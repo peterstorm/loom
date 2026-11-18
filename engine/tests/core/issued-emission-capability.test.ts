@@ -643,7 +643,7 @@ describe("request emission routes", () => {
     expect(projectEmissionTaskText(archivedRoute, "archived final-message instruction"))
       .toEqual({ descriptor: "", instruction: "archived final-message instruction", decision: archivedRoute });
 
-    // The descriptor's own version picks the claim (ADR-0083): a schema-2
+    // The descriptor's own version picks the claim (ADR-0084): a schema-2
     // registration carrying the Wave v4 descriptor mints a v4 claim, never v2.
     for (const { program, binding } of CURRENT_REVIEWER_PROGRAMS) {
       const current = issuedReviewerPayloadClaim(program, { requestId: binding.requestId, contextDigest: CONTEXT_DIGEST });

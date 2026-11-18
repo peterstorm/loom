@@ -50,7 +50,7 @@ export function reviewerEmissionEligible(request: Pick<AgentRequestAuthority, "r
  * Project a raw durable program registration onto the protocol the claim mint
  * reads, ACCEPTING ONLY the frozen descriptors: a schema-2 registration must
  * carry the exact v2 protocol, or for a Wave Gate the exact v4 protocol
- * (ADR-0083), and a schema-3 successor the exact frozen v3 protocol — a drifted descriptor is a refusal (unavailable
+ * (ADR-0084), and a schema-3 successor the exact frozen v3 protocol — a drifted descriptor is a refusal (unavailable
  * evidence), never an extraction downgrade of a corrupt issuance. `null` is
  * the ordinary no-reviewer-program arm.
  */

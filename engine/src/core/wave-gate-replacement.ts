@@ -6,7 +6,7 @@
  * registration. The shell re-derives the transition under the state lock and
  * compares registrations with the matching `same…Registration` predicate.
  * A replacement is a new Wave Gate registration and issues the current Wave
- * reviewer protocol (v4, ADR-0083) whatever its predecessor issued: every
+ * reviewer protocol (v4, ADR-0084) whatever its predecessor issued: every
  * request is reissued, so no reviewer straddles the two protocols.
  */
 import type { ReviewRunSlotAuthority, Task, TaskGraph } from "../types";

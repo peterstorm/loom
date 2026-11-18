@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
+import { RUN_RETRO_SKIPPED } from "../fixtures/retro-record";
 import fc from "fast-check";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
@@ -2118,8 +2119,22 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       statusDeps,
     );
     expect(finished.next.action.kind).toBe("done");
-    expect(finished.next.reasons.map(({ kind }) => kind)).toEqual(["run-complete", "orchestration-complete"]);
-    expect(renderLoomStatusHuman(finished)).toContain("[orchestration-complete]");
+    // Without the run's retrospective, status names it first (ADR-0083).
+    expect(finished.next.reasons.map(({ kind }) => kind)).toEqual(["run-complete", "retro-required"]);
+    const retroed = deriveLoomStatusFromParsedGraph(
+      { ok: true, value: { ...committed([taskState({ id: "T1", wave: 1, status: "completed" })]), retro_records: RUN_RETRO_SKIPPED } },
+      statusDeps,
+    );
+    expect(retroed.next.reasons.map(({ kind }) => kind)).toEqual(["run-complete", "orchestration-complete"]);
+    // A Wave-scoped retro alone does not cover the run: status still names the run's retro.
+    const waveOnly = deriveLoomStatusFromParsedGraph(
+      { ok: true, value: { ...committed([taskState({ id: "T1", wave: 1, status: "completed" })]), retro_records: [
+        { schemaVersion: 1, kind: "retro-recorded", scope: { kind: "wave", wave: 1 }, path: ".claude/retros/w1.md", digest: "a".repeat(64) },
+      ] } },
+      statusDeps,
+    );
+    expect(waveOnly.next.reasons.map(({ kind }) => kind)).toEqual(["run-complete", "retro-required"]);
+    expect(renderLoomStatusHuman(retroed)).toContain("[orchestration-complete]");
   });
 
   it("preserves committed done-action construction failure as unavailable", () => {
@@ -2846,11 +2861,13 @@ describe("final-Wave compatibility completion replay", () => {
         kind: "done",
         runId: completed.wave_gate_history?.[0]?.runId,
       });
-      // The final Wave with every Task completed: status also names the retirement.
+      // The final Wave with every Task completed: status names the run's
+      // retrospective it still owes, and its message points on to the
+      // retirement (ADR-0083).
       expect(committedStatus.next.reasons).toEqual([
         expect.objectContaining({ kind: "run-complete" }),
         expect.objectContaining({
-          kind: "orchestration-complete",
+          kind: "retro-required",
           message: expect.stringContaining("helper complete-orchestration"),
         }),
       ]);

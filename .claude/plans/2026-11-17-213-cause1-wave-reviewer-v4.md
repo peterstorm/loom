@@ -26,7 +26,7 @@ ADR-0009 requires Wave reviewers to echo the exact `packetId` (a 64-hex sha256) 
 - **`wave-review-authority.ts`:** pass `registration.reviewerProtocol` into the packet builder.
 - **`programs/wave-gate-start.ts` (~80):** new registrations use `WAVE_REVIEWER_PROTOCOL_V4`.
 - **`programs/wave-gate-replacement.ts` (~123, ~225):** restart and orphan recovery **inherit `previous.reviewerProtocol`**, so a run never changes protocol.
-  - *Superseded during implementation:* replacements always issue v4 (ADR-0083). A replacement reissues every request, so no reviewer straddles two protocols and inheriting the predecessor's descriptor buys nothing.
+  - *Superseded during implementation:* replacements always issue v4 (ADR-0084). A replacement reissues every request, so no reviewer straddles two protocols and inheriting the predecessor's descriptor buys nothing.
 - **`review-output.ts`:**
   - `parseIssuedReviewerProtocol` uses the program-aware parse.
   - `currentPriorRosterIsRepresentable` sizes the roster per version.
@@ -56,7 +56,7 @@ ADR-0009 requires Wave reviewers to echo the exact `packetId` (a 64-hex sha256) 
   - a v2-registered Wave run still requires packetId/generation and refuses a v4 payload;
   - standalone registrations refuse the v4 descriptor;
   - restart and orphan replacement inherit the predecessor's descriptor.
-    - *Superseded during implementation:* the regression test asserts that a v2 predecessor yields a v4 replacement (ADR-0083); see the `wave-gate-replacement.ts` note above.
+    - *Superseded during implementation:* the regression test asserts that a v2 predecessor yields a v4 replacement (ADR-0084); see the `wave-gate-replacement.ts` note above.
 - **Re-pin only bytes that really changed:**
   - wire-contract.test.ts (stamp check)
   - review-agent-contract

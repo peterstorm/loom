@@ -22,7 +22,7 @@ None emitted, none surviving, none refuted, in either slice. Defect-family accou
 | type-design-analyzer-2 | accepted | Exhaustive version matches in `reviewerFixedSections` and `decodeCurrentPayload`. |
 | type-design-analyzer-3 | deferred | Naming the decoder version on stored evidence changes the persisted evidence model. |
 | comment-analyzer-1 | accepted | Rewrite the stale "fresh Wave Gate reviews issue v2" paragraph in `docs/standalone-review.md`. |
-| comment-analyzer-2 | accepted | Mark the plan's inherit-the-predecessor design as superseded by ADR-0083. |
+| comment-analyzer-2 | accepted | Mark the plan's inherit-the-predecessor design as superseded by ADR-0084. |
 | architecture-tech-lead-1 | accepted | Same fix as type-design-analyzer-1. |
 | architecture-tech-lead-2 | deferred | Wave-only at the packet seam is an interface change; registration and admission enforce it. |
 | architecture-tech-lead-3 | deferred | Same as type-design-analyzer-3. |

@@ -125,7 +125,7 @@ const malformedArguments = (cell: RegistryCell): unknown => {
 const SHELL_REQUEST_ID = "req-emission-tool-t5-shell";
 
 /** The AD-5 whitespace-only prose for one cell. The shared fixture carries the
- *  v2 reviewer envelope; the Wave v4 cell (ADR-0083) needs its own envelope,
+ *  v2 reviewer envelope; the Wave v4 cell (ADR-0084) needs its own envelope,
  *  so its finding's claim is blanked inside the v4 example instead. */
 const whitespaceOnlyArgumentsFor = (cell: RegistryCell): unknown =>
   cell.kind === "reviewer-payload" && cell.version === "v4"

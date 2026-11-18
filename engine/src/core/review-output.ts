@@ -230,7 +230,7 @@ export type ParsedReviewerEvidence = LegacyStandaloneReviewerEvidence | CurrentS
 /**
  * The current payload, decoded by the decoder its issued descriptor selects,
  * as one admission shape. A v2 Wave payload states its packet identity, which
- * must equal the issued subject; a v4 Wave payload carries none (ADR-0083), so
+ * must equal the issued subject; a v4 Wave payload carries none (ADR-0084), so
  * there is nothing to compare and the subject alone binds it.
  */
 type CurrentPayload =

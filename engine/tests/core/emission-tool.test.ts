@@ -143,7 +143,7 @@ describe("admitIssuedEmissionArguments — the ONE admission under an issued bin
     }
   });
 
-  it("admits valid Wave v4 arguments through the registry's v4 parser, and refuses a v4 payload that echoes packet identity (ADR-0083)", () => {
+  it("admits valid Wave v4 arguments through the registry's v4 parser, and refuses a v4 payload that echoes packet identity (ADR-0084)", () => {
     const admitted = admitIssuedEmissionArguments(REVIEWER_V4, WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4);
     expect(admitted.kind).toBe("valid");
     if (admitted.kind === "valid") {

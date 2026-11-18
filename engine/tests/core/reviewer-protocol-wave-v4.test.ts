@@ -1,5 +1,5 @@
 /**
- * Wave reviewer protocol v4 (ADR-0083): the Wave payload carries no packet
+ * Wave reviewer protocol v4 (ADR-0084): the Wave payload carries no packet
  * identity, and the engine binds the Review Packet ID and Review Generation
  * from the issued subject. A v2-registered Wave run is unchanged, and v4 is
  * Wave-only.

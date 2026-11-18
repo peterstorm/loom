@@ -163,7 +163,7 @@ function payload(handle: RunDirHandle, request: AgentRequestAuthority, findings:
   const context = readWaveReviewContext([packet], packet.digest);
   if (context.kind !== "loaded" || context.value.task === null || context.value.taskRun === null) throw new Error("expected issued Task context");
   const priors = context.value.task.priorFindings.map(({ id }) => ({ finding_id: id, verdict, reason: "  verified against issued bytes\nexact reason  " }));
-  // The issued descriptor selects the envelope (ADR-0083): v4 for a Wave Gate
+  // The issued descriptor selects the envelope (ADR-0084): v4 for a Wave Gate
   // registered now, v2 for one registered before it.
   if (packet.schemaVersion === 2) return issuedWaveReviewerPayload(packet, { prior_findings: priors, findings });
   return ["### Machine Summary", `REVIEW_GENERATION: ${context.value.taskRun.generation}`, `REVIEW_PACKET_ID: ${context.value.packetId}`,
@@ -205,7 +205,7 @@ async function legacyPrefix(p: ReturnType<typeof project>) {
  * A Wave Gate registered under `reviewerProtocol` exactly as `start` registers
  * one — program first, then protected active authority — and issued by the
  * real façade resume. With `REVIEWER_PROTOCOL_V2` it is a run registered
- * before ADR-0083, which keeps v2 until it ends.
+ * before ADR-0084, which keeps v2 until it ends.
  */
 async function registeredPrefix(p: ReturnType<typeof project>, reviewerProtocol: ReviewerProtocolDescriptor) {
   const handle = value(createRunDirectory(p.runsRoot, "run.registered"));
@@ -412,7 +412,7 @@ describe("registered Wave reviewer protocol", () => {
       .toEqual({ ok: false, message: "task T1 Review Packet is not bound to the active epoch and exact reviewer roster" });
   }, 30_000);
 
-  it("ADR-0083: a freshly started Wave Gate registers v4, issues every Task review packet under it and tells each reviewer the v4 envelope", async () => {
+  it("ADR-0084: a freshly started Wave Gate registers v4, issues every Task review packet under it and tells each reviewer the v4 envelope", async () => {
     const p = project(mixedPriors());
     const { handle, action } = await start(p);
     const issued = action.requests!;
@@ -435,7 +435,7 @@ describe("registered Wave reviewer protocol", () => {
     }
   }, 30_000);
 
-  it("ADR-0083: a v4 reviewer that copies packetId is refused naming the v4 envelope, and the identity-free payload is admitted bound to the issued packet", async () => {
+  it("ADR-0084: a v4 reviewer that copies packetId is refused naming the v4 envelope, and the identity-free payload is admitted bound to the issued packet", async () => {
     const priors = mixedPriors();
     const p = project(priors);
     const { handle, action } = await start(p);
@@ -482,7 +482,7 @@ describe("registered Wave reviewer protocol", () => {
       reviewer_protocol: WAVE_REVIEWER_PROTOCOL_V4 });
   }, 60_000);
 
-  it("ADR-0083: restarting an exhausted v2-registered Wave Gate registers the replacement under v4", async () => {
+  it("ADR-0084: restarting an exhausted v2-registered Wave Gate registers the replacement under v4", async () => {
     const p = project();
     const { handle } = await start(p);
     // The same run as it stood when Wave Gates registered v2: its registration and its Review Run carry the v2 descriptor.
@@ -504,7 +504,7 @@ describe("registered Wave reviewer protocol", () => {
       restart: { previousRunId: handle.runId, exhaustedSlots: BASE_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`) } });
   }, 30_000);
 
-  it("ADR-0083: a v2-registered Wave Gate keeps v2 until it ends: it refuses the v4 payload and admits the v2 one", async () => {
+  it("ADR-0084: a v2-registered Wave Gate keeps v2 until it ends: it refuses the v4 payload and admits the v2 one", async () => {
     const p = project(mixedPriors());
     const { handle, action } = await registeredPrefix(p, REVIEWER_PROTOCOL_V2);
     expect(registration(handle).reviewerProtocol).toEqual(REVIEWER_PROTOCOL_V2);

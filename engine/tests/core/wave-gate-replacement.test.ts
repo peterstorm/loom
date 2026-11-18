@@ -139,7 +139,7 @@ describe("replacement registration identity is shared by restart and orphan reco
     expect(sameOrphanRecoveryRegistration(recovered, schemaOne({ orphanRecovery: orphan }))).toBe(false);
   });
 
-  it("ADR-0083: a v4 replacement is never the same registration as a v2 one, so a pre-v4 replacement cannot replay as current", () => {
+  it("ADR-0084: a v4 replacement is never the same registration as a v2 one, so a pre-v4 replacement cannot replay as current", () => {
     const v4Restart = schemaTwo({ restart, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4 });
     expect(sameRestartRegistration(v4Restart, v4Restart)).toBe(true);
     expect(sameRestartRegistration(v4Restart, schemaTwo({ restart }))).toBe(false);

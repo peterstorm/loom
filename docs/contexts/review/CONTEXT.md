@@ -7,7 +7,7 @@ How Loom reviews code and plans. Core terms (Finding, Refutation Panel, Review R
 ### Reviewer protocol
 
 **Issued Reviewer Protocol**:
-The nominal authority joining independent registration, published request and Context Packet to reviewer admission. Current packets freeze exact reviewer schema and impact rubric bytes; genuine v1 issuance retains its original contract without inventing a retrospectively frozen rubric. The issued descriptor's version selects the decoder: v2 for standalone review and Wave Gates registered before ADR-0083, v4 for Wave Gates registered after it, whose payload carries no Review Packet ID or Review Generation because the issued subject binds both. Output shape and caller version hints never select the decoder.
+The nominal authority joining independent registration, published request and Context Packet to reviewer admission. Current packets freeze exact reviewer schema and impact rubric bytes; genuine v1 issuance retains its original contract without inventing a retrospectively frozen rubric. The issued descriptor's version selects the decoder: v2 for standalone review and Wave Gates registered before ADR-0084, v4 for Wave Gates registered after it, whose payload carries no Review Packet ID or Review Generation because the issued subject binds both. Output shape and caller version hints never select the decoder.
 _Avoid_: Payload version authority, decoder fallback, current prompt
 
 **Finding Basis**:

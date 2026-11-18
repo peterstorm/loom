@@ -158,7 +158,7 @@ describe("Pi issued-request classification under a registered review facade", ()
   it.each([
     { version: 2 as const, cell: REVIEWER_V2_CELL },
     // A Wave Gate registered under v4 keeps its schema-2 registration; the
-    // descriptor's own version selects the v4 claim (ADR-0083).
+    // descriptor's own version selects the v4 claim (ADR-0084).
     { version: 4 as const, cell: REVIEWER_V4_CELL },
   ])("keeps a direct registered reviewer request on its exact issued emission protocol (v$version)", ({ version, cell }) => {
     const schemaDigest = mintedBindingFor(cell, OBSERVED_REQUEST_ID).schemaDigest;

@@ -1,6 +1,6 @@
 /**
  * Wave reviewer payload fixtures: the exact envelope the issued reviewer
- * descriptor admits (ADR-0083). A v4 Wave Gate refuses `packetId` and
+ * descriptor admits (ADR-0084). A v4 Wave Gate refuses `packetId` and
  * `generation` (the engine binds both from the issued subject); a v2 Wave Gate
  * registered before v4 still requires them. The version is always read from
  * issued authority, never assumed, so a fixture cannot silently emit the
@@ -65,7 +65,7 @@ export function issuedDescriptorWavePayload(
 
 /**
  * The v4 envelope that still copies the issued packet identity — the shape a
- * v4 Wave Gate must refuse (ADR-0083), and the one a v2 reviewer would emit
+ * v4 Wave Gate must refuse (ADR-0084), and the one a v2 reviewer would emit
  * with the v4 `schemaVersion`.
  */
 export function waveReviewerPayloadV4WithIdentity(identity: WavePacketIdentity, body: WaveReviewerPayloadBody): string {

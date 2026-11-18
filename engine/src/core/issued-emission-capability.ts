@@ -556,7 +556,7 @@ type CurrentIssuedProducerClaim = Extract<IssuedProducerClaim, Readonly<{ versio
 /** The registered review program's authenticated frozen protocol, shared by
  *  the issuance renderer and Pi parent admission. The registration schema
  *  version fixes which descriptor versions it can carry: a schema-2
- *  registration carries v2 or the Wave v4 descriptor (ADR-0083), a schema-3
+ *  registration carries v2 or the Wave v4 descriptor (ADR-0084), a schema-3
  *  one only the successor v3, so a schema-3 v2/v4 or schema-2 v3 pair is
  *  unrepresentable. The descriptor's own version selects the producer-claim
  *  arm. */

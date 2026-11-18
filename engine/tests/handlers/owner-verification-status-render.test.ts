@@ -58,7 +58,7 @@ describe("helper orchestration status: owner verification", () => {
     expectTypeOf<LoomStatusDocument["ownerVerification"]>().toEqualTypeOf<OwnerVerificationStatusReport>();
     expectTypeOf<ReturnType<typeof deriveLoomStatusFromParsedGraph>>().toEqualTypeOf<LoomStatusDocument>();
     expectTypeOf<LoomStatus>().not.toHaveProperty("ownerVerification");
-    const keys: readonly (keyof LoomStatusDocument)[] = ["schemaVersion", "facts", "next", "ownerVerification", "skeletons"];
+    const keys: readonly (keyof LoomStatusDocument)[] = ["schemaVersion", "facts", "next", "ownerVerification", "skeletons", "retro"];
     const { json } = statusOf({ kind: "absent" });
     expect(Object.keys(json).sort()).toEqual([...keys].sort());
   });

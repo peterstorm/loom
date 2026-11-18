@@ -99,7 +99,7 @@ export type WaveReviewerPayloadV2 = z.infer<typeof waveSchema>;
 export type ReviewerPayloadV2 = z.infer<typeof reviewerPayloadV2Schema>;
 
 /**
- * The Wave reviewer payload of protocol v4 (ADR-0083): the v2 Wave arm without
+ * The Wave reviewer payload of protocol v4 (ADR-0084): the v2 Wave arm without
  * `packetId` and `generation`. The issued request already names its slot and
  * the Context Packet digest, so the engine binds both from the issued subject;
  * a reviewer that copies them is refused by the strict object. Prior
@@ -183,7 +183,7 @@ export type ReviewerProtocolDescriptorV2 = Readonly<{
   protocol: "loom-reviewer"; version: 2; rubricVersion: 1;
   schemaDigest: ArtifactDigest; rubricDigest: ArtifactDigest;
 }>;
-/** The v4 descriptor: Wave review only (ADR-0083). Version 4, never 3, so it
+/** The v4 descriptor: Wave review only (ADR-0084). Version 4, never 3, so it
  *  cannot collide with the standalone successor v3 descriptor (ADR-0010). */
 export type WaveReviewerProtocolDescriptorV4 = Readonly<{
   protocol: "loom-reviewer"; version: 4; rubricVersion: 1;

@@ -331,7 +331,7 @@ describe("authoritative generated wire contract", () => {
     const schema = orFail(compactSchemaOf(source), describeCompactSchemaError);
     expect(schema.value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
     // One compact schema, then the examples in section order: standalone v2,
-    // Wave v4 (ADR-0083), standalone successor v3.
+    // Wave v4 (ADR-0084), standalone successor v3.
     expect(json).toEqual([
       schema.text,
       JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2),
@@ -342,7 +342,7 @@ describe("authoritative generated wire contract", () => {
     // pretty-printed schema, or a second (v3 or v4) schema, from creeping in:
     // the successor section adds only its shape, roster rule and example
     // (issue #185), and the Wave v4 section only its heading and example
-    // (ADR-0083). Measured at 14138 bytes once the v4 section landed, past
+    // (ADR-0084). Measured at 14138 bytes once the v4 section landed, past
     // the former 13 KiB pin.
     expect(bytes(rendered).length).toBeLessThanOrEqual(14 * 1024);
     expect(rendered).toContain(STANDALONE_SUCCESSOR_ROSTER_RULE);

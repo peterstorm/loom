@@ -27,7 +27,7 @@ export type ReviewerDelivery =
   | Readonly<{ version: 2; readObligation: FrozenDiff | null }>
   /** Explicit standalone successor v3 issuance. */
   | Readonly<{ version: 3 }>
-  /** Wave v4 issuance (ADR-0083): the payload carries no packet identity. */
+  /** Wave v4 issuance (ADR-0084): the payload carries no packet identity. */
   | Readonly<{ version: 4 }>;
 
 export type SpawnTaskFacts = Readonly<{
@@ -118,7 +118,7 @@ function readObligationDelivery(diff: FrozenDiff): string {
 }
 
 /**
- * The payload a Wave v4 reviewer must emit (ADR-0083): the engine binds the
+ * The payload a Wave v4 reviewer must emit (ADR-0084): the engine binds the
  * Review Packet ID and Review Generation from the issued request, so the
  * reviewer copies neither, and the v2 Wave envelope is refused.
  */

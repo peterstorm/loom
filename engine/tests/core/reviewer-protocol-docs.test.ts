@@ -210,7 +210,7 @@ describe("archived issued contracts are not rewritten (FR-020/AS-012)", () => {
     // One schema section: the output contract names it, its heading opens it,
     // its one sentence says it is the packet's section in compact form, and
     // the Wave line names the packet's section once more as the authority on
-    // which Wave envelope (v2 or v4, ADR-0083) applies.
+    // which Wave envelope (v2 or v4, ADR-0084) applies.
     expect([...fragment.matchAll(/## reviewer-payload-schema\n/g)]).toHaveLength(1);
     expect([...fragment.matchAll(/reviewer-payload-schema/g)]).toHaveLength(4);
     expect(REVIEWER_OUTPUT_CONTRACT).toBe(

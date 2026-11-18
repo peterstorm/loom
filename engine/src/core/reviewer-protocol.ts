@@ -46,7 +46,7 @@ export const STANDALONE_V3_ENVELOPE_HINT =
   '"lineageDigest", "snapshotDigest", "priorAssessments" and "findings", as the wire contract\'s Successor review section shows.';
 
 /**
- * What a top-level Wave v4 refusal adds (ADR-0083): a reviewer that copied
+ * What a top-level Wave v4 refusal adds (ADR-0084): a reviewer that copied
  * packetId and generation, or the v2 envelope, is told the whole v4 envelope.
  */
 export const WAVE_V4_ENVELOPE_HINT =
@@ -316,7 +316,7 @@ export function parseReviewerPayloadV2(rawBytes: Uint8Array): DomainResult<Revie
   }
 }
 
-/** The Wave v4 decoder (ADR-0083): the strict v4 object, no packet identity. */
+/** The Wave v4 decoder (ADR-0084): the strict v4 object, no packet identity. */
 export function parseWaveReviewerPayloadV4(rawBytes: Uint8Array): DomainResult<WaveReviewerPayloadV4, ReviewerProtocolFailure> {
   const decoded = parseBoundedReviewerJson(rawBytes, REVIEWER_PAYLOAD_LIMITS.bytes);
   if (!decoded.ok) return decoded;
@@ -361,7 +361,7 @@ export function renderReviewerWireContract(): string {
 }
 
 /**
- * The Wave v4 arm of the wire contract (ADR-0083). Live v2 Wave runs and v4
+ * The Wave v4 arm of the wire contract (ADR-0084). Live v2 Wave runs and v4
  * runs share one stamped contract, so the section is conditional on the task:
  * a v4 request's packet carries the v4 schema, and its task says so.
  */

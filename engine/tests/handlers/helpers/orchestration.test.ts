@@ -94,7 +94,7 @@ function currentCritical(file: string, claim: string): ReviewerDraftV2 {
 }
 /**
  * The payload a protected current Review Run's own descriptor admits
- * (ADR-0083): v4 for a freshly started Wave Gate, v2 for one registered
+ * (ADR-0084): v4 for a freshly started Wave Gate, v2 for one registered
  * before it. The run is read from the State File, so its descriptor is wire
  * data; a run without one is a legacy run and has no JSON payload at all.
  */
@@ -662,7 +662,7 @@ describe("prepareOrphanedWaveGateRecovery", () => {
     });
   });
 
-  it("registers the replacement under Wave reviewer protocol v4, whatever its predecessor issued (ADR-0083)", () => {
+  it("registers the replacement under Wave reviewer protocol v4, whatever its predecessor issued (ADR-0084)", () => {
     const prepared = prepareOrphanedWaveGateRecovery(
       graph(), { runId: activeRunId, wave: 1, authorityDigest }, "/runs", "run.orphan-replacement", "/runs",
     );
@@ -2209,7 +2209,7 @@ describe("orchestration CLI", () => {
       })),
     }));
     const beforeSubmission = readFileSync(statePath);
-    // A freshly started Wave Gate issues v4 (ADR-0083): the payload carries no
+    // A freshly started Wave Gate issues v4 (ADR-0084): the payload carries no
     // packet identity, so the refusal below comes from the protected slot join.
     expect(protectedGraph.tasks[0]?.review_run?.["reviewer_protocol"]).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     const submitted = (await runCli([
@@ -3147,7 +3147,7 @@ describe("orchestration CLI", () => {
     expect(batch.requests).toHaveLength(1 + BASE_WAVE_REVIEW_AGENTS.length);
     expect(batch.requests.every(({ authority }) =>
       authority.runId === "run.wave-orphan-replacement" && authority.attempt === 1)).toBe(true);
-    // ADR-0083: the replacement is a new registration and issues v4.
+    // ADR-0084: the replacement is a new registration and issues v4.
     expect(JSON.parse(readFileSync(join(replacementRun, "program.json"), "utf8")).reviewerProtocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
 
     const after = JSON.parse(readFileSync(statePath, "utf8")) as {
@@ -3375,7 +3375,7 @@ describe("orchestration CLI", () => {
     };
     expect(replacement.kind).toBe("spawn-batch");
     expect(replacement.runId).toBe("run.wave-replacement");
-    // ADR-0083: replacing an archived v1 run registers the current Wave protocol, v4.
+    // ADR-0084: replacing an archived v1 run registers the current Wave protocol, v4.
     expect(JSON.parse(readFileSync(join(replacementRun, "program.json"), "utf8"))).toMatchObject({
       schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4,
     });

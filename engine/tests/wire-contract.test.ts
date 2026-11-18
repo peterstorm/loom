@@ -318,7 +318,7 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
     expect(example![2]).toContain("refused");
   });
 
-  it("shows the Wave v4 envelope without packet identity, between the standalone example and the successor (ADR-0083)", () => {
+  it("shows the Wave v4 envelope without packet identity, between the standalone example and the successor (ADR-0084)", () => {
     const section = /## Wave review v4 \(wave-review, schemaVersion 4\)\n\n([\s\S]*?)\n\n## Successor review/.exec(fragment);
     expect(section).not.toBeNull();
     for (const phrase of [
@@ -356,7 +356,7 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
 
   it("the stamped schema is the issued schema value and the rubric bytes are untouched (stamp/schema consistency)", () => {
     // The template fence is plain text: exactly the schema, the standalone
-    // example, the Wave v4 example (ADR-0083) and the successor example
+    // example, the Wave v4 example (ADR-0084) and the successor example
     // remain ```json blocks.
     const source = markdown("references/reviewer-wire/wire-contract.md", fragment);
     expect(orFail(fencesOf(source, "json"), describeMarkdownError)).toHaveLength(4);

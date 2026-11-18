@@ -26,7 +26,7 @@ export async function completeOrchestration(graphPath: string, nowMs: number): P
     const completion = judgeOrchestrationCompletion(graph);
     return completion.kind === "complete"
       ? { ok: true, value: completedGraphArchiveLeaf(graph, nowMs) }
-      : { ok: false, error: renderCompletionRefusal(basename(graphPath), completion.reasons) };
+      : { ok: false, error: renderCompletionRefusal(basename(graphPath), completion.shortfalls) };
   });
   if (!archived.ok) return { kind: "error", message: archived.error };
   process.stderr.write(

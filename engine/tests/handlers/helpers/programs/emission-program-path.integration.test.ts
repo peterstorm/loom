@@ -249,7 +249,7 @@ describe("the wave-gate program path projects the frozen issued route (T6)", () 
     if (parsed.kind !== "registered" || parsed.program.kind !== "wave-gate") {
       throw new Error("fixture wave-gate registration unavailable");
     }
-    // A Wave Gate started from now on registers reviewer protocol v4 (ADR-0083).
+    // A Wave Gate started from now on registers reviewer protocol v4 (ADR-0084).
     expect(parsed.program.reviewerProtocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     const reviewer = reviewers[0]!;
     const waveAuthority = mustAuthority(reviewer.authority);
@@ -291,7 +291,7 @@ describe("positive program-path issuance through a Pi parent (T6)", () => {
         if (descriptor.kind !== "issued") continue;
         expect(descriptor.contextDigest).toBe(authority.contextDigest);
         expect(descriptor.binding.requestId).toBe(authority.requestId);
-        // A fresh Wave Gate issues the v4 cell (ADR-0083), never v2.
+        // A fresh Wave Gate issues the v4 cell (ADR-0084), never v2.
         expect(descriptor.binding.version).toBe("v4");
         expect(descriptor.binding.schemaDigest).toBe(WAVE_REVIEWER_PROTOCOL_V4.schemaDigest);
         expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");

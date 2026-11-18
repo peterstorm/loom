@@ -76,7 +76,7 @@ Skip flags exist for explicit lifecycle bypasses:
 /loom --skip-plan-design-review "..."   # no design review of the plan before decompose
 ```
 
-`/loom --complete` and `--abort` are not implemented lifecycle flags. After the final Wave Gate, `helper complete-orchestration` archives the TaskGraph and lifts the guards. The guarded cleanup helper is only for deliberately abandoning an unfinished run. See [Operations](docs/operations.md).
+`/loom --complete` and `--abort` are not implemented lifecycle flags. After the final Wave Gate, `/retro` writes the run's retrospective, and `helper complete-orchestration` archives the TaskGraph and lifts the guards. The guarded cleanup helper is only for deliberately abandoning an unfinished run. See [Operations](docs/operations.md).
 
 ## Full feature flow
 
