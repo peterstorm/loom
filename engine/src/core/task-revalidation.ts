@@ -14,7 +14,7 @@
 import { distillTasksReopenedWith, isDistillTask } from "./distill-task";
 import { nonEmpty, type DomainResult, type NonEmpty, type OrchestrationRunId } from "./orchestration-contract";
 import type { Phase } from "./phases";
-import { derivePendingTaskProof, isTestsOnlyProof, redThenGreenEra } from "./proof-obligations";
+import { derivePendingTaskProof, isTestsOnlyProof, redThenGreenEra, type TestsOnlyScope } from "./proof-obligations";
 import { taskArtifactExpectation } from "./task-artifact-expectation";
 import { parseTaskId, type TaskId } from "./task-id";
 import type { FrozenVerificationManifest } from "./verification-manifest";
@@ -41,28 +41,35 @@ import type { ReopenedTaskIds, Task, TaskGraph } from "../types";
  * tests waived) and its agent's normal declared-artifact expectation.
  *
  * A tests-only reopening (ADR-0093) ends here too, for the same reason: a
- * Task in one has its scope dropped, and a Task whose settled Proof was
- * derived under one gets the Proof its policy derives. The returned Task is a
- * full re-implementation; Task Reopening sets a fresh scope afterwards when
- * the operator names `--needs tests`. A Task carrying a tests-only Proof is
- * never an Acceptance Contract writer (Task Reopening refuses one), so the
- * graph's era is its era.
+ * Task in one has its scope and reopen baseline dropped, and a Task whose
+ * settled Proof was derived under one gets the Proof its policy derives. A
+ * Task carrying a tests-only Proof is never an Acceptance Contract writer
+ * (Task Reopening refuses one), so the graph's era is its era.
+ *
+ * `testsOnly` is the scope a tests-only Task Reopening returns this Task
+ * under: the Task then carries it and the pending Proof it derives, in this
+ * one rewrite. Without it the returned Task is a full re-implementation.
  */
-export function returnToRevalidation(task: Task, verificationManifest: FrozenVerificationManifest | undefined): Task {
+export function returnToRevalidation(
+  task: Task,
+  verificationManifest: FrozenVerificationManifest | undefined,
+  testsOnly?: TestsOnlyScope,
+): Task {
   // The exits from the modes `armImplementationAttestation` (implementation-lifecycle)
   // and a tests-only Task Reopening (task-reopening) enter.
-  const { implementation_attestation: attested, reopen_scope: testsOnly, ...unscoped } = task;
-  const rederive = attested === true || testsOnly !== undefined ||
+  const { implementation_attestation: attested, reopen_scope: scoped, reopen_baseline: _baseline, ...unscoped } = task;
+  const rederive = testsOnly !== undefined || attested === true || scoped !== undefined ||
     (task.proof !== undefined && isTestsOnlyProof(task.proof.obligations));
   const kept = rederive ? undefined : task.proof;
   const proof = kept ?? derivePendingTaskProof({
     verificationPolicy: taskVerificationPolicy(task),
     declaredArtifacts: task.file_list ?? [],
-    ...(attested === true ? { declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }) } : {}),
+    ...(testsOnly === undefined ? { declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }) } : { testsOnly }),
     redThenGreen: redThenGreenEra(verificationManifest),
   });
   return {
     ...unscoped,
+    ...(testsOnly === undefined ? {} : { reopen_scope: testsOnly }),
     status: "pending",
     proof,
     revalidation_required: true,
@@ -75,6 +82,12 @@ export function returnToRevalidation(task: Task, verificationManifest: FrozenVer
     review_evidence_failures: undefined,
   };
 }
+
+/** The tests-only scope each returned Task takes, by Task id (ADR-0093). */
+export type TestsOnlyScopes = ReadonlyMap<string, TestsOnlyScope>;
+
+/** A revalidation that returns every Task as a full re-implementation. */
+export const NO_TESTS_ONLY_SCOPES: TestsOnlyScopes = new Map();
 
 declare const REOPENABLE_WAVE: unique symbol;
 
@@ -284,14 +297,22 @@ export type WaveRevalidation = Readonly<{ graph: TaskGraph; returned: Revalidati
  * review evidence the run accepted is kept as Findings before each returned
  * Task resets; then the gate bits that judged the Wave are cleared and its
  * block re-derived. The other Tasks of the Wave keep their status.
+ *
+ * `testsOnly` maps a returned Task to the tests-only scope it returns under
+ * (ADR-0093); a Task it does not name returns as a full re-implementation.
+ * Only Task Reopening names any; Contract Revision passes `NO_TESTS_ONLY_SCOPES`.
  */
-export function returnWaveTasksToRevalidation(reopenable: ReopenableWave, taskIds: readonly string[]): WaveRevalidation {
+export function returnWaveTasksToRevalidation(
+  reopenable: ReopenableWave,
+  taskIds: readonly string[],
+  testsOnly: TestsOnlyScopes,
+): WaveRevalidation {
   const { graph, wave, abandonedRunId } = reopenable;
   const retired = retireUnownedWaveReviewAuthority(graph, wave, abandonedRunId);
   const returned = revalidationTargets(retired.tasks, taskIds);
   const returnedIds = new Set<string>(returnedTaskIds(returned));
   const tasks = retired.tasks.map((task) =>
-    returnedIds.has(task.id) ? returnToRevalidation(task, retired.verification_manifest) : task);
+    returnedIds.has(task.id) ? returnToRevalidation(task, retired.verification_manifest, testsOnly.get(task.id)) : task);
   const existing = retired.wave_gates[String(wave)] ?? newWaveGate();
   const gate = {
     ...existing,

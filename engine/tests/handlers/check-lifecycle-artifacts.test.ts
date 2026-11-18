@@ -181,7 +181,7 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
   function writeGateState(dir: string, planFile: string, machineFile: string): string {
     const statePath = join(dir, "active_task_graph.json");
     const proof = evaluateTaskProof(
-      { newTestsRequired: true, declaredArtifacts: [machineFile] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [machineFile] },
       trustedPassEvidence([machineFile]),
     );
     if (proof.state !== "satisfied") throw new Error("gate fixture proof must be satisfied");

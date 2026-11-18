@@ -1,3 +1,4 @@
+import { match, P } from "ts-pattern";
 import { canonicalStructuralEquals, concatNonEmpty, mapNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
 import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
 import {
@@ -48,20 +49,25 @@ export type ProofObligation =
   | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
   | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>
   | Readonly<{ kind: "behaviour-preserved" }>
-  /** A tests-only attempt (ADR-0093): at least one of `testFiles` changed since the reopening. */
-  | Readonly<{ kind: "test-files-changed"; testFiles: NonEmpty<string> }>
+  /** A tests-only attempt (ADR-0093): at least one of `testFiles` changed since
+   *  the reopening the TaskGraph audits at `reopening` in `task_reopening_history`. */
+  | Readonly<{ kind: "test-files-changed"; testFiles: NonEmpty<string>; reopening: number }>
   /** A tests-only attempt (ADR-0093): none of `implementationFiles` changed since the reopening. */
   | Readonly<{ kind: "implementation-files-unchanged"; implementationFiles: readonly string[] }>;
 
 /**
- * What a tests-only reopening (ADR-0093) froze of a Task's `file_list`: its
- * Test-File Classification, at least one test file and every other entry an
- * implementation file. Its Proof owes new or strengthened tests in the test
- * files and no change to the implementation files, and owes no I6 order.
+ * A tests-only reopening (ADR-0093): the reopened Task's `file_list` split by
+ * the frozen Test-File Classification (at least one test file, every other
+ * entry an implementation file) and `reopening`, the 0-based position of the
+ * reopening's audit in `task_reopening_history`. Its Proof owes new or
+ * strengthened tests in the test files and no change to the implementation
+ * files, and owes no I6 order. The one value the Task's `reopen_scope`, the
+ * Proof derivation and the settled Proof's record share.
  */
 export type TestsOnlyScope = Readonly<{
   testFiles: NonEmpty<string>;
   implementationFiles: readonly string[];
+  reopening: number;
 }>;
 
 /**
@@ -181,12 +187,13 @@ const isDeclaredArtifactExpectation = (value: unknown): value is DeclaredArtifac
   DECLARED_ARTIFACT_EXPECTATIONS.some((expectation) => expectation === value);
 
 /**
- * What the declared artifacts owe: one `DeclaredArtifactExpectation` (absent
- * reads as `changed`), or a tests-only reopening's scope (ADR-0093), never
- * both. `taskArtifactScope` is the one reader of a Task that builds it.
+ * What the declared artifacts owe: one `DeclaredArtifactExpectation`, or a
+ * tests-only reopening's scope (ADR-0093), exactly one of them. Neither may
+ * be left out, so no derivation can drop a Task's scope by omission.
+ * `taskArtifactScope` is the one reader of a Task that builds it.
  */
 export type ArtifactScopeInput =
-  | Readonly<{ declaredArtifactExpectation?: DeclaredArtifactExpectation; testsOnly?: never }>
+  | Readonly<{ declaredArtifactExpectation: DeclaredArtifactExpectation; testsOnly?: never }>
   | Readonly<{ declaredArtifactExpectation?: never; testsOnly: TestsOnlyScope }>;
 
 /**
@@ -519,14 +526,15 @@ export function deriveProofObligations(input: ProofObligationInput): NonEmpty<Pr
     ? [Object.freeze({ kind: "regression-test-pass" as const })]
     : [];
   if (input.testsOnly !== undefined) {
+    const { testFiles, implementationFiles, reopening } = input.testsOnly;
     return nonEmptyOf<ProofObligation>(
       Object.freeze({ kind: "task-completed" }),
       ...regression,
-      Object.freeze({ kind: "test-files-changed", testFiles: mapNonEmpty(input.testsOnly.testFiles, (file) => file) }),
-      Object.freeze({ kind: "implementation-files-unchanged", implementationFiles: Object.freeze([...input.testsOnly.implementationFiles]) }),
+      Object.freeze({ kind: "test-files-changed", testFiles: mapNonEmpty(testFiles, (file) => file), reopening }),
+      Object.freeze({ kind: "implementation-files-unchanged", implementationFiles: Object.freeze([...implementationFiles]) }),
     );
   }
-  const expectation = input.declaredArtifactExpectation ?? "changed";
+  const expectation = input.declaredArtifactExpectation;
   const tail: ProofObligation[] = [
     ...regression,
     ...(requiresNewTests(policy)
@@ -859,16 +867,17 @@ const evaluateOne = (
 /**
  * The tests-only scope a Proof was derived under (ADR-0093), read back from
  * its two scope obligations, or null for a Proof derived under none. A
- * settled tests-only Proof outlives its Task's `reopen_scope`, so the State
- * File re-derives it from here.
+ * settled tests-only Proof outlives its Task's `reopen_scope`; this is only
+ * what the Proof claims. The State File proves the claim against independent
+ * data: the reopening audit it names and the frozen Test-File Classification.
  */
 export function testsOnlyScopeOfProof(obligations: readonly ProofObligation[]): TestsOnlyScope | null {
-  const tests = obligations.flatMap((obligation) => obligation.kind === "test-files-changed" ? [obligation.testFiles] : []).at(0);
+  const tests = obligations.flatMap((obligation) => obligation.kind === "test-files-changed" ? [obligation] : []).at(0);
   const implementations = obligations.flatMap((obligation) =>
     obligation.kind === "implementation-files-unchanged" ? [obligation.implementationFiles] : []).at(0);
   return tests === undefined || implementations === undefined
     ? null
-    : Object.freeze({ testFiles: tests, implementationFiles: implementations });
+    : Object.freeze({ testFiles: tests.testFiles, implementationFiles: implementations, reopening: tests.reopening });
 }
 
 /** Whether a Proof was derived under a tests-only scope (ADR-0093). */
@@ -986,9 +995,13 @@ export function parseProofObligation(raw: unknown, path = "obligation"): ProofPa
     });
   }
   if (raw.kind === "test-files-changed") {
-    return parseExactRecordArm<ProofObligation>(raw, path, ["kind", "testFiles"], () => {
+    return parseExactRecordArm<ProofObligation>(raw, path, ["kind", "testFiles", "reopening"], () => {
       const testFiles = parseNonEmptyDistinctPaths(raw.testFiles, `${path}.testFiles`);
-      return testFiles.ok ? ok(Object.freeze({ kind: "test-files-changed", testFiles: testFiles.value })) : testFiles;
+      if (!testFiles.ok) return testFiles;
+      const reopening = raw.reopening;
+      return typeof reopening === "number" && Number.isSafeInteger(reopening) && reopening >= 0
+        ? ok(Object.freeze({ kind: "test-files-changed", testFiles: testFiles.value, reopening }))
+        : fail([`${path}.reopening must be a non-negative safe integer (a task_reopening_history position)`]);
     });
   }
   if (raw.kind === "implementation-files-unchanged") {
@@ -1071,11 +1084,12 @@ function parseDeclaredArtifactList(raw: unknown): DeclaredArtifactList {
   return { artifacts, errors };
 }
 
-/** Optional fields already proven by `proofInputShapeErrors`; absent fields stay absent. */
+/** Fields already proven by `proofInputShapeErrors`: an absent expectation
+ *  reads as `changed`, an absent era stays absent. */
 const optionalProofInputFields = (raw: Record<string, unknown>) => ({
-  ...(raw.declaredArtifactExpectation === undefined
-    ? {}
-    : { declaredArtifactExpectation: raw.declaredArtifactExpectation as DeclaredArtifactExpectation }),
+  declaredArtifactExpectation: raw.declaredArtifactExpectation === undefined
+    ? "changed" as const
+    : raw.declaredArtifactExpectation as DeclaredArtifactExpectation,
   ...(raw.redThenGreen === undefined ? {} : { redThenGreen: raw.redThenGreen as RedThenGreenEra }),
 });
 
@@ -1401,29 +1415,27 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
 
 /** The proof failures that name the declared artifacts they judged. */
 function parseArtifactProofFailure(raw: Record<string, unknown>, path: string): ProofParseResult<ProofFailure> {
-  if (raw.kind === "declared-artifact-not-changed" || raw.kind === "declared-artifact-drifted") {
-    const kind = raw.kind;
-    return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact"], () => {
-      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
-    });
-  }
-  if (raw.kind === "declared-artifact-contract-violated") {
-    return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact", "violations"], () => {
-      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      const violations = parseViolations(raw.violations, `${path}.violations`);
-      return artifact.ok && violations.ok
-        ? ok(Object.freeze({ kind: "declared-artifact-contract-violated", artifact: artifact.value, violations: violations.value }))
-        : fail([...(artifact.ok ? [] : artifact.errors), ...(violations.ok ? [] : violations.errors)]);
-    });
-  }
-  if (raw.kind === "implementation-files-changed") {
-    return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifacts"], () => {
-      const artifacts = parseNonEmptyDistinctPaths(raw.artifacts, `${path}.artifacts`);
-      return artifacts.ok ? ok(Object.freeze({ kind: "implementation-files-changed", artifacts: artifacts.value })) : artifacts;
-    });
-  }
-  return fail([`${path}.kind is not a recognized proof failure`]);
+  // `raw.kind` is wire data, an open domain: `.otherwise` names the unknown kind.
+  return match(raw.kind)
+    .with(P.union("declared-artifact-not-changed", "declared-artifact-drifted"), (kind) =>
+      parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact"], () => {
+        const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+        return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
+      }))
+    .with("declared-artifact-contract-violated", () =>
+      parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact", "violations"], () => {
+        const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+        const violations = parseViolations(raw.violations, `${path}.violations`);
+        return artifact.ok && violations.ok
+          ? ok(Object.freeze({ kind: "declared-artifact-contract-violated", artifact: artifact.value, violations: violations.value }))
+          : fail([...(artifact.ok ? [] : artifact.errors), ...(violations.ok ? [] : violations.errors)]);
+      }))
+    .with("implementation-files-changed", () =>
+      parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifacts"], () => {
+        const artifacts = parseNonEmptyDistinctPaths(raw.artifacts, `${path}.artifacts`);
+        return artifacts.ok ? ok(Object.freeze({ kind: "implementation-files-changed", artifacts: artifacts.value })) : artifacts;
+      }))
+    .otherwise(() => fail([`${path}.kind is not a recognized proof failure`]));
 }
 
 /** The `regression-test-pass` arm: trusted ledger evidence, or a labelled Pi-structured untrusted pass. */

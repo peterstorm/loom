@@ -6,8 +6,7 @@
  * Pure.
  */
 import { taskRolePolicy } from "./distill-task";
-import type { ArtifactScopeInput, DeclaredArtifactExpectation } from "./proof-obligations";
-import { testsOnlyProofScope, type TestsOnlyReopenScope } from "./reopen-scope";
+import type { ArtifactScopeInput, DeclaredArtifactExpectation, TestsOnlyScope } from "./proof-obligations";
 
 /** What the choice reads of a Task; a raw State File record qualifies before it is proven. */
 export type ArtifactExpectationSource = Readonly<{ agent?: unknown; implementation_attestation?: unknown }>;
@@ -26,7 +25,7 @@ export function taskArtifactExpectation(task: ArtifactExpectationSource): Declar
 }
 
 /** What `taskArtifactScope` reads: the expectation's fields and a parsed reopen scope. */
-export type ArtifactScopeSource = ArtifactExpectationSource & Readonly<{ reopen_scope?: TestsOnlyReopenScope }>;
+export type ArtifactScopeSource = ArtifactExpectationSource & Readonly<{ reopen_scope?: TestsOnlyScope }>;
 
 /**
  * What a Task's declared artifacts owe, as the Proof derivation takes it: a
@@ -39,7 +38,7 @@ export type ArtifactScopeSource = ArtifactExpectationSource & Readonly<{ reopen_
 export function taskArtifactScope(task: ArtifactScopeSource): ArtifactScopeInput {
   return task.reopen_scope === undefined
     ? { declaredArtifactExpectation: taskArtifactExpectation(task) }
-    : { testsOnly: testsOnlyProofScope(task.reopen_scope) };
+    : { testsOnly: task.reopen_scope };
 }
 
 /** The observations of changed declared artifacts a settlement holds. */
@@ -74,7 +73,7 @@ export function proofArtifactChanges<Path extends string>(
   changes: ObservedArtifactChanges<Path>,
 ): readonly Path[] {
   if (scope.testsOnly !== undefined) return changes.sinceReopen;
-  const expectation = scope.declaredArtifactExpectation ?? "changed";
+  const expectation = scope.declaredArtifactExpectation;
   switch (expectation) {
     case "changed":
       return changes.cumulative;

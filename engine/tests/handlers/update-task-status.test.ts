@@ -829,7 +829,7 @@ describe("update-task-status — transcript path resolution", () => {
   });
 
   it("quarantines the sole proof-bearing executing Task when its resolved transcript becomes unreadable", async () => {
-    const proof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
+    const proof = derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] });
     const s = await makeSession({ plantTranscript: false, executingTasks: ["T1"], proof });
     expect(s.read().tasks[0]?.proof).toEqual(proof);
     const unreadableTranscript = canonicalTempDir("loom-unreadable-transcript-");

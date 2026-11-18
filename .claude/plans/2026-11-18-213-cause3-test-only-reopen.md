@@ -10,7 +10,8 @@
 
 ## Design
 - `reopen-task --needs tests|implementation` (default `implementation`). The request carries `needs`; the audit records `needs: "tests"` only for a tests-only reopening, so default audits are byte-identical.
-- A tests-only reopening sets protected `reopen_scope` on each named Task: `{kind: "tests-only", test_files, implementation_files, baseline}` where the files are the frozen Test-File Classification of `file_list` and `baseline` is `{kind: "awaiting-attempt"}` until the first attempt after the reopen registers, then `{kind: "captured", entries}` (the registration's declared-artifact snapshot). Absent means a full re-implementation.
+- A tests-only reopening sets protected `reopen_scope` on each named Task: one `TestsOnlyScope` value, `{testFiles, implementationFiles, reopening}`, where the files are the frozen Test-File Classification of `file_list` and `reopening` is the position of the reopening's audit in `task_reopening_history`. A separate `reopen_baseline` is absent until the first attempt after the reopen registers, then holds that registration's declared-artifact snapshot. Absent `reopen_scope` means a full re-implementation.
+- The State File proves the scope, live or recorded in a settled Proof, against independent data: the audit it names must be a `needs: "tests"` reopening of the Task, and the lists must equal the frozen classification of `file_list`. The stored obligations must then equal what the scope derives.
 - `deriveProofObligations` is the one derivation. Given a tests-only scope it derives: `task-completed`, `regression-test-pass` (the policy must require regression, else the reopen is refused), `test-files-changed` (at least one declared test file changed since the reopen) and `implementation-files-unchanged` (no declared implementation file changed since the reopen). No `new-tests`, no `red-then-green`, no `declared-artifact-changed`.
 - Settlement judges a tests-only Proof against the declared paths changed since the reopen baseline (`reopenScopeChangedPaths`, the shell's capture of current bytes over the baseline's artifacts). Retries keep measuring from the same baseline, so a production write in attempt 1 cannot be laundered by attempt 2.
 - The scope ends when the lineage settles terminally: `implemented` (the satisfied tests-only Proof stays as the record) or `escalation-required` (the Task gets a fresh default pending Proof, so `remediate` dispatches a full re-implementation). Retry and infrastructure-blocked settlements keep it.
@@ -20,7 +21,7 @@
 
 ## Tests (red first)
 - Parser and decision table for `--needs`; replay idempotent; conflicting repeat refused; refusals.
-- State File round-trip of `reopen_scope` and audit `needs`; malformed scopes refused; obligation lockstep.
+- State File round-trip of `reopen_scope`, `reopen_baseline` and audit `needs`; malformed scopes refused; a scope naming no tests-only audit, or not matching the frozen classification, refused; stored obligations must equal the scope's.
 - Proof: tests-only passes with test-only changes; fails on a production write; fails with no test change; no I6 owed.
 - Registration captures the baseline once; settlement clears the scope; escalation re-derives the default Proof.
 - End to end: reopen → brief → settle through the pure settlement path; default reopen unchanged.

@@ -7,6 +7,7 @@ import type {
   PendingTaskProof,
   SatisfiedTaskProof,
   TaskProof,
+  TestsOnlyScope,
 } from "./core/proof-obligations";
 import type {
   ImplementationAttemptAuthority,
@@ -16,7 +17,7 @@ import type {
 import type { ImplementationAttemptContext } from "./core/implementation-retry";
 import type { StoredVerificationPolicy } from "./core/verification-policy";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
-import type { ReopenNeeds, TestsOnlyReopenScope } from "./core/reopen-scope";
+import type { RecordedReopenNeeds } from "./core/reopen-scope";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
 import type {
   AcceptedWaveCompletionReceipt,
@@ -545,13 +546,21 @@ interface TaskCommonMetadataBase {
   readonly implementation_attestation?: true;
   /**
    * A tests-only reopening in force (ADR-0093, `reopen-task --needs tests`):
-   * the Task's frozen Test-File Classification and the baseline its attempts
-   * are measured from. Its Proof owes changed test files, unchanged
-   * implementation files and regression, and no I6 order. Absent is a full
-   * re-implementation. Load-locked to its Proof's obligations; cleared when
+   * the Task's frozen Test-File Classification and the position of the
+   * reopening's audit in `task_reopening_history`. Its Proof owes changed test
+   * files, unchanged implementation files and regression, and no I6 order.
+   * Absent is a full re-implementation. Load-locked to its Proof's
+   * obligations, to that audit and to the frozen classification; cleared when
    * the reopened lineage settles implemented or escalated.
    */
-  readonly reopen_scope?: TestsOnlyReopenScope;
+  readonly reopen_scope?: TestsOnlyScope;
+  /**
+   * The declared-artifact snapshot of `file_list` the first attempt after a
+   * tests-only reopening registered with: what that lineage's attempts are
+   * measured from. Only beside `reopen_scope`; absent until that attempt
+   * registers, and refused while an attempt is registered without it.
+   */
+  readonly reopen_baseline?: readonly DeclaredArtifactBaseline[];
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
   /** The skeleton outcome registration recorded for each non-test file_list
@@ -828,7 +837,7 @@ export type TaskReopeningAudit = Readonly<{
   /** What the reopening said the Finding needs (ADR-0093). Recorded only for
    *  `tests`; absent is the default full re-implementation, so an audit of a
    *  reopening that named no `--needs` is byte-identical to before. */
-  needs?: Exclude<ReopenNeeds, "implementation">;
+  needs?: RecordedReopenNeeds;
 }> & ReopenedTaskIds;
 
 /** Immutable audit of one Forward Fix, the retired operation that appended

@@ -67,7 +67,7 @@ describe("Claude SubagentStop project boundary", () => {
     const task = taskFixture({
       id: "T1", description: "change the worktree", agent: "code-implementer-agent",
       wave: 1, depends_on: [], file_list: ["src/artifact.ts"],
-      proof: derivePendingTaskProof({ verificationPolicy, declaredArtifacts: ["src/artifact.ts"] }),
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: ["src/artifact.ts"] }),
       verification_policy: {
         regression: verificationPolicy.regression,
         new_tests: verificationPolicy.newTests,
@@ -149,7 +149,7 @@ describe("Claude SubagentStop project boundary", () => {
     const task = taskFixture({
       id: "T1", description: "change the worktree", agent: "code-implementer-agent",
       wave: 1, depends_on: [], file_list: ["src/artifact.ts"],
-      proof: derivePendingTaskProof({ verificationPolicy, declaredArtifacts: ["src/artifact.ts"] }),
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: ["src/artifact.ts"] }),
       verification_policy: {
         regression: verificationPolicy.regression,
         new_tests: verificationPolicy.newTests,

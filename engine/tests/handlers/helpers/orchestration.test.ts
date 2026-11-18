@@ -214,7 +214,7 @@ function specCheckDocuments(specFile: string | null, planFile: string | null) {
 
 function passingWaveTaskProof() {
   const proof = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+    { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
     trustedPassEvidence(["src/x.ts"]),
   );
   if (proof.state !== "satisfied") throw new Error("passing Wave Task proof fixture must be satisfied");
@@ -1677,9 +1677,7 @@ describe("orchestration CLI", () => {
 
     const committedBytes = readFileSync(statePath, "utf8");
     const graph = JSON.parse(committedBytes) as { tasks: readonly { id: string; reopen_scope?: unknown }[] };
-    expect(graph.tasks[0]!.reopen_scope).toEqual({
-      kind: "tests-only", test_files: ["src/t1.test.ts"], implementation_files: ["src/t1.ts"], baseline: { kind: "awaiting-attempt" },
-    });
+    expect(graph.tasks[0]!.reopen_scope).toEqual({ testFiles: ["src/t1.test.ts"], implementationFiles: ["src/t1.ts"], reopening: 0 });
     const replay = await runCli(reopen, "", root);
     expect(replay.stdout).toContain("already reopened; nothing changed");
     const conflicting = await runCli(reopen.slice(0, -2), "", root);

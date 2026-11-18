@@ -47,7 +47,7 @@ function graph(attempt: ImplementationAttemptAuthority, newTestsRequired = false
     depends_on: [],
     file_list: [],
     new_tests_required: newTestsRequired,
-    proof: derivePendingTaskProof({ newTestsRequired, declaredArtifacts: [] }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired, declaredArtifacts: [] }),
     active_implementation_attempt: attempt,
     artifact_baseline: [],
     attempt_artifact_baseline: [],
@@ -293,7 +293,7 @@ describe("shared exact implementation settlement shell", () => {
           regression: verificationPolicy.regression,
           new_tests: verificationPolicy.newTests,
         },
-        proof: derivePendingTaskProof({ verificationPolicy, declaredArtifacts: [] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] }),
       })),
     };
     const settled = settleExactImplementation(provenanceGraph, facts("Pi", attempt, untrusted), ports(attempt));

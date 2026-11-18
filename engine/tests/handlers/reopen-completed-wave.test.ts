@@ -32,7 +32,7 @@ import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
 
 const proof = (() => {
-  const evaluated = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: [] }, observedEvidence({
+  const evaluated = evaluateTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }, observedEvidence({
     taskCompleted: true,
     testResult: undefined,
     filesModified: [],
@@ -365,7 +365,7 @@ describe("reopen completed Wave", () => {
       writeFileSync(join(root, "src", "a.ts"), "export const a = 1;\n");
       expect(spawnSync("git", ["init"], { cwd: root, encoding: "utf8" }).status).toBe(0);
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
-      const e2eProof = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }, observedEvidence({
+      const e2eProof = evaluateTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }, observedEvidence({
         taskCompleted: true,
         testResult: undefined,
         filesModified: ["src/a.ts"],

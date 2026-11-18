@@ -81,7 +81,6 @@ describe("proofArtifactChanges", () => {
     expect(proofArtifactChanges(expecting("changed"), changes)).toBe(changes.cumulative);
     expect(proofArtifactChanges(expecting("attested"), changes)).toBe(changes.attemptScope);
     expect(proofArtifactChanges(expecting("preserved"), changes)).toBe(changes.attemptScope);
-    expect(proofArtifactChanges({}, changes)).toBe(changes.cumulative);
   });
 
   it("answers for every expectation", () => {
@@ -91,27 +90,21 @@ describe("proofArtifactChanges", () => {
   });
 
   it("judges a tests-only Proof by the delta since its reopening (ADR-0093)", () => {
-    const testsOnly = { testFiles: ["src/attempt.test.ts"] as const, implementationFiles: ["src/attempt.ts"] };
+    const testsOnly = { testFiles: ["src/attempt.test.ts"] as const, implementationFiles: ["src/attempt.ts"], reopening: 0 };
     expect(proofArtifactChanges({ testsOnly }, changes)).toBe(changes.sinceReopen);
   });
 });
 
 describe("taskArtifactScope", () => {
-  const scope = {
-    kind: "tests-only" as const,
-    test_files: ["src/a.test.ts"] as const,
-    implementation_files: ["src/a.ts"],
-    baseline: { kind: "awaiting-attempt" as const },
-  };
+  const scope = { testFiles: ["src/a.test.ts"] as const, implementationFiles: ["src/a.ts"], reopening: 3 };
 
   it("is the expectation for a Task with no tests-only scope", () => {
     expect(taskArtifactScope({ agent: "code-implementer-agent" })).toEqual({ declaredArtifactExpectation: "changed" });
     expect(taskArtifactScope({ agent: DISTILL_AGENT })).toEqual({ declaredArtifactExpectation: "preserved" });
   });
 
-  it("is the frozen classification for a Task with one", () => {
-    expect(taskArtifactScope({ agent: "code-implementer-agent", reopen_scope: scope }))
-      .toEqual({ testsOnly: { testFiles: ["src/a.test.ts"], implementationFiles: ["src/a.ts"] } });
+  it("is the Task's one scope value for a Task with one", () => {
+    expect(taskArtifactScope({ agent: "code-implementer-agent", reopen_scope: scope })).toEqual({ testsOnly: scope });
   });
 });
 

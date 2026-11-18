@@ -33,23 +33,18 @@ import { match } from "ts-pattern";
 import { isFlagToken } from "./cli-flag-token";
 import { isDistillTask } from "./distill-task";
 import type { DomainResult, NonEmpty } from "./orchestration-contract";
-import { derivePendingTaskProof, redThenGreenScope, writtenContract } from "./proof-obligations";
-import {
-  classifyTestsOnlyScope,
-  REOPEN_NEEDS,
-  reopeningNeedsOf,
-  testsOnlyProofScope,
-  type ReopenNeeds,
-  type TestsOnlyReopenScope,
-} from "./reopen-scope";
+import { redThenGreenScope, writtenContract, type TestsOnlyScope } from "./proof-obligations";
+import { classifyTestsOnlyScope, REOPEN_NEEDS, reopeningNeedsOf, type ReopenNeeds } from "./reopen-scope";
 import { parseTaskId, type TaskId } from "./task-id";
 import { taskVerificationPolicy } from "./verification-policy";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
 import {
+  NO_TESTS_ONLY_SCOPES,
   reopenableWave,
   reopenedTaskIdsOf,
   returnWaveTasksToRevalidation,
   type ReopenableWave,
+  type TestsOnlyScopes,
   type WaveReopeningRefusal,
 } from "./task-revalidation";
 import type { Task, TaskGraph, TaskReopeningAudit } from "../types";
@@ -99,7 +94,7 @@ export type TaskReopening =
   | Readonly<{ kind: "already-reopened"; audit: TaskReopeningAudit }>;
 
 export const TASK_REOPENING_USAGE =
-  'Usage: helper orchestration reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason "<why the Task must be re-implemented>" [--needs implementation|tests]';
+  'Usage: helper orchestration reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason "<the Finding to fix>" [--needs implementation|tests]';
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const refuse = (kind: TaskReopeningRefusalKind, message: string): DomainResult<never, TaskReopeningRefusal> =>
@@ -262,10 +257,6 @@ function targetRefusal(graph: TaskGraph, request: TaskReopeningRequest): DomainR
   return null;
 }
 
-/** The tests-only scope each named Task takes, by id; empty for a full re-implementation. */
-type TestsOnlyScopes = ReadonlyMap<string, TestsOnlyReopenScope>;
-const NO_SCOPES: TestsOnlyScopes = new Map();
-
 /**
  * Each named Task's tests-only scope under `--needs tests` (ADR-0093), or the
  * first target, in request order, whose Proof could not be tests-only:
@@ -273,12 +264,14 @@ const NO_SCOPES: TestsOnlyScopes = new Map();
  * writer (its tests stay red by contract), a TaskGraph with no frozen
  * Test-File Classification, a `file_list` with no test file, or a policy that
  * waives regression (nothing would prove the tests pass). Swept Distill Tasks
- * take no scope: they are dispatched again as distill passes.
+ * take no scope: they are dispatched again as distill passes. Each scope names
+ * the audit this reopening appends, at the end of `task_reopening_history`.
  */
 function testsOnlyScopes(graph: TaskGraph, request: TaskReopeningRequest): DomainResult<TestsOnlyScopes, TaskReopeningRefusal> {
-  if (request.needs === "implementation") return freeze({ ok: true as const, value: NO_SCOPES });
+  if (request.needs === "implementation") return freeze({ ok: true as const, value: NO_TESTS_ONLY_SCOPES });
   const writers = redThenGreenScope(graph.verification_manifest, graph.acceptance_contracts ?? []);
-  const scopes = new Map<string, TestsOnlyReopenScope>();
+  const reopening = (graph.task_reopening_history ?? []).length;
+  const scopes = new Map<string, TestsOnlyScope>();
   for (const id of request.taskIds) {
     const task = graph.tasks.find((candidate) => candidate.id === id);
     if (task === undefined) return refuse("unknown-task", `${id} is not a Task of this TaskGraph`);
@@ -293,7 +286,7 @@ function testsOnlyScopes(graph: TaskGraph, request: TaskReopeningRequest): Domai
     if (regression.kind === "waived") {
       return refuse("tests-only-regression-waived", `${id} waives regression (${regression.reason}), so nothing would prove the tests it adds pass; reopen it without --needs tests`);
     }
-    const scope = classifyTestsOnlyScope(task.file_list ?? [], graph.verification_manifest);
+    const scope = classifyTestsOnlyScope(task.file_list ?? [], graph.verification_manifest, reopening);
     if (!scope.ok) {
       return scope.error.kind === "classification-unfrozen"
         ? refuse("tests-only-unclassified", "this TaskGraph froze no Test-File Classification, so a tests-only Proof cannot tell test files from implementation files; reopen without --needs tests")
@@ -303,20 +296,6 @@ function testsOnlyScopes(graph: TaskGraph, request: TaskReopeningRequest): Domai
   }
   return freeze({ ok: true as const, value: scopes });
 }
-
-/** A returned Task with its tests-only scope and the Proof that scope derives. */
-const withTestsOnlyScope = (task: Task, scope: TestsOnlyReopenScope): Task => freeze({
-  ...task,
-  status: "pending" as const,
-  revalidation_required: true as const,
-  legacy_missing_proof: undefined,
-  reopen_scope: scope,
-  proof: derivePendingTaskProof({
-    verificationPolicy: taskVerificationPolicy(task),
-    declaredArtifacts: task.file_list ?? [],
-    testsOnly: testsOnlyProofScope(scope),
-  }),
-});
 
 /**
  * Reopen implemented Tasks of the active Wave for re-implementation, or
@@ -328,9 +307,9 @@ const withTestsOnlyScope = (task: Task, scope: TestsOnlyReopenScope): Task => fr
  * reopened Task holds a reservation the precondition would refuse. A repeat
  * naming other `--needs` is refused just as early.
  *
- * Under `--needs tests` each named Task returns to revalidation like any
- * other, then takes its tests-only scope and the pending Proof that scope
- * derives (ADR-0093); the audit records `needs: "tests"`.
+ * Under `--needs tests` the transition returns each named Task under its
+ * tests-only scope, with the pending Proof that scope derives, in one rewrite
+ * (ADR-0093); the audit records `needs: "tests"`.
  */
 export function reopenImplementedTasks(
   graph: TaskGraph,
@@ -345,17 +324,7 @@ export function reopenImplementedTasks(
   const scopes = testsOnlyScopes(graph, request);
   if (!scopes.ok) return scopes;
 
-  const revalidated = returnWaveTasksToRevalidation(reopenable.value, request.taskIds);
-  const reopened = scopes.value.size === 0 ? revalidated : {
-    ...revalidated,
-    graph: {
-      ...revalidated.graph,
-      tasks: revalidated.graph.tasks.map((task) => {
-        const scope = scopes.value.get(task.id);
-        return scope === undefined ? task : withTestsOnlyScope(task, scope);
-      }),
-    },
-  };
+  const reopened = returnWaveTasksToRevalidation(reopenable.value, request.taskIds, scopes.value);
   // The audited ids are every Task the transition returned, named and swept,
   // in TaskGraph order, so one reopening has one canonical audit whatever
   // order the operator named. The transition returns none only when no named

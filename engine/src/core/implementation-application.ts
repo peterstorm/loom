@@ -578,6 +578,7 @@ export function redThenGreenDuty(
     const eraObligations = deriveProofObligations({
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
+      ...taskArtifactScope(task),
       redThenGreen: era.kind,
     });
     return owesRedThenGreen(eraObligations)
@@ -748,7 +749,7 @@ const RETIRED_ATTEMPT_BOUNDARY = Object.freeze({
  */
 function withoutReopenScope(task: Task, era: RedThenGreenEra): Task {
   if (task.reopen_scope === undefined) return task;
-  const { reopen_scope: _ended, ...rest } = task;
+  const { reopen_scope: _ended, reopen_baseline: _endedBaseline, ...rest } = task;
   if (task.status !== "pending") return rest;
   return {
     ...rest,

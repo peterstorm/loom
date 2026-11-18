@@ -51,7 +51,7 @@ export const requiredTask = (id: string, era: RedThenGreenEra, files: readonly s
   taskFixture({
     ...base(id, wave, files),
     new_tests_required: true,
-    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: files, redThenGreen: era }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: files, redThenGreen: era }),
   });
 
 /** A Task whose new tests are waived with `reason`, its Proof derived in the I6 era. */
@@ -63,14 +63,14 @@ export const waivedTask = (id: string, reason: NewTestWaiverReason): Task => {
   return taskFixture({
     ...base(id, 1, FILES),
     verification_policy: { regression: verificationPolicy.regression, new_tests: verificationPolicy.newTests },
-    proof: derivePendingTaskProof({ verificationPolicy, declaredArtifacts: FILES, redThenGreen: OWED_ERA }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: FILES, redThenGreen: OWED_ERA }),
   });
 };
 
 /** A failed I6 evaluation, as settlement stores it, minting `gap` (or `ledger-unavailable`). */
 export const failedProof = (gap: RedThenGreenGap | "no-ledger"): FailedTaskProof => {
   const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: FILES, redThenGreen: OWED_ERA },
+    { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: FILES, redThenGreen: OWED_ERA },
     trustedPassEvidence(FILES, gap === "no-ledger" ? {} : { redThenGreen: { kind: "unproven", gap } }),
   );
   if (evaluated.state !== "failed") throw new Error("failed proof fixture must fail");

@@ -1000,7 +1000,7 @@ export const ENGINE_RUN_FILE_PLACEHOLDER = "<test file>";
  * ones (it owes no I6, ADR-0093), an I6-owing Task's classified ones, or none.
  */
 function namedEngineRunFiles(task: Task, manifest: FrozenVerificationManifest | undefined): readonly string[] {
-  if (task.reopen_scope !== undefined) return task.reopen_scope.test_files;
+  if (task.reopen_scope !== undefined) return task.reopen_scope.testFiles;
   const duty = redThenGreenDuty(task, manifest);
   return duty.kind === "owed" ? classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline).testFiles : [];
 }

@@ -195,9 +195,10 @@ again, the I6 red-then-green order included. When new or strengthened tests
 close the Finding (a surviving mutant, an uncovered case), reopen with `--needs
 tests`. That attempt's Proof owes three things measured from the bytes the
 Task's files held at the reopening: a changed test file, no changed
-implementation file, and passing tests. It owes no red-then-green order, and a
-write to an implementation file fails it as `implementation-files-changed`. The
-dispatch tells the implementer which files are off limits. The reviewers and the
+implementation file, and passing tests. It owes no red-then-green order, and an
+implementation file whose bytes differ from the reopening's when the attempt
+finishes fails it as `implementation-files-changed`. The dispatch tells the
+implementer which files are off limits. The reviewers and the
 Owner Verification that raised the Finding re-check it at the fresh Wave Gate.
 
 `--needs tests` refuses a Distill Task, an Acceptance Contract writer, a Task

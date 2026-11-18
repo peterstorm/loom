@@ -31,9 +31,9 @@ import { contractWriter, frozenPaths } from "./acceptance-contract";
 import { coupledSetGaps, coupledSetKey, describeCoupledSetGap } from "./coupled-file-sets";
 import { isDistillTask } from "./distill-task";
 import type { DomainResult } from "./orchestration-contract";
-import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra } from "./proof-obligations";
+import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra, type TestsOnlyScope } from "./proof-obligations";
 import { parseReviewPath } from "./review-packet";
-import { classifyTestsOnlyScope, type TestsOnlyReopenScope } from "./reopen-scope";
+import { classifyTestsOnlyScope } from "./reopen-scope";
 import { taskArtifactScope } from "./task-artifact-expectation";
 import { parseTaskId, type TaskId } from "./task-id";
 import { reopenableWave, waveReopeningRefusalMessage } from "./task-revalidation";
@@ -263,7 +263,7 @@ function rescopedTask(
   task: PendingTask,
   fileList: readonly string[],
   observed: ObservedBaselines | null,
-  reopenScope: TestsOnlyReopenScope | undefined,
+  reopenScope: TestsOnlyScope | undefined,
 ): Task {
   const scope = redThenGreenScope(graph.verification_manifest, graph.acceptance_contracts ?? []);
   const baselineOf = new Map([...(task.artifact_baseline ?? []), ...(observed?.entries ?? [])].map((entry) => [entry.artifact, entry] as const));
@@ -300,9 +300,9 @@ function rescopedReopenScope(
   graph: TaskGraph,
   task: Task,
   fileList: readonly string[],
-): DomainResult<TestsOnlyReopenScope | undefined, TaskRescopeRefusal> {
+): DomainResult<TestsOnlyScope | undefined, TaskRescopeRefusal> {
   if (task.reopen_scope === undefined) return freeze({ ok: true as const, value: undefined });
-  const scope = classifyTestsOnlyScope(fileList, graph.verification_manifest);
+  const scope = classifyTestsOnlyScope(fileList, graph.verification_manifest, task.reopen_scope.reopening);
   return scope.ok
     ? freeze({ ok: true as const, value: scope.value })
     : refuse("tests-only-no-test-files", `${task.id} is reopened for tests only, and its new file list would leave it no test file to change ` +
@@ -342,7 +342,7 @@ export function rescopeTask(
   }
   if (isDistillTask(task)) return refuse("distill-task", `${task.id} is a Distill Task; the engine derives its scope`);
   if (task.implementation_attestation === true) return refuse("attested", `${task.id} is armed for attestation; a re-scoped Task needs a fresh implementation, not an attestation`);
-  if (task.reopen_scope?.baseline.kind === "captured") {
+  if (task.reopen_baseline !== undefined) {
     return refuse("tests-only-attempted", `${task.id} is reopened for tests only and an attempt already measures from its reopen ` +
       "baseline; a re-scope would move what that baseline covers, so let the lineage settle first");
   }
