@@ -161,7 +161,7 @@ export async function reconcileWaveReviewIssuance(
   ) => publishReviewInitialBatch(handle, requests, packets, CURRENT_BATCH_LABEL, registration);
   // A Review Run a restart kept for its carried slots (ADR-0089) belongs to
   // the predecessor until this batch rebinds it, so it does not count as
-  // installed here. A fresh start's Successor Carry (ADR-0090) carries whole
+  // installed here. A fresh start's Successor Carry (ADR-0091) carries whole
   // Tasks only, which hold no Review Run.
   const carry = registeredCarry(registration);
   const initialBatchMissingOrPartial = graph.wave_review_epoch === undefined &&

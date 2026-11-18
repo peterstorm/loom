@@ -45,6 +45,7 @@ import {
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
 import { waveReviewView } from "./wave-review-authority";
+import { advisoryDecisionTasks, waveAdvisories } from "./advisory-disposition";
 
 export type WavePreparationError = Readonly<{
   kind: "wave-preparation-rejected";
@@ -150,18 +151,14 @@ export function deriveWaveAdvisoryDecisionRequest(
 ): DomainResult<WaveAdvisoryDecisionRequest, WavePreparationError> {
   const runId = parseOrchestrationRunId(rawRunId);
   if (!runId.ok) return preparationFailure(runId.error.message);
-  const canonicalAdvisories = tasks.flatMap((task) => {
-    if (task.findings !== undefined) {
-      return task.findings.filter((finding) => finding.severity === "advisory").map((finding) => ({
-        identity: `${task.id}:${finding.id}`,
-        bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify({ taskId: task.id, finding }))]),
-      }));
-    }
-    return (task.advisory_findings ?? []).filter((claim) => claim.trim() !== "").map((claim, index) => ({
-      identity: `${task.id}:legacy-advisory-${index + 1}`,
-      bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify({ taskId: task.id, claim }))]),
-    }));
-  });
+  // The one advisory derivation (ADR-0090): the approval gate and the
+  // disposition operation read the same advisories this request issues.
+  const canonicalAdvisories = waveAdvisories(tasks).map(({ taskId, identity, subject }) => ({
+    identity,
+    bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify(subject.kind === "finding"
+      ? { taskId, finding: subject.finding }
+      : { taskId, claim: subject.claim }))]),
+  }));
   const triaged = nonEmpty(canonicalAdvisories);
   if (triaged === null) return preparationFailure("no canonical advisories require user triage");
 
@@ -254,7 +251,7 @@ export function deriveWaveGateDriveStep(
   if (!projected.ok) return preparationFailure(projected.error.message);
   const state = projected.value;
   if (state.kind === "awaiting-advisory-decision") {
-    const material = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, snapshot.waveTasks);
+    const material = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, advisoryDecisionTasks(snapshot.graph, snapshot.wave));
     return material.ok
       ? canonicalRecord({ ok: true, value: canonicalRecord({ kind: "await-advisory-decision", material: material.value, state }) })
       : material;
@@ -278,7 +275,7 @@ export function deriveWaveAdvisoryNextAction(
   if (!isCanonicalWaveReadiness(snapshot) || state.runId !== snapshot.registration.runId) {
     return preparationFailure("advisory action requires canonical readiness for this lifecycle run");
   }
-  const request = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, snapshot.waveTasks);
+  const request = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, advisoryDecisionTasks(snapshot.graph, snapshot.wave));
   if (!request.ok) return request;
   const actionRequest = waveAdvisoryDecisionActionRequest(request.value);
   if (!actionRequest.ok) return actionRequest;

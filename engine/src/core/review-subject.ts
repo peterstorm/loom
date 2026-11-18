@@ -1,5 +1,5 @@
 /**
- * The Subject Digest of a Wave review and its seal on an acceptance (ADR-0090).
+ * The Subject Digest of a Wave review and its seal on an acceptance (ADR-0091).
  *
  * A Review Run records the Subject Digest of what its packets presented
  * (`waveTaskSubjectDigest` mints it through `subjectDigestOf`). Its acceptance

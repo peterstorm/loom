@@ -11,6 +11,7 @@
  * Pure: it reads a parsed graph, live or archived, and never the disk.
  */
 
+import { standingDispositions, type AdvisoryDecision } from "./advisory-disposition";
 import { isDistillTask } from "./distill-task";
 import type { Task, TaskAddedEdit, TaskGraph, TaskWithdrawnEdit } from "../types";
 
@@ -68,6 +69,8 @@ export type WaveFriction = Readonly<{
   remediations: number;
   infrastructureBlocks: number;
   findings: FindingTally;
+  /** The standing decision on each of the Wave's advisories (ADR-0090), counted by kind. */
+  advisoryDispositions: Readonly<Record<AdvisoryDecision, number>>;
   /** The Wave's Tasks with any friction, in graph order. */
   tasks: readonly TaskFriction[];
 }>;
@@ -130,6 +133,13 @@ function progressOf(graph: TaskGraph, wave: number): WaveProgress {
 const rosterEdits = (graph: TaskGraph): readonly (TaskAddedEdit | TaskWithdrawnEdit)[] =>
   (graph.wave_plan_edits ?? []).flatMap((edit) => (edit.kind === "task-added" || edit.kind === "task-withdrawn" ? [edit] : []));
 
+/** The standing advisory decisions recorded in `wave`, by kind: the latest per advisory counts once. */
+function dispositionTally(graph: TaskGraph, wave: number): Readonly<Record<AdvisoryDecision, number>> {
+  const standing = [...standingDispositions(graph.advisory_dispositions).values()].filter((disposition) => disposition.wave === wave);
+  const of = (decision: AdvisoryDecision): number => count(standing, (disposition) => disposition.decision === decision);
+  return freeze({ fixed: of("fixed"), deferred: of("deferred"), dismissed: of("dismissed") });
+}
+
 /** Every Wave Gate run a Wave's digest saw: completed, retired and abandoned. */
 export const gateRunCount = ({ gateRuns }: WaveFriction): number => gateRuns.completed + gateRuns.retired + gateRuns.abandoned;
 
@@ -166,6 +176,7 @@ export function waveFriction(graph: TaskGraph, wave: number): WaveFriction {
       advisory: sum(all, (task) => task.findings.advisory),
       refuted: sum(all, (task) => task.findings.refuted),
     }),
+    advisoryDispositions: dispositionTally(graph, wave),
     tasks: freeze(all.filter(hasFriction)),
   });
 }

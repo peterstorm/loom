@@ -30,7 +30,7 @@ export type PreparedWaveGateStart = Readonly<{
   runId: string;
   registration: RegisteredWaveGateProgram;
   /** Each reviewed Task the start issues in full although it succeeds a
-   *  retired run, and why its accepted review did not carry (ADR-0090). */
+   *  retired run, and why its accepted review did not carry (ADR-0091). */
   notCarried: readonly TaskNotCarried[];
 }>;
 
@@ -64,7 +64,7 @@ function loadPredecessorRegistration(
 }
 
 /**
- * What a fresh start carries from the retired run it succeeds (ADR-0090):
+ * What a fresh start carries from the retired run it succeeds (ADR-0091):
  * the shell loads the predecessor's registration and the reviewed workspaces,
  * and the pure `planSuccessorCarry` decides. Nothing is planned for
  * `--fresh-review`, nor for a Wave with no retired run to succeed.

@@ -173,7 +173,7 @@ declare const SEALED_SUBJECT_DIGEST: unique symbol;
 
 /**
  * The Subject Digest of what one Task's Wave reviewer packets present, except
- * its Findings (ADR-0090). Minted only by `waveTaskSubjectDigest`, read back
+ * its Findings (ADR-0091). Minted only by `waveTaskSubjectDigest`, read back
  * only through `parseSubjectDigest` (core/review-subject).
  */
 export type SubjectDigest = string & { readonly [SUBJECT_DIGEST]: true };
@@ -196,7 +196,7 @@ export type CurrentReviewRun = Readonly<ReviewRunBase & Extract<ReviewRunWorkspa
   evidence: readonly CurrentReviewRunEvidence[];
   slot_authority: readonly [CurrentReviewRunSlotAuthority, ...CurrentReviewRunSlotAuthority[]];
   /**
-   * The Subject Digest of what this run's packets present (ADR-0090): every
+   * The Subject Digest of what this run's packets present (ADR-0091): every
    * fact of the Task's review subject except its Findings, which the run
    * records as `prior_finding_ids`. Absent on runs installed before it existed.
    */
@@ -226,7 +226,7 @@ export type CurrentAcceptedReviewAuthority = Readonly<AcceptedReviewAuthorityBas
   reviewer_protocol: ReviewerProtocolDescriptor;
   /**
    * The run's Subject Digest sealed with the Findings this acceptance left
-   * (`acceptedSubjectDigest`, ADR-0090). Absent on an acceptance recorded
+   * (`acceptedSubjectDigest`, ADR-0091). Absent on an acceptance recorded
    * before it existed: a Successor Carry reviews such a Task in full once.
    */
   subject_digest?: SealedSubjectDigest;

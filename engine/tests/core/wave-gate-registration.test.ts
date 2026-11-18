@@ -211,7 +211,7 @@ describe("installWaveGateRegistration", () => {
       const next = install(abandonedGraph);
       expect(next.wave_review_epoch).toBeUndefined();
       expect(next.spec_check).toBeUndefined();
-      // ADR-0090: the acceptances stay for a Successor Carry to judge, and the
+      // ADR-0091: the acceptances stay for a Successor Carry to judge, and the
       // abandoned run becomes the protected provenance a carry rests on.
       expect(next.retired_wave_review_runs).toEqual([{ schemaVersion: 1, kind: "retired-wave-review-run",
         runId: "run.abandoned", wave: 8, authorityDigest: "d".repeat(64), retirement: "abandoned" }]);

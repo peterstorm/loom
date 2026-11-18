@@ -229,7 +229,7 @@ export function reopenCompletedWave(
   };
   // The reopened run joins the retired runs the Wave's next start succeeds:
   // its unchanged Tasks keep their acceptances, and that start carries each one
-  // whose subject is still unchanged (ADR-0090).
+  // whose subject is still unchanged (ADR-0091).
   return retireReopenedWaveReview({
     ...graph,
     current_wave: request.wave,

@@ -1,5 +1,5 @@
 /**
- * The retired Wave Gate runs a fresh start may succeed (ADR-0090): the one
+ * The retired Wave Gate runs a fresh start may succeed (ADR-0091): the one
  * invariant over `retired_wave_review_runs` (a run is retired once) and the one
  * append that keeps it. The State File parser and every retirement writer ask
  * here, so what is written and what loads cannot disagree.

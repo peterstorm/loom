@@ -4946,6 +4946,29 @@ describe("orchestration CLI", () => {
       expect(await currentOrchestrationStatus(["--json", "--runs-root", runsRoot], statePath))
         .not.toContain("accepted Review Packet authority is stale");
 
+      // Approval is refused, recording nothing, until every advisory the
+      // request issued has a disposition (ADR-0090).
+      const advice = (JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph).tasks[0]!.findings!
+        .find(({ severity }) => severity === "advisory")!;
+      const approve = () => runCli(
+        ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", awaiting.request.requestId],
+        JSON.stringify({ kind: "approve" }),
+        root,
+      );
+      const refused = await approve();
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toContain(`approval refused: 1 advisory has no disposition (T1:${advice.id})`);
+      const events = await opened.value.readEvents();
+      expect(events.some(({ event }) => (event as { kind?: unknown }).kind === "user-decision-recorded")).toBe(false);
+      const disposed = await runCli(["disposition"], JSON.stringify({ dispositions: [
+        { finding: `T1:${advice.id}`, decision: "deferred", reason: "the lifecycle request lands with Wave 2", target: "Wave 2" },
+      ] }), root);
+      expect(disposed.status, disposed.stderr).toBe(0);
+      expect(JSON.parse(disposed.stdout)).toMatchObject({
+        kind: "advisory-dispositions-recorded",
+        recorded: [{ taskId: "T1", findingId: advice.id, decision: "deferred", target: "Wave 2" }],
+      });
+
       const decided = (await runCli(
         ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", awaiting.request.requestId],
         JSON.stringify({ kind: "approve" }),

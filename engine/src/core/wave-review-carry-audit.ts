@@ -1,5 +1,5 @@
 /**
- * The registration boundary of a carry plan (ADR-0089, ADR-0090): the parsers
+ * The registration boundary of a carry plan (ADR-0089, ADR-0091): the parsers
  * that turn a stored restart carry or a fresh start's succession into the
  * typed audit, and the one comparison of two lineage runs.
  *
@@ -109,7 +109,7 @@ export function parseWaveReviewCarryAudit(raw: unknown): DomainResult<WaveReview
 }
 
 /**
- * Parse a fresh start's stored succession (ADR-0090): the run it succeeded,
+ * Parse a fresh start's stored succession (ADR-0091): the run it succeeded,
  * how that run ended, and a carry of whole-roster acceptances whose lineage
  * ends with that run.
  */

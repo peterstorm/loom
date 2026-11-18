@@ -459,7 +459,7 @@ describe("upgrade-spec-trace helper", () => {
     expect(stored.active_wave_completion_suite).toBeUndefined();
     expect(stored.tasks[0]?.review_run).toBeUndefined();
     expect(stored.tasks[0]?.findings).toEqual([finding]);
-    // ADR-0090: the acceptance stays and the run is recorded as retired; a
+    // ADR-0091: the acceptance stays and the run is recorded as retired; a
     // successor carries it only while its Subject Digest is unchanged, and this
     // legacy acceptance has none, so the successor reviews T2 in full.
     expect(stored.tasks[1]).toMatchObject({ review_status: "passed", review_generation: 7,

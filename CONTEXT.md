@@ -121,7 +121,7 @@ A packet-bound collection of evidence from the exact expected reviewer roster fo
 _Avoid_: Review Generation, Refutation Panel, reviewer batch (without the binding)
 
 **Subject Digest**:
-The digest of everything a Task's Wave reviewer packets present except its Findings: protocol, roster, description, plan context, Requirement trace, files, Review Generation, proof, test result, owner map, contract surface and the reviewed bytes. A Review Run records it; its acceptance seals it with the Finding IDs it left, active and refuted. An accepted review carries into another run only while it is unchanged (ADR-0090).
+The digest of everything a Task's Wave reviewer packets present except its Findings: protocol, roster, description, plan context, Requirement trace, files, Review Generation, proof, test result, owner map, contract surface and the reviewed bytes. A Review Run records it; its acceptance seals it with the Finding IDs it left, active and refuted. An accepted review carries into another run only while it is unchanged (ADR-0091).
 _Avoid_: Packet digest (one request's context), workspace head (the bytes alone), authority digest (the whole Wave's snapshot)
 
 **Successor Carry**:

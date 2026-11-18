@@ -130,7 +130,7 @@ function admission(
 }
 
 /**
- * The run a fresh Wave Gate of `wave` succeeds (ADR-0090), as the retirement
+ * The run a fresh Wave Gate of `wave` succeeds (ADR-0091), as the retirement
  * record it has or is about to get: the Wave's abandoned tombstone, which the
  * install retires, otherwise the Wave's latest retired run. Null when the
  * Wave has no retired run to succeed. The start's preflight and the locked
@@ -213,7 +213,7 @@ export function installWaveGateRegistration(
       if (problem !== null) return canonicalRecord({ kind: "refused", message: problem });
       // An abandoned Run is not completion authority. Its review epoch and
       // packet-bound evidence retire with the successor install and it joins
-      // the retired runs a later start may succeed (ADR-0090); the reviews it
+      // the retired runs a later start may succeed (ADR-0091); the reviews it
       // accepted stay, for this start's Successor Carry to judge. Accepted
       // Findings and implementation proof survive. The tombstone is not
       // archived as a completed Wave.
@@ -355,7 +355,7 @@ function withOtherWaveSpecCheckHeld(
  * authority exactly as restart and orphan recovery do — accepted findings and
  * Review Generations survive — and records the abandoned run in
  * `retired_wave_review_runs`, the protected provenance of a Successor Carry
- * (ADR-0090). The reviews the abandoned run accepted stay: the successor
+ * (ADR-0091). The reviews the abandoned run accepted stay: the successor
  * carries each one whose subject is unchanged and reissues the rest, and a
  * reopened Task's acceptance is cleared by its own revalidation. A Requirement
  * trace amendment over the same tombstone retires it identically, through
@@ -371,7 +371,7 @@ export function supersedeAbandonedWaveGateReview(
   return tombstone?.runId === abandonedRunId ? withRetiredRun(reset, tombstone, "abandoned") : reset;
 }
 
-/** `graph` with the completed run `completed`, now reopened, recorded for a later start to succeed (ADR-0090). */
+/** `graph` with the completed run `completed`, now reopened, recorded for a later start to succeed (ADR-0091). */
 export function retireReopenedWaveReview(graph: TaskGraph, completed: RetiringRun): TaskGraph {
   return withRetiredRun(graph, completed, "completed-reopened");
 }

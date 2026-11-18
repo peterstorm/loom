@@ -885,6 +885,24 @@ function parseCurrentRunEvidence(raw: Record<string, unknown> | ReviewRunEvidenc
   });
 }
 
+/**
+ * Why a run's prior Finding ids are not what an issuance can select from the
+ * active Findings, or null. They are the active Findings in order, less only
+ * advisories a standing disposition suppressed (`issuedPriorFindings`,
+ * ADR-0090): a critical is always issued.
+ */
+function priorSelectionError(priorIds: readonly string[], active: readonly Finding[]): string | null {
+  let next = 0;
+  for (const finding of active) {
+    if (priorIds[next] === finding.id) {
+      next += 1;
+    } else if (finding.severity !== "advisory") {
+      return `must issue every active critical finding, in active order (missing ${finding.id})`;
+    }
+  }
+  return next === priorIds.length ? null : "must select active findings in their active order";
+}
+
 /** Prove the packet-bound in-progress review run before the Task cast. */
 export function reviewRunError(
   raw: unknown,
@@ -924,15 +942,14 @@ export function reviewRunError(
   }
   if (new Set(run.prior_finding_ids).size !== run.prior_finding_ids.length) return `${label}.prior_finding_ids must be unique`;
   const priorIds = run.prior_finding_ids as string[];
-  const activeIds = Array.isArray(rawFindings)
+  const active = Array.isArray(rawFindings)
     ? rawFindings.flatMap((entry) => {
         const finding = parseStoredFinding(entry);
-        return finding === null ? [] : [finding.id];
+        return finding === null ? [] : [finding];
       })
     : [];
-  if (priorIds.length !== activeIds.length || priorIds.some((id, index) => id !== activeIds[index])) {
-    return `${label}.prior_finding_ids must exactly snapshot the active findings in order`;
-  }
+  const selectionError = priorSelectionError(priorIds, active);
+  if (selectionError !== null) return `${label}.prior_finding_ids ${selectionError}`;
   if (run.workspace_scope !== undefined) {
     if (!Array.isArray(run.workspace_scope) || run.workspace_scope.length === 0 ||
         run.workspace_scope.some((path) => typeof path !== "string" || path.trim() !== path || path === "")) {
@@ -1626,7 +1643,7 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
     true,
   );
   // The acceptance seals the run's Subject Digest with the Findings it leaves
-  // (ADR-0090), so a later Successor Carry can prove neither changed.
+  // (ADR-0091), so a later Successor Carry can prove neither changed.
   const subject = run.reviewer_protocol === undefined || run.subject_digest === undefined
     ? {}
     : { subject_digest: acceptedSubjectDigest(run.subject_digest, { findings: active, refuted_findings: task.refuted_findings }) };

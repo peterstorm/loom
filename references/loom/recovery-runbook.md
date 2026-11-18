@@ -91,6 +91,19 @@ Name a path a completed Wave wrote with `--sealed-file`, any other with `--file`
 
 Then return to the Phase 5 loop: status owes the new Task's dispatch (render it with `brief`, adding the breach as `--note`s), and the judge's next attempt once it settles. The preconditions and what the helper writes are in `docs/reference/recovery.md` ("Adding a Task to the active Wave").
 
+## Advisories at the Wave Gate pause
+
+Approval is refused until every advisory the request issued has a disposition. Record the user's decision on each, with its reason, on the TaskGraph:
+
+<!-- wire-example: advisory-disposition -->
+```bash
+bun {LOOM_DIR}/engine/src/cli.ts helper orchestration disposition <<'JSON'
+{"dispositions":[{"finding":"T3:code-reviewer-2","decision":"deferred","reason":"Wave 5 owns the retry policy","target":"Wave 5"}]}
+JSON
+```
+
+`decision` is `fixed`, `deferred` or `dismissed`; `target` is for a deferral only. Dispositions survive abandoning the run, and a later gate does not reissue a deferred or dismissed advisory while its bytes are unchanged. To fix one first, record it `fixed`, then follow Acting on a Finding in `commands/wave-gate.md`. The full contract is in `docs/reference/recovery.md` (Recording advisory dispositions).
+
 ## Overriding a false positive
 
 Only when a finding is wrong, and only with the user's approval. Pipe the corrected findings through the helpers the state guard allows:

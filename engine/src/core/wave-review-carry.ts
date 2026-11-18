@@ -1,5 +1,5 @@
 /**
- * Carried Review Evidence (ADR-0089, ADR-0090): the one rule for when a Wave
+ * Carried Review Evidence (ADR-0089, ADR-0091): the one rule for when a Wave
  * Gate run may carry accepted reviews from an earlier run instead of
  * reissuing them, and the transitions that apply it.
  *
@@ -26,9 +26,11 @@
  *
  * One admissibility rule serves planning and the install. Evidence carries
  * only while nothing it judged has changed: the reviewer protocol descriptor,
- * the Review Generation, the prior Finding IDs, the derived roster, the
- * reviewed workspace scope and head, and the Subject Digest of everything
- * else its packets presented.
+ * the Review Generation, the derived roster, the reviewed workspace scope and
+ * head, and the Subject Digest of everything else its packets presented. A
+ * whole-roster acceptance's seal also binds the Findings it left; carried
+ * slots also need the prior-Finding selection their reissued siblings would
+ * be issued (ADR-0090), which an advisory disposition can change.
  *
  * Pure: no I/O, no clock, no randomness.
  */
@@ -58,7 +60,13 @@ import type {
   WaveReviewCarry,
   WaveReviewCarryAudit,
 } from "./wave-gate-program";
-import { derivedWaveTaskReview, taskReviewScope, waveReviewStanding, waveTaskSubjectDigest } from "./wave-review-authority";
+import {
+  derivedWaveTaskReview,
+  taskReviewScope,
+  waveReviewPriorFindings,
+  waveReviewStanding,
+  waveTaskSubjectDigest,
+} from "./wave-review-authority";
 import { sameAuthority } from "./wave-review-carry-audit";
 import { issuedRoles, registeredCarry, waveReviewCarryOf, type RegisteredCarry } from "./wave-review-carry-plan";
 
@@ -139,16 +147,31 @@ function assertNever(value: never): never {
 }
 
 /**
- * The terms carried evidence is judged by: the run's protocol, the Task's
- * derived roster, its bytes and the Subject Digest of everything else its
- * packets present.
+ * The terms a carried whole-roster acceptance is judged by: the run's
+ * protocol, the Task's derived roster, its bytes and the Subject Digest of
+ * everything else its packets present.
+ *
+ * No prior-Finding selection: a carried Task is issued to no reviewer, so no
+ * selection is presented. An advisory disposition recorded after the
+ * acceptance (ADR-0090) changes only which advisories a later review would be
+ * issued; it changes neither the subject nor the Findings the seal binds, so
+ * it never breaks the carry.
  */
-export type CarryTerms = Readonly<{
+export type AcceptanceTerms = Readonly<{
   protocol: ReviewerProtocolDescriptor;
   roster: NonEmpty<string>;
   bytes: ReviewedBytes;
   subject: SubjectDigest;
 }>;
+
+/**
+ * The terms carried slots are judged by: an acceptance's terms, and the prior
+ * Finding ids a fresh issuance over those bytes would select
+ * (`waveReviewPriorFindings` on the `fresh` basis, ADR-0090). A run whose
+ * priors differ assessed another set than the replacement's reissued slots
+ * would be issued.
+ */
+export type CarryTerms = AcceptanceTerms & Readonly<{ priorFindingIds: readonly string[] }>;
 
 /**
  * How a carry treats an acceptance recorded before the Subject Digest. A
@@ -183,7 +206,7 @@ function carriableSlots(task: Task, run: CurrentReviewRun, terms: CarryTerms): D
   const drift = driftOf([
     ["protocol", canonicalStructuralEquals(run.reviewer_protocol, terms.protocol)],
     ["generation", run.generation === (task.review_generation ?? 0)],
-    ["prior-findings", canonicalStructuralEquals(run.prior_finding_ids, (task.findings ?? []).map(({ id }) => id))],
+    ["prior-findings", canonicalStructuralEquals(run.prior_finding_ids, terms.priorFindingIds)],
     ["roster", canonicalStructuralEquals(run.expected_agents, terms.roster)],
     ["scope", canonicalStructuralEquals(run.workspace_scope, terms.bytes.scope) && bytesCoverTask(task, terms.bytes)],
     ["head", run.workspace_head_sha === terms.bytes.headSha],
@@ -205,7 +228,7 @@ function carriableAcceptance(
   task: Task,
   acceptance: CarriedReviewAuthority,
   acceptedRoster: readonly string[],
-  terms: CarryTerms,
+  terms: AcceptanceTerms,
   kind: CarryKind,
 ): DomainResult<true, NotCarriedReason> {
   const accepted = task.accepted_review_authority;
@@ -285,7 +308,7 @@ function acceptedRoster(
   context: CarryContext,
   acceptance: CarriedReviewAuthority,
   taskId: string,
-  terms: CarryTerms,
+  terms: AcceptanceTerms,
 ): readonly string[] | undefined {
   if (sameAuthority(acceptance, context.predecessor)) {
     return context.source.kind === "restart" ? context.source.issuedRosters.get(taskId) : terms.roster;
@@ -312,11 +335,20 @@ function carryTermsOf(context: CarryContext, task: Task): DomainResult<CarryTerm
   const review = derivedWaveTaskReview(graph, 2, task);
   if (review.kind !== "roster") return notCarried({ kind: "roster-not-derivable" });
   const bytes: ReviewedBytes = { scope: admitted.value.scope, headSha: admitted.value.headSha };
-  return { ok: true, value: { protocol, roster: review.roster, bytes, subject: waveTaskSubjectDigest(graph, task, review, protocol, bytes) } };
+  return {
+    ok: true,
+    value: {
+      protocol,
+      roster: review.roster,
+      bytes,
+      subject: waveTaskSubjectDigest(graph, task, review, protocol, bytes),
+      priorFindingIds: waveReviewPriorFindings(graph, task, admitted.value.artifacts, "fresh").ids,
+    },
+  };
 }
 
 /** `task`'s whole-roster acceptance as a carry entry, or why it does not carry. */
-function acceptanceCarry(context: CarryContext, task: Task, terms: CarryTerms): DomainResult<AcceptedTaskCarry, NotCarriedReason> {
+function acceptanceCarry(context: CarryContext, task: Task, terms: AcceptanceTerms): DomainResult<AcceptedTaskCarry, NotCarriedReason> {
   const accepted = task.accepted_review_authority;
   if (accepted?.run_id === undefined) return notCarried({ kind: "nothing-accepted" });
   const acceptance: CarriedReviewAuthority = Object.freeze({ runId: accepted.run_id, authorityDigest: accepted.authority_digest });
@@ -436,7 +468,7 @@ function retiredPredecessorRegistration(input: SuccessorCarryInput): DomainResul
 }
 
 /**
- * A Successor Carry (ADR-0090): which reviewed Tasks of a fresh start carry
+ * A Successor Carry (ADR-0091): which reviewed Tasks of a fresh start carry
  * the whole-roster acceptance their unchanged subject still holds, from the
  * retired run the start succeeds or from that run's own lineage, and why each
  * other reviewed Task is issued in full. A Task carries whatever its
@@ -480,6 +512,8 @@ export type CarriedRunBinding = Readonly<{
   packetId: string;
   headSha: string;
   bytes: ReviewedBytes;
+  /** The prior Finding ids a fresh issuance over `bytes` selects (`CarryTerms`). */
+  priorFindingIds: readonly string[];
   roster: NonEmpty<string>;
   /** The Subject Digest of the Task as the replacement's packets present it. */
   subject: SubjectDigest;
@@ -506,7 +540,8 @@ export function rebindCarriedReviewRun(
   const run = task.review_run;
   if (run?.reviewer_protocol === undefined) return refuse("has no current Review Run to carry");
   const accepted = carriableSlots(task, run, {
-    protocol: binding.protocol, roster: binding.roster, bytes: binding.bytes, subject: binding.subject,
+    protocol: binding.protocol, roster: binding.roster, bytes: binding.bytes,
+    subject: binding.subject, priorFindingIds: binding.priorFindingIds,
   });
   if (!accepted.ok) return refuse(`carried review evidence no longer judges it: ${describeNotCarried(accepted.error)}`);
   if (!canonicalStructuralEquals(accepted.value, carry.agents)) {
@@ -558,7 +593,7 @@ export function rebindCarriedReviewRun(
 export function carriedAcceptanceProblem(
   task: Task,
   carry: AcceptedTaskCarry,
-  terms: CarryTerms,
+  terms: AcceptanceTerms,
   kind: CarryKind,
 ): string | null {
   const carriable = carriableAcceptance(task, carry.acceptance, carry.roster, terms, kind);

@@ -34,6 +34,7 @@ import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/
 import type { SiblingEntryPoint } from "./core/sibling-entry-point";
 import type { InvariantId } from "./core/invariant-id";
 import type { TaskId } from "./core/task-id";
+import type { AdvisoryDisposition } from "./core/advisory-disposition-shape";
 // The G2 values (AD-4) are owned by their dependency-free leaf, which imports
 // nothing from this file, so the canonical Task and TaskGraph declare them.
 import type { ExportBinding, PathSkeletonOutcome, SkeletonRecord } from "./core/skeleton/persisted";
@@ -885,7 +886,7 @@ export type SpecTraceWaveGateRetirement = Readonly<{
 /**
  * How a Wave Gate run that can be succeeded ended: abandoned by the operator
  * (its tombstone was superseded or retired), or completed and then reopened
- * because some Task's bytes drifted (ADR-0090). The tuple is the one source
+ * because some Task's bytes drifted (ADR-0091). The tuple is the one source
  * the type, the State File parser and the registration parser read.
  */
 export const WAVE_REVIEW_RUN_RETIREMENTS = ["abandoned", "completed-reopened"] as const;
@@ -896,7 +897,7 @@ export const isWaveReviewRunRetirement = (raw: unknown): raw is WaveReviewRunRet
   (WAVE_REVIEW_RUN_RETIREMENTS as readonly unknown[]).includes(raw);
 
 /**
- * Successor Carry provenance (ADR-0090): one Wave Gate run whose review
+ * Successor Carry provenance (ADR-0091): one Wave Gate run whose review
  * authority was retired without a replacement taking it over. The next fresh
  * start of `wave` succeeds the latest of these, and a carried acceptance is
  * admitted only along a lineage that starts from one. Appended when an
@@ -1544,6 +1545,12 @@ export interface TaskGraph {
   /** Retrospectives written or skipped, per Wave or for the run (ADR-0083), oldest first.
    *  `complete-orchestration` refuses until one covers the run. */
   readonly retro_records?: readonly RetroRecord[];
+  /** The operator's decision on each advisory a Wave Gate raised
+   *  (`orchestration disposition`, ADR-0090), append-only: the latest record
+   *  per advisory stands. A deferred or dismissed advisory is not reissued to
+   *  reviewers while its anchored bytes hold (`issuedPriorFindings`).
+   *  Re-population drops them with the Tasks they named. */
+  readonly advisory_dispositions?: readonly AdvisoryDisposition[];
   /** Accepted quiescent-Wave result bound to the exact active registration. */
   readonly active_wave_completion_suite?: AcceptedWaveCompletionReceipt;
   /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */
@@ -1567,7 +1574,7 @@ export interface TaskGraph {
   readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
   /** Abandoned active authority retired only to install Requirement trace v2. */
   readonly spec_trace_wave_gate_retirements?: readonly SpecTraceWaveGateRetirement[];
-  /** Runs a fresh Wave Gate may succeed, oldest first (ADR-0090): the
+  /** Runs a fresh Wave Gate may succeed, oldest first (ADR-0091): the
    *  protected provenance of a Successor Carry. Dropped by re-population. */
   readonly retired_wave_review_runs?: readonly RetiredWaveReviewRun[];
   /** Append-only audit of in-place v2 trace amendments; each Task's latest

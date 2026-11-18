@@ -664,6 +664,11 @@ describe("registered Wave reviewer protocol", () => {
     expect(graph(p).tasks[0]!.findings).toMatchObject([{ ...advisory, protocolVersion: 2 }]);
     expect(value(handle.readTranscriptBytes(requests[2]!.authority))).toEqual(sibling);
     expect(await resume(p, handle)).toEqual(awaiting);
+    // Approval needs a disposition on every advisory the request issued (ADR-0090).
+    const advised = graph(p).tasks[0]!;
+    await runCli(p, ["disposition"], JSON.stringify({ dispositions: [
+      { finding: `${advised.id}:${advised.findings![0]!.id}`, decision: "dismissed", reason: "scripted fixture advice" },
+    ] }));
     const done = await runCli(p, ["decide", "--runs-root", p.runsRoot, "--run", handle.runId, "--request", awaiting.request!.requestId], JSON.stringify({ kind: "approve" }));
     expect(done.kind, JSON.stringify(done)).toBe("done");
     expect(await resume(p, handle)).toEqual(done);
@@ -758,7 +763,7 @@ describe("registered Wave reviewer protocol", () => {
     await new StateManager(p.statePath).update((locked) => ({ ...locked, tasks: locked.tasks.map((task) => {
       const accepted = task.accepted_review_authority;
       if (accepted?.reviewer_protocol === undefined) throw new Error("fixture must have genuine accepted current authority");
-      // The sealed Subject Digest is current-only authority too (ADR-0090), so it goes with the descriptor.
+      // The sealed Subject Digest is current-only authority too (ADR-0091), so it goes with the descriptor.
       const { reviewer_protocol: _removed, subject_digest: _sealed, ...missing } = accepted;
       return { ...task, accepted_review_authority: missing };
     }) }));
@@ -1041,7 +1046,7 @@ describe("Wave Gate restart carries accepted review evidence", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0090 (loom#213 Cause 5): a fresh Wave Gate start carries the accepted
+// ADR-0091 (loom#213 Cause 5): a fresh Wave Gate start carries the accepted
 // reviews of unchanged Tasks from the run it succeeds.
 // ---------------------------------------------------------------------------
 
@@ -1078,6 +1083,13 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
     const awaiting = await resume(p, handle);
     expect(awaiting.kind, JSON.stringify(awaiting)).toBe("await-user");
     expect(graph(p).tasks.map(({ accepted_review_authority }) => accepted_review_authority?.run_id)).toEqual(SIX.map(() => "run.first"));
+    // The operator decides both advisories at the pause, after the acceptances (ADR-0090):
+    // T1's is deferred over its unchanged bytes, T6's is to be fixed.
+    const [t1, , , , , t6] = graph(p).tasks;
+    await runCli(p, ["disposition"], JSON.stringify({ dispositions: [
+      { finding: `T1:${t1!.findings![0]!.id}`, decision: "deferred", reason: "belongs to a later Wave", target: "Wave 2" },
+      { finding: `T6:${t6!.findings![0]!.id}`, decision: "fixed", reason: "reopening T6 to fix it" },
+    ] }));
     const abandoned = await cliResult(p, ["abandon", "--runs-root", p.runsRoot, "--run", "run.first", "--reason", "fix T6's advisory"]);
     expect(abandoned.status, abandoned.stderr).toBe(0);
     return p;
@@ -1146,6 +1158,8 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
     expect(settled.tasks[5]!.findings).toEqual([]);
     expect(settled.tasks[0]!.findings).toMatchObject([{ claim: advisoryOn("T1").claim }]);
     expect(settled.tasks[0]!.accepted_review_authority?.run_id).toBe("run.first");
+    // The deferral recorded after T1's acceptance did not stop it carrying (ADR-0091), and it
+    // still stands for T1's advisory, so approval needs no new disposition.
     const done = await runCli(p, ["decide", "--runs-root", p.runsRoot, "--run", "run.second", "--request", awaiting.request!.requestId],
       JSON.stringify({ kind: "approve" }));
     expect(done.kind, JSON.stringify(done)).toBe("done");

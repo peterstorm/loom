@@ -103,5 +103,6 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0086](ADR-0086-a-task-joins-the-active-wave-through-a-plan-edit.md) | A Task joins the active Wave through a plan edit | Accepted (2026-11-18) | — |
 | [ADR-0087](ADR-0087-the-spec-is-amended-by-an-audited-operation.md) | The spec is amended by an audited operation | Accepted (2026-11-18) | — |
 | [ADR-0088](ADR-0088-acceptance-tests-run-through-declared-runtime-seams.md) | Acceptance tests run through declared runtime seams | Accepted (2026-11-18) | — |
-| [ADR-0089](ADR-0089-wave-gate-restart-carries-accepted-review-evidence.md) | Wave Gate restart carries accepted review evidence and reissues only exhausted slots | Accepted (2026-11-18) | partly supersedes ADR-0084; amended by ADR-0090 |
-| [ADR-0090](ADR-0090-a-fresh-wave-gate-carries-unchanged-tasks-accepted-reviews.md) | A fresh Wave Gate carries unchanged Tasks' accepted reviews | Accepted (2026-11-18) | amends ADR-0089 |
+| [ADR-0089](ADR-0089-wave-gate-restart-carries-accepted-review-evidence.md) | Wave Gate restart carries accepted review evidence and reissues only exhausted slots | Accepted (2026-11-18) | partly supersedes ADR-0084; amended by ADR-0091 |
+| [ADR-0090](ADR-0090-advisory-decisions-are-recorded-on-the-taskgraph.md) | Advisory decisions are recorded on the TaskGraph and suppress reissue while their bytes hold | Accepted (2026-11-18) | — |
+| [ADR-0091](ADR-0091-a-fresh-wave-gate-carries-unchanged-tasks-accepted-reviews.md) | A fresh Wave Gate carries unchanged Tasks' accepted reviews | Accepted (2026-11-18) | amends ADR-0089 |

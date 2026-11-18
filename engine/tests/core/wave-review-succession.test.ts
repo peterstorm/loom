@@ -1,5 +1,5 @@
 /**
- * A Successor Carry (ADR-0090, loom#213 Cause 5): a fresh Wave Gate start
+ * A Successor Carry (ADR-0091, loom#213 Cause 5): a fresh Wave Gate start
  * carries the accepted review of every Task whose review subject is
  * unchanged since the retired run it succeeds accepted it, along a protected
  * lineage, and reviews every other Task in full.
@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, BASE_WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
+import { advisoryDisposition, anchorDigest } from "../../src/core/advisory-disposition";
 import { attributeFindings, reviewRunError } from "../../src/core/findings";
 import { parseRegisteredFacadeProgram } from "../../src/handlers/helpers/programs/registration";
 import type { CurrentAcceptedReviewAuthority, Finding } from "../../src/core/findings-shape";
@@ -26,10 +27,12 @@ import {
   issuedWaveReviewRosters,
   taskReviewScope,
   waveGateAuthorityDigest,
+  waveReviewPriorFindings,
   waveTaskSubjectDigest,
 } from "../../src/core/wave-review-authority";
 import { parseWaveGateSuccessionAudit } from "../../src/core/wave-review-carry-audit";
 import {
+  carriedAcceptanceProblem,
   planSuccessorCarry,
   waveAcceptanceProblem,
   type CarryDrift,
@@ -38,6 +41,7 @@ import {
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { RetiredWaveReviewRun, Task, TaskCommonMetadata, TaskGraph } from "../../src/types";
 import { contract } from "../fixtures/contract-status-fixtures";
+import { findingFixture } from "../fixtures/finding";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import { activeWaveGateFixture, graphFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 import { value } from "../fixtures/parse-result";
@@ -405,5 +409,53 @@ describe("the State File and registration parse the new authority", () => {
       tasks: unsealed.tasks.map((task) => ({ ...task, accepted_review_authority: sealedAcceptance(unsealed, task) })) };
     expect(succeed(graph).succession?.carry.carried).toEqual([
       { kind: "accepted-task", taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, acceptance: PREVIOUS_AUTHORITY }]);
+  });
+});
+
+describe("an advisory disposition recorded after an acceptance never breaks its carry (ADR-0090, ADR-0091)", () => {
+  // T1's acceptance left an active advisory; the operator decides it afterwards.
+  const advice = findingFixture("code-reviewer-7", "advisory", "src/t1.ts");
+  const advised = (): TaskGraph => retiredWave({ t1: { findings: [advice], advisory_findings: [advice.claim] } });
+  const disposition = (decision: "fixed" | "deferred" | "dismissed", anchorHolds: boolean) => {
+    const t1 = advised().tasks[0]!;
+    const anchor = anchorDigest(advice.file, observe(t1, anchorHolds ? undefined : "other bytes").artifacts);
+    return value(advisoryDisposition({ wave: 1, taskId: "T1", findingId: advice.id, decision, reason: "operator decision",
+      target: null, anchor: decision === "fixed" ? null : anchor }));
+  };
+
+  it("a disposition leaves the Subject Digest and its seal untouched, so every Task still carries", () => {
+    fc.assert(fc.property(
+      fc.constantFrom("fixed" as const, "deferred" as const, "dismissed" as const), fc.boolean(),
+      (decision, anchorHolds) => {
+        const graph: TaskGraph = { ...advised(), advisory_dispositions: [disposition(decision, anchorHolds)] };
+        const plan = succeed(graph);
+        expect(plan.notCarried).toEqual([]);
+        expect(plan.succession?.carry.carried.map(({ taskId }) => taskId)).toEqual(["T1", "T2", "T3", "T4", "T5", "T6"]);
+      },
+    ));
+  });
+
+  it("the batch install still honours the carried acceptance once the disposition is recorded", () => {
+    const before = advised();
+    const entry = succeed(before).succession!.carry.carried[0]!;
+    const after: TaskGraph = { ...before, advisory_dispositions: [disposition("dismissed", true)] };
+    const t1 = after.tasks[0]!;
+    const review = derivedWaveTaskReview(after, 2, t1);
+    if (review.kind !== "roster") throw new Error("T1 must be reviewed");
+    const bytes = observe(t1);
+    // The disposition does change what a fresh review of T1 would be issued...
+    expect(waveReviewPriorFindings(before, before.tasks[0]!, bytes.artifacts, "fresh").ids).toEqual([advice.id]);
+    expect(waveReviewPriorFindings(after, t1, bytes.artifacts, "fresh").ids).toEqual([]);
+    // ...but T1 is issued to no reviewer, and its carried acceptance still holds.
+    expect(carriedAcceptanceProblem(t1, entry,
+      { protocol: V4, roster: review.roster, bytes, subject: waveTaskSubjectDigest(after, t1, review, V4, bytes) }, "succession"))
+      .toBeNull();
+  });
+
+  it("a Finding added after the acceptance still breaks the seal, disposition or not", () => {
+    const added = findingFixture("code-reviewer-6", "advisory", "src/t1.ts");
+    const graph = withTask({ ...advised(), advisory_dispositions: [disposition("dismissed", true)] }, "T1",
+      (task) => ({ ...task, findings: [...(task.findings ?? []), added] }));
+    expect(succeed(graph).notCarried).toEqual([{ taskId: "T1", reason: { kind: "drift", fields: ["subject"] } }]);
   });
 });

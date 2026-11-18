@@ -105,6 +105,7 @@ import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
 import { dependencyAddedEdit, parsePlanEditReason, taskAddedEdit, taskRescopedEdit, taskWithdrawnEdit } from "./core/wave-plan-edit";
 import { retroRecordEntry, retroScopeKnown } from "./core/retro-record";
+import { parseAdvisoryDispositions, type AdvisoryDisposition } from "./core/advisory-disposition";
 import { dependencyCycles } from "./core/task-dependencies";
 import {
   amendmentHistoryError,
@@ -752,7 +753,7 @@ function parseOrphanedWaveGateHistory(raw: unknown): ParseResult<readonly Orphan
 
 const RETIRED_WAVE_REVIEW_RUN_FIELDS = ["schemaVersion", "kind", "runId", "wave", "authorityDigest", "retirement"] as const;
 
-/** Parse one Successor Carry provenance record (ADR-0090). */
+/** Parse one Successor Carry provenance record (ADR-0091). */
 function parseRetiredWaveReviewRun(raw: unknown, label: string): ParseResult<RetiredWaveReviewRun> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
@@ -2061,7 +2062,7 @@ function taskPacketError(
           authority.authority_digest === undefined)) {
       return `tasks[${index}] ("${id}"): current accepted_review_authority requires supported descriptor and run authority`;
     }
-    // The sealed Subject Digest (ADR-0090) belongs to a current acceptance only.
+    // The sealed Subject Digest (ADR-0091) belongs to a current acceptance only.
     if (Object.hasOwn(authority, "subject_digest") && (!Object.hasOwn(authority, "reviewer_protocol") ||
         parseSealedSubjectDigest(authority.subject_digest) === null)) {
       return `tasks[${index}] ("${id}"): accepted_review_authority.subject_digest must be a SHA-256 digest on a current acceptance`;
@@ -3086,6 +3087,7 @@ type ParsedTaskGraphHistoryFields = Readonly<{
   specAmendments: readonly SpecAmendment[] | undefined;
   wavePlanEdits: readonly WavePlanEdit[] | undefined;
   retroRecords: readonly RetroRecord[] | undefined;
+  advisoryDispositions: readonly AdvisoryDisposition[] | undefined;
 }>;
 
 function activeWaveGateRetirementConflict(
@@ -3154,6 +3156,8 @@ function parseTaskGraphHistoryFields(
   if (!forwardFixWithdrawals.ok) return parseErr(forwardFixWithdrawals.error);
   const retroRecords = parseRetroRecords(obj.retro_records, tasks);
   if (!retroRecords.ok) return parseErr(retroRecords.error);
+  const advisoryDispositions = parseAdvisoryDispositions(obj.advisory_dispositions);
+  if (!advisoryDispositions.ok) return parseErr(advisoryDispositions.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
@@ -3199,6 +3203,7 @@ function parseTaskGraphHistoryFields(
     specAmendments: specAmendments.value,
     wavePlanEdits: wavePlanEdits.value,
     retroRecords: retroRecords.value,
+    advisoryDispositions: advisoryDispositions.value,
   });
 }
 
@@ -3670,6 +3675,7 @@ function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<Task
   const {
     reopeningHistory, taskReopeningHistory, forwardFixHistory, forwardFixWithdrawals, orphanedHistory,
     specTraceRetirements, retiredReviewRuns, specTraceAmendments, specAmendments, wavePlanEdits, retroRecords,
+    advisoryDispositions,
   } = history;
   return {
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
@@ -3677,6 +3683,7 @@ function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<Task
     ...(forwardFixHistory === undefined ? {} : { forward_fix_history: forwardFixHistory }),
     ...(forwardFixWithdrawals === undefined ? {} : { forward_fix_withdrawals: forwardFixWithdrawals }),
     ...(retroRecords === undefined ? {} : { retro_records: retroRecords }),
+    ...(advisoryDispositions === undefined ? {} : { advisory_dispositions: advisoryDispositions }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(retiredReviewRuns === undefined ? {} : { retired_wave_review_runs: retiredReviewRuns }),

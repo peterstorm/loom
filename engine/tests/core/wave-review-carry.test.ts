@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { BASE_WAVE_REVIEW_AGENTS, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
+import { advisoryDisposition, anchorDigest } from "../../src/core/advisory-disposition";
 import { preserveAcceptedReviewRunFindings } from "../../src/core/findings";
 import type {
   CurrentAcceptedReviewAuthority,
@@ -33,6 +34,7 @@ import {
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskCommonMetadata, TaskGraph } from "../../src/types";
 import type { ReviewerProtocolDescriptor } from "../../src/core/reviewer-contract";
+import { findingFixture } from "../fixtures/finding";
 import { activeWaveGateFixture, graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { value } from "../fixtures/parse-result";
 import { withOrigin } from "../fixtures/wave-gate-origin";
@@ -309,6 +311,48 @@ describe("a restart names each reviewed Task it did not carry, and why", () => {
       .toEqual([{ taskId: "T1", reason: { kind: "acceptance-off-lineage", runId: "run.earliest" } }]);
   });
 
+  describe("a carried run's priors are judged against a fresh issuance over the current bytes (ADR-0090)", () => {
+    const advice = findingFixture("code-reviewer-9", "advisory", "src/t2.ts");
+    const dismissed = value(advisoryDisposition({ wave: 1, taskId: "T2", findingId: advice.id, decision: "dismissed",
+      reason: "false positive", target: null, anchor: anchorDigest(advice.file, observe("T2", ["src/t2.ts"]).artifacts) }));
+    const withAdvice = (priorIds: readonly string[], dispositions?: TaskGraph["advisory_dispositions"]): TaskGraph => {
+      const state = exhaustedWave({ run: predecessorRun(accepted, { prior_finding_ids: priorIds }) });
+      const [first, t2] = state.tasks;
+      return { ...state, tasks: [first!, { ...t2!, findings: [advice], advisory_findings: [advice.claim] }],
+        ...(dispositions === undefined ? {} : { advisory_dispositions: dispositions }) };
+    };
+
+    it("carries a run that issued the advisory while nothing is decided", () => {
+      expect(restart(withAdvice([advice.id])).registration.restart?.carry?.carried).toContainEqual(
+        { kind: "accepted-slots", taskId: "T2", agents: accepted });
+    });
+
+    it("names prior-findings drift when the advisory was dismissed after the run issued it", () => {
+      expect(restart(withAdvice([advice.id], [dismissed])).notCarried)
+        .toEqual([{ taskId: "T2", reason: { kind: "drift", fields: ["prior-findings"] } }]);
+    });
+
+    it("keeps a whole-roster acceptance as accepted-task when its advisory is dismissed after it (ADR-0091)", () => {
+      // T1 is issued to no reviewer, so no prior selection is presented to judge;
+      // the disposition leaves its Findings, and so the acceptance, unchanged.
+      const own = findingFixture("code-reviewer-8", "advisory", "src/t1.ts");
+      const ownDismissed = value(advisoryDisposition({ wave: 1, taskId: "T1", findingId: own.id, decision: "dismissed",
+        reason: "false positive", target: null, anchor: anchorDigest(own.file, observe("T1", ["src/t1.ts"]).artifacts) }));
+      const state = exhaustedWave({ t1: { findings: [own], advisory_findings: [own.claim] } });
+      const prepared = restart({ ...state, advisory_dispositions: [ownDismissed] });
+      expect(prepared.notCarried).toEqual([]);
+      expect(prepared.registration.restart?.carry?.carried).toContainEqual(
+        { kind: "accepted-task", taskId: "T1", roster: ROSTER, acceptance: { runId: "run.previous", authorityDigest: DIGEST_A } });
+    });
+
+    it("carries the accepted slots of a run that already omitted an advisory dismissed over unchanged bytes", () => {
+      const prepared = restart(withAdvice([], [dismissed]));
+      expect(prepared.notCarried).toEqual([]);
+      expect(prepared.registration.restart?.carry?.carried).toContainEqual(
+        { kind: "accepted-slots", taskId: "T2", agents: accepted });
+    });
+  });
+
   it("names a run with no accepted slot", () => {
     expect(restart(exhaustedWave({ run: predecessorRun([]) })).notCarried)
       .toEqual([{ taskId: "T2", reason: { kind: "nothing-accepted" } }]);
@@ -353,7 +397,7 @@ describe("a chained restart keeps every carried slot's original origin", () => {
     const bytes = observe("T2", ["src/t2.ts"]);
     const rebound = value(rebindCarriedReviewRun(t2, carry, {
       runId: nextRunId, authorityDigest: prepared.registration.authorityDigest, protocol: WAVE_REVIEWER_PROTOCOL_V4,
-      generation: 0, packetId, headSha: epoch, bytes: { scope: bytes.scope, headSha: bytes.headSha }, roster: ROSTER,
+      generation: 0, packetId, headSha: epoch, bytes: { scope: bytes.scope, headSha: bytes.headSha }, priorFindingIds: [], roster: ROSTER,
       subject: SUBJECT_T2, issued: issuedRoles(ROSTER, carry).map((agent) => issuedSlot(agent, packetId.charCodeAt(0) * 100 + ROSTER.indexOf(agent))),
     }));
     const [first, ...rest] = rebound.slot_authority.map((slot) => (slot.carried_from === undefined ? { ...slot, attempted: 2 as const } : slot));
@@ -398,7 +442,7 @@ describe("rebinding a carried Task's Review Run into the replacement run", () =>
   const binding: CarriedRunBinding = {
     runId: "run.next", authorityDigest: DIGEST_B, protocol: WAVE_REVIEWER_PROTOCOL_V4,
     generation: 0, packetId: PACKET_B, headSha: EPOCH_B, bytes: { scope: bytes.scope, headSha: bytes.headSha },
-    roster: ROSTER, subject: SUBJECT_T2, issued: [freshSlot],
+    priorFindingIds: [], roster: ROSTER, subject: SUBJECT_T2, issued: [freshSlot],
   };
   const task = (): Task => exhaustedWave().tasks[1]!;
   const carry = { kind: "accepted-slots" as const, taskId: "T2", agents: accepted as unknown as readonly [string, ...string[]] };

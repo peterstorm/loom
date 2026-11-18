@@ -18,7 +18,7 @@ export type RegisteredReviewerProtocol<Descriptor extends ReviewerProtocolDescri
 /**
  * One Wave Gate run on a carry lineage, named by its run and authority digest:
  * a restart's exhausted predecessor (ADR-0089) or the retired run a fresh
- * start succeeded (ADR-0090), and every run those carried from in turn.
+ * start succeeded (ADR-0091), and every run those carried from in turn.
  */
 export type CarriedReviewAuthority = Readonly<{ runId: string; authorityDigest: string }>;
 
@@ -26,7 +26,7 @@ export type CarriedReviewAuthority = Readonly<{ runId: string; authorityDigest: 
  * What one reviewed Task carries into a run from an earlier run on its lineage:
  * - `accepted-task`: every slot of `roster` was accepted along the lineage, by
  *   the run `acceptance` names. The Task is not reissued. A restart (ADR-0089)
- *   and a fresh start's Successor Carry (ADR-0090) both record it.
+ *   and a fresh start's Successor Carry (ADR-0091) both record it.
  * - `accepted-slots`: the `agents` slots were accepted; only the rest of the
  *   Task's roster is reissued. Only a restart records it.
  */
@@ -47,7 +47,7 @@ export type AcceptedTaskCarry = Readonly<{
  * chain afresh. `carried` lists the reviewed Tasks that carry, in registration
  * order. Absent when nothing carries, so such a registration is byte-identical
  * to one written before carry existed. `Entry` narrows what may carry: a
- * Successor Carry (ADR-0090) carries whole-roster acceptances only.
+ * Successor Carry (ADR-0091) carries whole-roster acceptances only.
  */
 export type WaveReviewCarryAudit<Entry extends WaveReviewCarry = WaveReviewCarry> = Readonly<{
   lineage: readonly [CarriedReviewAuthority, ...CarriedReviewAuthority[]];
@@ -55,7 +55,7 @@ export type WaveReviewCarryAudit<Entry extends WaveReviewCarry = WaveReviewCarry
 }>;
 
 /**
- * Audit of a fresh start that succeeded a retired run of its Wave (ADR-0090):
+ * Audit of a fresh start that succeeded a retired run of its Wave (ADR-0091):
  * the abandoned or completed-and-reopened run it succeeded, and the accepted
  * reviews it carries from that run's lineage. Recorded only when something
  * carries, so a fresh start that carries nothing registers exactly as before.

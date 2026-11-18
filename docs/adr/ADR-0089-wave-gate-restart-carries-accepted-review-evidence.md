@@ -3,7 +3,7 @@
 ## Status
 Accepted (2026-11-18). Partly supersedes ADR-0084: its "every request is reissued" bullet, for a
 replacement whose predecessor issued the same reviewer protocol. Issue #213, Cause 1(b).
-Amended by ADR-0090 (2026-11-18): a fresh start after an abandon or a completed-Wave reopen carries
+Amended by ADR-0091 (2026-11-18): a fresh start after an abandon or a completed-Wave reopen carries
 unchanged Tasks' accepted reviews too, so the last Consequence below no longer holds; and a carry is
 admissible only while the Task's Subject Digest, when the evidence recorded one, is unchanged.
 

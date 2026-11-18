@@ -440,7 +440,7 @@ export class StateManager {
   /**
    * Install one fresh protected active-run anchor, idempotently for exact
    * replay. A fresh start that carries accepted reviews passes the parsed
-   * `succession` its registration records (ADR-0090); the install checks it
+   * `succession` its registration records (ADR-0091); the install checks it
    * against the protected predecessor.
    */
   async registerActiveWaveGate(

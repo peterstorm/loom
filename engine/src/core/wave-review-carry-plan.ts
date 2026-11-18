@@ -1,5 +1,5 @@
 /**
- * Reading a registration's carry plan (ADR-0089, ADR-0090): the plan itself,
+ * Reading a registration's carry plan (ADR-0089, ADR-0091): the plan itself,
  * which entry a Task has, and what a run still issues for it. Batch
  * preparation, the locked install, the carried-run rebinding, resume
  * classification, completion admission and completed-run verification all
@@ -21,7 +21,7 @@ import {
 /**
  * The carry plan a registration froze, with what froze it: a restart's
  * (ADR-0089), which may carry slots, or a fresh start's Successor Carry
- * (ADR-0090), which carries whole-roster acceptances only. The kind decides
+ * (ADR-0091), which carries whole-roster acceptances only. The kind decides
  * how a carried acceptance recorded before the Subject Digest is judged.
  */
 export type RegisteredCarry =

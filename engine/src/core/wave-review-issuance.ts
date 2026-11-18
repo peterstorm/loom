@@ -33,6 +33,7 @@ import {
   prepareWaveReviewBatch,
   readWaveReviewContext,
   taskReviewScope,
+  waveReviewPriorFindings,
   waveRunRosterProblem,
   waveSpecCheckDocumentsMatch,
   waveTaskSubjectDigest,
@@ -94,7 +95,7 @@ export function waveBatchSpecCheckAuthority(batch: WaveRequestBatch): DomainResu
  * Task that already carries a Review Packet must carry exactly this one.
  *
  * A registration's carry plan (a restart's, ADR-0089, or a fresh start's
- * Successor Carry, ADR-0090) is honoured here. A Task whose whole roster
+ * Successor Carry, ADR-0091) is honoured here. A Task whose whole roster
  * carries installs nothing and must still hold the acceptance its plan
  * carried. A Task carrying some slots has its predecessor's Review Run rebound
  * under this batch's Review Packet. Its carried slots keep their identity and
@@ -220,6 +221,7 @@ export function installWaveReviewRunsTransition(
         packetId: taskRun.packetId,
         headSha: taskRun.headSha,
         bytes,
+        priorFindingIds: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts, "fresh").ids,
         roster: expectedAgents,
         subject,
         issued: currentSlots,
@@ -263,7 +265,7 @@ export function installWaveReviewRunsTransition(
         packet_id: taskRun.packetId,
         head_sha: taskRun.headSha,
         expected_agents: expectedAgents,
-        prior_finding_ids: (task.findings ?? []).map(({ id }) => id),
+        prior_finding_ids: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts, "installed").ids,
         evidence: [],
         ...(registration.schemaVersion === 2
           ? { reviewer_protocol: registration.reviewerProtocol, slot_authority: currentSlots }

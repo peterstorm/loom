@@ -290,7 +290,7 @@ function parseWaveRegistrationAudit(raw: Readonly<Record<string, unknown>>): Pro
     return { ok: true, value: Object.freeze({ orphanRecovery }) };
   }
   // A fresh start that carried accepted reviews from the run it succeeded
-  // (ADR-0090); one that carried nothing records no succession at all.
+  // (ADR-0091); one that carried nothing records no succession at all.
   if (Object.hasOwn(raw, "succession")) {
     const succession = parseWaveGateSuccessionAudit(raw.succession);
     return succession.ok ? { ok: true, value: Object.freeze({ succession: succession.value }) } : { ok: false, message: succession.error };
@@ -367,7 +367,7 @@ function parseRegisteredWaveGateProgram(raw: unknown): FacadeRegistrationParse {
   if (!audit.ok) return invalidRegistration(audit.message);
   const input = parseWaveGateStartInput(raw.input);
   if (!input.ok) return invalidRegistration(input.message);
-  // A Successor Carry is admitted only against a retired run of an exact Wave (ADR-0090).
+  // A Successor Carry is admitted only against a retired run of an exact Wave (ADR-0091).
   if (audit.value.succession !== undefined && input.value.wave === null) {
     return invalidRegistration("wave-gate registration succession requires an exact Wave");
   }

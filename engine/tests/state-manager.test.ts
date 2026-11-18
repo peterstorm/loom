@@ -1654,7 +1654,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     }
   });
 
-  it("keeps a review the abandoned run accepted for its successor to judge, and records the retired run (ADR-0090)", async () => {
+  it("keeps a review the abandoned run accepted for its successor to judge, and records the retired run (ADR-0091)", async () => {
     const dir = makeTmpDir();
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(waveGraph));

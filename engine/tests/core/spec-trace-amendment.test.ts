@@ -225,7 +225,7 @@ describe("amendSpecTrace", () => {
     expect(reloads(kept).ok).toBe(true);
   });
 
-  it("keeps review acceptance granted by the abandoned run and records the run as retired (ADR-0090)", () => {
+  it("keeps review acceptance granted by the abandoned run and records the run as retired (ADR-0091)", () => {
     const runId = "run.abandoned";
     const accepted = {
       ...task("T2", 2, ["FR-001"], []),
