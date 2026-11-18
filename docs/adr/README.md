@@ -99,3 +99,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0082](ADR-0082-a-package-manifest-and-its-lockfile-belong-to-one-task.md) | A package manifest and its lockfile belong to one Task | Accepted (2026-11-17) | — |
 | [ADR-0083](ADR-0083-a-run-records-its-friction-and-a-retro-reads-it-first.md) | A run records its friction, and a retro reads it first | Accepted (2026-11-17) | — |
 | [ADR-0084](ADR-0084-wave-reviewer-payloads-carry-no-packet-identity.md) | Wave reviewer payloads carry no packet identity; the issued subject binds it | Accepted (2026-11-17) | partly supersedes ADR-0009 |
+| [ADR-0087](ADR-0087-the-spec-is-amended-by-an-audited-operation.md) | The spec is amended by an audited operation | Accepted (2026-11-18) | — |

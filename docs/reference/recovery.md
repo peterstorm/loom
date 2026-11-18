@@ -210,6 +210,16 @@ Usually omit `--superseded-by` and start the replacement only after migration. I
 
 On success, one immutable `SpecTraceWaveGateRetirement` audit preserves the old run id, Wave, authority digest, revision, runs root, and exact abandonment reason/supersession. The same locked commit installs trace v2 and retires the run's review authority as a successor install would, except that another Wave's `spec_check` and its block are left alone: it clears `active_wave_gate`, `wave_review_epoch`, `active_wave_completion_suite`, the retired Wave's `spec_check`, the Wave's in-flight `review_run`s, and review acceptance granted by the abandoned run (those reviews reopen), and re-derives the retired Wave's block. Tasks, proofs, Findings, Review Generations, Refutations, Resolutions, issued packets, completed/orphan retirement history, and implementation evidence remain intact, so the next `start wave-gate` installs cleanly. An exact replay does not append another audit; a different mapping remains refused.
 
+## Amending the specification's text
+
+When the specification itself must change mid-run (a Requirement rewritten, added or withdrawn), write the new text to a file outside the spec and run:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper amend-spec --from /path/to/proposed-spec.md --reason "<why the spec changes>"
+```
+
+Under the TaskGraph lock it requires a trace v2 graph, the Wave-reopening precondition (execute Phase, no live Wave Gate, no executing Task, attempt or subagent), both the current and the proposed text to parse into a Spec Index, and no Task that has not completed still claiming or contributing to an id the change withdraws. Move such a claim first with `amend-spec-trace`. It records a `spec-amended` audit in `spec_amendments` with the reason, both Spec Index observations, the rewritten, added and withdrawn ids, and the completed claims owed a re-judgement. It re-anchors the rewritten claims of every Task that has not completed to the new text, retires the current Wave's review authority and spec-check, and then writes the new bytes to `spec_file`. A rewritten claim of a completed Task is judged again by the next Wave Gate's spec-check, as a row of that Wave, and its completion re-anchors it. A withdrawn completed claim stays completed-claim drift until `amend-spec-trace` drops it. Assign an added Requirement with `amend-spec-trace`. If the command stopped after recording the audit but before writing the bytes, running it again writes only the bytes ([ADR-0087](../adr/ADR-0087-the-spec-is-amended-by-an-audited-operation.md)).
+
 ## Amending a v2 Requirement trace
 
 A populated v2 graph whose Completion Claims or Contributions are wrong (a Requirement claimed by the wrong Task, a missing Contribution) is corrected in place, not by `populate-task-graph --force`. Re-population resets every Task to `pending` and discards all settled implementation, review and refutation results; an amendment keeps them. Prepare the same exact-roster JSON as the legacy upgrade, every Task once in protected order (each Distill Task too, with two empty arrays), then:

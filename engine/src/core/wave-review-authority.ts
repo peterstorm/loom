@@ -992,8 +992,14 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
     decisionRecord: task.agent === DECISION_RECORD_AGENT,
     ...taskRowFields(task),
     anchorHashes: parsedAnchorHashes(task.spec_anchor_hashes),
+    rejudgeClaims: rejudgeClaimsOf(graph, task.id),
   })));
 }
+
+/** The claims of `taskId` that any spec amendment listed for re-judgement (ADR-0087), without repeats. */
+export const rejudgeClaimsOf = (graph: TaskGraph, taskId: string): readonly string[] =>
+  Object.freeze([...new Set((graph.spec_amendments ?? []).flatMap(({ rejudge }) =>
+    rejudge.flatMap((entry) => (entry.taskId === taskId ? [entry.claim] : []))))]);
 
 /**
  * The sole Wave review authority derivation.

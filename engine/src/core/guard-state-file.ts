@@ -121,6 +121,7 @@ export const WHITELISTED_HELPERS: readonly string[] = [
   "write-verification-manifest",
   "upgrade-spec-trace",
   "amend-spec-trace",
+  "amend-spec",
   "revise-contract",
   "repair-task-graph",
   "review-packet",
