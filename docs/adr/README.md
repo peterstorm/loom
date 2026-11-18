@@ -91,7 +91,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0074](ADR-0074-every-doc-reference-resolves-against-the-project.md) | Every doc reference resolves against the project | Accepted (2026-11-14) | amended by ADR-0079 |
 | [ADR-0075](ADR-0075-every-rule-family-is-on-or-declined.md) | Every rule family is on or declined | Accepted (2026-11-14) | — |
 | [ADR-0076](ADR-0076-shipped-machines-are-pinned-by-digest.md) | Shipped machines are pinned by digest | Accepted (2026-11-16) | — |
-| [ADR-0077](ADR-0077-a-judgement-lands-while-its-subject-is-open-and-is-fixed-forward-otherwise.md) | A judgement lands while its subject is open, and is fixed forward otherwise | Accepted (2026-11-16) | — |
+| [ADR-0077](ADR-0077-a-judgement-lands-while-its-subject-is-open-and-is-fixed-forward-otherwise.md) | A judgement lands while its subject is open, and is fixed forward otherwise | Accepted (2026-11-16) | the Forward Fix fallback is superseded by ADR-0086 |
 | [ADR-0078](ADR-0078-successor-reviewers-copy-references-from-an-issued-roster.md) | Successor reviewers copy references from an issued roster | Accepted (2026-11-16) | — |
 | [ADR-0079](ADR-0079-a-word-that-lives-outside-the-source-is-listed-as-an-external-name.md) | A word that lives outside the source is listed as an external name | Accepted (2026-11-16) | amends ADR-0074 |
 | [ADR-0080](ADR-0080-a-failure-in-another-in-flight-tasks-test-file-is-that-tasks-to-fix.md) | A failure in another in-flight Task's test file is that Task's to fix | Accepted (2026-11-17) | — |
@@ -100,7 +100,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0083](ADR-0083-a-run-records-its-friction-and-a-retro-reads-it-first.md) | A run records its friction, and a retro reads it first | Accepted (2026-11-17) | — |
 | [ADR-0084](ADR-0084-wave-reviewer-payloads-carry-no-packet-identity.md) | Wave reviewer payloads carry no packet identity; the issued subject binds it | Accepted (2026-11-17) | partly supersedes ADR-0009; restart reissue bullet superseded by ADR-0089 |
 | [ADR-0085](ADR-0085-an-attesting-attempt-cannot-write.md) | An attesting attempt cannot write | Accepted (2026-11-18) | — |
-| [ADR-0086](ADR-0086-a-task-joins-the-active-wave-through-a-plan-edit.md) | A Task joins the active Wave through a plan edit | Accepted (2026-11-18) | — |
+| [ADR-0086](ADR-0086-a-task-joins-the-active-wave-through-a-plan-edit.md) | A Task joins the active Wave through a plan edit | Accepted (2026-11-18) | supersedes the Forward Fix fallback of ADR-0077 |
 | [ADR-0087](ADR-0087-the-spec-is-amended-by-an-audited-operation.md) | The spec is amended by an audited operation | Accepted (2026-11-18) | — |
 | [ADR-0088](ADR-0088-acceptance-tests-run-through-declared-runtime-seams.md) | Acceptance tests run through declared runtime seams | Accepted (2026-11-18) | — |
 | [ADR-0089](ADR-0089-wave-gate-restart-carries-accepted-review-evidence.md) | Wave Gate restart carries accepted review evidence and reissues only exhausted slots | Accepted (2026-11-18) | partly supersedes ADR-0084; amended by ADR-0091 |

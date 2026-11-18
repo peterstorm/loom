@@ -40,7 +40,7 @@ The owned native integration test uses the explicit production-source roster in
 `engine/tests/fixtures/standalone-native-workload.ts`. The import-cycle extraction
 added three new shell owner volumes to that roster — `handlers/helpers/programs/
 program-result.ts`, `standalone-evidence.ts` and `standalone-disposition-source.ts` —
-so it now lists 46 production paths; the integration test reports 49 files (the 46
+so it now lists 64 production paths; the integration test reports 67 files (the 64
 scope paths plus the three fixture remediation scope paths `src/repair.mjs`,
 `src/types.ts` and `README.md`). It copies exact current bodies into its multi-file
 scope, proves identical ordered paths/bytes after staging and after a clean fixture

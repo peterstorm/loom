@@ -56,13 +56,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 21 files |
-| `engine/` | The engine: 603 src files / 170.4k lines TS; `engine/tests/` holds 923 TS files / 260k lines (fixtures and helpers included), of which 811 test files are executed | — |
+| `engine/` | The engine: 603 src files / ~162.3k lines TS at deb8c369 (610 files / ~172.0k at HEAD); `engine/tests/` holds 923 TS files / 260k lines (fixtures and helpers included), of which 811 test files are executed (787 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
-| `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 7 scripts |
-| `docs/` | 117 docs incl. **90 ADRs** (index test-enforced) | — |
+| `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
+| `docs/` | 119 docs incl. **91 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -915,9 +915,10 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **811 executed test files / 260k lines under `engine/tests/`** (923 TS files there
+- **811 executed test files / 260k lines** — 787 under `engine/tests/` (923 TS files there
   including fixtures and helpers; core 293 test files, handlers 193, pi 49,
-  linter 46, orchestration 36, utils 34, machine 30, acceptance 20, security 19, …).
+  linter 46, orchestration 36, utils 34, machine 30, acceptance 20, security 19, …)
+  and 24 under `calibration/` and `probes/`, which the Vitest include set adds.
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
   contracts, dual-harness evidence fixtures.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
@@ -1182,6 +1183,7 @@ advisory-disposition.ts / advisory-disposition-record.ts / advisory-disposition-
 affected-stop-check.ts — Affected-test stop check's pure core (I7, AD-10) ·
 affected-stop-check-types.ts — CT-2 types file: the surface of I7 ·
 agent-catalog-projections.ts — every agent set, phase map, classification ·
+agent-skills.ts — parse block- or flow-style skills from already-read agent markdown ·
 agent-tools.ts — Agent tool declarations written once, in Claude Code's vocabulary ·
 artifact-baseline.ts — persisted shape shared by file and directory artifacts ·
 artifact-write-scope.ts — write policy for non-implementation loom-owned agents, one policy/two harnesses ·
@@ -1196,6 +1198,7 @@ claude-transcript-projection.ts — everything the engine reads out of one trans
 cli-flag-token.ts — the value-is-a-flag rule every engine CLI grammar shares ·
 compiler-diagnostic-policy.ts — what compiler diagnostics mean to the gate ·
 completion-suite.ts — pure completion-suite kernel (frozen checks, digest, receipts) ·
+context-packet-projection.ts — read-model projection of a packet's sections (expected identity supplied by delivery) ·
 context-packets.ts — immutable, byte-aware context packets ·
 contract-revision.ts — the one operator path that changes a frozen contract ·
 contract-status.ts/-types.ts — CT-1 status view of contracts in a TaskGraph ·
@@ -1212,8 +1215,8 @@ engine-runtime-paths.ts — repository paths the engine writes while an attempt 
 exact-data.ts — exact own-data snapshots of untrusted JSON-shaped values ·
 family-sites.ts — the family-site metric (counting raw second sites) ·
 findings.ts/findings-shape.ts — Finding identity (agent, ordinal) and shape ·
-forward-fix.ts — RETIRED (#217): replaced by task-addition through plan edits (ADR-0086) ·
 frozen.ts — genuinely immutable collection singletons ·
+git-sha.ts — exact lowercase Git object id grammar for SHA-1 and SHA-256 repositories ·
 grandfathered-spawn-model.ts — grandfathered spawn-model authorization ·
 guarded-locations.ts — the guarded directories as one domain value ·
 guard-state-file.ts — the deny-by-default state-path Bash policy ·
@@ -1225,6 +1228,7 @@ issued-emission-capability.ts — the emission capability contract ·
 judged-paths.ts — decompose-time rule: a judge never runs after its subject's Wave ·
 ledger-epoch-view.ts — one epoch's facts rendered for I6 ·
 legacy-archive.ts — read-only parsers for historical artifacts ·
+legacy-panel-decisions.ts — the legacy panel program's decisions: registration, verdict-source selection, submission settlement (AD-8/AD-9) ·
 lint-coverage-ignore.ts — the user's silenced-repository list ·
 lint-runtime-skew.ts — did the full-tier lint judge the current bytes ·
 loom-cli-command.ts — every command/path the engine prints that names itself ·
@@ -1247,6 +1251,7 @@ plan-path-match.ts/plan-paths.ts — plan-declared path roles and matching ·
 predecessor-archive/-output.ts — retained predecessor records ·
 proof-boundary-observation.ts — compact record of TaskGraph proof state ·
 proof-obligations.ts — what a Task must discharge to become implemented ·
+project-command-environment.ts — the environment one project command runs under, as the harness set it ·
 provider-key.ts — which key Pi would send to a custom provider ·
 read-only-git.ts — which git invocations write nothing outside .git ·
 red-then-green*.ts — the I6 judge and its surface ·
@@ -1258,11 +1263,22 @@ requirement-coverage.ts — spec index × task claims join ·
 retired-wave-review-runs.ts — retired Wave review runs as protected provenance (ADR-0091) ·
 review-* (authority-receipt/ed-workspace/emission-route/output/packet/panel/protocol/retry) — review authority machinery ·
 review-subject.ts — the Subject Digest of a Wave review and its seal on an acceptance (ADR-0091) ·
+reviewer-contract.ts — reviewer wire definitions only: no issuance, Findings behavior, or shell authority ·
 rules-gate.ts — the shared rules-gate decision core ·
+route-reachability.ts — the fail-closed gate before a Pi parent spawns children on a route ·
 run-inspection.ts — what a run's own files say about it ·
 runtime-baseline-restore.ts — restoration rules for implementation settlement ·
+safe-io-cause.ts — bounded diagnostic classification: never echo paths, messages, stacks or arbitrary thrown data ·
 scope-classification.ts — standalone-review scope policy ·
 security-* (adjudication/audit-contract/audit-start/coverage/disposition/findings/lenses/lens-select/reports/sandbox/verification) — the audit program's pure machinery ·
+served-model.ts — which model a provider serves right now, decided from what the shell observed ·
+served-model-cause.ts — why a `served` routing target's model is unknown, as one closed union ·
+set-phase.ts — the `set-phase` loop-back: an operator moves `current_phase` back, optionally dropping one artifact ·
+sibling-entry-point.ts — the one plan shape the plan model and the owner-verification core share, in a dependency-free leaf ·
+spawn-admission.ts — the pure decision that accepts or blocks one Pi subagent spawn batch before any state mutation ·
+spawn-emission-gate.ts — the façade's emission gate: the verdict on a Pi parent's spawn batch ·
+spawn-request-authority.ts — an emitted spawn batch's request authorities, parsed once as the stored-request parser admits them ·
+spawn-task-text.ts — engine-issued spawn task text: authority markers, packet path, Skill marker, emission descriptor, delivery bootstrap ·
 spec-check.ts/spec-trace*.ts — requirement trace and its amendment/migration ·
 standalone-* (19 modules) — the standalone review program: kinds, scope, rosters, read coverage, attempt admission, transcripts, records, lineage, disposition, refutation, successor, checkpoint ·
 stop-check-*.ts — the stop-check planner and note surface ·
@@ -1270,7 +1286,7 @@ structured-test-report.ts — one test file as its structured report lists it ·
 subagent-authority.ts — which Bash a subagent may not run (ADR-0067 D6) ·
 task-* (artifact-expectation/attribution/dependencies/graph-population/id/implementation-dispatch/mutation-check/reopening/revalidation) — task lifecycle machinery ·
 test-evidence.ts/test-file-classification.ts — evidence precedence; the one test-file classifier (INV-2) ·
-tool-vocabulary.ts — tool + test-runner vocabulary (incl. PACKAGE_RUN_HEADS) ·
+tool-vocabulary.ts — tool and test-runner vocabulary (TEST_COMMAND_PATTERNS, FILE_MODIFYING_TOOLS, SUBAGENT_SPAWN_TOOLS) ·
 type-diagnostics.ts — compiler-in-the-loop advisory diagnostics ·
 unified-diff.ts — deterministic line-based diff ·
 user-decision.ts — the decision input `decide` reads ·
@@ -1278,7 +1294,7 @@ validate-* (phase-order/task-execution/template-substitution) — the spawn-gate
 verification-* (manifest, manifest-install, policy, verified-claim-hashes) — manifest freeze and waivers; hash re-anchoring ·
 test-evidence-{mode,policy,authority}.ts / engine-test-run.ts — the frozen test-evidence mode (#198), the engine-run receipt and its admission (#201) ·
 verify-slice.ts — which part of `npm run verify` one invocation runs ·
-wave-* (18 modules) — the Wave Gate: model, machine (LC-1), checks, membership, registration/replacement, preparation, completion-suite readiness, frozen source, review authority/issuance, transcripts, status facts ·
+wave-* (19 modules) — the Wave Gate: model, machine (LC-1), checks, membership, registration/replacement, preparation, completion-suite readiness, frozen source, review authority/issuance, carry, transcripts, status facts ·
 wire-contract.ts — the Wire Contract's stamping seam ·
 skeleton/* (17 modules) — generation, resolution, conformance, records, refresh, status; pure TS/Java surfaces ·
 shell-* (9 modules) — the shared bash grammar (see §4.4) ·
@@ -1320,7 +1336,8 @@ update-task-status, store-reviewer-findings, store-spec-check-findings, stop-che
 **subagent-start/** — mark-subagent-active (binding + machine + attempt, four jobs).
 
 **machine/** — advance (pure reducer), evidence (identity brands, attribution,
-SessionRegistry port), extract-evidence (pure), harness-tool-call-types, ledger
+SessionRegistry port), extract-evidence (pure; PACKAGE_RUN_HEADS and
+NPX_PREFIX_OPTION live here), harness-tool-call-types, ledger
 (shell), tool-evidence-recorder (the one minting shell), report-discovery,
 session-registry (adapter), test-report (trust judgment), parse-machine, mermaid,
 task-graph-pointer, types.
@@ -1370,7 +1387,7 @@ task-addition-operations, and the rest of the whitelisted-helper surface
 
 ## Appendix C — `pi/` module-by-module
 
-extension.ts (registration shell, 714 ln); spawn machinery (spawn-{claims,
+extension.ts (registration shell, 717 ln); spawn machinery (spawn-{claims,
 claim-shell, graph, lifecycle, preparation, reservation}, reserved-{slot,results},
 subagent-{process,result,result-batch,result-route,settlement,stop}); emission
 machinery (emission-{tool,readiness,readiness-gate,readiness-protocol,

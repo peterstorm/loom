@@ -1109,7 +1109,6 @@
     "docs/adr/ADR-0015-one-frozen-schema-explicit-limits-on-its-guarantees.md::structured_outputs",
     "docs/adr/ADR-0015-one-frozen-schema-explicit-limits-on-its-guarantees.md::validateToolArguments",
     "docs/adr/ADR-0015-one-frozen-schema-explicit-limits-on-its-guarantees.md::validateToolArguments",
-    "docs/adr/ADR-0017-issuance-aware-instructions-and-honest-degraded-routes.md::agents/README.md",
     "docs/adr/ADR-0018-one-observation-selection-decision-with-per-path-payload-construction.md::PanelVerdictEmissionPort",
     "docs/adr/ADR-0018-one-observation-selection-decision-with-per-path-payload-construction.md::orchestration-contract/identity",
     "docs/adr/ADR-0020-acceptance-and-a-real-vertical-slice-before-breadth.md::admitEmissionArguments",
