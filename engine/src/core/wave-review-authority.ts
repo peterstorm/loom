@@ -1,4 +1,5 @@
 import { sha256Hex } from "./digest";
+import { rejudgeClaimsOf } from "./spec-rejudgement";
 import type {
   Finding,
   ReviewRun,
@@ -992,6 +993,7 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
     decisionRecord: task.agent === DECISION_RECORD_AGENT,
     ...taskRowFields(task),
     anchorHashes: parsedAnchorHashes(task.spec_anchor_hashes),
+    rejudgeClaims: rejudgeClaimsOf(graph, task),
   })));
 }
 

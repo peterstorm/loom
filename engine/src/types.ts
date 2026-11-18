@@ -991,6 +991,39 @@ export type TaskRescopedEdit = Readonly<{
   reason: string;
 }>;
 
+/**
+ * A completed Task's claim a spec amendment changed: rewritten (judged again at
+ * the next Wave Gate) or withdrawn (recorded; it stays completed-claim drift
+ * until `amend-spec-trace` drops it).
+ */
+export type SpecAmendmentRejudgement = Readonly<{ taskId: string; claim: string }>;
+
+/** A Spec Index observation of bytes that parsed. */
+export type IndexedSpecIndexObservation = Extract<SpecIndexObservation, Readonly<{ kind: "indexed" }>>;
+
+/**
+ * Immutable audit of one Spec Amendment (`helper amend-spec`, ADR-0087): an
+ * operator-authored change to the specification's text while the TaskGraph is
+ * live. It names the Spec Index observations before and after (both parsed),
+ * the Requirement ids the change rewrote, added and withdrew (disjoint), the
+ * completed claims it changed, and the abandoned Wave Gate run whose review
+ * authority it retired. Dropped by re-population.
+ */
+export type SpecAmendment = Readonly<{
+  schemaVersion: 1;
+  kind: "spec-amended";
+  wave: number;
+  /** The operator's non-blank reason, at most 500 characters. */
+  reason: string;
+  before: IndexedSpecIndexObservation;
+  after: IndexedSpecIndexObservation;
+  rewritten: readonly string[];
+  added: readonly string[];
+  withdrawn: readonly string[];
+  rejudge: readonly SpecAmendmentRejudgement[];
+  retiredRunId: OrchestrationRunId | null;
+}>;
+
 /** Immutable audit of one in-place v2 Requirement trace amendment. It names
  * the Wave whose review authority it retired (and the abandoned run, when one
  * was tombstoned), every changed Task, and the Spec Index observation any
@@ -1507,6 +1540,8 @@ export interface TaskGraph {
   /** Append-only audit of in-place v2 trace amendments; each Task's latest
    *  change must agree with its current trace. Dropped by re-population. */
   readonly spec_trace_amendments?: readonly SpecTraceAmendment[];
+  /** Operator-authored spec text changes (`helper amend-spec`, ADR-0087). Dropped by re-population. */
+  readonly spec_amendments?: readonly SpecAmendment[];
   /**
    * The plan's Contracts, stamped at population: each one's contract Task,
    * frozen paths and covered Requirements, and its Acceptance Freeze. Absent

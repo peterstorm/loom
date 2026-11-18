@@ -119,6 +119,7 @@ Hooks and `/wave-gate` drive most state-writing helpers themselves (`complete-wa
 | `write-verification-manifest`, `populate-task-graph` | Phase 4d |
 | `set-phase` | Loop-back to an earlier phase (Phase 3.5, Phase 4a) |
 | `amend-spec-trace` | Correcting a Requirement trace in place after population |
+| `amend-spec` | Changing the specification's text while the TaskGraph is live (ADR-0087) |
 | `revise-contract` | Operator Contract Revision of a frozen Acceptance Contract |
 | `mark-tests-passed` | Read-only evidence status check during `/wave-gate`; it does not modify state |
 | `repair-task-graph` | Corrupt State File (below) |

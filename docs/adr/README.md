@@ -101,4 +101,5 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0084](ADR-0084-wave-reviewer-payloads-carry-no-packet-identity.md) | Wave reviewer payloads carry no packet identity; the issued subject binds it | Accepted (2026-11-17) | partly supersedes ADR-0009 |
 | [ADR-0085](ADR-0085-an-attesting-attempt-cannot-write.md) | An attesting attempt cannot write | Accepted (2026-11-18) | — |
 | [ADR-0086](ADR-0086-a-task-joins-the-active-wave-through-a-plan-edit.md) | A Task joins the active Wave through a plan edit | Accepted (2026-11-18) | — |
+| [ADR-0087](ADR-0087-the-spec-is-amended-by-an-audited-operation.md) | The spec is amended by an audited operation | Accepted (2026-11-18) | — |
 | [ADR-0088](ADR-0088-acceptance-tests-run-through-declared-runtime-seams.md) | Acceptance tests run through declared runtime seams | Accepted (2026-11-18) | — |

@@ -168,6 +168,11 @@ export type CoverageTask = Readonly<{
   declaredFiles: readonly string[];
   modifiedFiles: readonly string[];
   anchorHashes: ReadonlyMap<string, RecordedHash>;
+  /** Completion claims of this completed Task that a spec amendment changed
+   * (ADR-0087). While one still drifts from the current text, the projection
+   * puts it among the current Wave's rows, so spec-check judges it again;
+   * the Wave's completion re-anchors it. Absent means none. */
+  rejudgeClaims?: readonly string[];
 }>;
 
 /**
@@ -380,7 +385,13 @@ export function projectRequirementCoverage(
       claimedAnywhere.add(claim);
       if (!task.inCurrentWave) {
         const drift = task.completed ? completedDriftOf(task, claim, byId) : null;
-        if (drift !== null) completedDrift.push(drift);
+        // A rewritten claim a spec amendment owes a re-judgement is judged now,
+        // as a row of this Wave, rather than reported as advisory drift.
+        if (drift?.change.kind === "rewritten" && (task.rejudgeClaims ?? []).includes(claim)) {
+          rows.push(Object.freeze({ taskId: task.id, claim, verdict: classify(task, claim, byId, populationObservation) }));
+        } else if (drift !== null) {
+          completedDrift.push(drift);
+        }
         continue;
       }
       rows.push(Object.freeze({
