@@ -225,7 +225,7 @@ describe("amendSpecTrace", () => {
     expect(reloads(kept).ok).toBe(true);
   });
 
-  it("retires review acceptance granted by the abandoned run", () => {
+  it("keeps review acceptance granted by the abandoned run and records the run as retired (ADR-0091)", () => {
     const runId = "run.abandoned";
     const accepted = {
       ...task("T2", 2, ["FR-001"], []),
@@ -244,9 +244,13 @@ describe("amendSpecTrace", () => {
         terminalOutcome: { kind: "terminal-abandoned", reason: "trace was wrong", supersededBy: null },
       }),
     };
-    const after = taskById(amended(graph, amendment({ T3: { anchors: ["FR-002"], contributions: [] } })).graph, "T2");
-    expect(after.review_status).toBe("pending");
-    expect(after.accepted_review_authority).toBeUndefined();
+    const result = amended(graph, amendment({ T3: { anchors: ["FR-002"], contributions: [] } })).graph;
+    // The next start judges the acceptance by its Subject Digest: T2's trace is
+    // unchanged, while T3's amended trace changes its subject.
+    const after = taskById(result, "T2");
+    expect(after.review_status).toBe("passed");
+    expect(after.accepted_review_authority?.run_id).toBe(runId);
+    expect(result.retired_wave_review_runs?.map(({ runId: retired, retirement }) => [retired, retirement])).toEqual([[runId, "abandoned"]]);
   });
 
   it.each<[string, (graph: TaskGraph) => TaskGraph, SpecTraceAmendmentRefusal["kind"]]>([

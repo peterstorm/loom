@@ -2,6 +2,7 @@ import { argumentValue } from "./cli-args";
 import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
 import { newWaveGate, reconcileWaveBlock } from "../../core/wave-gate-model";
+import { retireReopenedWaveReview } from "../../core/wave-gate-registration";
 import { parseReopenRequest, type ReopenRequest } from "../../core/wave-reopening-request";
 import {
   exactRevalidationTargets,
@@ -226,7 +227,10 @@ export function reopenCompletedWave(
     tests_passed: null,
     reviews_complete: false,
   };
-  return {
+  // The reopened run joins the retired runs the Wave's next start succeeds:
+  // its unchanged Tasks keep their acceptances, and that start carries each one
+  // whose subject is still unchanged (ADR-0091).
+  return retireReopenedWaveReview({
     ...graph,
     current_wave: request.wave,
     tasks,
@@ -235,7 +239,7 @@ export function reopenCompletedWave(
     wave_reopening_history: [...(graph.wave_reopening_history ?? []), audit],
     wave_review_epoch: undefined,
     spec_check: undefined,
-  };
+  }, completed);
 }
 
 type WaveReopeningCommit =

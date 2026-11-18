@@ -204,16 +204,19 @@ describe("installWaveGateRegistration", () => {
       return decision.state;
     };
 
-    it("retires the abandoned run's epoch and spec-check and reopens only the reviews it accepted", () => {
+    it("retires the abandoned run's epoch and spec-check, records the retired run and keeps the reviews it accepted", () => {
       // Production regression: abandoning an exhausted Wave 8 gate left its
       // review epoch behind, so the successor's registration was refused as
       // "wave_review_epoch must match active_wave_gate run/Wave authority".
       const next = install(abandonedGraph);
       expect(next.wave_review_epoch).toBeUndefined();
       expect(next.spec_check).toBeUndefined();
+      // ADR-0091: the acceptances stay for a Successor Carry to judge, and the
+      // abandoned run becomes the protected provenance a carry rests on.
+      expect(next.retired_wave_review_runs).toEqual([{ schemaVersion: 1, kind: "retired-wave-review-run",
+        runId: "run.abandoned", wave: 8, authorityDigest: "d".repeat(64), retirement: "abandoned" }]);
       const [t13, t14, t1] = next.tasks;
-      expect(t13).toMatchObject({ review_status: "pending", review_generation: 6 });
-      expect(t13?.accepted_review_authority).toBeUndefined();
+      expect(t13).toMatchObject({ review_status: "passed", review_generation: 6, accepted_review_authority: { run_id: "run.abandoned" } });
       expect(t13?.findings).toEqual(abandonedGraph.tasks[0]!.findings);
       expect(t14).toMatchObject({ review_status: "passed", accepted_review_authority: { run_id: "run.other" } });
       expect(t1).toMatchObject({ review_status: "passed", accepted_review_authority: { run_id: "run.abandoned" } });

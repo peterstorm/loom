@@ -43,6 +43,17 @@ proof, test evidence, new tests), a Wave another live run owns, a completed
 Wave, or — under a Verification Manifest — full-tier lint. Fix the named cause
 and rerun `start` with the same fresh run id; there is nothing to `abandon`.
 
+A `start` after an abandoned run, or after a completed Wave was reopened,
+carries each unchanged Task's accepted review from that run (a Successor Carry,
+ADR-0091): the batch is spec-check plus the rosters of the Tasks whose review
+subject changed (bytes, description, plan context, Requirement trace, proof,
+test result, Findings, owner map or contract surface), or that hold no
+acceptance. A Task carries even when a sibling changed. `start` names each
+reviewed Task it reviews in full, and why, in one `wave-gate-start-not-carried`
+JSON line on stderr. Add `--fresh-review` to `start` to carry nothing and
+review every Task in full. The completion suite and spec-check always re-run,
+and carried Findings reach this run's Refutation Panel and advisory decision.
+
 Execute only the one typed action returned by `start`, `resume`, or `decide`:
 
 - `spawn-batch`: spawn every exact request, preserving its model, required
@@ -157,14 +168,17 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration brief \
 ```
 
 4. Once every reopened Task settles, start a fresh Wave Gate with `start
-   wave-gate` and a fresh run id (above).
+   wave-gate` and a fresh run id (above). It reviews the reopened Tasks and
+   carries the other Tasks' accepted reviews from the abandoned run.
 
 Reopening returns each named Task to revalidation, so status owes it a fresh
 dispatch (an `implemented` Task gets no brief, and the spawn gate refuses it).
 Its Findings stay as prior Findings for the next Review Run (less the advisories
 deferred or dismissed over bytes that did not change), the abandoned
-run's review and suite authority is retired, and the Wave's other Tasks stay
-`implemented`. The fix subagent spawns from that brief and can Edit/Write; the
+run's review epoch, spec-check and suite authority are retired, and the Wave's
+other Tasks stay `implemented` with their accepted reviews, which the fresh
+start carries while their review subject is unchanged (ADR-0091); a
+disposition recorded after an acceptance does not stop it carrying. The fix subagent spawns from that brief and can Edit/Write; the
 orchestrator cannot. Never use `populate-task-graph --force`, which resets
 every Task.
 
@@ -254,9 +268,12 @@ attempt-2 rejection. On success it retires the old run and returns the
 replacement `spawn-batch`. Every reviewer slot the old run accepted carries into
 the replacement by reference (ADR-0089), so the batch is spec-check plus only
 the exhausted slots. A Task whose whole roster was accepted gets no request.
-A Task whose reviewed bytes, Review Generation, prior Findings (including a
-disposition that changed which advisories are issued) or roster changed, or a
-run registered under the earlier reviewer protocol, is reissued in full. Execute that exact batch normally. The old transcripts remain as audit
+A Task whose reviewed bytes, Review Generation, prior Findings, roster or
+Subject Digest (the rest of its review subject, ADR-0091) changed, or a run
+registered under the earlier reviewer protocol, is reissued in full. For a
+partly accepted Task, a disposition that changed which advisories are issued
+(ADR-0090) is such a change; a whole-roster acceptance is issued to no
+reviewer, so a disposition never stops it carrying. Execute that exact batch normally. The old transcripts remain as audit
 evidence. Never repair, copy, or delete exhausted transcripts by hand.
 
 ## Reopening a completed Wave after Review Packet integrity loss
@@ -271,7 +288,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper reopen-completed-wave \
 JSON
 ```
 
-Loom reopens exactly the Tasks whose current declared bytes differ from the reviewed ones. A packet too old to carry a byte snapshot records `legacy-workspace-authority-unverifiable` and requires every completed Task of that Wave. The command refuses an active gate, any later-Wave progress, a wrong Task list, and a packet with no drift. Each reopened Task returns to pending revalidation at a fresh Review Generation, and the Wave's implementation, test and review gates reset. Re-spawn every reopened Task before the next Wave Gate: an Agent may make no production change if the code is correct, but must finish with fresh test evidence. Then start a fresh Wave Gate.
+Loom reopens exactly the Tasks whose current declared bytes differ from the reviewed ones. A packet too old to carry a byte snapshot records `legacy-workspace-authority-unverifiable` and requires every completed Task of that Wave. The command refuses an active gate, any later-Wave progress, a wrong Task list, and a packet with no drift. Each reopened Task returns to pending revalidation at a fresh Review Generation, and the Wave's implementation, test and review gates reset. Re-spawn every reopened Task before the next Wave Gate: an Agent may make no production change if the code is correct, but must finish with fresh test evidence. Then start a fresh Wave Gate. It carries the accepted reviews of the Tasks the reopening left alone (ADR-0091), so it reviews the reopened Tasks only.
 
 ## Recovering an orphaned active run
 

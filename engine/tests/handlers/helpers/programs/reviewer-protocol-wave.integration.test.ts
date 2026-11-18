@@ -49,6 +49,11 @@ import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/fa
 import { expectParentIndependentIssuance, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { value } from "../../../fixtures/parse-result";
 import { parseSpec } from "../../../../src/core/parse-spec";
+import { parseTaskReopeningArgs, reopenImplementedTasks } from "../../../../src/core/task-reopening";
+import { successionPredecessorOf } from "../../../../src/core/wave-gate-registration";
+import { planSuccessorCarry } from "../../../../src/core/wave-review-carry";
+import { observeReviewedWorkspace } from "../../../../src/handlers/helpers/reviewed-workspace";
+import { withOrigin } from "../../../fixtures/wave-gate-origin";
 import { recordedAnchorHashes } from "../../../../src/core/requirement-coverage";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
@@ -758,7 +763,8 @@ describe("registered Wave reviewer protocol", () => {
     await new StateManager(p.statePath).update((locked) => ({ ...locked, tasks: locked.tasks.map((task) => {
       const accepted = task.accepted_review_authority;
       if (accepted?.reviewer_protocol === undefined) throw new Error("fixture must have genuine accepted current authority");
-      const { reviewer_protocol: _removed, ...missing } = accepted;
+      // The sealed Subject Digest is current-only authority too (ADR-0091), so it goes with the descriptor.
+      const { reviewer_protocol: _removed, subject_digest: _sealed, ...missing } = accepted;
       return { ...task, accepted_review_authority: missing };
     }) }));
     await capture(handle, action.requests![0]!.authority, specPass);
@@ -976,8 +982,8 @@ describe("Wave Gate restart carries accepted review evidence", () => {
   }, 120_000);
 
   it.each([
-    ["a whole-roster acceptance", "x.ts", "Task T1 cannot keep the acceptance its restart carried from run run.current: drift in head"],
-    ["carried slots", "y.ts", "Task T2 carried review evidence no longer judges it: drift in head"],
+    ["a whole-roster acceptance", "x.ts", "Task T1 cannot keep the acceptance its restart carried from run run.current: drift in head, subject"],
+    ["carried slots", "y.ts", "Task T2 carried review evidence no longer judges it: drift in head, subject"],
   ])("the first install refuses %s whose reviewed bytes changed after the restart, and writes nothing", async (_label, file, refusal) => {
     const { p, next } = await restartedBeforeFirstResume();
     writeFileSync(join(p.root, "src", file), "export const changed = true;\n");
@@ -995,7 +1001,7 @@ describe("Wave Gate restart carries accepted review evidence", () => {
       try { return [JSON.parse(line) as unknown]; } catch { return []; }
     });
     expect(reported).toContainEqual({ kind: "wave-gate-restart-not-carried", runId: "run.restarted",
-      notCarried: [{ taskId: "T2", reason: { kind: "drift", fields: ["head"] } }] });
+      notCarried: [{ taskId: "T2", reason: { kind: "drift", fields: ["head", "subject"] } }] });
     // T2 is issued in full; T1 still carries.
     expect((JSON.parse(restarted.stdout) as Action).requests?.map(({ authority }) => authority.role))
       .toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
@@ -1011,13 +1017,13 @@ describe("Wave Gate restart carries accepted review evidence", () => {
     const batchFor = (program: RegisteredWaveGateProgram) => withFixturePiSession(p.root, async () =>
       waveRequests(handle, program, graph(p), 1, { kind: "state-layout", root: p.root }));
     const plain = await batchFor(current);
-    const restartedWithoutCarry = await batchFor({ ...current, restart: { previousRunId: "run.previous", exhaustedSlots: ["T2/code-reviewer"] } });
+    const restartedWithoutCarry = await batchFor(withOrigin(current, { restart: { previousRunId: "run.previous", exhaustedSlots: ["T2/code-reviewer"] } }));
     expect(restartedWithoutCarry.batchEpoch).toBe(plain.batchEpoch);
     expect(restartedWithoutCarry.requests.map(({ authority }) => [authority.slotId, authority.requestId]))
       .toEqual(plain.requests.map(({ authority }) => [authority.slotId, authority.requestId]));
     const acceptance = { runId: "run.previous", authorityDigest: "c".repeat(64) };
-    const carrying = await batchFor({ ...current, restart: { previousRunId: "run.previous", exhaustedSlots: ["T2/code-reviewer"],
-      carry: { lineage: [acceptance], carried: [{ kind: "accepted-task", taskId: "T1", roster: BASE_WAVE_REVIEW_AGENTS, acceptance }] } } });
+    const carrying = await batchFor(withOrigin(current, { restart: { previousRunId: "run.previous", exhaustedSlots: ["T2/code-reviewer"],
+      carry: { lineage: [acceptance], carried: [{ kind: "accepted-task", taskId: "T1", roster: BASE_WAVE_REVIEW_AGENTS, acceptance }] } } }));
     expect(carrying.batchEpoch).not.toBe(plain.batchEpoch);
     expect(carrying.subjects).toEqual([{ role: "spec-check-invoker", taskId: null },
       ...BASE_WAVE_REVIEW_AGENTS.map((role) => ({ role, taskId: "T2" }))]);
@@ -1034,9 +1040,197 @@ describe("Wave Gate restart carries accepted review evidence", () => {
     const settled = await settleReplacement(p, next, restarted);
     const blocked = settled.kind === "blocked" ? settled : await resume(p, next);
     expect(blocked).toMatchObject({ kind: "blocked", diagnostic: {
-      message: expect.stringContaining("Task T1 acceptance from run run.forged is neither this run's nor carried along its restart lineage"),
+      message: expect.stringContaining("Task T1 acceptance from run run.forged is neither this run's nor carried along its recorded lineage"),
     } });
   }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0091 (loom#213 Cause 5): a fresh Wave Gate start carries the accepted
+// reviews of unchanged Tasks from the run it succeeds.
+// ---------------------------------------------------------------------------
+
+describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", () => {
+  const SIX = ["T1", "T2", "T3", "T4", "T5", "T6"] as const;
+  const fileOfTask = (id: string) => `src/${id.toLowerCase()}.ts`;
+  const advisoryOn = (id: string): ReviewerDraftV2 => ({ ...advisory, file: fileOfTask(id), claim: ` advisory on ${id} ` });
+
+  /** A six-Task Wave 1 over one file each, all implemented. */
+  function sixTaskProject() {
+    const p = project();
+    for (const id of SIX) writeFileSync(join(p.root, fileOfTask(id)), `export const ${id.toLowerCase()} = 1;\n`);
+    git(p.root, ["add", "src"]);
+    git(p.root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "six"]);
+    const tasks = SIX.map((id) => implementedTask(id, [fileOfTask(id)], fileOfTask(id),
+      id === "T1" ? { spec_anchors: ["FR-001", "AS-001"], spec_contributions: [] } : { spec_anchors: [], spec_contributions: ["FR-001"] }));
+    const state: TaskGraph = { ...graphFixture(tasks), spec_file: join(p.root, "spec.md"), plan_file: join(p.root, "plan.md"), spec_trace_version: 2 };
+    writeFileSync(p.statePath, JSON.stringify(value(parseTaskGraph(state))));
+    return p;
+  }
+
+  /** The advisory round behind #213: every roster accepted, T1 and T6 each left one advisory, then abandoned. */
+  async function abandonedAdvisoryRound() {
+    const p = sixTaskProject();
+    const { handle, action } = await start(p, "run.first");
+    const [specCheck, ...reviewers] = action.requests!;
+    expect(reviewers).toHaveLength(SIX.length * BASE_WAVE_REVIEW_AGENTS.length);
+    await capture(handle, specCheck!.authority, specPass);
+    for (const [index, { authority }] of reviewers.entries()) {
+      const taskId = SIX[Math.floor(index / BASE_WAVE_REVIEW_AGENTS.length)]!;
+      const first = index % BASE_WAVE_REVIEW_AGENTS.length === 0;
+      await capture(handle, authority, payload(handle, authority, first && (taskId === "T1" || taskId === "T6") ? [advisoryOn(taskId)] : []));
+    }
+    const awaiting = await resume(p, handle);
+    expect(awaiting.kind, JSON.stringify(awaiting)).toBe("await-user");
+    expect(graph(p).tasks.map(({ accepted_review_authority }) => accepted_review_authority?.run_id)).toEqual(SIX.map(() => "run.first"));
+    // The operator decides both advisories at the pause, after the acceptances (ADR-0090):
+    // T1's is deferred over its unchanged bytes, T6's is to be fixed.
+    const [t1, , , , , t6] = graph(p).tasks;
+    await runCli(p, ["disposition"], JSON.stringify({ dispositions: [
+      { finding: `T1:${t1!.findings![0]!.id}`, decision: "deferred", reason: "belongs to a later Wave", target: "Wave 2" },
+      { finding: `T6:${t6!.findings![0]!.id}`, decision: "fixed", reason: "reopening T6 to fix it" },
+    ] }));
+    const abandoned = await cliResult(p, ["abandon", "--runs-root", p.runsRoot, "--run", "run.first", "--reason", "fix T6's advisory"]);
+    expect(abandoned.status, abandoned.stderr).toBe(0);
+    return p;
+  }
+
+  /** `reopen-task T6`, then T6 re-implemented over new bytes, as its brief would. */
+  async function reopenAndReimplementT6(p: ReturnType<typeof project>) {
+    const request = value(parseTaskReopeningArgs(["--wave", "1", "--task", "T6", "--reason", "fix the advisory"]));
+    await new StateManager(p.statePath).update((locked) => {
+      const reopened = reopenImplementedTasks(locked, request);
+      if (!reopened.ok || reopened.value.kind !== "reopened") throw new Error(JSON.stringify(reopened));
+      return reopened.value.graph;
+    });
+    writeFileSync(join(p.root, fileOfTask("T6")), "export const t6 = 2;\n");
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, tasks: locked.tasks.map((task) => {
+      if (task.id !== "T6") return task;
+      const reimplemented = implementedTask("T6", [fileOfTask("T6")], fileOfTask("T6"), { spec_anchors: [], spec_contributions: ["FR-001"] });
+      return { ...reimplemented, review_generation: task.review_generation, findings: task.findings,
+        critical_findings: task.critical_findings, advisory_findings: task.advisory_findings };
+    }) }));
+  }
+
+  const startCli = (p: ReturnType<typeof project>, runId: string, extra: readonly string[] = []) =>
+    cliResult(p, ["start", "wave-gate", "--runs-root", p.runsRoot, "--run", runId, ...extra], JSON.stringify({ wave: 1 }));
+  const reportedLines = (stderr: string): readonly unknown[] => stderr.split("\n").flatMap((line) => {
+    try { return [JSON.parse(line) as unknown]; } catch { return []; }
+  });
+
+  it("replays the #213 advisory round: the fresh start issues spec-check plus T6's roster only, and completes on the carried acceptances", async () => {
+    const p = await abandonedAdvisoryRound();
+    await reopenAndReimplementT6(p);
+    const started = await startCli(p, "run.second");
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as Action;
+    expect(action.kind, started.stdout).toBe("spawn-batch");
+    expect(action.requests?.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
+    const next = value(openRunDirectory(p.runsRoot, "run.second"));
+    for (const { authority } of action.requests!.slice(1)) {
+      expect(identityOf(next, authority)).toBeDefined();
+      const context = readWaveReviewContext([value(next.readContext(authority.contextDigest))], authority.contextDigest);
+      expect(context.kind === "loaded" ? context.value.subject.taskId : null).toBe("T6");
+    }
+    // The start names the one Task it reviews in full, and why.
+    expect(reportedLines(started.stderr)).toContainEqual({ kind: "wave-gate-start-not-carried", runId: "run.second",
+      notCarried: [{ taskId: "T6", reason: { kind: "nothing-accepted" } }] });
+    const first = registration(value(openRunDirectory(p.runsRoot, "run.first")));
+    expect(registration(next).succession).toEqual({
+      previousRunId: "run.first", previousAuthorityDigest: first.authorityDigest, kind: "abandoned",
+      carry: {
+        lineage: [{ runId: "run.first", authorityDigest: first.authorityDigest }],
+        carried: SIX.slice(0, 5).map((taskId) => ({ kind: "accepted-task", taskId, roster: BASE_WAVE_REVIEW_AGENTS,
+          acceptance: { runId: "run.first", authorityDigest: first.authorityDigest } })),
+      },
+    });
+    expect(graph(p).retired_wave_review_runs).toEqual([{ schemaVersion: 1, kind: "retired-wave-review-run", runId: "run.first",
+      wave: 1, authorityDigest: first.authorityDigest, retirement: "abandoned" }]);
+
+    // Spec-check and T6's roster land; T1's carried advisory reaches this run's advisory decision.
+    const [specCheck, ...t6] = action.requests!;
+    await capture(next, specCheck!.authority, specPass);
+    for (const { authority } of t6) await capture(next, authority, payload(next, authority));
+    const awaiting = await resume(p, next);
+    expect(awaiting.kind, JSON.stringify(awaiting)).toBe("await-user");
+    const settled = graph(p);
+    expect(settled.tasks[5]!.accepted_review_authority?.run_id).toBe("run.second");
+    expect(settled.tasks[5]!.findings).toEqual([]);
+    expect(settled.tasks[0]!.findings).toMatchObject([{ claim: advisoryOn("T1").claim }]);
+    expect(settled.tasks[0]!.accepted_review_authority?.run_id).toBe("run.first");
+    // The deferral recorded after T1's acceptance did not stop it carrying (ADR-0091), and it
+    // still stands for T1's advisory, so approval needs no new disposition.
+    const done = await runCli(p, ["decide", "--runs-root", p.runsRoot, "--run", "run.second", "--request", awaiting.request!.requestId],
+      JSON.stringify({ kind: "approve" }));
+    expect(done.kind, JSON.stringify(done)).toBe("done");
+    expect(await resume(p, next)).toEqual(done);
+  }, 180_000);
+
+  it("--fresh-review carries nothing: every reviewed Task is issued, and the registration is exactly a carry-free start's", async () => {
+    const p = await abandonedAdvisoryRound();
+    const started = await startCli(p, "run.fresh", ["--fresh-review"]);
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as Action;
+    expect(action.requests).toHaveLength(1 + SIX.length * BASE_WAVE_REVIEW_AGENTS.length);
+    expect(reportedLines(started.stderr).some((line) => (line as { kind?: string }).kind === "wave-gate-start-not-carried")).toBe(false);
+    const fresh = value(openRunDirectory(p.runsRoot, "run.fresh"));
+    expect(Object.keys(value(fresh.readProgramRegistration()) as object).sort())
+      .toEqual(["authorityDigest", "input", "kind", "reviewerProtocol", "schemaVersion", "taskIds"]);
+  }, 180_000);
+
+  it("a start with no carry prepares the batch it always did; a succession enters the epoch and drops the carried subjects", async () => {
+    const p = sixTaskProject();
+    const { handle } = await start(p);
+    const current = registration(handle);
+    if (current.schemaVersion !== 2) throw new Error("a started Wave Gate registers schema 2");
+    const batchFor = (program: RegisteredWaveGateProgram) => withFixturePiSession(p.root, async () =>
+      waveRequests(handle, program, graph(p), 1, { kind: "state-layout", root: p.root }));
+    const plain = await batchFor(current);
+    const acceptance = { runId: "run.previous", authorityDigest: "c".repeat(64) };
+    const carrying = await batchFor(withOrigin(current, { succession: { previousRunId: acceptance.runId, previousAuthorityDigest: acceptance.authorityDigest,
+      kind: "abandoned", carry: { lineage: [acceptance], carried: [{ kind: "accepted-task", taskId: "T1", roster: BASE_WAVE_REVIEW_AGENTS, acceptance }] } } }));
+    expect(carrying.batchEpoch).not.toBe(plain.batchEpoch);
+    expect(carrying.taskRuns.map(({ taskId }) => taskId)).toEqual(SIX.slice(1));
+  }, 120_000);
+
+  it("a start whose predecessor's Run Directory is gone issues every reviewed Task and names predecessor-unreadable", async () => {
+    const p = await abandonedAdvisoryRound();
+    rmSync(join(p.runsRoot, "run.first"), { recursive: true, force: true });
+    const started = await startCli(p, "run.orphaned-predecessor");
+    expect(started.status, started.stderr).toBe(0);
+    expect((JSON.parse(started.stdout) as Action).requests).toHaveLength(1 + SIX.length * BASE_WAVE_REVIEW_AGENTS.length);
+    const report = reportedLines(started.stderr).find((line) => (line as { kind?: string }).kind === "wave-gate-start-not-carried") as
+      { notCarried: readonly { taskId: string; reason: { kind: string } }[] } | undefined;
+    expect(report?.notCarried.map(({ taskId, reason }) => [taskId, reason.kind])).toEqual(SIX.map((taskId) => [taskId, "predecessor-unreadable"]));
+    expect(Object.hasOwn(value(value(openRunDirectory(p.runsRoot, "run.orphaned-predecessor")).readProgramRegistration()) as object,
+      "succession")).toBe(false);
+  }, 180_000);
+
+  it("the first batch install refuses a carried acceptance whose bytes changed after the start, and writes nothing", async () => {
+    const p = await abandonedAdvisoryRound();
+    await reopenAndReimplementT6(p);
+    // The start's preflight and registration as `start wave-gate` commits them, before its first resume.
+    const before = graph(p);
+    const taskIds = before.tasks.map(({ id }) => id);
+    const first = registration(value(openRunDirectory(p.runsRoot, "run.first")));
+    const predecessor = successionPredecessorOf(before, 1);
+    if (predecessor === null) throw new Error("the abandoned run must be the predecessor");
+    const plan = planSuccessorCarry({ graph: before, taskIds, protocol: WAVE_REVIEWER_PROTOCOL_V4, predecessor,
+      previous: { ok: true, value: first }, workspaces: observeReviewedWorkspace(before.tasks, p.root) });
+    const succession = plan.succession;
+    if (succession === undefined) throw new Error("T1..T5 must carry");
+    const next = value(createRunDirectory(p.runsRoot, "run.second"));
+    const program: RegisteredWaveGateProgram = { schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4, kind: "wave-gate",
+      input: { wave: 1 }, taskIds, authorityDigest: waveGateAuthorityDigest(1, taskIds, before), succession };
+    value(await next.registerProgram(program));
+    await new StateManager(p.statePath).registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: next.runId, wave: 1,
+      authorityDigest: program.authorityDigest, revision: 0, runsRoot: next.identity.runsRoot, terminalOutcome: null }, taskIds, succession);
+    writeFileSync(join(p.root, fileOfTask("T1")), "export const t1 = 'edited after the start';\n");
+    const installed = readFileSync(p.statePath);
+    expect(await resume(p, next)).toMatchObject({ kind: "blocked", diagnostic: { message:
+      "internal Wave Gate failure: Task T1 cannot keep the acceptance its succession carried from run run.first: drift in head, subject" } });
+    expect(readFileSync(p.statePath)).toEqual(installed);
+  }, 180_000);
 });
 
 // ---------------------------------------------------------------------------

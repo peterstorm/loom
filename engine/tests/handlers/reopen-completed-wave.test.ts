@@ -346,6 +346,9 @@ describe("reopen completed Wave", () => {
     expect(after.tasks.slice(0, 2).map((entry) => entry.proof)).toEqual(before.tasks.slice(0, 2).map((entry) => entry.proof));
     expect(checkImplementationProof(after.tasks.filter((entry) => entry.wave === 3))).toMatchObject({ passed: false });
     expect(after.wave_gates["3"]).toEqual({ impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false });
+    // ADR-0091: the reopened run is the protected predecessor the Wave's next start succeeds.
+    expect(after.retired_wave_review_runs).toEqual([{ schemaVersion: 1, kind: "retired-wave-review-run",
+      runId: "wave-run", wave: 3, authorityDigest: digest, retirement: "completed-reopened" }]);
   });
 
   it("refuses actual missing drift and remains idempotent only through the immutable audit", () => {

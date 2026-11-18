@@ -28,6 +28,7 @@ import {
   waveTaskReviewRosters,
 } from '../../../core/wave-review-authority';
 import { waveAcceptanceProblem } from '../../../core/wave-review-carry';
+import { registeredCarry } from '../../../core/wave-review-carry-plan';
 import { exactObject } from './registration';
 import type { FacadeDriveResult } from './program-result';
 import {
@@ -70,8 +71,8 @@ function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: Regist
     .map((request) => issuedWaveProtocol(handle, registration, request));
   const rosters = waveTaskReviewRosters(graph, registration.schemaVersion, registration.taskIds);
   if (!rosters.ok) throw new Error(`completed Wave Gate roster cannot be derived: ${rosters.error}`);
-  // A role a restart carried (ADR-0089) was published along the lineage, not by this run.
-  for (const { taskId, roster } of issuedWaveReviewRosters(rosters.value, registration.restart?.carry)) {
+  // A role a restart or a fresh start carried (ADR-0089, ADR-0091) was published along the lineage, not by this run.
+  for (const { taskId, roster } of issuedWaveReviewRosters(rosters.value, registeredCarry(registration))) {
     if (roster.some((role) => !protocols.some((protocol) =>
       protocol.subject.taskId === taskId && protocol.request.role === role))) {
       throw new Error(`completed Wave Task ${taskId} lacks the complete published reviewer protocol roster`);
@@ -212,10 +213,12 @@ async function resumeWaveGateAfter(
     const refreshed = specCheck.value;
     // Only reviewed Tasks are bound: a Task exempt from Wave review holds no
     // accepted review authority. An acceptance is this run's own, or one its
-    // restart carried along the recorded lineage (ADR-0089).
+    // restart or fresh start carried along the recorded lineage (ADR-0089,
+    // ADR-0091) from a protected retired run.
     const registeredTasks = refreshed.tasks.filter((task) => registration.taskIds.includes(task.id));
+    const retired = refreshed.retired_wave_review_runs ?? [];
     const acceptanceProblems = waveReviewView(registeredTasks).reviewed
-      .flatMap((task) => waveAcceptanceProblem(task, registration, handle.runId) ?? []);
+      .flatMap((task) => waveAcceptanceProblem(task, registration, handle.runId, retired) ?? []);
     if (acceptanceProblems.length > 0) {
       return waveBlocked(handle, `current Wave review lacks exact accepted reviewer protocol authority: ${acceptanceProblems.join("; ")}`);
     }

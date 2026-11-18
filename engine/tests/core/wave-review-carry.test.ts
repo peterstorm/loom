@@ -22,9 +22,10 @@ import { reviewedWorkspaceObservation, type ReviewedWorkspaceObservation } from 
 import { prepareExhaustedWaveGateRestart, sameRestartRegistration, type RestartCarryObservation } from "../../src/core/wave-gate-replacement";
 import type { RegisteredWaveGateProgram, WaveReviewCarryAudit } from "../../src/core/wave-gate-program";
 import { issuedWaveReviewRosters } from "../../src/core/wave-review-authority";
-import { issuedRoles } from "../../src/core/wave-review-carry-plan";
+import { issuedRoles, registeredCarry } from "../../src/core/wave-review-carry-plan";
+import { parseWaveReviewCarryAudit } from "../../src/core/wave-review-carry-audit";
+import { parseSubjectDigest } from "../../src/core/review-subject";
 import {
-  parseWaveReviewCarryAudit,
   publishedRostersOf,
   rebindCarriedReviewRun,
   waveAcceptanceProblem,
@@ -36,6 +37,7 @@ import type { ReviewerProtocolDescriptor } from "../../src/core/reviewer-contrac
 import { findingFixture } from "../fixtures/finding";
 import { activeWaveGateFixture, graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { value } from "../fixtures/parse-result";
+import { withOrigin } from "../fixtures/wave-gate-origin";
 
 const DIGEST_A = "a".repeat(64);
 const EPOCH_A = "e".repeat(64);
@@ -46,6 +48,8 @@ const EPOCH_B = "4".repeat(64);
 const DIGEST_B = "b".repeat(64);
 const ROSTER = BASE_WAVE_REVIEW_AGENTS;
 const EXHAUSTED = ROSTER[2]!;
+/** A Subject Digest for T2's rebinding: the fixture runs predate the digest, so none is compared. */
+const SUBJECT_T2 = parseSubjectDigest("5".repeat(64))!;
 
 const hex = (seed: number, length: number): string => seed.toString(16).padStart(length, "0");
 const observe = (taskId: string, scope: readonly string[], content = "export const x = 1;\n"): ReviewedWorkspaceObservation =>
@@ -157,7 +161,7 @@ describe("Wave Gate restart records the carry plan along the restart lineage", (
     expect(t2.findings).toEqual([]);
     expect(prepared.graph.wave_review_epoch).toBeUndefined();
     expect(issuedWaveReviewRosters([{ taskId: "T1", roster: ROSTER }, { taskId: "T2", roster: ROSTER }],
-      prepared.registration.restart?.carry)).toEqual([{ taskId: "T2", roster: [EXHAUSTED] }]);
+      registeredCarry(prepared.registration))).toEqual([{ taskId: "T2", roster: [EXHAUSTED] }]);
   });
 
   it("is re-derived identically, and a different carry plan is a different registration", () => {
@@ -185,8 +189,8 @@ describe("Wave Gate restart records the carry plan along the restart lineage", (
   it("an accepted Task carried from an earlier run carries again only while that run stays on the lineage", () => {
     const earlier = { runId: "run.earliest", authorityDigest: "c".repeat(64) };
     const t1 = { accepted_review_authority: acceptanceT1({ run_id: earlier.runId, authority_digest: earlier.authorityDigest }) };
-    const chained: RegisteredWaveGateProgram = { ...previousRegistration(), restart: { previousRunId: "run.earliest",
-      exhaustedSlots: ["T2/x"], carry: { lineage: [earlier], carried: [{ kind: "accepted-task", taskId: "T1", roster: ROSTER, acceptance: earlier }] } } };
+    const chained = withOrigin(previousRegistration(), { restart: { previousRunId: "run.earliest",
+      exhaustedSlots: ["T2/x"], carry: { lineage: [earlier], carried: [{ kind: "accepted-task", taskId: "T1", roster: ROSTER, acceptance: earlier }] } } });
     const prepared = restart(exhaustedWave({ t1 }), observation({ issuedRosters: new Map() }), chained);
     expect(prepared.registration.restart?.carry).toEqual({
       lineage: [earlier, { runId: "run.previous", authorityDigest: DIGEST_A }],
@@ -267,7 +271,7 @@ describe("issuedRoles: what a replacement issues for one Task", () => {
   });
 
   it("issuedWaveReviewRosters drops a Task with nothing left to issue", () => {
-    const carry = restart(exhaustedWave()).registration.restart?.carry;
+    const carry = registeredCarry(restart(exhaustedWave()).registration);
     expect(issuedWaveReviewRosters([{ taskId: "T1", roster: ROSTER }, { taskId: "T2", roster: ROSTER }], carry))
       .toEqual([{ taskId: "T2", roster: [EXHAUSTED] }]);
   });
@@ -328,6 +332,19 @@ describe("a restart names each reviewed Task it did not carry, and why", () => {
         .toEqual([{ taskId: "T2", reason: { kind: "drift", fields: ["prior-findings"] } }]);
     });
 
+    it("keeps a whole-roster acceptance as accepted-task when its advisory is dismissed after it (ADR-0091)", () => {
+      // T1 is issued to no reviewer, so no prior selection is presented to judge;
+      // the disposition leaves its Findings, and so the acceptance, unchanged.
+      const own = findingFixture("code-reviewer-8", "advisory", "src/t1.ts");
+      const ownDismissed = value(advisoryDisposition({ wave: 1, taskId: "T1", findingId: own.id, decision: "dismissed",
+        reason: "false positive", target: null, anchor: anchorDigest(own.file, observe("T1", ["src/t1.ts"]).artifacts) }));
+      const state = exhaustedWave({ t1: { findings: [own], advisory_findings: [own.claim] } });
+      const prepared = restart({ ...state, advisory_dispositions: [ownDismissed] });
+      expect(prepared.notCarried).toEqual([]);
+      expect(prepared.registration.restart?.carry?.carried).toContainEqual(
+        { kind: "accepted-task", taskId: "T1", roster: ROSTER, acceptance: { runId: "run.previous", authorityDigest: DIGEST_A } });
+    });
+
     it("carries the accepted slots of a run that already omitted an advisory dismissed over unchanged bytes", () => {
       const prepared = restart(withAdvice([], [dismissed]));
       expect(prepared.notCarried).toEqual([]);
@@ -381,7 +398,7 @@ describe("a chained restart keeps every carried slot's original origin", () => {
     const rebound = value(rebindCarriedReviewRun(t2, carry, {
       runId: nextRunId, authorityDigest: prepared.registration.authorityDigest, protocol: WAVE_REVIEWER_PROTOCOL_V4,
       generation: 0, packetId, headSha: epoch, bytes: { scope: bytes.scope, headSha: bytes.headSha }, priorFindingIds: [], roster: ROSTER,
-      issued: issuedRoles(ROSTER, carry).map((agent) => issuedSlot(agent, packetId.charCodeAt(0) * 100 + ROSTER.indexOf(agent))),
+      subject: SUBJECT_T2, issued: issuedRoles(ROSTER, carry).map((agent) => issuedSlot(agent, packetId.charCodeAt(0) * 100 + ROSTER.indexOf(agent))),
     }));
     const [first, ...rest] = rebound.slot_authority.map((slot) => (slot.carried_from === undefined ? { ...slot, attempted: 2 as const } : slot));
     return {
@@ -425,7 +442,7 @@ describe("rebinding a carried Task's Review Run into the replacement run", () =>
   const binding: CarriedRunBinding = {
     runId: "run.next", authorityDigest: DIGEST_B, protocol: WAVE_REVIEWER_PROTOCOL_V4,
     generation: 0, packetId: PACKET_B, headSha: EPOCH_B, bytes: { scope: bytes.scope, headSha: bytes.headSha },
-    priorFindingIds: [], roster: ROSTER, issued: [freshSlot],
+    priorFindingIds: [], roster: ROSTER, subject: SUBJECT_T2, issued: [freshSlot],
   };
   const task = (): Task => exhaustedWave().tasks[1]!;
   const carry = { kind: "accepted-slots" as const, taskId: "T2", agents: accepted as unknown as readonly [string, ...string[]] };
@@ -481,18 +498,18 @@ describe("completion admits only acceptances carried along the recorded restart 
 
   it("admits the replacement run's own acceptance and a carried one", () => {
     const own = { ...t1(), accepted_review_authority: acceptanceT1({ run_id: "run.next", authority_digest: replacement().authorityDigest }) };
-    expect(waveAcceptanceProblem(own, replacement(), "run.next")).toBeNull();
-    expect(waveAcceptanceProblem(t1(), replacement(), "run.next")).toBeNull();
+    expect(waveAcceptanceProblem(own, replacement(), "run.next", [])).toBeNull();
+    expect(waveAcceptanceProblem(t1(), replacement(), "run.next", [])).toBeNull();
   });
 
   it("refuses an acceptance forged outside the lineage, a missing one and a carried one under another protocol", () => {
     const forged = { ...t1(), accepted_review_authority: acceptanceT1({ run_id: "run.forged" }) };
-    expect(waveAcceptanceProblem(forged, replacement(), "run.next")).not.toBeNull();
-    expect(waveAcceptanceProblem({ ...t1(), accepted_review_authority: undefined }, replacement(), "run.next")).not.toBeNull();
+    expect(waveAcceptanceProblem(forged, replacement(), "run.next", [])).not.toBeNull();
+    expect(waveAcceptanceProblem({ ...t1(), accepted_review_authority: undefined }, replacement(), "run.next", [])).not.toBeNull();
     const v2 = { ...t1(), accepted_review_authority: acceptanceT1({ reviewer_protocol: REVIEWER_PROTOCOL_V2 }) };
-    expect(waveAcceptanceProblem(v2, replacement(), "run.next")).not.toBeNull();
-    const noCarry = { ...replacement(), restart: { previousRunId: "run.previous", exhaustedSlots: [`T2/${EXHAUSTED}`] } };
-    expect(waveAcceptanceProblem(t1(), noCarry, "run.next")).not.toBeNull();
+    expect(waveAcceptanceProblem(v2, replacement(), "run.next", [])).not.toBeNull();
+    const noCarry = withOrigin(replacement(), { restart: { previousRunId: "run.previous", exhaustedSlots: [`T2/${EXHAUSTED}`] } });
+    expect(waveAcceptanceProblem(t1(), noCarry, "run.next", [])).not.toBeNull();
   });
 });
 

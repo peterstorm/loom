@@ -60,6 +60,7 @@ import { isExactGitSha } from "./git-sha";
 import { isRecord } from "./plain-record";
 import { scopeCovers } from "./path-coverage";
 import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseWaveReviewerProtocolDescriptor } from "./reviewer-contract";
+import { acceptedSubjectDigest, parseSubjectDigest } from "./review-subject";
 
 // The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf
 // volume of this concept (it imports only ./reviewer-contract), so the
@@ -917,6 +918,9 @@ export function reviewRunError(
       !parseOrchestrationRunId(run.wave_gate_run_id).ok || run.workspace_scope === undefined || run.slot_authority === undefined)) {
     return `${label} current review requires supported descriptor, workspace and slots`;
   }
+  if (Object.hasOwn(run, "subject_digest") && (!current || parseSubjectDigest(run.subject_digest) === null)) {
+    return `${label}.subject_digest must be a lowercase SHA-256 digest on a current review`;
+  }
   if (typeof run.generation !== "number" || !Number.isSafeInteger(run.generation) || run.generation < 0) {
     return `${label}.generation must be a non-negative safe integer`;
   }
@@ -1638,6 +1642,11 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
     resolved,
     true,
   );
+  // The acceptance seals the run's Subject Digest with the Findings it leaves
+  // (ADR-0091), so a later Successor Carry can prove neither changed.
+  const subject = run.reviewer_protocol === undefined || run.subject_digest === undefined
+    ? {}
+    : { subject_digest: acceptedSubjectDigest(run.subject_digest, { findings: active, refuted_findings: task.refuted_findings }) };
   return {
     ...task,
     review_status: active.some((finding) => finding.severity === "critical") ? "blocked" : "passed",
@@ -1653,6 +1662,7 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
         run_id: run.wave_gate_run_id,
         authority_digest: run.wave_gate_authority_digest,
         ...(run.reviewer_protocol === undefined ? {} : { reviewer_protocol: run.reviewer_protocol }),
+        ...subject,
       },
     }),
     ...activeFindingAggregate(active),

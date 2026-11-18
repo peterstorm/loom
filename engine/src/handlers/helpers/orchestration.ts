@@ -7,7 +7,7 @@
  *   helper orchestration abandon --run <run-directory> --runs-root <root>
  *                                --reason <text> [--superseded-by <run-directory>]
  *   helper orchestration start <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --run <run-directory>
- *                              --runs-root <root> < program.json
+ *                              --runs-root <root> [--fresh-review] < program.json
  *   helper orchestration restart --run <exhausted-wave-run> --new-run <fresh-run-directory>
  *                                --runs-root <root>
  *   helper orchestration recover-orphan --run-id <missing-wave-run-id> --wave <N>
@@ -296,6 +296,8 @@ function usage(): HookResult {
       "  abandon --runs-root <root> --run <run-directory> --reason <text> [--superseded-by <run-directory>]",
       "          (terminal marker; deletes nothing and refuses every operation that would advance the run)",
       "  start   <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --runs-root <root> --run <run-directory> < program.json",
+      "          (wave-gate: carries each unchanged Task's accepted review from the abandoned or reopened run it succeeds;",
+      "          --fresh-review carries nothing and reviews every Task in full)",
       "  restart --runs-root <root> --run <exhausted-wave-run> --new-run <fresh-run-directory>",
       "  recover-orphan --runs-root <root> --run-id <missing-run-id> --wave <N> --digest <sha256> --new-run <fresh-run-directory>",
       "  resume  --runs-root <root> --run <run-directory>",
@@ -1377,7 +1379,9 @@ async function startWaveGate(stdin: string, args: readonly string[], emission: E
   if (!input.ok) return { kind: "error", message: input.message };
   const location = startRunLocation(args, "wave-gate start requires --runs-root and --run");
   if (!location.ok) return location.result;
-  const prepared = prepareWaveGateFacadeStart(input.value, location.runsRoot, location.run);
+  // `--fresh-review` carries nothing from the run this start succeeds (ADR-0091).
+  const prepared = prepareWaveGateFacadeStart(input.value, location.runsRoot, location.run,
+    { freshReview: hasFlag(args, "--fresh-review") });
   if (!prepared.ok) return { kind: "error", message: prepared.message };
   return driveCreatedRun(args, emission, (handle) => startWaveGateFacade(handle, prepared.value));
 }

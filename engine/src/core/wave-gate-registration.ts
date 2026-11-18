@@ -19,10 +19,12 @@
  * the supersession step.
  */
 
-import type { ActiveWaveGateRegistration, TaskGraph } from "../types";
+import type { ActiveWaveGateRegistration, RetiredWaveReviewRun, TaskGraph } from "../types";
 import { preserveAcceptedReviewRunFindings } from "./findings";
 import { canonicalRecord, canonicalStructuralEquals } from "./orchestration-contract";
+import { appendRetiredWaveReviewRun } from "./retired-wave-review-runs";
 import { reconcileWaveBlock } from "./wave-gate-model";
+import type { WaveGateSuccessionAudit } from "./wave-gate-program";
 import { waveGateAuthorityDigest } from "./wave-review-authority";
 
 /** The registration identity the admission compares against protected state. */
@@ -128,16 +130,71 @@ function admission(
 }
 
 /**
+ * The run a fresh Wave Gate of `wave` succeeds (ADR-0091), as the retirement
+ * record it has or is about to get: the Wave's abandoned tombstone, which the
+ * install retires, otherwise the Wave's latest retired run. Null when the
+ * Wave has no retired run to succeed. The start's preflight and the locked
+ * install both ask here, so they agree on the predecessor.
+ */
+export function successionPredecessorOf(graph: TaskGraph, wave: number): RetiredWaveReviewRun | null {
+  const active = graph.active_wave_gate;
+  if (active !== undefined && active.wave === wave && active.terminalOutcome?.kind === "terminal-abandoned") {
+    return retirementOf(active, "abandoned");
+  }
+  return (graph.retired_wave_review_runs ?? []).findLast((run) => run.wave === wave) ?? null;
+}
+
+/** The Wave Gate run whose review authority a retirement records. */
+type RetiringRun = Pick<ActiveWaveGateRegistration, "runId" | "wave" | "authorityDigest">;
+
+const retirementOf = (run: RetiringRun, retirement: RetiredWaveReviewRun["retirement"]): RetiredWaveReviewRun =>
+  canonicalRecord({
+    schemaVersion: 1, kind: "retired-wave-review-run", runId: run.runId, wave: run.wave,
+    authorityDigest: run.authorityDigest, retirement,
+  });
+
+/** `graph` with `run` appended to its retired runs, through the one append that keeps a run retired once. */
+const withRetiredRun = (graph: TaskGraph, run: RetiringRun, retirement: RetiredWaveReviewRun["retirement"]): TaskGraph => ({
+  ...graph,
+  retired_wave_review_runs: appendRetiredWaveReviewRun(graph.retired_wave_review_runs, retirementOf(run, retirement)),
+});
+
+/**
+ * Why `succession` cannot install over `state`, or null. Its predecessor must
+ * be the protected one (`successionPredecessorOf`), and each Task it carries
+ * must still hold exactly the acceptance it names. Whether that acceptance
+ * still judges the Task's bytes and Subject Digest is decided again when the
+ * batch installs.
+ */
+function successionProblem(state: TaskGraph, wave: number, succession: WaveGateSuccessionAudit): string | null {
+  const predecessor = successionPredecessorOf(state, wave);
+  if (predecessor === null || predecessor.runId !== succession.previousRunId ||
+      predecessor.authorityDigest !== succession.previousAuthorityDigest || predecessor.retirement !== succession.kind) {
+    return `Wave Gate succession names ${succession.kind} run ${succession.previousRunId}, ` +
+      `but Wave ${wave}'s protected predecessor is ${predecessor === null ? "none" : `${predecessor.retirement} run ${predecessor.runId}`}`;
+  }
+  const stale = succession.carry.carried.find(({ taskId, acceptance }) => {
+    const accepted = state.tasks.find(({ id }) => id === taskId)?.accepted_review_authority;
+    return accepted?.run_id !== acceptance.runId || accepted.authority_digest !== acceptance.authorityDigest;
+  });
+  return stale === undefined
+    ? null
+    : `Wave Gate succession carries Task ${stale.taskId}'s acceptance from run ${stale.acceptance.runId}, which the Task no longer holds`;
+}
+
+/**
  * The locked install: freshness, admission, abandoned-predecessor supersession
  * and the new active registration, decided together as one pure transition.
  * Only a fresh registration — revision 0, no terminal outcome — may install;
  * that refusal precedes admission, so a stale or terminal candidate is never
- * mistaken for an exact replay.
+ * mistaken for an exact replay. A fresh start that carries accepted reviews
+ * passes its `succession`, which must name the protected predecessor.
  */
 export function installWaveGateRegistration(
   state: TaskGraph,
   registration: ActiveWaveGateRegistration,
   publishedTaskIds: readonly string[],
+  succession?: WaveGateSuccessionAudit,
 ): WaveGateInstallDecision {
   if (registration.revision !== 0 || registration.terminalOutcome !== null) {
     return canonicalRecord({
@@ -152,11 +209,14 @@ export function installWaveGateRegistration(
     case "replay":
       return canonicalRecord({ kind: "replayed", registration: admitted.existing });
     case "install": {
+      const problem = succession === undefined ? null : successionProblem(state, registration.wave, succession);
+      if (problem !== null) return canonicalRecord({ kind: "refused", message: problem });
       // An abandoned Run is not completion authority. Its review epoch and
-      // packet-bound evidence retire with the successor install, and any review
-      // it accepted reopens because that acceptance's run authority is gone;
-      // accepted Findings and implementation proof survive. The tombstone is
-      // not archived as a completed Wave.
+      // packet-bound evidence retire with the successor install and it joins
+      // the retired runs a later start may succeed (ADR-0091); the reviews it
+      // accepted stay, for this start's Successor Carry to judge. Accepted
+      // Findings and implementation proof survive. The tombstone is not
+      // archived as a completed Wave.
       const successorBase = admitted.predecessor.kind === "abandoned"
         ? supersedeAbandonedWaveGateReview(state, admitted.predecessor.runId, publishedTaskIds)
         : state;
@@ -293,8 +353,11 @@ function withOtherWaveSpecCheckHeld(
  * record and packet-bound review state stay behind and contradict any
  * successor (an epoch must belong to the active run). This retires that review
  * authority exactly as restart and orphan recovery do — accepted findings and
- * Review Generations survive — and reopens any review the abandoned run
- * accepted, because that acceptance's authority died with it. A Requirement
+ * Review Generations survive — and records the abandoned run in
+ * `retired_wave_review_runs`, the protected provenance of a Successor Carry
+ * (ADR-0091). The reviews the abandoned run accepted stay: the successor
+ * carries each one whose subject is unchanged and reissues the rest, and a
+ * reopened Task's acceptance is cleared by its own revalidation. A Requirement
  * trace amendment over the same tombstone retires it identically, through
  * `retireWaveReviewAuthority`.
  */
@@ -303,12 +366,12 @@ export function supersedeAbandonedWaveGateReview(
   abandonedRunId: string,
   taskIds: readonly string[],
 ): TaskGraph {
+  const tombstone = graph.active_wave_gate;
   const reset = resetWaveGateReviewAuthority(graph, taskIds);
-  return {
-    ...reset,
-    tasks: reset.tasks.map((task) =>
-      taskIds.includes(task.id) && task.accepted_review_authority?.run_id === abandonedRunId
-        ? { ...task, review_status: "pending" as const, accepted_review_authority: undefined }
-        : task),
-  };
+  return tombstone?.runId === abandonedRunId ? withRetiredRun(reset, tombstone, "abandoned") : reset;
+}
+
+/** `graph` with the completed run `completed`, now reopened, recorded for a later start to succeed (ADR-0091). */
+export function retireReopenedWaveReview(graph: TaskGraph, completed: RetiringRun): TaskGraph {
+  return withRetiredRun(graph, completed, "completed-reopened");
 }

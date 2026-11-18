@@ -430,7 +430,7 @@ describe("upgrade-spec-trace helper", () => {
     });
   });
 
-  it("retires the abandoned run's packet-bound review state exactly as a successor install would, so the successor starts clean", async () => {
+  it("retires the abandoned run's packet-bound review state exactly as a successor install would, keeping its acceptances for the successor to judge", async () => {
     const { statePath, runsRoot, graph } = await activeFixture({ marker: "valid" });
     const active = graph.active_wave_gate!;
     const [t1, t2] = graph.tasks;
@@ -459,8 +459,12 @@ describe("upgrade-spec-trace helper", () => {
     expect(stored.active_wave_completion_suite).toBeUndefined();
     expect(stored.tasks[0]?.review_run).toBeUndefined();
     expect(stored.tasks[0]?.findings).toEqual([finding]);
-    expect(stored.tasks[1]).toMatchObject({ review_status: "pending", review_generation: 7 });
-    expect(stored.tasks[1]?.accepted_review_authority).toBeUndefined();
+    // ADR-0091: the acceptance stays and the run is recorded as retired; a
+    // successor carries it only while its Subject Digest is unchanged, and this
+    // legacy acceptance has none, so the successor reviews T2 in full.
+    expect(stored.tasks[1]).toMatchObject({ review_status: "passed", review_generation: 7,
+      accepted_review_authority: { run_id: "run.active" } });
+    expect(stored.retired_wave_review_runs?.map(({ runId, retirement }) => [runId, retirement])).toEqual([["run.active", "abandoned"]]);
 
     const successorRoster = ["T1", "T2"];
     const installed = installWaveGateRegistration(stored, activeWaveGateFixture({

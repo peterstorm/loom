@@ -1654,7 +1654,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     }
   });
 
-  it("reopens a review the abandoned run accepted when its successor installs", async () => {
+  it("keeps a review the abandoned run accepted for its successor to judge, and records the retired run (ADR-0091)", async () => {
     const dir = makeTmpDir();
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(waveGraph));
@@ -1681,8 +1681,10 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
 
       await mgr.registerActiveWaveGate(activeGate("run.second", mgr.load()), ["T1"]);
       const installed = mgr.load();
-      expect(installed.tasks[0]).toMatchObject({ review_status: "pending", review_generation: 1 });
-      expect(installed.tasks[0]?.accepted_review_authority).toBeUndefined();
+      expect(installed.tasks[0]).toMatchObject({ review_status: "passed", review_generation: 1,
+        accepted_review_authority: { run_id: first.runId } });
+      expect(installed.retired_wave_review_runs).toEqual([{ schemaVersion: 1, kind: "retired-wave-review-run",
+        runId: first.runId, wave: 1, authorityDigest: first.authorityDigest, retirement: "abandoned" }]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
