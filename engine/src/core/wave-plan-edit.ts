@@ -1,19 +1,19 @@
 /**
  * The audited plan edits a TaskGraph carries in `wave_plan_edits` (loom#198
- * Cause 3; ADR-0081). This leaf module is the one home of an edit's
+ * Cause 3; ADR-0081, ADR-0086). This leaf module is the one home of an edit's
  * invariants: the commands that write one (`core/task-rescope.ts`,
- * `core/task-dependency-edit.ts`) and the State File parser that reads one
- * back both build it through `taskRescopedEdit` or `dependencyAddedEdit`, so
- * neither can hold a value the other would refuse.
+ * `core/task-dependency-edit.ts`, `core/task-addition.ts`) and the State File
+ * parser that reads one back both build it through the constructor of its
+ * kind, so neither can hold a value the other would refuse.
  *
  * Pure.
  */
 
 import { isExactGitSha } from "./git-sha";
-import { nonEmpty, type DomainResult } from "./orchestration-contract";
+import { nonEmpty, type DomainResult, type OrchestrationRunId } from "./orchestration-contract";
 import { parseReviewPath } from "./review-packet";
 import { parseTaskId } from "./task-id";
-import type { DependencyAddedEdit, TaskRescopedEdit } from "../types";
+import type { DependencyAddedEdit, TaskAddedEdit, TaskRescopedEdit, TaskWithdrawnEdit } from "../types";
 
 /** The longest reason an operator may give for a plan edit. */
 export const MAX_PLAN_EDIT_REASON_LENGTH = 500;
@@ -28,6 +28,19 @@ export function parsePlanEditReason(raw: unknown): DomainResult<string, string> 
   if (raw.trim() !== raw) return fail("must not start or end with whitespace");
   if (raw.length > MAX_PLAN_EDIT_REASON_LENGTH) return fail(`is at most ${MAX_PLAN_EDIT_REASON_LENGTH} characters`);
   return freeze({ ok: true as const, value: raw });
+}
+
+/** `raw` as distinct Task ids none of which is `self`, or why not. */
+function otherTaskIds(raw: readonly string[], label: string, self: string): DomainResult<readonly string[], string> {
+  const ids: string[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const id = parseTaskId(entry, `${label}[${index}]`);
+    if (!id.ok) return fail(id.error.errors.join("; "));
+    if (id.value === self) return fail(`${label} names ${self} itself`);
+    if (ids.includes(id.value)) return fail(`${label} names ${id.value} twice`);
+    ids.push(id.value);
+  }
+  return freeze({ ok: true as const, value: freeze(ids) });
 }
 
 /** `paths` as distinct review paths, or why they are not. */
@@ -113,15 +126,9 @@ export function dependencyAddedEdit(input: DependencyAddedEditInput): DomainResu
   if (!Number.isSafeInteger(input.wave) || input.wave < 1) return fail("wave must be an integer >= 1");
   const taskId = parseTaskId(input.taskId, "taskId");
   if (!taskId.ok) return fail(taskId.error.errors.join("; "));
-  const ids: string[] = [];
-  for (const [index, raw] of input.dependsOn.entries()) {
-    const id = parseTaskId(raw, `dependsOn[${index}]`);
-    if (!id.ok) return fail(id.error.errors.join("; "));
-    if (id.value === taskId.value) return fail(`${taskId.value} cannot depend on itself`);
-    if (ids.includes(id.value)) return fail(`dependsOn names ${id.value} twice`);
-    ids.push(id.value);
-  }
-  const dependsOn = nonEmpty(ids);
+  const ids = otherTaskIds(input.dependsOn, "dependsOn", taskId.value);
+  if (!ids.ok) return ids;
+  const dependsOn = nonEmpty(ids.value);
   if (dependsOn === null) return fail("dependsOn names no Task");
   const reason = parsePlanEditReason(input.reason);
   if (!reason.ok) return fail(`reason ${reason.error}`);
@@ -134,6 +141,91 @@ export function dependencyAddedEdit(input: DependencyAddedEditInput): DomainResu
       taskId: taskId.value,
       dependsOn: freeze(dependsOn),
       reason: reason.value,
+    }),
+  });
+}
+
+export type TaskAddedEditInput = Readonly<{
+  wave: number;
+  taskId: string;
+  files: readonly string[];
+  /** The files a completed Wave sealed, named explicitly; a subset of `files`. */
+  sealed: readonly string[];
+  dependsOn: readonly string[];
+  dependents: readonly string[];
+  reason: string;
+  abandonedRunId: OrchestrationRunId | null;
+}>;
+
+/**
+ * A `task-added` edit, or why it is not one: a Wave of at least 1, a Task id,
+ * at least one distinct review path, sealed paths that are distinct listed
+ * files, distinct dependency and dependent ids that name neither the Task nor
+ * each other, and a reason `parsePlanEditReason` admits. Whether those Tasks
+ * exist, where they sit and whether a sealed path is sealed are the caller's
+ * to check.
+ */
+export function taskAddedEdit(input: TaskAddedEditInput): DomainResult<TaskAddedEdit, string> {
+  if (!Number.isSafeInteger(input.wave) || input.wave < 1) return fail("wave must be an integer >= 1");
+  const taskId = parseTaskId(input.taskId, "taskId");
+  if (!taskId.ok) return fail(taskId.error.errors.join("; "));
+  const files = distinctPaths(input.files, "files");
+  if (!files.ok) return files;
+  const fileList = nonEmpty(files.value);
+  if (fileList === null) return fail("files names no path");
+  const sealed = distinctPaths(input.sealed, "sealed");
+  if (!sealed.ok) return sealed;
+  const unlisted = sealed.value.find((path) => !files.value.includes(path));
+  if (unlisted !== undefined) return fail(`sealed names ${unlisted}, which is not in files`);
+  const sealedPaths = nonEmpty(sealed.value);
+  const dependsOn = otherTaskIds(input.dependsOn, "dependsOn", taskId.value);
+  if (!dependsOn.ok) return dependsOn;
+  const dependents = otherTaskIds(input.dependents, "dependents", taskId.value);
+  if (!dependents.ok) return dependents;
+  const both = dependsOn.value.find((id) => dependents.value.includes(id));
+  if (both !== undefined) return fail(`${both} is both a dependency and a dependent, a cycle`);
+  const reason = parsePlanEditReason(input.reason);
+  if (!reason.ok) return fail(`reason ${reason.error}`);
+  return freeze({
+    ok: true as const,
+    value: freeze({
+      schemaVersion: 1 as const,
+      kind: "task-added" as const,
+      wave: input.wave,
+      taskId: taskId.value,
+      files: fileList,
+      ...(sealedPaths === null ? {} : { sealed: sealedPaths }),
+      dependsOn: dependsOn.value,
+      dependents: dependents.value,
+      reason: reason.value,
+      abandonedRunId: input.abandonedRunId,
+    }),
+  });
+}
+
+export type TaskWithdrawnEditInput = Readonly<{
+  wave: number;
+  taskId: string;
+  reason: string;
+  abandonedRunId: OrchestrationRunId | null;
+}>;
+
+/** A `task-withdrawn` edit, or why it is not one: a Wave of at least 1, a Task id and an admitted reason. */
+export function taskWithdrawnEdit(input: TaskWithdrawnEditInput): DomainResult<TaskWithdrawnEdit, string> {
+  if (!Number.isSafeInteger(input.wave) || input.wave < 1) return fail("wave must be an integer >= 1");
+  const taskId = parseTaskId(input.taskId, "taskId");
+  if (!taskId.ok) return fail(taskId.error.errors.join("; "));
+  const reason = parsePlanEditReason(input.reason);
+  if (!reason.ok) return fail(`reason ${reason.error}`);
+  return freeze({
+    ok: true as const,
+    value: freeze({
+      schemaVersion: 1 as const,
+      kind: "task-withdrawn" as const,
+      wave: input.wave,
+      taskId: taskId.value,
+      reason: reason.value,
+      abandonedRunId: input.abandonedRunId,
     }),
   });
 }

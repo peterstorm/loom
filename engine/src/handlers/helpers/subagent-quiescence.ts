@@ -18,8 +18,8 @@ export type QuiescentOperation =
   | "task reopening"
   | "task re-scope"
   | "dependency edit"
-  | "forward fix"
-  | "forward fix withdrawal"
+  | "adding a Task"
+  | "withdrawing a Task"
   | "engine-run test evidence adoption"
   | "engine revision adoption";
 
@@ -31,8 +31,8 @@ const SETTLE: Readonly<Record<QuiescentOperation, string>> = Object.freeze({
   "task reopening": "wait for it to settle and retry",
   "task re-scope": "wait for it to settle and retry",
   "dependency edit": "wait for it to settle and retry",
-  "forward fix": "wait for it to settle and retry",
-  "forward fix withdrawal": "wait for it to settle and retry",
+  "adding a Task": "wait for it to settle and retry",
+  "withdrawing a Task": "wait for it to settle and retry",
   "engine-run test evidence adoption": "wait for it to settle and retry",
   "engine revision adoption": "wait for it to settle and retry",
 });

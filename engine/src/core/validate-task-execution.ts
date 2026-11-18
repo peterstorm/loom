@@ -95,7 +95,7 @@ function dependencyExecutionBlock(state: TaskGraph, task: Task): TaskExecutionDe
 /**
  * A Task under a dispatch hold is withheld (`dispatchHoldOf`): a Distill Task
  * until every other Task of its Wave is implemented and unreserved
- * (ADR-0068), a Forward Fix's held judge until its fix settles. The rule is
+ * (ADR-0068), a Task until the same-Wave Tasks it depends on settle. The rule is
  * the one status asks, so registration refuses exactly what status does not
  * offer. A stale reservation still blocks here: its owner is re-dispatched
  * first. The Tasks registering in the same batch count as reserved, so a held
