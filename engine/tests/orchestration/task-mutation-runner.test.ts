@@ -36,11 +36,11 @@ import {
   observeTaskMutation,
   observeTaskMutationDigest,
   readTaskMutationRecord,
-  taskIdFileSegment,
   taskMutationRecordPath,
   writeTaskMutationRecord,
 } from "../../src/orchestration/task-mutation-record";
 import { runFileMutants, runTaskMutationCheck, type TaskMutationBudget } from "../../src/orchestration/task-mutation-runner";
+import { taskIdFileSegment } from "../../src/orchestration/task-record-file";
 import type { HookResult } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { loomCommandsAt } from "../fixtures/loom-package-root";

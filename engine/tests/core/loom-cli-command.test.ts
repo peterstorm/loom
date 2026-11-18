@@ -33,6 +33,10 @@ describe("every spelling that names the package", () => {
     expect(PLAIN.mutationCheck("T2")).toBe("bun '/opt/loom/engine/src/cli.ts' helper mutation-check --task 'T2'");
   });
 
+  it("ownerCheck: the Task owner check for one Task", () => {
+    expect(PLAIN.ownerCheck("T2")).toBe("bun '/opt/loom/engine/src/cli.ts' helper owner-check --task 'T2'");
+  });
+
   it("auditNonce: how the parent obtains a receipt binding for one owner's artifact", () => {
     expect(PLAIN.auditNonce("/runs/run 1", anAgentId("security-hunter-agent--2"))).toBe(
       "bun '/opt/loom/engine/src/cli.ts' helper security-audit nonce --out '/runs/run 1' " +
@@ -87,6 +91,7 @@ function shellWords(command: string, cwd: string): readonly string[] {
 /** The commands that run as printed: `auditNonce` leaves `<file>` for the parent to fill in, so it is not one. */
 const RUNNABLE: readonly (readonly [string, (commands: LoomCommands) => string])[] = [
   ["mutationCheck", (commands) => commands.mutationCheck("T'1")],
+  ["ownerCheck", (commands) => commands.ownerCheck("T'1")],
   ["verificationImport", (commands) => commands.verificationImport("/tmp/my audit", "run.verify-w1")],
   ["orchestrationStart", (commands) => commands.orchestrationStart("security-verification", "/tmp/it's runs")],
 ];

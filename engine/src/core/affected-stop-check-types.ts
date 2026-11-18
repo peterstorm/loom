@@ -12,9 +12,10 @@
  * stop reports it instead (CT-2 amendment A1). The acceptance check and
  * the affected check run in sequence under one runner lock and inside one hook
  * budget, and they produce one combined block message. The Task mutation
- * check (ADR-0071) is a third arm of the same stop that runs no runner; its
- * name, cap and heading are declared here beside the others, and its rules
- * live in `task-mutation-check.ts`. Nothing here is completion evidence: no
+ * check (ADR-0071) and the Task owner check (ADR-0092) are a third and fourth
+ * arm of the same stop that run no runner; their names, caps and headings are
+ * declared here beside the others, and their rules live in
+ * `task-mutation-check.ts` and `task-owner-check.ts`. Nothing here is completion evidence: no
  * type below reaches proof, receipts or Wave Gate evidence (FR-026).
  *
  * Types and fixed constants only: the types, sealed ADTs, function
@@ -191,9 +192,9 @@ export type StopChecksOutcome =
 
 /** Every stop check, in the order a stop decides them. The one list of check
  *  names: `StopCheckName` is derived from it, so the two cannot drift.
- *  `acceptance` and `affected` each run a runner; `mutation` (ADR-0071) runs
- *  none: it reads the record `helper mutation-check` left. */
-export const STOP_CHECK_NAMES = Object.freeze(["acceptance", "affected", "mutation"] as const);
+ *  `acceptance` and `affected` each run a runner; `mutation` (ADR-0071) and
+ *  `owner` (ADR-0092) run none: each reads the record its helper left. */
+export const STOP_CHECK_NAMES = Object.freeze(["acceptance", "affected", "mutation", "owner"] as const);
 
 /** The stop checks. Each keeps its own per-agent block counter and cap. */
 export type StopCheckName = (typeof STOP_CHECK_NAMES)[number];
@@ -203,6 +204,12 @@ export type StopCheckName = (typeof STOP_CHECK_NAMES)[number];
  *  may be an equivalent mutant no test can kill, and the agent's answer to
  *  that is prose in its report, which no stop can read. */
 export const TASK_MUTATION_STOP_CHECK_MAX_BLOCKS = 2;
+
+/** At most this many Task-owner-check blocks per spawned agent (ADR-0092);
+ *  then the arm fails open with a note. The same cap as the mutation check,
+ *  for the same reason: an equivalent mutant of the owner is answered in
+ *  prose, which no stop can read. */
+export const TASK_OWNER_STOP_CHECK_MAX_BLOCKS = 2;
 
 /** Blocks already issued to one agent by one check, or why that count cannot be read. */
 export type StopCheckBlockCount =
@@ -307,6 +314,11 @@ export const AFFECTED_BLOCK_HEADING = "## Affected-test stop check";
  *  present exactly when that arm blocks: for a check that never ran, ran over
  *  other bytes, or left survivors. */
 export const MUTATION_BLOCK_HEADING = "## Task mutation check";
+
+/** The heading of the Task owner check's part of a block message (ADR-0092).
+ *  It is present exactly when that arm blocks: for a check that never ran,
+ *  ran over other bytes, or left a finding the Task answers. */
+export const OWNER_BLOCK_HEADING = "## Task owner check";
 
 /** The line introducing a blocking run's expected-RED acceptance failures,
  *  which do not block. */

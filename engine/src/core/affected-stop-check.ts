@@ -5,7 +5,8 @@
  *   `classifyFailedTestcase`, so one it would excuse as expected RED never
  *   blocks.
  * - `stopCheckBlockDecision` is the whole block-counter transition rule for
- *   every stop check (the two runner checks and the Task mutation check),
+ *   every stop check (the two runner checks, the Task mutation check and
+ *   the Task owner check),
  *   applying `blockAdmission`, the per-check cap gate.
  * - `renderAffectedBlock` and `renderStopChecksBlock` build the one combined
  *   message a blocked agent reads.
@@ -25,8 +26,10 @@ import {
   AFFECTED_EXCUSED_HEADING,
   AFFECTED_NOTE_TEXT,
   MUTATION_BLOCK_HEADING,
+  OWNER_BLOCK_HEADING,
   STOP_CHECK_NAMES,
   TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
+  TASK_OWNER_STOP_CHECK_MAX_BLOCKS,
   type AFFECTED_STOP_CHECK_MAX_BLOCKS,
   type AffectedRunVerdict,
   type ExcusedAcceptanceTestcase,
@@ -71,13 +74,14 @@ export const judgeAffectedRun: JudgeAffectedRunFn = (projection, expectation): A
  * for: a passing, skipped, off or fail-open check is null. The decision is
  * generic over the failure so a block can carry the very failure it blocks for.
  */
-export type StopCheckFailures<Acceptance, Affected, Mutation> =
-  Readonly<{ acceptance: Acceptance | null; affected: Affected | null; mutation: Mutation | null }>;
+export type StopCheckFailures<Acceptance, Affected, Mutation, Owner> =
+  Readonly<{ acceptance: Acceptance | null; affected: Affected | null; mutation: Mutation | null; owner: Owner | null }>;
 
 /**
  * Each check's own block cap, typed by what its cap note states.
- * - `affected` and `mutation` are the literal types of their constants. Each
- *   note states that constant, so any other cap would make the note misstate it.
+ * - `affected`, `mutation` and `owner` are the literal types of their
+ *   constants. Each note states that constant, so any other cap would make the
+ *   note misstate it.
  * - `acceptance` is any count. Its note writes in the cap it is given, so it
  *   is truthful for every value. Its constant, `ACCEPTANCE_STOP_CHECK_MAX_BLOCKS`,
  *   belongs to the acceptance shell, and a pure module does not import a shell.
@@ -86,6 +90,7 @@ export type StopCheckBlockCaps = Readonly<{
   acceptance: number;
   affected: typeof AFFECTED_STOP_CHECK_MAX_BLOCKS;
   mutation: typeof TASK_MUTATION_STOP_CHECK_MAX_BLOCKS;
+  owner: typeof TASK_OWNER_STOP_CHECK_MAX_BLOCKS;
 }>;
 
 /** A check that blocks this stop: the failure it blocks for, and the block
@@ -93,43 +98,54 @@ export type StopCheckBlockCaps = Readonly<{
 export type Blocking<Failure> = Readonly<{ failure: Failure; blocks: number }>;
 
 /**
- * One slot per stop check, in check order, with at least one filled. A block
- * and its message are both of this shape, so neither can name no check.
+ * One slot per stop check, in check order, with at least one filled: each
+ * shape names the first filled slot, the slots before it empty and the slots
+ * after it optional. A block and its message are both of this shape, so
+ * neither can name no check.
  */
-export type SomeChecks<Acceptance, Affected, Mutation> =
-  | AcceptanceFirst<Acceptance, Affected, Mutation>
-  | AffectedFirst<Affected, Mutation>
-  | MutationOnly<Mutation>;
+export type SomeChecks<Acceptance, Affected, Mutation, Owner> =
+  | AcceptanceFirst<Acceptance, Affected, Mutation, Owner>
+  | AffectedFirst<Affected, Mutation, Owner>
+  | MutationFirst<Mutation, Owner>
+  | OwnerOnly<Owner>;
 
 /** The checks with acceptance filled, the others optional. */
-type AcceptanceFirst<Acceptance, Affected, Mutation> = Readonly<{ acceptance: Acceptance; affected: Affected | null; mutation: Mutation | null }>;
+type AcceptanceFirst<Acceptance, Affected, Mutation, Owner> =
+  Readonly<{ acceptance: Acceptance; affected: Affected | null; mutation: Mutation | null; owner: Owner | null }>;
 /** The checks with acceptance empty and affected filled. */
-type AffectedFirst<Affected, Mutation> = Readonly<{ acceptance: null; affected: Affected; mutation: Mutation | null }>;
-/** The checks with only mutation filled. */
-type MutationOnly<Mutation> = Readonly<{ acceptance: null; affected: null; mutation: Mutation }>;
+type AffectedFirst<Affected, Mutation, Owner> =
+  Readonly<{ acceptance: null; affected: Affected; mutation: Mutation | null; owner: Owner | null }>;
+/** The checks with acceptance and affected empty and mutation filled. */
+type MutationFirst<Mutation, Owner> = Readonly<{ acceptance: null; affected: null; mutation: Mutation; owner: Owner | null }>;
+/** The checks with only owner filled. */
+type OwnerOnly<Owner> = Readonly<{ acceptance: null; affected: null; mutation: null; owner: Owner }>;
 
 /*
  * Which shape a `SomeChecks` has, read from its slots' null-ness. TypeScript
  * never narrows a union on a property whose type is generic, so a null test on
- * `checks.acceptance` narrows that slot but not `checks`; these two predicates
- * are where the shape is read, and a check that is neither is `MutationOnly`.
+ * `checks.acceptance` narrows that slot but not `checks`; these predicates are
+ * where the shape is read, and a check that is none of them is `OwnerOnly`.
  * Pass the check type explicitly: on a union one predicate has already
  * narrowed, inference would read an empty slot's null as part of the check.
  */
-const isAcceptanceFirst = <Check>(checks: SomeChecks<Check, Check, Check>): checks is AcceptanceFirst<Check, Check, Check> =>
+const isAcceptanceFirst = <Check>(checks: SomeChecks<Check, Check, Check, Check>): checks is AcceptanceFirst<Check, Check, Check, Check> =>
   checks.acceptance !== null;
-const isAffectedFirst = <Check>(checks: SomeChecks<Check, Check, Check>): checks is AffectedFirst<Check, Check> =>
+const isAffectedFirst = <Check>(checks: SomeChecks<Check, Check, Check, Check>): checks is AffectedFirst<Check, Check, Check> =>
   checks.acceptance === null && checks.affected !== null;
+const isMutationFirst = <Check>(checks: SomeChecks<Check, Check, Check, Check>): checks is MutationFirst<Check, Check> =>
+  checks.acceptance === null && checks.affected === null && checks.mutation !== null;
 
 /** The slots as `SomeChecks`, or null when none is filled. */
-function someChecks<Acceptance, Affected, Mutation>(
+function someChecks<Acceptance, Affected, Mutation, Owner>(
   acceptance: Acceptance | null,
   affected: Affected | null,
   mutation: Mutation | null,
-): SomeChecks<Acceptance, Affected, Mutation> | null {
-  if (acceptance !== null) return freeze({ acceptance, affected, mutation });
-  if (affected !== null) return freeze({ acceptance: null, affected, mutation });
-  return mutation === null ? null : freeze({ acceptance: null, affected: null, mutation });
+  owner: Owner | null,
+): SomeChecks<Acceptance, Affected, Mutation, Owner> | null {
+  if (acceptance !== null) return freeze({ acceptance, affected, mutation, owner });
+  if (affected !== null) return freeze({ acceptance: null, affected, mutation, owner });
+  if (mutation !== null) return freeze({ acceptance: null, affected: null, mutation, owner });
+  return owner === null ? null : freeze({ acceptance: null, affected: null, mutation: null, owner });
 }
 
 /**
@@ -139,20 +155,31 @@ function someChecks<Acceptance, Affected, Mutation>(
  * check changes the slot shape here, never in a shell.
  */
 export function mapSomeChecks<Check, Part>(
-  checks: SomeChecks<Check, Check, Check>,
+  checks: SomeChecks<Check, Check, Check, Check>,
   f: (name: StopCheckName, check: Check) => Part,
-): SomeChecks<Part, Part, Part> {
+): SomeChecks<Part, Part, Part, Part> {
   const at = (name: StopCheckName, check: Check | null): Part | null => check === null ? null : f(name, check);
   if (isAcceptanceFirst<Check>(checks)) {
-    return freeze({ acceptance: f("acceptance", checks.acceptance), affected: at("affected", checks.affected), mutation: at("mutation", checks.mutation) });
+    return freeze({
+      acceptance: f("acceptance", checks.acceptance),
+      affected: at("affected", checks.affected),
+      mutation: at("mutation", checks.mutation),
+      owner: at("owner", checks.owner),
+    });
   }
-  if (isAffectedFirst<Check>(checks)) return freeze({ acceptance: null, affected: f("affected", checks.affected), mutation: at("mutation", checks.mutation) });
-  return freeze({ acceptance: null, affected: null, mutation: f("mutation", checks.mutation) });
+  if (isAffectedFirst<Check>(checks)) {
+    return freeze({ acceptance: null, affected: f("affected", checks.affected), mutation: at("mutation", checks.mutation), owner: at("owner", checks.owner) });
+  }
+  if (isMutationFirst<Check>(checks)) {
+    return freeze({ acceptance: null, affected: null, mutation: f("mutation", checks.mutation), owner: at("owner", checks.owner) });
+  }
+  return freeze({ acceptance: null, affected: null, mutation: null, owner: f("owner", checks.owner) });
 }
 
 /** The checks one block names: at least one, in check order. A check absent
  *  here keeps its counter unchanged. */
-export type BlockingChecks<Acceptance, Affected, Mutation> = SomeChecks<Blocking<Acceptance>, Blocking<Affected>, Blocking<Mutation>>;
+export type BlockingChecks<Acceptance, Affected, Mutation, Owner> =
+  SomeChecks<Blocking<Acceptance>, Blocking<Affected>, Blocking<Mutation>, Blocking<Owner>>;
 
 /**
  * The decision for one stop. A block names exactly the checks that contribute
@@ -160,20 +187,22 @@ export type BlockingChecks<Acceptance, Affected, Mutation> = SomeChecks<Blocking
  * every counter, so it names none. `notes` explain every failing check that
  * was not allowed to block.
  */
-export type StopCheckBlockDecision<Acceptance, Affected, Mutation> =
-  | Readonly<{ outcome: "block"; blocking: BlockingChecks<Acceptance, Affected, Mutation>; notes: readonly string[] }>
+export type StopCheckBlockDecision<Acceptance, Affected, Mutation, Owner> =
+  | Readonly<{ outcome: "block"; blocking: BlockingChecks<Acceptance, Affected, Mutation, Owner>; notes: readonly string[] }>
   | Readonly<{ outcome: "proceed"; notes: readonly string[] }>;
 
 const CAP_NOTE: { readonly [K in StopCheckName]: (cap: StopCheckBlockCaps[K]) => string } = freeze({
   acceptance: (cap) => `the acceptance stop check reached its ${cap}-block cap`,
   affected: () => AFFECTED_NOTE_TEXT["cap-reached"],
   mutation: () => `the Task mutation check reached its ${TASK_MUTATION_STOP_CHECK_MAX_BLOCKS}-block cap`,
+  owner: () => `the Task owner check reached its ${TASK_OWNER_STOP_CHECK_MAX_BLOCKS}-block cap`,
 });
 
 const UNREADABLE_NOTE: Readonly<Record<StopCheckName, (reason: string) => string>> = freeze({
   acceptance: (reason) => `the acceptance stop check's block counter is unreadable: ${reason}`,
   affected: (reason) => `${AFFECTED_NOTE_TEXT["counter-unreadable"]}: ${reason}`,
   mutation: (reason) => `the Task mutation check's block counter is unreadable: ${reason}`,
+  owner: (reason) => `the Task owner check's block counter is unreadable: ${reason}`,
 });
 
 /** Whether one check may still block this agent, and the count its counter
@@ -213,16 +242,17 @@ function checkStep<K extends StopCheckName, Failure>(
     : freeze({ blocking: freeze({ failure, blocks: admission.blocks }), note: null });
 }
 
-export function stopCheckBlockDecision<Acceptance, Affected, Mutation>(
+export function stopCheckBlockDecision<Acceptance, Affected, Mutation, Owner>(
   issued: Readonly<Record<StopCheckName, StopCheckBlockCount>>,
-  failures: StopCheckFailures<Acceptance, Affected, Mutation>,
+  failures: StopCheckFailures<Acceptance, Affected, Mutation, Owner>,
   caps: StopCheckBlockCaps,
-): StopCheckBlockDecision<Acceptance, Affected, Mutation> {
+): StopCheckBlockDecision<Acceptance, Affected, Mutation, Owner> {
   const acceptance = checkStep("acceptance", issued.acceptance, failures.acceptance, caps.acceptance);
   const affected = checkStep("affected", issued.affected, failures.affected, caps.affected);
   const mutation = checkStep("mutation", issued.mutation, failures.mutation, caps.mutation);
-  const notes = freeze([acceptance.note, affected.note, mutation.note].filter((note): note is string => note !== null));
-  const blocking = someChecks(acceptance.blocking, affected.blocking, mutation.blocking);
+  const owner = checkStep("owner", issued.owner, failures.owner, caps.owner);
+  const notes = freeze([acceptance.note, affected.note, mutation.note, owner.note].filter((note): note is string => note !== null));
+  const blocking = someChecks(acceptance.blocking, affected.blocking, mutation.blocking, owner.blocking);
   return blocking === null ? freeze({ outcome: "proceed", notes }) : freeze({ outcome: "block", blocking, notes });
 }
 
@@ -267,12 +297,13 @@ export function renderAffectedBlock(
 }
 
 /** The parts of one combined block message. At least one check contributes. */
-export type StopChecksBlockParts = SomeChecks<string, string, string>;
+export type StopChecksBlockParts = SomeChecks<string, string, string, string>;
 
 const BLOCK_HEADING: Readonly<Record<StopCheckName, string>> = freeze({
   acceptance: ACCEPTANCE_BLOCK_HEADING,
   affected: AFFECTED_BLOCK_HEADING,
   mutation: MUTATION_BLOCK_HEADING,
+  owner: OWNER_BLOCK_HEADING,
 });
 
 /** One combined block message: each contributing check's part under its own

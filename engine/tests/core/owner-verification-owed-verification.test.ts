@@ -114,7 +114,7 @@ describe("ownerObservationDecision — the gate's owner check before anything ru
 
 describe("verificationRuns — each owed obligation's run, decided once", () => {
   it("FR-008: a verify obligation mutates through the frozen runner, an exempt one runs coverage only, in stamp order", () => {
-    const planned = verificationRuns(owedOf(ADMISSION, FEES), RUNNER);
+    const planned = verificationRuns(owedOf(ADMISSION, FEES).obligations, RUNNER);
     expect(planned.ok).toBe(true);
     if (!planned.ok) return;
     expect(planned.value.runs).toEqual([
@@ -126,14 +126,14 @@ describe("verificationRuns — each owed obligation's run, decided once", () => 
   });
 
   it("a Wave owing mutation without a frozen runner is runner-missing, naming every obligation that owes it", () => {
-    expect(verificationRuns(owedOf(ADMISSION, FEES), undefined)).toEqual({
+    expect(verificationRuns(owedOf(ADMISSION, FEES).obligations, undefined)).toEqual({
       ok: false,
       error: { kind: "runner-missing", detail: "INV-1 owe mutation verification, but the frozen verification manifest declares no affectedRunner" },
     });
   });
 
   it("a Wave owing only exempt obligations needs no runner and reports a zero per-run bound", () => {
-    expect(verificationRuns(owedOf(FEES), undefined)).toEqual({
+    expect(verificationRuns(owedOf(FEES).obligations, undefined)).toEqual({
       ok: true,
       value: { runs: [{ kind: "exempt", obligation: FEES }], verifying: [], perRunMs: 0 },
     });
@@ -142,7 +142,7 @@ describe("verificationRuns — each owed obligation's run, decided once", () => 
   it("decides by each obligation's policy, never by object identity: an equal copy is planned the same", () => {
     const copy = ownerObligation({ ...ADMISSION, invariant: ADMISSION.invariant });
     expect(copy).not.toBe(ADMISSION);
-    const planned = verificationRuns(owedOf(copy), RUNNER);
+    const planned = verificationRuns(owedOf(copy).obligations, RUNNER);
     expect(planned.ok && planned.value.runs[0].kind).toBe("mutate");
   });
 });

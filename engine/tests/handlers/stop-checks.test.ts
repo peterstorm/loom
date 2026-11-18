@@ -31,6 +31,7 @@ import {
 } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../src/core/changed-files";
 import { NO_TASK_MUTATION_CHECK } from "../../src/core/task-mutation-check";
+import { NO_TASK_OWNER_CHECK } from "../../src/core/task-owner-check";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import {
   ACCEPTANCE_STOP_CHECK_MAX_BLOCKS,
@@ -259,6 +260,7 @@ function input(
     agentKey: "session.agent",
     changedFiles: () => observation,
     taskMutation: () => NO_TASK_MUTATION_CHECK,
+    taskOwnerCheck: () => NO_TASK_OWNER_CHECK,
     hookStartedAtMs: startedAtMs,
   };
 }
@@ -699,7 +701,7 @@ describe("runStopChecks: one lock, one sequence, one message, one budget", () =>
 describe("stopChecksReportLine (Pi report-only)", () => {
   it("prints nothing for a skip and one operator line naming both checks otherwise", () => {
     expect(stopChecksReportLine("T2", { kind: "skip" })).toBeNull();
-    expect(stopChecksReportLine("T2", { kind: "passed" })).toBe("stop checks: every acceptance, affected-test and Task mutation check that ran for T2 passes");
+    expect(stopChecksReportLine("T2", { kind: "passed" })).toBe("stop checks: every acceptance, affected-test, Task mutation and Task owner check that ran for T2 passes");
     expect(stopChecksReportLine("T2", { kind: "note", message: "did not decide" })).toBe("did not decide");
     expect(stopChecksReportLine("T2", { kind: "block", message: "still failing" }))
       .toBe("stop checks (report-only on Pi; the agent has already ended): T2\nstill failing");

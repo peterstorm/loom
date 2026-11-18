@@ -37,6 +37,7 @@ import { claudeEpochLedger } from "./update-task-status";
 import { publishStopCheckNote } from "../../stop-check-note-sidecar";
 import { contractStubStopNote } from "../../orchestration/contract-stub-materialization";
 import { observeTaskMutation } from "../../orchestration/task-mutation-record";
+import { observeTaskOwnerCheck } from "../../orchestration/task-owner-check-record";
 import { LOOM_COMMANDS } from "../../utils/loom-package-root";
 import { readFileSync } from "node:fs";
 import { claudeFinalTurnHandedBack, parseClaudeTranscript } from "../../core/claude-transcript-projection";
@@ -406,7 +407,7 @@ export const runDispatch = async (
   if (resolution.kind === "unresolved") return unresolvedTaskGraph(resolution.cause);
   const { manager } = resolution;
 
-  // The stop checks (acceptance, affected tests, the Task mutation record) run before settlement
+  // The stop checks (acceptance, affected tests, the Task mutation and owner records) run before settlement
   // and before cleanup: a blocked stop keeps this same agent working, so
   // nothing may settle the Task or release the agent's runtime bindings. They
   // are total and fail open. The changed files come from this agent's own
@@ -433,6 +434,7 @@ export const runDispatch = async (
       agentKey: `${sidecar.sessionId}.${sidecar.agentId}`,
       changedFiles: epochChangedFiles(epoch, stopCheckPorts.pathExists),
       taskMutation: observeTaskMutation(LOOM_COMMANDS),
+      taskOwnerCheck: observeTaskOwnerCheck(LOOM_COMMANDS),
       hookStartedAtMs,
     }, stopCheckPorts);
     // A block keeps the agent working only if the harness can hold it open. An

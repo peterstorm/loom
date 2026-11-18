@@ -36,8 +36,9 @@ import {
   type TaskMutationStanding,
 } from "../../src/core/task-mutation-check";
 import type { TaskMutant } from "../../src/core/owner-verification/mutation-plan";
+import { NO_TASK_OWNER_CHECK } from "../../src/core/task-owner-check";
 import { REPORT_ONLY_STOP_CHECK_PORTS } from "../../src/handlers/subagent-stop/acceptance-stop-check";
-import { runStopChecks, type StopChecksInput } from "../../src/handlers/subagent-stop/stop-checks";
+import type { StopChecksInput } from "../../src/handlers/subagent-stop/stop-checks";
 import type { Evidence } from "../../src/machine";
 import {
   observeTaskMutation,
@@ -51,7 +52,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { task } from "../fixtures/contract-status-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
-import { recordingStopCheckPorts } from "../fixtures/stop-check-runners";
+import { outcomeText, recordingStopCheckPorts, stopsOf } from "../fixtures/stop-check-runners";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { junitReport, mutationManifest, START_SHA, talliedResult, type JunitCase, type MutationManifestOverrides } from "../fixtures/task-mutation";
 
@@ -135,15 +136,13 @@ function stopper(space: ReturnType<typeof workspace>, options: StopOptions = {})
       changed: changedFilesAtStop(files.map((path): Evidence => ({ kind: "FileWrite", path: join(root, path), via: "tool" })), root, () => true),
     }),
     taskMutation: options.taskMutation ?? observeTaskMutation(COMMANDS, () => space.records),
+    taskOwnerCheck: () => NO_TASK_OWNER_CHECK,
     hookStartedAtMs: 0,
   };
-  const shell = options.root === "unavailable"
-    ? { ...ports, repositoryRoot: () => ({ ok: false as const, reason: "no Git repository here" }) }
-    : ports;
-  return { stop: () => runStopChecks(input, shell), counts, launches };
+  return { stop: stopsOf(input, ports, options.root), counts, launches };
 }
 
-const textOf = (outcome: StopChecksOutcome): string => outcome.kind === "block" || outcome.kind === "note" ? outcome.message : "";
+const textOf = outcomeText;
 
 describe("the Task mutation check at a stop", () => {
   it("holds a stop whose check never ran, naming the one command, and runs no runner for it", async () => {

@@ -96,6 +96,14 @@ What one **Task Mutation Check** run leaves: its result (no mutants, clean, surv
 _Avoid_: Mutation receipt, mutation proof (it proves nothing to settlement), mutation evidence
 _Mechanics_: Keyed by Task, not by Agent, because the check cannot learn which Agent ran it.
 
+**Task Owner Check**:
+The Wave Gate's **Owner Verification**, run by an implementation Agent over the owned invariants its Task writes, before it stops: sibling coverage over the paths settled at the stop, then the gate's own mutation plan over the owner. Only the matrix test answers its findings, so it holds the stop, a bounded number of times, only for a Task that lists the matrix test, or for a missing or stale result. It fails open, is report-only on Pi, and is never completion evidence; the gate's check stays the control.
+_Avoid_: Task-level Owner Verification (the verdicts are the gate's; the scope and the deadline are the Task's), owner gate, early gate
+
+**Task Owner Record**:
+What one **Task Owner Check** run leaves: the gate's verdict per owed invariant, or why it could not run, with a digest of the Task's base, its owed obligations and every family input, so a record of other bytes is stale. One runtime file per Task, beside the **Task Mutation Record**, never in the TaskGraph.
+_Avoid_: Owner receipt, owner proof
+
 **Stop-Check Plan**:
 The read-only view of what the acceptance and affected-test stop checks would do at one Task's stop: the same pure plan both live checks decide from. It runs nothing.
 _Avoid_: Dry run, stop-check preview, acceptance dry run
@@ -138,7 +146,7 @@ _Avoid_: using it for new work
 - A TaskGraph has at most one **Test-File Classification**
 - The **Evidence Minting Rule** is the only source of Evidence Ledger facts on either harness
 - **Changed Files** feed only the **Affected-Test Stop Check** and the **Stop-Check Plan**
-- A Task has at most one **Task Mutation Record**
+- A Task has at most one **Task Mutation Record** and at most one **Task Owner Record**
 - No stop check can satisfy or fail a Proof Obligation
 - A **Distill Task** has exactly one **Distill Scope**
 - An **Added Task** is one Task of the active Wave; each Task that waits for it is under a **Dispatch Hold** until it settles

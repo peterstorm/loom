@@ -13,7 +13,8 @@
  *   observation is bound to. Branded, and built only by the decision, so the
  *   owed ids the check authorizes and the obligations the runner iterates
  *   cannot disagree.
- * - `verificationRuns` is the runner's per-obligation plan, computed once:
+ * - `verificationRuns` is the runner's per-obligation plan, computed once
+ *   over the gate's owed obligations or a Task owner check's (ADR-0092):
  *   each obligation's coverage always runs, and its mutation runs through the
  *   frozen runner exactly when `verifyOwed` selects it. A Wave owing
  *   mutation without a frozen runner is the `runner-missing` failure, so a
@@ -106,8 +107,11 @@ export type VerificationRuns = Readonly<{
  * asked per obligation, so the owes-mutation rule stays in its one home and
  * no run is joined back to it by identity.
  */
-export function verificationRuns(owed: OwedVerification, runner: AffectedRunner | undefined): DomainResult<VerificationRuns, OwnerInfrastructureFailure> {
-  const verifying = verifyOwed(owed.obligations);
+export function verificationRuns(
+  obligations: NonEmpty<OwnerObligation>,
+  runner: AffectedRunner | undefined,
+): DomainResult<VerificationRuns, OwnerInfrastructureFailure> {
+  const verifying = verifyOwed(obligations);
   if (verifying.length > 0 && runner === undefined) {
     return failure(freeze({
       kind: "runner-missing",
@@ -118,7 +122,7 @@ export function verificationRuns(owed: OwedVerification, runner: AffectedRunner 
     runner !== undefined && verifyOwed([obligation]).length > 0
       ? freeze({ kind: "mutate", obligation, runner })
       : freeze({ kind: "exempt", obligation });
-  const [first, ...rest] = owed.obligations;
+  const [first, ...rest] = obligations;
   const runs: NonEmpty<ObligationRun> = [runOf(first), ...rest.map(runOf)];
   return success(freeze({
     runs: Object.freeze(runs),

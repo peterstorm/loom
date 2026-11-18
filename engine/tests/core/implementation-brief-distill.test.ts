@@ -29,6 +29,7 @@ import { authorizeImplementationSpawn } from "../../src/core/implementation-retr
 import { DECISION_RECORD_AGENT, DISTILL_AGENT } from "../../src/core/model-profiles";
 import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
 import { TASK_MUTATION_BASH_TIMEOUT_MS } from "../../src/core/task-mutation-check";
+import { TASK_OWNER_CHECK_BASH_TIMEOUT_MS } from "../../src/core/task-owner-check";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { IMPLEMENTATION_BRIEF_TEMPLATE, renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
@@ -346,6 +347,60 @@ describe("the Task mutation check in a brief (ADR-0071)", () => {
     ["a manifest with no affected runner", pending(), { verificationManifest: mutationManifest({ affectedRunner: undefined }) }],
   ])("says nothing of the check to %s", (_label, task, overrides) => {
     expect(render(task, { verificationManifest: mutationManifest(), ...overrides })).not.toContain(HEADING);
+  });
+});
+
+describe("the Task owner check in a brief (ADR-0092)", () => {
+  const HEADING = "**Task owner check.**";
+  const MATRIX = "src/order/pricing.matrix.test.ts";
+  const PRICING = ownerObligation({
+    invariant: "INV-4", title: "Prices come only from the pricing module", statement: null,
+    owner: OWNER, siblings: [{ path: SIBLING, note: null }], matrixTest: MATRIX, mutation: { kind: "verify" },
+  });
+  const writer = (files: readonly string[]): Task => implementer("T5", OWNER, { status: "pending", file_list: [...files] });
+  const policyOf = (task: Task, stamp: readonly typeof PRICING[] | undefined): string =>
+    section(render(task, {
+      verificationManifest: mutationManifest(),
+      roster: [task, implementer("T6", SIBLING), PASS],
+      ownership: briefOwnership(stamp, [], task.file_list ?? []),
+    }), "Verification Policy");
+
+  it("tells a Task writing the owner and the matrix test the command, its timeout, what it checks and how to answer", () => {
+    const text = policyOf(writer([OWNER, MATRIX]), [PRICING]);
+    expect(text).toContain(`${HEADING} Your Task writes the family of an owned Invariant the Wave Gate verifies.`);
+    expect(text).toContain(`a timeout of ${TASK_OWNER_CHECK_BASH_TIMEOUT_MS} ms:\n\`${loomCommandsAt("/loom").ownerCheck("T5")}\`\n`);
+    expect(text).toContain("at most 24 per Invariant");
+    // The sibling is a concurrent Task's work, so the stop asks for the owner only.
+    expect(text).toContain(`- INV-4 (Prices come only from the pricing module): the matrix test \`${MATRIX}\` must import \`${OWNER}\`, and every mutant`);
+    expect(text).toContain("You list the matrix test, so its findings are yours to answer.");
+    expect(text).toContain("For a missing path, make the matrix test import it");
+    expect(text).toContain("For a survivor, add an assertion to the matrix test");
+    expect(text).toContain("at most 2 times");
+    expect(text).toContain("never holds you");
+  });
+
+  it("tells a Task writing only the owner that the matrix test's findings are reported, not its to answer", () => {
+    expect(policyOf(writer([OWNER]), [PRICING])).toContain("You do not list the matrix test, so its findings are reported to the orchestrator");
+  });
+
+  it("keeps an owing implementer's brief admissible to the spawn gate", () => {
+    const task = writer([OWNER, MATRIX]);
+    const prompt = render(task, {
+      verificationManifest: mutationManifest(),
+      roster: [task, implementer("T6", SIBLING), PASS],
+      ownership: briefOwnership([PRICING], [], task.file_list ?? []),
+    });
+    expect(prompt).toContain(HEADING);
+    expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
+    expect(validateTemplateSubstitution(prompt, true)).toEqual({ kind: "allow" });
+  });
+
+  it.each<[string, Task, readonly typeof PRICING[] | undefined]>([
+    ["a Distill Task", PASS, [PRICING]],
+    ["a graph populated before owner verification", writer([OWNER, MATRIX]), undefined],
+    ["a Task that touches no owned family", writer(["src/order/other.ts"]), [PRICING]],
+  ])("says nothing of the check to %s", (_label, task, stamp) => {
+    expect(policyOf(task, stamp)).not.toContain(HEADING);
   });
 });
 

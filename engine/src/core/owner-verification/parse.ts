@@ -219,22 +219,29 @@ function parseInvariantVerdict(raw: unknown, path: string): Parsed<InvariantVerd
     : refused(errors);
 }
 
+/**
+ * Per-Invariant verdicts at `path`, each rebuilt in its canonical shape, an
+ * Invariant at most once: the gate observation's and the Task owner
+ * check record's (ADR-0092) one reading of them.
+ */
+export function parseInvariantVerdicts(raw: unknown, path: string): Parsed<readonly InvariantVerdict[]> {
+  const verdicts = collectDenseArray(raw, path, (entry, entryPath) => toElementResult(parseInvariantVerdict(entry, entryPath)));
+  if (verdicts.kind === "not-array") return refused([`${path} must be an array`]);
+  if (verdicts.errors.length > 0) return refused(verdicts.errors);
+  const ids = verdicts.values.map(({ invariant }) => invariant);
+  if (new Set(ids).size !== ids.length) return refused([`${path} names an Invariant more than once`]);
+  return parsed(freezeArray(verdicts.values));
+}
+
 function parseVerifiedObservation(raw: UnknownRecord, path: string): Parsed<OwnerVerificationObservation> {
   const record = exactRecord(raw, ["kind", "obligationsDigest", "boundMs", "verdicts"], path);
   if (!record.ok) return record;
   const obligations = parseDigest(record.value.obligationsDigest, `${path}.obligationsDigest`);
   const boundMs = parseCount(record.value.boundMs, `${path}.boundMs`);
-  const verdicts = collectDenseArray(record.value.verdicts, `${path}.verdicts`, (entry, entryPath) =>
-    toElementResult(parseInvariantVerdict(entry, entryPath)));
-  const errors = errorsOf([obligations, boundMs]);
-  if (verdicts.kind === "not-array") errors.push(`${path}.verdicts must be an array`);
-  else errors.push(...verdicts.errors);
-  if (errors.length > 0 || !obligations.ok || !boundMs.ok || verdicts.kind === "not-array") return refused(errors);
-  const ids = verdicts.values.map(({ invariant }) => invariant);
-  if (new Set(ids).size !== ids.length) return refused([`${path}.verdicts names an Invariant more than once`]);
-  return parsed(freeze({
-    kind: "verified", obligationsDigest: obligations.value, boundMs: boundMs.value, verdicts: freezeArray(verdicts.values),
-  }));
+  const verdicts = parseInvariantVerdicts(record.value.verdicts, `${path}.verdicts`);
+  const errors = errorsOf([obligations, boundMs, verdicts]);
+  if (errors.length > 0 || !obligations.ok || !boundMs.ok || !verdicts.ok) return refused(errors);
+  return parsed(freeze({ kind: "verified", obligationsDigest: obligations.value, boundMs: boundMs.value, verdicts: verdicts.value }));
 }
 
 /** The owner-verification observation at `path`, rebuilt in its canonical shape: `verified` or `unavailable`. */

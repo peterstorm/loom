@@ -144,7 +144,8 @@ export const invariantVerdict = (obligation: OwnerObligation, coverage: Coverage
   mutation: mutationVerdictOf(obligation, evidence),
 });
 
-function verdictFailures(verdict: InvariantVerdict): readonly OwnerVerificationFailure[] {
+/** One verdict's blocking findings, coverage before mutation: what the gate blocks on, and what the Task owner check sorts (ADR-0092). */
+export function invariantVerdictFailures(verdict: InvariantVerdict): readonly OwnerVerificationFailure[] {
   const { invariant, owner, matrixTest } = verdict;
   const coverage = match(verdict.coverage)
     .with({ kind: "covered" }, (): readonly OwnerVerificationFailure[] => [])
@@ -165,7 +166,7 @@ function verdictFailures(verdict: InvariantVerdict): readonly OwnerVerificationF
 export const ownerVerificationFailures = (observation: OwnerVerificationObservation): readonly OwnerVerificationFailure[] =>
   match(observation)
     .with({ kind: "unavailable" }, ({ failure }): readonly OwnerVerificationFailure[] => [{ kind: "infrastructure", invariant: null, failure }])
-    .with({ kind: "verified" }, ({ verdicts }) => verdicts.flatMap(verdictFailures))
+    .with({ kind: "verified" }, ({ verdicts }) => verdicts.flatMap(invariantVerdictFailures))
     .exhaustive();
 
 /**

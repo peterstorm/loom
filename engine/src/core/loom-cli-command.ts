@@ -80,6 +80,9 @@ export type LoomCommands = Readonly<{
    *  TaskGraph lives in. The brief and a stop's block both print it, so an
    *  implementer is never told two forms. */
   mutationCheck: (taskId: string) => string;
+  /** The Task owner check for `taskId` (ADR-0092), printed by the brief and
+   *  a stop's block alike, as `mutationCheck` is. */
+  ownerCheck: (taskId: string) => string;
   /** The engine test run over `files` (repository-relative test files), one
    *  `--files` each (loom#198). In a TaskGraph that froze engine-run test
    *  evidence it is the only run settlement counts, and the evidence recorder
@@ -121,6 +124,7 @@ export function loomCommands(root: LoomPackageRoot): LoomCommands {
   const helper = `bun ${quoteShellArgument(`${root}/engine/src/cli.ts`)} helper`;
   return Object.freeze({
     mutationCheck: (taskId: string) => `${helper} mutation-check --task ${quoteShellArgument(taskId)}`,
+    ownerCheck: (taskId: string) => `${helper} owner-check --task ${quoteShellArgument(taskId)}`,
     runTests: (files: readonly string[]) => `${helper} run-tests${files.map((file) => ` --files ${quoteShellArgument(file)}`).join("")}`,
     auditNonce: (runDir: string, owner: SecurityAgentId) =>
       `${helper} security-audit nonce --out ${quoteShellArgument(runDir)} --artifact agents/${owner}/artifacts/<file>`,

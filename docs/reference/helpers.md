@@ -4,7 +4,7 @@ These helpers print what the engine already knows. Use them before a mutating op
 
 ## Shared behaviour
 
-- **Read-only, with two exceptions.** No helper documented on this page writes the State File or the evidence ledger, and none takes the TaskGraph lock. None writes the runtime directory except `mutation-check`, which writes one runtime record (its row below); and `run-tests` runs the project's runner, which writes its report at the path the frozen manifest names (its row below). Each is safe to run while a Wave, a Wave Gate or a subagent is live. `ledger-epoch` never writes, truncates or creates a file, the ledger and the subagent directory included.
+- **Read-only, with two exceptions.** No helper documented on this page writes the State File or the evidence ledger, and none takes the TaskGraph lock. None writes the runtime directory except `mutation-check` and `owner-check`, each of which writes one runtime record (their rows below); and `run-tests` runs the project's runner, which writes its report at the path the frozen manifest names (its row below). Each is safe to run while a Wave, a Wave Gate or a subagent is live. `ledger-epoch` never writes, truncates or creates a file, the ledger and the subagent directory included.
 - **Which graph.** The TaskGraph helpers read the default State File. Set `LOOM_STATE_PATH` to read a non-default graph.
 - **Shared refusals (exit 1).** `contract-status`, `stop-check-plan` and `red-then-green-status` exit 1 with `No task graph at <path>` when no TaskGraph exists, and with the load boundary's error when the graph is unreadable or corrupt. A corrupt graph is never reported as missing.
 - **`--task <id>` helpers.** `stop-check-plan` and `red-then-green-status` take exactly one argument. They also exit 1 when `--task` is missing or has no value, when an argument is left unconsumed, and when the Task id is not in the TaskGraph (`No task <id> in the TaskGraph`). A typo never reads as "nothing owed" or "not owed".
@@ -23,6 +23,7 @@ These helpers print what the engine already knows. Use them before a mutating op
 | `helper suggest-affected-runner [--preset <id>]` | the `affectedRunner` to declare, detected from the repository's `package.json` and lockfile, as a manifest fragment to paste | [Verification](../verification.md#declaring-the-affected-runner) |
 | `helper run-tests --files <path>...` | the engine test run: the frozen `affectedRunner` over the named test files, ending with the receipt line the evidence ledger records. In a TaskGraph with engine-run test evidence it is the only run settlement counts. Not read-only: the runner writes its report | [Verification](../verification.md#red-then-green-i6-what-a-run-must-be) |
 | `helper mutation-check --task <id>` | which changed lines a Task's tests do not answer. Not read-only: it writes one runtime record and only reads the real workspace | [Verification](../verification.md#task-mutation-check) |
+| `helper owner-check --task <id>` | the Wave Gate's owner verification over the owned invariants a Task writes, before it stops: a sibling the matrix test misses, a mutant of the owner it lets survive. Not read-only: it writes one runtime record and only reads the real workspace | [Verification](../verification.md#task-owner-check) |
 
 ## Inspecting one run
 
