@@ -357,9 +357,10 @@ export type CallerWriteMode = Readonly<{ taskId: string; mode: TaskWriteMode }>;
 export function callerWriteModeVerdict(caller: CallerWriteMode | undefined): HookResult {
   if (caller === undefined) return { kind: "allow" };
   return match(caller.mode)
-    .with("implementing", (): HookResult => ({ kind: "allow" }))
-    .with("attesting", (): HookResult => ({ kind: "block", message: attestationWriteRefusal(caller.taskId) }))
-    .with("unobservable", (): HookResult => ({ kind: "block", message: unobservableWriteModeRefusal(caller.taskId) }))
+    .with({ kind: "implementing" }, (): HookResult => ({ kind: "allow" }))
+    .with({ kind: "attesting" }, (): HookResult => ({ kind: "block", message: attestationWriteRefusal(caller.taskId) }))
+    .with({ kind: "unobservable" }, ({ reason }): HookResult =>
+      ({ kind: "block", message: unobservableWriteModeRefusal(caller.taskId, reason) }))
     .exhaustive();
 }
 

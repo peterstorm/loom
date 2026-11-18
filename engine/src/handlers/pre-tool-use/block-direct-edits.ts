@@ -36,9 +36,9 @@ import {
   type OrchestratedRepository,
 } from "../../core/block-direct-edits";
 import { nonEmpty } from "../../core/acceptance-contract/kernel";
-import { taskWriteMode, type AttestationTask } from "../../core/attestation-writes";
 import type { ImplementationBinding } from "../../core/implementation-binding";
 import { StateManager } from "../../state-manager";
+import { callerWriteModeOf, type TaskGraphSource } from "../attestation-mode";
 import { observeTaskGraphProjectBoundary, protectedDirs, subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
 import { readActiveAgentRoles, type ActiveAgent } from "../../machine/ledger";
 import { parseCanonicalTaskGraphPointer } from "../../machine/task-graph-pointer";
@@ -337,6 +337,9 @@ export function artifactWriteRequest(
   return { callerAgentId: input.agent_id ?? null, targetPath, projectRoot };
 }
 
+/** The calling Agent and its attempted binding (`null` binding: not a rostered implementation Agent). */
+export type CallerBinding = Readonly<{ callerId: string; binding: ImplementationBinding | null }>;
+
 /**
  * The caller's own binding, attempted HERE, before the decision, inside the
  * same handler that decides — Claude runs separate PreToolUse hooks in
@@ -346,7 +349,7 @@ function callerBinding(
   input: PreToolUseInput,
   sessionId: SessionId,
   roster: readonly ActiveAgent[] | null,
-): Readonly<{ callerId: string; binding: ImplementationBinding | null }> | null {
+): CallerBinding | null {
   const callerId = parseReportedAgentId(input.agent_id ?? "");
   return callerId === null
     ? null
@@ -358,43 +361,26 @@ function callerBinding(
  * attempted binding, every other rostered implementation Agent its observed
  * (never published) state.
  */
-function callerBindingProbe(sessionId: SessionId, caller: ReturnType<typeof callerBinding>): ImplementationBindingProbe {
+function callerBindingProbe(sessionId: SessionId, caller: CallerBinding | null): ImplementationBindingProbe {
   return (agentId) => caller !== null && agentId === caller.callerId && caller.binding !== null
     ? caller.binding
     : observeImplementationBinding(sessionId, agentId);
 }
 
 /**
- * The Tasks of the TaskGraph `source` resolves (`label` names it for the
- * operator), or `null` (announced) when none resolves or it cannot be read:
- * the attestation check then fails closed. Claude Code reads the session's
- * recorded TaskGraph, the one the attempt binding reads; Pi reads the graph
- * the child's write grant names.
- */
-export function readAttestationTasks(source: () => StateManager | null, label: string): readonly AttestationTask[] | null {
-  try {
-    const graph = source();
-    if (graph !== null) return graph.load().tasks;
-    process.stderr.write(`block-direct-edits: no TaskGraph resolves for ${label} to check attestation mode\n`);
-  } catch (e) {
-    process.stderr.write(
-      `block-direct-edits: cannot read the TaskGraph of ${label} to check attestation mode: ${e instanceof Error ? e.message : String(e)}\n`,
-    );
-  }
-  return null;
-}
-
-/**
  * Adapter for core's `callerWriteMode` (ADR-0085): the caller's bound attempt
- * names its Task, whose mode the session's TaskGraph answers. A caller with no
- * bound attempt answers `undefined`.
+ * names its Task, whose mode the session's recorded TaskGraph answers (the
+ * graph the attempt binding reads; `graphOf` is that resolver). A caller with
+ * no bound attempt answers `undefined`.
  */
-const claudeCallerWriteMode = (sessionId: SessionId | null, caller: ReturnType<typeof callerBinding>) => (): CallerWriteMode | undefined => {
+export const claudeCallerWriteMode = (
+  sessionId: SessionId | null,
+  caller: CallerBinding | null,
+  graphOf: (sessionId: SessionId) => TaskGraphSource = (id) => () => StateManager.fromSession(id),
+) => (): CallerWriteMode | undefined => {
   const binding = caller?.binding;
   if (sessionId === null || binding?.kind !== "bound") return undefined;
-  const taskId = binding.authority.taskId;
-  const tasks = readAttestationTasks(() => StateManager.fromSession(sessionId), `session ${sessionId}`);
-  return { taskId, mode: taskWriteMode(tasks, taskId) };
+  return callerWriteModeOf(binding.authority.taskId, graphOf(sessionId), `session ${sessionId}`);
 };
 
 // Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
