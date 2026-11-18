@@ -97,6 +97,19 @@ describe("reopen-task shell", () => {
     expect(readFileSync(statePath, "utf8")).toBe(before);
   });
 
+  it("refuses --needs tests on a TaskGraph that froze no Test-File Classification, without writing", async () => {
+    const statePath = installState();
+    const before = readFileSync(statePath, "utf8");
+    const result = await createReopenTaskOperation(quiet)([...ARGS, "--needs", "tests"]);
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("froze no Test-File Classification") });
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
+  it("refuses an unknown --needs before reading any graph", async () => {
+    const result = await createReopenTaskOperation(quiet)([...ARGS, "--needs", "everything"]);
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("--needs must be implementation or tests") });
+  });
+
   it("refuses a precondition without writing", async () => {
     const statePath = installState();
     const before = readFileSync(statePath, "utf8");

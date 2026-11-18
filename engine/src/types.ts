@@ -16,6 +16,7 @@ import type {
 import type { ImplementationAttemptContext } from "./core/implementation-retry";
 import type { StoredVerificationPolicy } from "./core/verification-policy";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
+import type { ReopenNeeds, TestsOnlyReopenScope } from "./core/reopen-scope";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
 import type {
   AcceptedWaveCompletionReceipt,
@@ -542,6 +543,15 @@ interface TaskCommonMetadataBase {
    * is refused by the TaskGraph task validator.
    */
   readonly implementation_attestation?: true;
+  /**
+   * A tests-only reopening in force (ADR-0093, `reopen-task --needs tests`):
+   * the Task's frozen Test-File Classification and the baseline its attempts
+   * are measured from. Its Proof owes changed test files, unchanged
+   * implementation files and regression, and no I6 order. Absent is a full
+   * re-implementation. Load-locked to its Proof's obligations; cleared when
+   * the reopened lineage settles implemented or escalated.
+   */
+  readonly reopen_scope?: TestsOnlyReopenScope;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
   /** The skeleton outcome registration recorded for each non-test file_list
@@ -815,6 +825,10 @@ export type TaskReopeningAudit = Readonly<{
    *  retired; null when no abandoned run was still on the graph (none had
    *  registered, or an earlier reopening already retired it). */
   abandonedRunId: OrchestrationRunId | null;
+  /** What the reopening said the Finding needs (ADR-0093). Recorded only for
+   *  `tests`; absent is the default full re-implementation, so an audit of a
+   *  reopening that named no `--needs` is byte-identical to before. */
+  needs?: Exclude<ReopenNeeds, "implementation">;
 }> & ReopenedTaskIds;
 
 /** Immutable audit of one Forward Fix, the retired operation that appended

@@ -13,6 +13,7 @@
 
 import { standingDispositions, type AdvisoryDecision } from "./advisory-disposition";
 import { isDistillTask } from "./distill-task";
+import { reopeningNeedsOf } from "./reopen-scope";
 import type { Task, TaskAddedEdit, TaskGraph, TaskWithdrawnEdit } from "../types";
 
 /** Finding counts as review left them on the Task. */
@@ -32,6 +33,8 @@ export type TaskFriction = Readonly<{
   failureKinds: readonly string[];
   /** Times an operator reopened it after it was implemented. */
   reopenings: number;
+  /** Of those, the reopenings for tests only (ADR-0093). */
+  testsOnlyReopenings: number;
   /** Audited plan edits of it: re-scopes and added dependencies. */
   planEdits: number;
   /** The Forward Fix Tasks that held it, in audit order (a retired operation an older run may carry, ADR-0086). */
@@ -59,6 +62,8 @@ export type WaveFriction = Readonly<{
   /** Completed-Wave reopenings for review integrity. */
   waveReopenings: number;
   taskReopenings: number;
+  /** Of those, the reopenings for tests only (ADR-0093). */
+  testsOnlyReopenings: number;
   forwardFixes: number;
   forwardFixWithdrawals: number;
   planEdits: number;
@@ -100,6 +105,8 @@ function taskFriction(graph: TaskGraph, task: Task): TaskFriction {
     infrastructureBlocks: transitions("infrastructure-blocked"),
     failureKinds: freeze(failureKinds),
     reopenings: count(graph.task_reopening_history, (audit) => audit.reopenedTaskIds.some((id) => id === task.id)),
+    testsOnlyReopenings: count(graph.task_reopening_history, (audit) =>
+      reopeningNeedsOf(audit) === "tests" && audit.reopenedTaskIds.some((id) => id === task.id)),
     planEdits: count(graph.wave_plan_edits, (edit) => edit.taskId === task.id),
     heldByForwardFixes: freeze((graph.forward_fix_history ?? [])
       .filter((audit) => audit.heldTaskIds.some((id) => id === task.id))
@@ -163,6 +170,7 @@ export function waveFriction(graph: TaskGraph, wave: number): WaveFriction {
     }),
     waveReopenings: ofWave(graph.wave_reopening_history),
     taskReopenings: ofWave(graph.task_reopening_history),
+    testsOnlyReopenings: count(graph.task_reopening_history, (audit) => audit.wave === wave && reopeningNeedsOf(audit) === "tests"),
     forwardFixes: ofWave(graph.forward_fix_history),
     forwardFixWithdrawals: count(graph.forward_fix_withdrawals, ({ audit }) => audit.wave === wave),
     planEdits: ofWave(graph.wave_plan_edits),

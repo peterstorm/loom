@@ -23,9 +23,10 @@ import {
   DECLARED_ARTIFACT_EXPECTATIONS,
   deriveProofObligations,
   TRUSTED_LEDGER_ONLY_POLICY,
+  type DeclaredArtifactExpectation,
 } from "../../src/core/proof-obligations";
 import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
-import { proofArtifactChanges, taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
+import { proofArtifactChanges, taskArtifactExpectation, taskArtifactScope } from "../../src/core/task-artifact-expectation";
 import { DISTILL_VERIFICATION_POLICY } from "../../src/core/verification-policy";
 import { renderImplementationLifecycleError } from "../../src/handlers/helpers/implementation-lifecycle-errors";
 import type { Task, TaskGraph } from "../../src/types";
@@ -69,18 +70,48 @@ describe("taskArtifactExpectation", () => {
 });
 
 describe("proofArtifactChanges", () => {
-  const changes = { attemptScope: ["src/attempt.ts"], cumulative: ["src/attempt.ts", "src/sibling.ts"] };
+  const changes = {
+    attemptScope: ["src/attempt.ts"],
+    cumulative: ["src/attempt.ts", "src/sibling.ts"],
+    sinceReopen: ["src/attempt.test.ts"],
+  };
+  const expecting = (declaredArtifactExpectation: DeclaredArtifactExpectation) => ({ declaredArtifactExpectation });
 
   it("judges a changed Proof by the cumulative delta and the other two by the attempt's own", () => {
-    expect(proofArtifactChanges("changed", changes)).toBe(changes.cumulative);
-    expect(proofArtifactChanges("attested", changes)).toBe(changes.attemptScope);
-    expect(proofArtifactChanges("preserved", changes)).toBe(changes.attemptScope);
+    expect(proofArtifactChanges(expecting("changed"), changes)).toBe(changes.cumulative);
+    expect(proofArtifactChanges(expecting("attested"), changes)).toBe(changes.attemptScope);
+    expect(proofArtifactChanges(expecting("preserved"), changes)).toBe(changes.attemptScope);
+    expect(proofArtifactChanges({}, changes)).toBe(changes.cumulative);
   });
 
   it("answers for every expectation", () => {
     for (const expectation of DECLARED_ARTIFACT_EXPECTATIONS) {
-      expect([changes.attemptScope, changes.cumulative]).toContain(proofArtifactChanges(expectation, changes));
+      expect([changes.attemptScope, changes.cumulative]).toContain(proofArtifactChanges(expecting(expectation), changes));
     }
+  });
+
+  it("judges a tests-only Proof by the delta since its reopening (ADR-0093)", () => {
+    const testsOnly = { testFiles: ["src/attempt.test.ts"] as const, implementationFiles: ["src/attempt.ts"] };
+    expect(proofArtifactChanges({ testsOnly }, changes)).toBe(changes.sinceReopen);
+  });
+});
+
+describe("taskArtifactScope", () => {
+  const scope = {
+    kind: "tests-only" as const,
+    test_files: ["src/a.test.ts"] as const,
+    implementation_files: ["src/a.ts"],
+    baseline: { kind: "awaiting-attempt" as const },
+  };
+
+  it("is the expectation for a Task with no tests-only scope", () => {
+    expect(taskArtifactScope({ agent: "code-implementer-agent" })).toEqual({ declaredArtifactExpectation: "changed" });
+    expect(taskArtifactScope({ agent: DISTILL_AGENT })).toEqual({ declaredArtifactExpectation: "preserved" });
+  });
+
+  it("is the frozen classification for a Task with one", () => {
+    expect(taskArtifactScope({ agent: "code-implementer-agent", reopen_scope: scope }))
+      .toEqual({ testsOnly: { testFiles: ["src/a.test.ts"], implementationFiles: ["src/a.ts"] } });
   });
 });
 

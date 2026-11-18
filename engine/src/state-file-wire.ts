@@ -75,6 +75,7 @@ import {
   parseEffectId,
   parseOrchestrationRunId,
   parseSlotId,
+  canonicalStructuralEquals,
   nonEmpty,
   type NonEmpty,
   type OrchestrationRunId,
@@ -86,8 +87,13 @@ import {
   parseTaskTestResult,
   redThenGreenScope,
   taskRedThenGreenEra,
+  testsOnlyScopeOfProof,
+  writtenContract,
+  type ArtifactScopeInput,
   type RedThenGreenScope,
+  type TaskProof,
 } from "./core/proof-obligations";
+import { parseTestsOnlyReopenScope, partitionsFileList, testsOnlyProofScope } from "./core/reopen-scope";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import {
   parseSettledFloor,
@@ -1165,7 +1171,7 @@ function parseTaskReopeningAudit(
 ): ParseResult<TaskReopeningAudit> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, TASK_REOPENING_AUDIT_FIELDS, [SWEPT_DISTILL_TASK_IDS_FIELD], label);
+  const fieldsError = exactFieldsError(record, TASK_REOPENING_AUDIT_FIELDS, [SWEPT_DISTILL_TASK_IDS_FIELD, "needs"], label);
   if (fieldsError !== null) return parseErr(fieldsError);
   if (record.schemaVersion !== 1 || record.kind !== "implemented-tasks-reopened") {
     return parseErr(`${label} has invalid schema or kind`);
@@ -1185,6 +1191,9 @@ function parseTaskReopeningAudit(
   if (abandonedRunId !== null && !abandonedRunId.ok) {
     return parseErr(`${label}.abandonedRunId: ${abandonedRunId.error.message}`);
   }
+  // Only a tests-only reopening records what it needed (ADR-0093): an absent
+  // field is the default full re-implementation, never spelled out.
+  if (record.needs !== undefined && record.needs !== "tests") return parseErr(`${label}.needs must be "tests" when present`);
   return parseOk(Object.freeze({
     schemaVersion: 1,
     kind: "implemented-tasks-reopened",
@@ -1192,6 +1201,7 @@ function parseTaskReopeningAudit(
     ...reopenedIds.value,
     reason: reason.value,
     abandonedRunId: abandonedRunId === null ? null : abandonedRunId.value,
+    ...(record.needs === "tests" ? { needs: "tests" as const } : {}),
   }));
 }
 
@@ -2213,6 +2223,43 @@ function distillTaskPerWaveError(tasks: readonly Record<string, unknown>[]): str
   return null;
 }
 
+/**
+ * What a stored Task's declared artifacts owe, as its Proof was derived
+ * (ADR-0093): a tests-only scope while `reopen_scope` is in force, which must
+ * parse against `file_list` and may sit only on a pending Task that a
+ * tests-only reopening could have scoped; the scope its settled tests-only
+ * Proof records once the lineage settled implemented; otherwise its
+ * `DeclaredArtifactExpectation`. Each refusal names the field it judged.
+ */
+function taskProofArtifactScope(
+  t: Record<string, unknown>,
+  proof: TaskProof,
+  fileList: readonly string[],
+  verification: ParsedTaskVerificationPolicy,
+  scope: RedThenGreenScope,
+  id: string,
+  label: string,
+): Readonly<{ ok: true; value: ArtifactScopeInput }> | Readonly<{ ok: false; error: string }> {
+  const refused = (problem: string) => Object.freeze({ ok: false as const, error: `${label}: ${problem}` });
+  if (t.reopen_scope !== undefined) {
+    const parsed = parseTestsOnlyReopenScope(t.reopen_scope, fileList, "reopen_scope");
+    if (!parsed.ok) return refused(parsed.errors.join("; "));
+    if (t.status !== "pending") return refused("a tests-only reopen_scope requires pending status; its lineage's settlement ends it");
+    if (t.implementation_attestation === true) return refused("a tests-only reopen_scope cannot coexist with attestation mode");
+    if (isDistillTask(t)) return refused("a Distill Task cannot be reopened for tests only");
+    if (writtenContract(scope, id) !== undefined) return refused("an Acceptance Contract writer cannot be reopened for tests only");
+    if (verification.policy.regression.kind !== "required") return refused("a tests-only reopen_scope requires regression verification");
+    return Object.freeze({ ok: true as const, value: Object.freeze({ testsOnly: testsOnlyProofScope(parsed.value) }) });
+  }
+  const settled = testsOnlyScopeOfProof(proof.obligations);
+  if (settled !== null && (t.status === "implemented" || t.status === "completed")) {
+    return partitionsFileList(settled.testFiles, settled.implementationFiles, fileList)
+      ? Object.freeze({ ok: true as const, value: Object.freeze({ testsOnly: settled }) })
+      : refused("a settled tests-only Proof's test and implementation files must partition file_list in its order");
+  }
+  return Object.freeze({ ok: true as const, value: Object.freeze({ declaredArtifactExpectation: taskArtifactExpectation(t) }) });
+}
+
 /** Status, review status/generation/run, and exact flat lifecycle invariants. */
 function taskStatusError(
   t: Record<string, unknown>,
@@ -2266,6 +2313,7 @@ function taskStatusError(
   }
 
   if (t.proof === undefined) {
+    if (t.reopen_scope !== undefined) return `${label}: a tests-only reopen_scope requires the Proof its scope derives`;
     if (t.status === "pending") {
       return t.legacy_missing_proof === undefined
         ? null
@@ -2277,18 +2325,25 @@ function taskStatusError(
   if (t.legacy_missing_proof === true) return `${label}: legacy_missing_proof requires absent Proof`;
   const proof = parseTaskProof(t.proof);
   if (!proof.ok) return `${label}: invalid proof: ${proof.errors.join("; ")}`;
-  // The one expectation rule (`taskArtifactExpectation`): a Distill Task's
-  // stored Proof must be exactly task-completed and behaviour-preserved.
+  const fileList: readonly string[] = Array.isArray(t.file_list) ? t.file_list : [];
+  const artifactScope = taskProofArtifactScope(t, proof.value, fileList, verification.value, scope, id, label);
+  if (!artifactScope.ok) return artifactScope.error;
+  // The one expectation rule (`taskArtifactScope`): a Distill Task's stored
+  // Proof must be exactly task-completed and behaviour-preserved, and a
+  // tests-only Task's exactly its scope's.
   const expectedObligations = deriveProofObligations({
     verificationPolicy: verification.value.policy,
-    declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
-    declaredArtifactExpectation: taskArtifactExpectation(t),
+    declaredArtifacts: fileList,
+    ...artifactScope.value,
     redThenGreen: taskRedThenGreenEra(scope, id),
   });
   const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
     proof.value.obligations.every((actual, obligationIndex) => {
       const expected = expectedObligations[obligationIndex];
       if (expected === undefined || actual.kind !== expected.kind) return false;
+      if (actual.kind === "test-files-changed" || actual.kind === "implementation-files-unchanged") {
+        return canonicalStructuralEquals(actual, expected);
+      }
       return actual.kind === "declared-artifact-changed" || actual.kind === "declared-artifact-attested"
         ? (expected.kind === "declared-artifact-changed" || expected.kind === "declared-artifact-attested") &&
           actual.artifact === expected.artifact
@@ -2702,6 +2757,13 @@ function migrateParsedTask(
     const proof = parseTaskProof(task.proof);
     if (!proof.ok) return parseErr(proof.errors.join("; "));
     migrated = { ...migrated, proof: proof.value };
+  }
+  if (task.reopen_scope !== undefined) {
+    // Already proven against file_list by `taskStatusError`; parsed again so the
+    // Task carries the frozen value, never the raw record.
+    const reopenScope = parseTestsOnlyReopenScope(task.reopen_scope, Array.isArray(task.file_list) ? task.file_list : []);
+    if (!reopenScope.ok) return parseErr(reopenScope.errors.join("; "));
+    migrated = { ...migrated, reopen_scope: reopenScope.value };
   }
   // Parse the persisted record before `Task` can assert Record<string,string>.
   // Non-string values are corrupt protected authority, not alternate spellings

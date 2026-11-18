@@ -131,7 +131,7 @@ describe("parseTaskReopeningArgs", () => {
   it("accepts one wave, repeated distinct tasks and a trimmed reason, in any order", () => {
     expect(parseTaskReopeningArgs(["--reason", "  fix it ", "--task", "T2", "--wave", "3", "--task", "T1"])).toEqual({
       ok: true,
-      value: { wave: 3, taskIds: ["T2", "T1"], reason: "fix it" },
+      value: { wave: 3, taskIds: ["T2", "T1"], reason: "fix it", needs: "implementation" },
     });
   });
 

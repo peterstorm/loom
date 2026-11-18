@@ -45,7 +45,7 @@ import {
 import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
 import { taskVerificationPolicy } from "../../core/verification-policy";
-import { taskArtifactExpectation } from "../../core/task-artifact-expectation";
+import { taskArtifactScope } from "../../core/task-artifact-expectation";
 import { taskRolePolicy } from "../../core/distill-task";
 
 export interface RecoveryPacketBinding {
@@ -282,8 +282,16 @@ function reconcileEra(task: Task, verificationManifest: FrozenVerificationManife
  * attempt that never ran (an undispatched Distill Task) or overwrite a stored
  * `restored` or `tests-passed` basis with one. Its stored Proof stands until
  * its next attempt settles.
+ *
+ * A Task reopened for tests only is the same (ADR-0093): its two scope
+ * obligations judge the bytes since the reopening, measured from the baseline
+ * its first attempt captured. Before that attempt there is nothing to judge,
+ * and after it the attempt's own settlement is the judgment; re-reading the
+ * cumulative delta would count the original implementation as a production
+ * write.
  */
-const settledOnlyByAttempt = (task: Task): boolean => taskRolePolicy(task).proofSettlement === "attempt-only";
+const settledOnlyByAttempt = (task: Task): boolean =>
+  taskRolePolicy(task).proofSettlement === "attempt-only" || task.reopen_scope !== undefined;
 
 /** Re-evaluate a failed aggregate from already-persisted evidence. This does
  * not invent completion or test provenance: it keeps the prior completion
@@ -312,7 +320,7 @@ export function reconcileTaskFromStoredEvidence(
     {
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
-      declaredArtifactExpectation: taskArtifactExpectation(task),
+      ...taskArtifactScope(task),
       redThenGreen: reconcileEra(task, verificationManifest),
     },
     {

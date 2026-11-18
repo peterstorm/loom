@@ -6,7 +6,8 @@
  * Pure.
  */
 import { taskRolePolicy } from "./distill-task";
-import type { DeclaredArtifactExpectation } from "./proof-obligations";
+import type { ArtifactScopeInput, DeclaredArtifactExpectation } from "./proof-obligations";
+import { testsOnlyProofScope, type TestsOnlyReopenScope } from "./reopen-scope";
 
 /** What the choice reads of a Task; a raw State File record qualifies before it is proven. */
 export type ArtifactExpectationSource = Readonly<{ agent?: unknown; implementation_attestation?: unknown }>;
@@ -24,16 +25,35 @@ export function taskArtifactExpectation(task: ArtifactExpectationSource): Declar
   return task.implementation_attestation === true ? "attested" : "changed";
 }
 
-/** The two observations of changed declared artifacts a settlement holds. */
+/** What `taskArtifactScope` reads: the expectation's fields and a parsed reopen scope. */
+export type ArtifactScopeSource = ArtifactExpectationSource & Readonly<{ reopen_scope?: TestsOnlyReopenScope }>;
+
+/**
+ * What a Task's declared artifacts owe, as the Proof derivation takes it: a
+ * tests-only reopening's scope while one is in force (ADR-0093), its
+ * `DeclaredArtifactExpectation` otherwise. Every derivation of a Task's
+ * obligations spreads this, so none can derive a tests-only Task's Proof as a
+ * full re-implementation's. Task Reopening and the State File refuse a
+ * tests-only scope on a Distill Task or an attesting one.
+ */
+export function taskArtifactScope(task: ArtifactScopeSource): ArtifactScopeInput {
+  return task.reopen_scope === undefined
+    ? { declaredArtifactExpectation: taskArtifactExpectation(task) }
+    : { testsOnly: testsOnlyProofScope(task.reopen_scope) };
+}
+
+/** The observations of changed declared artifacts a settlement holds. */
 export type ObservedArtifactChanges<Path extends string> = Readonly<{
   /** Every declared path whose bytes differ from the attempt baseline, reported or not. */
   attemptScope: readonly Path[];
   /** Declared paths whose bytes differ from the first Task baseline. */
   cumulative: readonly Path[];
+  /** Declared paths whose bytes differ from a tests-only reopening's baseline; empty without one. */
+  sinceReopen: readonly Path[];
 }>;
 
 /**
- * The changed paths a Proof under `expectation` is evaluated against.
+ * The changed paths a Proof under `scope` is evaluated against.
  *
  * - `changed` reads the cumulative delta against the first Task baseline, so
  *   an earlier attempt's production still counts on a verify-only retry.
@@ -44,11 +64,17 @@ export type ObservedArtifactChanges<Path extends string> = Readonly<{
  *   implementation, which would make every distill pass owe tests for code it
  *   never touched, and a transcript-attributed set would let an unreported
  *   write settle as `unchanged`.
+ * - a tests-only scope (ADR-0093) reads the raw delta against the reopening's
+ *   baseline: the cumulative delta holds the original implementation, which
+ *   would read as a production write, and the attempt's own delta would let a
+ *   retry hide its predecessor's production write.
  */
 export function proofArtifactChanges<Path extends string>(
-  expectation: DeclaredArtifactExpectation,
+  scope: ArtifactScopeInput,
   changes: ObservedArtifactChanges<Path>,
 ): readonly Path[] {
+  if (scope.testsOnly !== undefined) return changes.sinceReopen;
+  const expectation = scope.declaredArtifactExpectation ?? "changed";
   switch (expectation) {
     case "changed":
       return changes.cumulative;

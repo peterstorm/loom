@@ -14,7 +14,7 @@
 import { distillTasksReopenedWith, isDistillTask } from "./distill-task";
 import { nonEmpty, type DomainResult, type NonEmpty, type OrchestrationRunId } from "./orchestration-contract";
 import type { Phase } from "./phases";
-import { derivePendingTaskProof, redThenGreenEra } from "./proof-obligations";
+import { derivePendingTaskProof, isTestsOnlyProof, redThenGreenEra } from "./proof-obligations";
 import { taskArtifactExpectation } from "./task-artifact-expectation";
 import { parseTaskId, type TaskId } from "./task-id";
 import type { FrozenVerificationManifest } from "./verification-manifest";
@@ -39,11 +39,22 @@ import type { ReopenedTaskIds, Task, TaskGraph } from "../types";
  * change, so keeping the mode would make the reopened Task unfixable. It gets
  * a fresh pending Proof under its current policy (attestation's, with new
  * tests waived) and its agent's normal declared-artifact expectation.
+ *
+ * A tests-only reopening (ADR-0093) ends here too, for the same reason: a
+ * Task in one has its scope dropped, and a Task whose settled Proof was
+ * derived under one gets the Proof its policy derives. The returned Task is a
+ * full re-implementation; Task Reopening sets a fresh scope afterwards when
+ * the operator names `--needs tests`. A Task carrying a tests-only Proof is
+ * never an Acceptance Contract writer (Task Reopening refuses one), so the
+ * graph's era is its era.
  */
 export function returnToRevalidation(task: Task, verificationManifest: FrozenVerificationManifest | undefined): Task {
-  // The exit from the mode `armImplementationAttestation` (implementation-lifecycle) enters.
-  const { implementation_attestation: attested, ...unattested } = task;
-  const kept = attested === true ? undefined : task.proof;
+  // The exits from the modes `armImplementationAttestation` (implementation-lifecycle)
+  // and a tests-only Task Reopening (task-reopening) enter.
+  const { implementation_attestation: attested, reopen_scope: testsOnly, ...unscoped } = task;
+  const rederive = attested === true || testsOnly !== undefined ||
+    (task.proof !== undefined && isTestsOnlyProof(task.proof.obligations));
+  const kept = rederive ? undefined : task.proof;
   const proof = kept ?? derivePendingTaskProof({
     verificationPolicy: taskVerificationPolicy(task),
     declaredArtifacts: task.file_list ?? [],
@@ -51,7 +62,7 @@ export function returnToRevalidation(task: Task, verificationManifest: FrozenVer
     redThenGreen: redThenGreenEra(verificationManifest),
   });
   return {
-    ...unattested,
+    ...unscoped,
     status: "pending",
     proof,
     revalidation_required: true,

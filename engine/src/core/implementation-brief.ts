@@ -243,13 +243,25 @@ const DISTILL_PASS_WAIVER =
   "unchanged. When you change one, it owes a trusted passing run after your last edit: the final verification run this brief " +
   "opens with. You write no new tests.";
 
-/** The Verification Policy section: each arm, then what an engine-only waiver on it means for this Task. */
-function verificationPolicyLines(policy: VerificationPolicy): readonly string[] {
+/**
+ * What a tests-only reopening (ADR-0093) does to the policy lines above it:
+ * the Proof it derived owes no `new_tests` observation and no I6 order. The
+ * files and the full statement are in the dispatch's tests-only appendix.
+ */
+const TESTS_ONLY_REOPENING =
+  "**Reopened for tests only (ADR-0093) — BINDING.** This attempt's Proof replaces `new_tests` and I6 with three obligations: " +
+  "at least one of your test files changed since the reopening, none of your implementation files changed since it, and your " +
+  "tests pass (regression). No red-then-green order is owed, and any write to an implementation file fails the attempt. The " +
+  "Implementation Retry Context lists both sets of files.";
+
+/** The Verification Policy section: each arm, then what an engine-only waiver or a tests-only reopening means for this Task. */
+function verificationPolicyLines(policy: VerificationPolicy, testsOnly: boolean): readonly string[] {
   const distillPass = policy.regression.kind === "waived" && policy.regression.reason === DISTILL_PASS;
   return [
     `- regression: ${requirementRendering(policy.regression)}`,
     `- new_tests: ${requirementRendering(policy.newTests)}`,
     ...(distillPass ? ["", DISTILL_PASS_WAIVER] : []),
+    ...(testsOnly ? ["", TESTS_ONLY_REOPENING] : []),
   ];
 }
 
@@ -984,21 +996,28 @@ function taskMutationSection(
 export const ENGINE_RUN_FILE_PLACEHOLDER = "<test file>";
 
 /**
+ * The test files the engine-run command names: a tests-only Task's frozen
+ * ones (it owes no I6, ADR-0093), an I6-owing Task's classified ones, or none.
+ */
+function namedEngineRunFiles(task: Task, manifest: FrozenVerificationManifest | undefined): readonly string[] {
+  if (task.reopen_scope !== undefined) return task.reopen_scope.test_files;
+  const duty = redThenGreenDuty(task, manifest);
+  return duty.kind === "owed" ? classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline).testFiles : [];
+}
+
+/**
  * The Test evidence section of a TaskGraph that froze engine-run evidence
  * (loom#198): every run settlement counts (I6's red and green, the final
  * verification run, a distill pass's run) is the engine test run, as one bare
- * Bash call. An I6-owing Task is given the exact command over its classified
- * test files; any other Task is given the form, to fill with the test files
- * that cover its change.
+ * Bash call. An I6-owing Task, and a Task reopened for tests only, is given
+ * the exact command over its classified test files; any other Task is given
+ * the form, to fill with the test files that cover its change.
  */
 function engineRunSection(
   task: Task,
   input: Pick<ImplementationBriefInput, "verificationManifest" | "commands">,
 ): string {
-  const duty = redThenGreenDuty(task, input.verificationManifest);
-  const testFiles = duty.kind === "owed"
-    ? classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline).testFiles
-    : [];
+  const testFiles = namedEngineRunFiles(task, input.verificationManifest);
   const named = testFiles.length > 0;
   const command = input.commands.runTests(named ? testFiles : [ENGINE_RUN_FILE_PLACEHOLDER]);
   return [
@@ -1084,7 +1103,7 @@ export function renderImplementationBrief(
     dependencies: task.depends_on.length === 0 ? "none" : task.depends_on.join(", "),
     predecessor_outputs: renderPredecessorOutputs(predecessors.value),
     verification_policy: [
-      ...verificationPolicyLines(policy),
+      ...verificationPolicyLines(policy, task.reopen_scope !== undefined),
       ...(redThenGreen.value === null ? [] : ["", redThenGreen.value]),
       ...(mutationCheck === null ? [] : ["", mutationCheck]),
       ...(input.testEvidence === undefined ? [] : ["", engineRunSection(task, input)]),

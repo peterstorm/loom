@@ -33,7 +33,8 @@ import { isDistillTask } from "./distill-task";
 import type { DomainResult } from "./orchestration-contract";
 import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra } from "./proof-obligations";
 import { parseReviewPath } from "./review-packet";
-import { taskArtifactExpectation } from "./task-artifact-expectation";
+import { classifyTestsOnlyScope, type TestsOnlyReopenScope } from "./reopen-scope";
+import { taskArtifactScope } from "./task-artifact-expectation";
 import { parseTaskId, type TaskId } from "./task-id";
 import { reopenableWave, waveReopeningRefusalMessage } from "./task-revalidation";
 import { renderTaskScopeProblem, taskTestFileProblem } from "./task-scope-rules";
@@ -66,6 +67,10 @@ export type TaskRescopeRefusal = Readonly<{
     | "completed-wave"
     | "distill-task"
     | "attested"
+    /** A tests-only Task whose first attempt already captured its reopen baseline (ADR-0093). */
+    | "tests-only-attempted"
+    /** The new file list leaves a tests-only Task no test file to change (ADR-0093). */
+    | "tests-only-no-test-files"
     | "path-not-addable"
     | "path-not-removable"
     | "empty-file-list"
@@ -250,8 +255,16 @@ function baselineRefusal(task: PendingTask, added: readonly string[], observed: 
  * The Task with its new file list: a Proof re-derived for it, the population
  * baseline extended by `observed` (absent when the Task had none), the attempt
  * baseline cleared, and recorded skeleton outcomes of removed paths dropped.
+ * A tests-only Task (ADR-0093) carries `reopenScope`, its scope re-classified
+ * over the new file list, and its Proof is derived from that scope.
  */
-function rescopedTask(graph: TaskGraph, task: PendingTask, fileList: readonly string[], observed: ObservedBaselines | null): Task {
+function rescopedTask(
+  graph: TaskGraph,
+  task: PendingTask,
+  fileList: readonly string[],
+  observed: ObservedBaselines | null,
+  reopenScope: TestsOnlyReopenScope | undefined,
+): Task {
   const scope = redThenGreenScope(graph.verification_manifest, graph.acceptance_contracts ?? []);
   const baselineOf = new Map([...(task.artifact_baseline ?? []), ...(observed?.entries ?? [])].map((entry) => [entry.artifact, entry] as const));
   const artifactBaseline = task.artifact_baseline === undefined
@@ -260,7 +273,7 @@ function rescopedTask(graph: TaskGraph, task: PendingTask, fileList: readonly st
       const entry = baselineOf.get(path);
       return entry === undefined ? [] : [entry];
     }));
-  const { attempt_artifact_baseline: _staleAttemptBaseline, ...rest } = task;
+  const { attempt_artifact_baseline: _staleAttemptBaseline, reopen_scope: _staleScope, ...rest } = task;
   return freeze({
     ...rest,
     file_list: freeze(fileList),
@@ -268,13 +281,32 @@ function rescopedTask(graph: TaskGraph, task: PendingTask, fileList: readonly st
     ...(task.skeleton_outcomes === undefined
       ? {}
       : { skeleton_outcomes: freeze(task.skeleton_outcomes.filter(({ path }) => fileList.includes(path))) }),
+    ...(reopenScope === undefined ? {} : { reopen_scope: reopenScope }),
     proof: derivePendingTaskProof({
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: fileList,
-      declaredArtifactExpectation: taskArtifactExpectation(task),
+      ...taskArtifactScope({ agent: task.agent, implementation_attestation: task.implementation_attestation, reopen_scope: reopenScope }),
       redThenGreen: taskRedThenGreenEra(scope, task.id),
     }),
   });
+}
+
+/**
+ * A tests-only Task's scope over its new file list (ADR-0093), re-classified
+ * by the frozen Test-File Classification and still awaiting its first
+ * attempt (a captured one is refused before this); none for any other Task.
+ */
+function rescopedReopenScope(
+  graph: TaskGraph,
+  task: Task,
+  fileList: readonly string[],
+): DomainResult<TestsOnlyReopenScope | undefined, TaskRescopeRefusal> {
+  if (task.reopen_scope === undefined) return freeze({ ok: true as const, value: undefined });
+  const scope = classifyTestsOnlyScope(fileList, graph.verification_manifest);
+  return scope.ok
+    ? freeze({ ok: true as const, value: scope.value })
+    : refuse("tests-only-no-test-files", `${task.id} is reopened for tests only, and its new file list would leave it no test file to change ` +
+      "under the frozen Test-File Classification");
 }
 
 /**
@@ -310,6 +342,10 @@ export function rescopeTask(
   }
   if (isDistillTask(task)) return refuse("distill-task", `${task.id} is a Distill Task; the engine derives its scope`);
   if (task.implementation_attestation === true) return refuse("attested", `${task.id} is armed for attestation; a re-scoped Task needs a fresh implementation, not an attestation`);
+  if (task.reopen_scope?.baseline.kind === "captured") {
+    return refuse("tests-only-attempted", `${task.id} is reopened for tests only and an attempt already measures from its reopen ` +
+      "baseline; a re-scope would move what that baseline covers, so let the lineage settle first");
+  }
   for (const { path, sealed } of additions) {
     const refusal = pathAdmissionRefusal(graph, task, path, sealed, RESCOPE_FLAGS);
     if (refusal !== null) return refuse("path-not-addable", refusal);
@@ -327,7 +363,10 @@ export function rescopeTask(
   if (scopeProblem !== null) return refuse("unprovable-scope", renderTaskScopeProblem(scopeProblem));
   const unobserved = baselineRefusal(task, added, observed);
   if (unobserved !== null) return refuse("baseline-unobserved", unobserved);
-  const tasks = graph.tasks.map((candidate) => (candidate.id === task.id ? rescopedTask(graph, task, fileList, observed) : candidate));
+  const reopenScope = rescopedReopenScope(graph, task, fileList);
+  if (!reopenScope.ok) return reopenScope;
+  const tasks = graph.tasks.map((candidate) =>
+    (candidate.id === task.id ? rescopedTask(graph, task, fileList, observed, reopenScope.value) : candidate));
   // Only a set this edit touches: a live graph may predate ADR-0082, and an
   // unrelated re-scope must not have to repair a split it did not make.
   const touched = new Set([...added, ...removed].flatMap((path) => coupledSetKey(path) ?? []));

@@ -18,6 +18,8 @@ import {
   type TaskLocalByteObservation,
 } from "../../core/implementation-application";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
+import type { DeclaredArtifactBaseline } from "../../core/artifact-baseline";
+import { capturedReopenBaseline } from "../../core/reopen-scope";
 import { sha256Bytes } from "../../core/digest";
 import { isEngineOwnedRuntimePath } from "../../core/engine-runtime-paths";
 import type { DomainResult } from "../../core/orchestration-contract";
@@ -52,6 +54,8 @@ type RequiredTaskBaselines = Readonly<{
   attempt: NonNullable<Task["attempt_artifact_baseline"]>;
   proof: NonNullable<Task["artifact_baseline"]>;
   repository: NonNullable<Task["attempt_repository_baseline"]>;
+  /** A tests-only Task's reopen baseline (ADR-0093); null for every other Task. */
+  reopen: readonly DeclaredArtifactBaseline[] | null;
 }>;
 
 function requireTaskBaselines(task: Task): RequiredTaskBaselines {
@@ -64,10 +68,15 @@ function requireTaskBaselines(task: Task): RequiredTaskBaselines {
   if (task.attempt_repository_baseline === undefined) {
     throw new Error("active Implementation Attempt has no attempt_repository_baseline");
   }
+  const reopen = capturedReopenBaseline(task);
+  if (task.reopen_scope !== undefined && reopen === null) {
+    throw new Error("tests-only Task's attempt registered without capturing its reopen baseline");
+  }
   return {
     attempt: task.attempt_artifact_baseline,
     proof: task.artifact_baseline,
     repository: task.attempt_repository_baseline,
+    reopen,
   };
 }
 
@@ -180,12 +189,21 @@ function observeAvailableTaskScope(
       args.repositoryRoot,
       baselines.repository,
     ).filter((path) => !isEngineOwnedRuntimePath(path, authoritativeStatePath));
+    const reopenScope = baselines.reopen === null
+      ? {}
+      : {
+          reopenScope: {
+            baseline: baselines.reopen,
+            current: captureDeclaredArtifactBaseline(args.repositoryRoot, baselines.reopen.map(({ artifact }) => artifact)),
+          },
+        };
     observed = buildTaskLocalByteObservation({
       authority: args.authority,
       attemptBaseline: baselines.attempt,
       currentAttemptScope,
       proofBaseline: baselines.proof,
       currentProofScope,
+      ...reopenScope,
       parserModifiedPaths,
       priorAttributedPaths,
       repositoryChangedPaths,

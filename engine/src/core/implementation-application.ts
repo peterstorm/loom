@@ -33,11 +33,15 @@ import { compareStrings } from "./ordering";
 import { samePlanPath } from "./plan-path-match";
 import {
   deriveProofObligations,
+  derivePendingTaskProof,
   evaluateTaskProof,
   frozenRedThenGreenEra,
   PI_STRUCTURED_EVIDENCE_POLICY,
+  redThenGreenScope,
+  taskRedThenGreenEra,
   type ProofEvaluationPolicy,
   type ProofObligation,
+  type RedThenGreenEra,
 } from "./proof-obligations";
 import type { RedThenGreenObservation } from "./red-then-green-types";
 import { invalidateTaskReview } from "./review-output";
@@ -45,7 +49,7 @@ import { parseReviewPath, type ReviewPath } from "./review-packet";
 import { isUntouchedSkeleton } from "./skeleton/outcomes";
 import { CONFORMANCE_NOT_OWED, type ContractConformance } from "./skeleton/conformance-verdict";
 import type { SkeletonRecord } from "./skeleton/types";
-import { proofArtifactChanges, taskArtifactExpectation } from "./task-artifact-expectation";
+import { proofArtifactChanges, taskArtifactScope } from "./task-artifact-expectation";
 import type { FrozenTestFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { taskVerificationPolicy } from "./verification-policy";
@@ -69,6 +73,10 @@ export type TaskLocalByteObservation = Readonly<{
   cumulativeModifiedPaths: readonly ReviewPath[];
   /** Declared paths whose bytes differ from the first Task baseline. */
   cumulativeProofArtifactChanges: readonly ReviewPath[];
+  /** Declared paths whose bytes differ from a tests-only reopening's
+   *  baseline (ADR-0093): the delta a tests-only Proof judges. Empty for a
+   *  Task with no tests-only scope. */
+  reopenScopeChangedPaths: readonly ReviewPath[];
   /** Task-scope bytes changed, or exact observation was unavailable. */
   taskBytesChangedOrUnobservable: boolean;
   /** Unowned foreign paths still different from the retained repository boundary. */
@@ -87,6 +95,10 @@ export type TaskLocalObservationInput = Readonly<{
   priorAttributedPaths: readonly unknown[];
   repositoryChangedPaths: readonly unknown[];
   siblingOwnedPaths: readonly unknown[];
+  /** A tests-only Task's reopen baseline beside the current snapshot of its
+   *  artifacts (ADR-0093); absent for every other Task. The two travel
+   *  together, so neither can be supplied without the other. */
+  reopenScope?: Readonly<{ baseline: unknown; current: unknown }>;
   /** Every skeleton the engine recorded writing, each beside what its path
    *  holds now (FR-012): bytes still equal to the record's are the engine's,
    *  never the implementer's. Required, so no caller can skip the
@@ -211,15 +223,23 @@ export function buildTaskLocalByteObservation(
   const priorPaths = parsePaths(input.priorAttributedPaths, "priorAttributedPaths");
   const repositoryPaths = parsePaths(input.repositoryChangedPaths, "repositoryChangedPaths");
   const siblingPaths = parsePaths(input.siblingOwnedPaths, "siblingOwnedPaths");
+  // A tests-only Task's delta since its reopening (ADR-0093). Engine skeleton
+  // bytes are not subtracted: the reopened Task's skeletons were replaced by
+  // its first implementation, so bytes back at a skeleton are a production
+  // change since the reopening, not the engine's.
+  const reopen = input.reopenScope === undefined
+    ? NO_REOPEN_SCOPE
+    : compareExactBaselines(input.reopenScope.baseline, input.reopenScope.current, "reopenScope");
   const errors = [
     ...(attempt.ok ? [] : attempt.errors),
     ...(proof.ok ? [] : proof.errors),
+    ...(reopen.ok ? [] : reopen.errors),
     ...(parserPaths.ok ? [] : parserPaths.errors),
     ...(priorPaths.ok ? [] : priorPaths.errors),
     ...(repositoryPaths.ok ? [] : repositoryPaths.errors),
     ...(siblingPaths.ok ? [] : siblingPaths.errors),
   ];
-  if (errors.length > 0 || !attempt.ok || !proof.ok || !parserPaths.ok || !priorPaths.ok ||
+  if (errors.length > 0 || !attempt.ok || !proof.ok || !reopen.ok || !parserPaths.ok || !priorPaths.ok ||
       !repositoryPaths.ok || !siblingPaths.ok) {
     const reason = unavailableReason(errors);
     return unavailableTaskLocalByteObservation(
@@ -283,11 +303,15 @@ export function buildTaskLocalByteObservation(
     attemptScopeChangedPaths: attempt.changed,
     cumulativeModifiedPaths: cumulative,
     cumulativeProofArtifactChanges: proofChanged,
+    reopenScopeChangedPaths: reopen.changed,
     taskBytesChangedOrUnobservable: attempt.changed.length > 0,
     unresolvedRepositoryPaths,
     invalidationBytesChanged: attempt.changed.length > 0 || unresolvedRepositoryPaths.length > 0,
   });
 }
+
+/** The comparison of a Task with no tests-only scope: nothing changed since a reopening it never had. */
+const NO_REOPEN_SCOPE: Readonly<{ ok: true; changed: readonly ReviewPath[] }> = freeze({ ok: true, changed: frozenArray([]) });
 
 export function unavailableTaskLocalByteObservation(
   authority: ImplementationAttemptAuthority,
@@ -305,6 +329,7 @@ export function unavailableTaskLocalByteObservation(
     attemptScopeChangedPaths: frozenArray([]),
     cumulativeModifiedPaths: frozenArray(cumulativeModifiedPaths),
     cumulativeProofArtifactChanges: frozenArray([]),
+    reopenScopeChangedPaths: frozenArray([]),
     taskBytesChangedOrUnobservable: true,
     unresolvedRepositoryPaths: frozenArray([]),
     invalidationBytesChanged: true,
@@ -464,7 +489,7 @@ export function applyUntrustedStopResolution(
     {
       verificationPolicy: taskVerificationPolicy(target),
       declaredArtifacts: target.file_list ?? [],
-      declaredArtifactExpectation: taskArtifactExpectation(target),
+      ...taskArtifactScope(target),
     },
     {
       taskCompleted: false,
@@ -715,7 +740,46 @@ const RETIRED_ATTEMPT_BOUNDARY = Object.freeze({
   repository_baseline: undefined,
 });
 
+/**
+ * The Task once its tests-only lineage settled terminally (ADR-0093): no
+ * scope, and, after an escalation, a fresh pending Proof as its policy and era
+ * derive it, so `remediate` dispatches a full re-implementation instead of a
+ * third tests-only attempt. The escalation receipt keeps what failed.
+ */
+function withoutReopenScope(task: Task, era: RedThenGreenEra): Task {
+  if (task.reopen_scope === undefined) return task;
+  const { reopen_scope: _ended, ...rest } = task;
+  if (task.status !== "pending") return rest;
+  return {
+    ...rest,
+    status: "pending",
+    proof: derivePendingTaskProof({
+      verificationPolicy: taskVerificationPolicy(task),
+      declaredArtifacts: task.file_list ?? [],
+      ...taskArtifactScope(rest),
+      redThenGreen: era,
+    }),
+    revalidation_required: true,
+    legacy_missing_proof: undefined,
+  };
+}
+
 function transitionedTask(
+  task: Task,
+  transition: Exclude<ImplementationCompletionTransition, { kind: "ignored" }>,
+  facts: ImplementationTransitionFacts,
+  era: RedThenGreenEra,
+): Task {
+  const settled = settledTask(task, transition, facts);
+  // A tests-only scope lasts for the reopened lineage: a retry or an
+  // infrastructure block keeps it, so attempt 2 is still tests-only and is
+  // measured from the same reopen baseline.
+  return transition.kind === "implemented" || transition.kind === "escalation-required"
+    ? withoutReopenScope(settled, era)
+    : settled;
+}
+
+function settledTask(
   task: Task,
   transition: Exclude<ImplementationCompletionTransition, { kind: "ignored" }>,
   facts: ImplementationTransitionFacts,
@@ -785,7 +849,8 @@ export function applyImplementationCompletionTransition(
   if (target?.active_implementation_attempt?.authorityDigest !== authority.authorityDigest) {
     return freeze({ kind: "ignored", state, reason: "stale" });
   }
-  let nextTask = transitionedTask(target, transition, facts);
+  const era = taskRedThenGreenEra(redThenGreenScope(state.verification_manifest, state.acceptance_contracts ?? []), target.id);
+  let nextTask = transitionedTask(target, transition, facts, era);
   if (facts.bytes.invalidationBytesChanged) nextTask = invalidateTaskReview(nextTask);
   const tasks = state.tasks.map((task) => task.id === target.id ? nextTask : task);
   const specCheckCleared = facts.bytes.invalidationBytesChanged && state.spec_check?.wave === target.wave;
@@ -879,9 +944,11 @@ export function settleObservedImplementation(
       // or as a change `behaviour-preserved` owes tests for, not as a clean
       // verification. A Distill Task never reads the cumulative delta, which
       // is its siblings' implementation and not what this attempt changed.
-      filesModified: proofArtifactChanges(taskArtifactExpectation(task), {
+      // A tests-only Task reads the raw delta since its reopening (ADR-0093).
+      filesModified: proofArtifactChanges(taskArtifactScope(task), {
         attemptScope: bytes.attemptScopeChangedPaths,
         cumulative: bytes.cumulativeProofArtifactChanges,
+        sinceReopen: bytes.reopenScopeChangedPaths,
       }),
       newTestsWritten: normalized.newTests.written,
       newTestEvidence: normalized.newTests.evidence,
