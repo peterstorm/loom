@@ -153,7 +153,7 @@ Loom's linter runs regex rules after every edit and structural rules at the Wave
 - [Workflows](docs/workflows.md): what each command does
 - [Architecture](docs/architecture.md): layers, authority, persistence, guarantees and limits
 - [Feature & Guard Map](docs/feature-guard-map.md): the mechanism-level map — every feature, guardrail and determinism device, and the verified residuals
-- [Operations](docs/operations.md): status, recovery, validation
+- [Operations](docs/operations.md): status, protected state, operating states and recovery
 - [Using Loom with Pi](docs/pi-usage.md)
 - [Running a security audit](docs/security-audit.md)
 - [Loom Agents](docs/agents.md)
