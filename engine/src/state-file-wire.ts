@@ -96,7 +96,7 @@ import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejecti
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
-import { dependencyAddedEdit, parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
+import { dependencyAddedEdit, parsePlanEditReason, taskAddedEdit, taskRescopedEdit, taskWithdrawnEdit } from "./core/wave-plan-edit";
 import { retroRecordEntry, retroScopeKnown } from "./core/retro-record";
 import { dependencyCycles } from "./core/task-dependencies";
 import {
@@ -1069,16 +1069,26 @@ const TASK_RESCOPED_EDIT_FIELDS = [
 const isStringArray = (raw: unknown): raw is readonly string[] => Array.isArray(raw) && raw.every((entry) => typeof entry === "string");
 
 /**
+ * What a plan edit may name: the roster, and the Tasks `withdraw-task` removed
+ * from it (ADR-0086), whose earlier edits stay in the history.
+ */
+type PlanEditRoster = Readonly<{ tasks: readonly Record<string, unknown>[]; withdrawn: ReadonlySet<string> }>;
+
+/** Whether `id` names a Task of the roster or a withdrawn one. */
+const knownToPlanEdits = (roster: PlanEditRoster, id: unknown): boolean =>
+  typeof id === "string" && (roster.withdrawn.has(id) || roster.tasks.some((task) => task.id === id));
+
+/**
  * The fields every plan edit shares: exactly `fields` (plus any of
  * `optional`), schema 1, a Wave of at least 1, and a Task id naming a Task of
- * that Wave.
+ * that Wave, or a withdrawn Task (`wavePlanHistoryError` places it).
  */
 function parsePlanEditHeader(
   record: Record<string, unknown>,
   fields: readonly string[],
   optional: readonly string[],
   label: string,
-  tasks: readonly Record<string, unknown>[],
+  roster: PlanEditRoster,
 ): ParseResult<Readonly<{ wave: number; taskId: string }>> {
   const fieldsError = exactFieldsError(record, fields, optional, label);
   if (fieldsError !== null) return parseErr(fieldsError);
@@ -1088,7 +1098,7 @@ function parsePlanEditHeader(
   const idError = taskIdError(record.taskId, `${label}.taskId`);
   if (idError !== null) return parseErr(idError);
   const taskId = record.taskId as string;
-  if (!tasks.some((task) => task.id === taskId && task.wave === wave.value)) {
+  if (!roster.withdrawn.has(taskId) && !roster.tasks.some((task) => task.id === taskId && task.wave === wave.value)) {
     return parseErr(`${label}.taskId: ${taskId} is not a Task of Wave ${wave.value}`);
   }
   return parseOk(Object.freeze({ wave: wave.value, taskId }));
@@ -1098,9 +1108,9 @@ function parsePlanEditHeader(
 function parseTaskRescopedEdit(
   record: Record<string, unknown>,
   label: string,
-  tasks: readonly Record<string, unknown>[],
+  roster: PlanEditRoster,
 ): ParseResult<WavePlanEdit> {
-  const header = parsePlanEditHeader(record, TASK_RESCOPED_EDIT_FIELDS, ["sealed"], label, tasks);
+  const header = parsePlanEditHeader(record, TASK_RESCOPED_EDIT_FIELDS, ["sealed"], label, roster);
   if (!header.ok) return header;
   const { wave, taskId } = header.value;
   if (!isStringArray(record.added) || !isStringArray(record.removed)) return parseErr(`${label}.added and .removed must be arrays of paths`);
@@ -1123,13 +1133,13 @@ const DEPENDENCY_ADDED_EDIT_FIELDS = ["schemaVersion", "kind", "wave", "taskId",
 function parseDependencyAddedEdit(
   record: Record<string, unknown>,
   label: string,
-  tasks: readonly Record<string, unknown>[],
+  roster: PlanEditRoster,
 ): ParseResult<WavePlanEdit> {
-  const header = parsePlanEditHeader(record, DEPENDENCY_ADDED_EDIT_FIELDS, [], label, tasks);
+  const header = parsePlanEditHeader(record, DEPENDENCY_ADDED_EDIT_FIELDS, [], label, roster);
   if (!header.ok) return header;
   const { wave, taskId } = header.value;
   if (!isStringArray(record.dependsOn)) return parseErr(`${label}.dependsOn must be an array of Task ids`);
-  const unknown = record.dependsOn.find((id) => !tasks.some((task) => task.id === id));
+  const unknown = record.dependsOn.find((id) => !knownToPlanEdits(roster, id));
   if (unknown !== undefined) return parseErr(`${label}.dependsOn: ${unknown} is not a Task of this TaskGraph`);
   const reason = parsePlanEditReason(record.reason);
   if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
@@ -1137,14 +1147,96 @@ function parseDependencyAddedEdit(
   return edit.ok ? parseOk(edit.value) : parseErr(`${label} ${edit.error}`);
 }
 
-/** One audited plan edit, dispatched on its `kind`: each edit kind (loom#199) is one arm. */
-function parseWavePlanEdit(raw: unknown, label: string, tasks: readonly Record<string, unknown>[]): ParseResult<WavePlanEdit> {
+const TASK_ADDED_EDIT_FIELDS = [
+  "schemaVersion", "kind", "wave", "taskId", "files", "dependsOn", "dependents", "reason", "abandonedRunId",
+] as const;
+
+/** A `task-added` edit (ADR-0086), built by the one constructor (`core/wave-plan-edit.ts`); its edges name known Tasks. */
+function parseTaskAddedEdit(record: Record<string, unknown>, label: string, roster: PlanEditRoster): ParseResult<WavePlanEdit> {
+  const header = parsePlanEditHeader(record, TASK_ADDED_EDIT_FIELDS, ["sealed"], label, roster);
+  if (!header.ok) return header;
+  const { wave, taskId } = header.value;
+  if (!isStringArray(record.files)) return parseErr(`${label}.files must be an array of paths`);
+  const sealed = record.sealed ?? [];
+  if (!isStringArray(sealed)) return parseErr(`${label}.sealed must be an array of paths when present`);
+  if (record.sealed !== undefined && sealed.length === 0) return parseErr(`${label}.sealed is omitted, not empty, when nothing sealed was added`);
+  if (!isStringArray(record.dependsOn) || !isStringArray(record.dependents)) {
+    return parseErr(`${label}.dependsOn and .dependents must be arrays of Task ids`);
+  }
+  const unknown = [...record.dependsOn, ...record.dependents].find((id) => !knownToPlanEdits(roster, id));
+  if (unknown !== undefined) return parseErr(`${label} names ${unknown}, which is not a Task of this TaskGraph`);
+  const reason = parsePlanEditReason(record.reason);
+  if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
+  const abandoned = parseNullableRunId(record.abandonedRunId, `${label}.abandonedRunId`);
+  if (!abandoned.ok) return abandoned;
+  const edit = taskAddedEdit({
+    wave, taskId, files: record.files, sealed, dependsOn: record.dependsOn, dependents: record.dependents,
+    reason: reason.value, abandonedRunId: abandoned.value,
+  });
+  return edit.ok ? parseOk(edit.value) : parseErr(`${label} ${edit.error}`);
+}
+
+const TASK_WITHDRAWN_EDIT_FIELDS = ["schemaVersion", "kind", "wave", "taskId", "reason", "abandonedRunId"] as const;
+
+/** A `task-withdrawn` edit (ADR-0086), built by the one constructor (`core/wave-plan-edit.ts`). */
+function parseTaskWithdrawnEdit(record: Record<string, unknown>, label: string, roster: PlanEditRoster): ParseResult<WavePlanEdit> {
+  const header = parsePlanEditHeader(record, TASK_WITHDRAWN_EDIT_FIELDS, [], label, roster);
+  if (!header.ok) return header;
+  const { wave, taskId } = header.value;
+  const reason = parsePlanEditReason(record.reason);
+  if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
+  const abandoned = parseNullableRunId(record.abandonedRunId, `${label}.abandonedRunId`);
+  if (!abandoned.ok) return abandoned;
+  const edit = taskWithdrawnEdit({ wave, taskId, reason: reason.value, abandonedRunId: abandoned.value });
+  return edit.ok ? parseOk(edit.value) : parseErr(`${label} ${edit.error}`);
+}
+
+type PlanEditParser = (record: Record<string, unknown>, label: string, roster: PlanEditRoster) => ParseResult<WavePlanEdit>;
+
+/** One parser per edit kind (loom#199); keyed by the union's kinds, so a new kind without a parser does not compile. */
+const PLAN_EDIT_PARSERS: Readonly<Record<WavePlanEdit["kind"], PlanEditParser>> = Object.freeze({
+  "task-rescoped": parseTaskRescopedEdit,
+  "dependency-added": parseDependencyAddedEdit,
+  "task-added": parseTaskAddedEdit,
+  "task-withdrawn": parseTaskWithdrawnEdit,
+});
+
+const isPlanEditKind = (kind: unknown): kind is WavePlanEdit["kind"] => typeof kind === "string" && Object.hasOwn(PLAN_EDIT_PARSERS, kind);
+
+/** One audited plan edit, parsed by its kind's parser; `kind` is wire data, so any other value is refused. */
+function parseWavePlanEdit(raw: unknown, label: string, roster: PlanEditRoster): ParseResult<WavePlanEdit> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
-  // `kind` is wire data, not a union the type system owns: dispatch by test, and refuse any other value.
-  if (record.kind === "task-rescoped") return parseTaskRescopedEdit(record, label, tasks);
-  if (record.kind === "dependency-added") return parseDependencyAddedEdit(record, label, tasks);
-  return parseErr(`${label} has invalid schema or kind`);
+  return isPlanEditKind(record.kind) ? PLAN_EDIT_PARSERS[record.kind](record, label, roster) : parseErr(`${label} has invalid schema or kind`);
+}
+
+/** The Task ids `raw`'s `task-withdrawn` edits name; each is proven by `wavePlanHistoryError`. */
+function withdrawnTaskIdsOf(raw: readonly unknown[]): ReadonlySet<string> {
+  return new Set(raw.flatMap((entry) =>
+    isRecord(entry) && entry.kind === "task-withdrawn" && typeof entry.taskId === "string" ? [entry.taskId] : []));
+}
+
+/**
+ * Why the added and withdrawn Tasks contradict each other or the roster, or
+ * null. A Task is added at most once and withdrawn at most once, only after
+ * it was added and in the same Wave; a withdrawn Task has left the roster.
+ */
+function wavePlanHistoryError(edits: readonly WavePlanEdit[], tasks: readonly Record<string, unknown>[]): string | null {
+  const added = new Map<string, number>();
+  const withdrawn = new Set<string>();
+  for (const [index, edit] of edits.entries()) {
+    const label = `wave_plan_edits[${index}]`;
+    if (edit.kind === "task-added") {
+      if (added.has(edit.taskId)) return `${label} adds ${edit.taskId} a second time`;
+      added.set(edit.taskId, edit.wave);
+    } else if (edit.kind === "task-withdrawn") {
+      if (added.get(edit.taskId) !== edit.wave) return `${label} withdraws ${edit.taskId}, which no earlier edit added to Wave ${edit.wave}`;
+      if (withdrawn.has(edit.taskId)) return `${label} withdraws ${edit.taskId} a second time`;
+      if (tasks.some((task) => task.id === edit.taskId)) return `${label} withdraws ${edit.taskId}, which is still on the roster`;
+      withdrawn.add(edit.taskId);
+    }
+  }
+  return null;
 }
 
 function parseWavePlanEdits(
@@ -1153,13 +1245,15 @@ function parseWavePlanEdits(
 ): ParseResult<readonly WavePlanEdit[] | undefined> {
   if (raw === undefined) return parseOk(undefined);
   if (!Array.isArray(raw)) return parseErr("wave_plan_edits must be an array when present");
+  const roster: PlanEditRoster = { tasks, withdrawn: withdrawnTaskIdsOf(raw) };
   const edits: WavePlanEdit[] = [];
   for (const [index, entry] of raw.entries()) {
-    const parsed = parseWavePlanEdit(entry, `wave_plan_edits[${index}]`, tasks);
+    const parsed = parseWavePlanEdit(entry, `wave_plan_edits[${index}]`, roster);
     if (!parsed.ok) return parsed;
     edits.push(parsed.value);
   }
-  return parseOk(Object.freeze(edits));
+  const historyError = wavePlanHistoryError(edits, tasks);
+  return historyError === null ? parseOk(Object.freeze(edits)) : parseErr(historyError);
 }
 
 /** A retro scope's exact wire shape: `{kind:"run"}` or `{kind:"wave",wave}`, else null. */
@@ -1388,16 +1482,27 @@ export function orphanExecutionReservationError(
 }
 
 /**
- * The same-Wave edges `wave_plan_edits` records as added by `add-dependency`
- * (ADR-0081), as `"<task>→<dependency>"` keys. Only an audited edit makes a
- * same-Wave edge legal; a decompose payload carries none.
+ * The same-Wave edges `wave_plan_edits` records, as `"<task>→<dependency>"`
+ * keys: those `add-dependency` added (ADR-0081), and an added Task's own edges
+ * and its dependents' edges to it (`add-task`, ADR-0086). Only an audited edit
+ * makes a same-Wave edge legal; a decompose payload carries none.
  */
 export function auditedSameWaveEdges(rawEdits: unknown): ReadonlySet<string> {
   if (!Array.isArray(rawEdits)) return new Set();
-  return new Set(rawEdits.flatMap((edit) =>
-    isRecord(edit) && edit.kind === "dependency-added" && typeof edit.taskId === "string" && isStringArray(edit.dependsOn)
-      ? edit.dependsOn.map((dependency) => `${edit.taskId}→${dependency}`)
-      : []));
+  return new Set(rawEdits.flatMap((edit): readonly string[] => {
+    if (!isRecord(edit) || typeof edit.taskId !== "string") return [];
+    const taskId = edit.taskId;
+    if (edit.kind === "dependency-added" && isStringArray(edit.dependsOn)) {
+      return edit.dependsOn.map((dependency) => `${taskId}→${dependency}`);
+    }
+    if (edit.kind === "task-added" && isStringArray(edit.dependsOn) && isStringArray(edit.dependents)) {
+      return [
+        ...edit.dependsOn.map((dependency) => `${taskId}→${dependency}`),
+        ...edit.dependents.map((dependent) => `${dependent}→${taskId}`),
+      ];
+    }
+    return [];
+  }));
 }
 
 /**

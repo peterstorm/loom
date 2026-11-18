@@ -27,13 +27,20 @@ import {
 } from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
 import type { PiEvidenceLedgerAddress } from "../engine/src/machine/harness-tool-call-types";
-import { consumePiWriteGrant } from "./write-grant";
+import { consumePiWriteGrant, isPhaseGrantTaskId } from "./write-grant";
+import type { CallerWriteMode } from "../engine/src/core/block-direct-edits";
+import { callerWriteModeOf } from "../engine/src/handlers/attestation-mode";
+import { StateManager } from "../engine/src/state-manager";
 import { cleanupFailureSuffix, runPiCleanupActions } from "./cleanup-actions";
 import type { DurableSpawnClaims, RosterClaim } from "./spawn-claims";
 
 type ActiveChildWriteGrantScope = Readonly<{
   scopeDirs?: readonly string[];
   grantCwd?: string;
+  /** The implementation Task the consumed grant was bound to, with the
+   *  TaskGraph it names: the edit guard reads that Task's attestation mode there
+   *  (ADR-0085). Absent exactly for a phase grant, which names no Task. */
+  implementationTask?: Readonly<{ taskId: string; taskGraphPath: string }>;
   /** The parent ledger address the consumed grant carried (AD-8): where this
    *  child's evidence recorder appends. Absent when the parent issued none. */
   evidenceLedger?: PiEvidenceLedgerAddress;
@@ -160,6 +167,7 @@ export async function activatePiChildWriteGrant(
       pointerBinding,
       scopeDirs: grant.scopeDirs,
       grantCwd: grant.cwd,
+      ...(isPhaseGrantTaskId(grant.taskId) ? {} : { implementationTask: { taskId: grant.taskId, taskGraphPath: grant.taskGraphPath } }),
       ...(grant.evidenceLedger === null ? {} : { evidenceLedger: grant.evidenceLedger }),
     });
     partialBinding = null;
@@ -239,4 +247,18 @@ export function retainedChildWriteGrant(
     return { ...binding, kind: "pointer-cleanup-pending", agentId: null, pointerBinding };
   }
   return null;
+}
+
+/**
+ * The write mode of the Task a child's active grant was bound to (ADR-0085),
+ * read from the TaskGraph the grant names, or `undefined` for a phase grant,
+ * a cleanup-pending entry or an ungranted session.
+ */
+export function grantCallerWriteMode(
+  grant: ActiveChildWriteGrant | undefined,
+  modeOf: typeof callerWriteModeOf = callerWriteModeOf,
+): CallerWriteMode | undefined {
+  const task = grant?.kind === "active" ? grant.implementationTask : undefined;
+  if (task === undefined) return undefined;
+  return modeOf(task.taskId, () => new StateManager(task.taskGraphPath), `write grant ${task.taskId}`);
 }

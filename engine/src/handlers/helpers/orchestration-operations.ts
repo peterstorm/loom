@@ -56,8 +56,8 @@ export const ORCHESTRATION_OPERATIONS = Object.freeze({
   "reopen-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "rescope-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "add-dependency": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
-  "add-forward-fix": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
-  "withdraw-forward-fix": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  "add-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  "withdraw-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "adopt-engine-run-tests": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "adopt-engine-revision": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
 } as const satisfies Readonly<Record<string, OrchestrationOperationTraits>>);

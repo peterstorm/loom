@@ -5,16 +5,15 @@
  * (`validate-task-execution.ts`) and the brief all ask here, so status never
  * offers a dispatch registration would refuse or a brief would not render.
  *
- * Three holds exist:
+ * Two holds exist:
  *
  * - `distill-pass`: a Distill Task waits for every other Task of its Wave
  *   (ADR-0068, `distillDispatchBlockers`).
- * - `forward-fix`: a Task a Forward Fix holds waits for that fix Task, so its
- *   retry judges the fixed code rather than failing on the same breach
- *   (`forward_fix_history`, written by `addForwardFix` in `forward-fix.ts`).
  * - `dependency`: a Task waits for the Tasks of its own Wave it depends on
  *   until they settle their implementation (ADR-0081). A blocker that reached
  *   terminal escalation is named as such: the dependent is blocked, not waiting.
+ *   A Forward Fix audit an older State File carries (ADR-0077, retired by
+ *   ADR-0086) is read the same way: each held Task depends on its fix Task.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
@@ -22,13 +21,11 @@
 import { match } from "ts-pattern";
 import { distillDispatchBlockers, distillWithheldMessage } from "./distill-task";
 import { nonEmpty, type NonEmpty } from "./orchestration-contract";
-import type { TaskId } from "./task-id";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
 import type { ForwardFixAudit, Task } from "../types";
 
 export type DispatchHold =
   | Readonly<{ kind: "distill-pass"; blockers: NonEmpty<string> }>
-  | Readonly<{ kind: "forward-fix"; fixTaskIds: NonEmpty<TaskId> }>
   /** Same-Wave dependencies not yet settled, each marked when it reached terminal escalation. */
   | Readonly<{ kind: "dependency"; blockers: NonEmpty<DependencyBlocker> }>;
 
@@ -47,28 +44,30 @@ export const implementationSettled = (task: Task, reserved: ReadonlySet<string>)
   !reserved.has(task.id) && task.active_implementation_attempt === undefined;
 
 /**
- * The fix Tasks still holding `task`: every Forward Fix of its Wave that
- * names it and whose fix Task has not settled, in audit order. A fix Task
- * missing from the roster holds nothing: the loader refuses such a graph.
+ * The Tasks `task` waits for: its `depends_on` edges, then the fix Task of
+ * every legacy Forward Fix audit of its Wave that held it, without repeats.
+ * This is the one wait relation: dispatch holds on it, and the plan edits
+ * refuse a cycle in it (`waitRelation`).
  */
-function forwardFixHolders(graph: DispatchHoldGraph, reserved: ReadonlySet<string>, task: Task): readonly TaskId[] {
-  const holders = (graph.forward_fix_history ?? [])
+export function waitsFor(graph: DispatchHoldGraph, task: Task): readonly string[] {
+  const fixes = (graph.forward_fix_history ?? [])
     .filter((audit) => audit.wave === task.wave && audit.heldTaskIds.some((id) => id === task.id))
-    .flatMap(({ fixTaskId }) => {
-      const fix = graph.tasks.find(({ id }) => id === fixTaskId);
-      return fix === undefined || implementationSettled(fix, reserved) ? [] : [fixTaskId];
-    });
-  return Object.freeze([...new Set(holders)]);
+    .map(({ fixTaskId }) => fixTaskId);
+  return [...new Set([...task.depends_on, ...fixes])];
 }
 
+/** Every Task with the edges it waits on (`waitsFor`), for a cycle check over exactly what dispatch enforces. */
+export const waitRelation = (graph: DispatchHoldGraph): readonly Readonly<{ id: string; wave: number; depends_on: readonly string[] }>[] =>
+  graph.tasks.map((task) => Object.freeze({ id: task.id, wave: task.wave, depends_on: waitsFor(graph, task) }));
+
 /**
- * The Tasks of `task`'s own Wave it depends on that have not settled, in edge
+ * The Tasks of `task`'s own Wave it waits for that have not settled, in edge
  * order, each marked when it escalated. Earlier-Wave and unknown edges are
  * registration's to refuse (`dependencyExecutionBlock`), and the State File
  * refuses an unknown one at load.
  */
 function dependencyBlockers(graph: DispatchHoldGraph, reserved: ReadonlySet<string>, task: Task): readonly DependencyBlocker[] {
-  return task.depends_on.flatMap((id) => {
+  return waitsFor(graph, task).flatMap((id) => {
     const dependency = graph.tasks.find((candidate) => candidate.id === id);
     return dependency === undefined || dependency.wave !== task.wave || implementationSettled(dependency, reserved)
       ? []
@@ -84,8 +83,6 @@ function dependencyBlockers(graph: DispatchHoldGraph, reserved: ReadonlySet<stri
 export function dispatchHoldOf(graph: DispatchHoldGraph, reserved: ReadonlySet<string>, task: Task): DispatchHold | null {
   const distill = nonEmpty(distillDispatchBlockers(graph.tasks, reserved, task));
   if (distill !== null) return Object.freeze({ kind: "distill-pass", blockers: distill });
-  const fixes = nonEmpty(forwardFixHolders(graph, reserved, task));
-  if (fixes !== null) return Object.freeze({ kind: "forward-fix", fixTaskIds: fixes });
   const blockers = nonEmpty(dependencyBlockers(graph, reserved, task));
   return blockers === null ? null : Object.freeze({ kind: "dependency", blockers });
 }
@@ -98,9 +95,6 @@ export const escalatedBlockers = (blockers: readonly DependencyBlocker[]): reado
 export function dispatchHoldMessage(taskId: string, hold: DispatchHold): string {
   return match(hold)
     .with({ kind: "distill-pass" }, ({ blockers }) => distillWithheldMessage(taskId, blockers))
-    .with({ kind: "forward-fix" }, ({ fixTaskIds }) =>
-      `${taskId} is held by Forward Fix ${fixTaskIds.join(", ")} and runs after it settles, so its next attempt ` +
-      "judges the fixed code")
     .with({ kind: "dependency" }, ({ blockers }) => {
       const escalated = escalatedBlockers(blockers);
       return escalated.length > 0
@@ -120,7 +114,6 @@ export function dispatchHoldMessage(taskId: string, hold: DispatchHold): string 
 export function stuckDispatchHoldMessage(taskId: string, hold: DispatchHold): string {
   const subject = match(hold)
     .with({ kind: "distill-pass" }, () => "the distill pass")
-    .with({ kind: "forward-fix" }, () => "the held Task")
     .with({ kind: "dependency" }, () => "the dependent Task")
     .exhaustive();
   return `${dispatchHoldMessage(taskId, hold)}; none of them is dispatchable, active or escalated, ` +

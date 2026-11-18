@@ -345,7 +345,7 @@ describe("wave_plan_edits on the State File", () => {
 
   it.each<[string, Readonly<Record<string, unknown>>, string]>([
     ["an unknown field", { ...EDIT, extra: 1 }, "unknown field(s): extra"],
-    ["a wrong kind", { ...EDIT, kind: "task-added" }, "invalid schema or kind"],
+    ["a wrong kind", { ...EDIT, kind: "task-renamed" }, "invalid schema or kind"],
     ["a Task of another Wave", { ...EDIT, wave: 2 }, "T1 is not a Task of Wave 2"],
     ["an unknown Task", { ...EDIT, taskId: "T9" }, "T9 is not a Task of Wave 1"],
     ["no change", { ...EDIT, added: [] }, "adds and removes nothing"],

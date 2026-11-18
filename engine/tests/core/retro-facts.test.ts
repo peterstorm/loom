@@ -85,11 +85,29 @@ describe("retroFacts", () => {
     expect(digest.gateRuns).toEqual({ completed: 0, retired: 0, abandoned: 1 });
     expect(digest).toMatchObject({ taskReopenings: 1, forwardFixes: 1 });
     expect(digest.tasks.find(({ taskId }) => taskId === "T2")).toMatchObject({ heldByForwardFixes: ["T1"] });
-    expect(digest.tasks.find(({ taskId }) => taskId === "T1")).toMatchObject({ forwardFix: true, reopenings: 1 });
+    expect(digest.tasks.find(({ taskId }) => taskId === "T1")).toMatchObject({ addedMidRun: true, reopenings: 1 });
     const withDistill = graph({}, [...base.tasks, i6PlanTask("T9", 2, ["src/t1.ts"], {
       agent: "distill-agent", description: "Distill pass", verification_policy: serializeVerificationPolicy(DISTILL_VERIFICATION_POLICY),
     })]);
     expect(waveFriction(withDistill, 2).tasks.map(({ taskId }) => taskId)).not.toContain("T9");
+  });
+
+  it("marks a Task add-task appended as addedMidRun, and counts a run its task-added and task-withdrawn edits name once", () => {
+    const base = graph();
+    const runId = value(parseOrchestrationRunId("w2-gate-1"));
+    const state: TaskGraph = {
+      ...base,
+      wave_plan_edits: [
+        { schemaVersion: 1, kind: "task-added", wave: 2, taskId: "T2", files: ["src/t2.ts"], dependsOn: [], dependents: [], reason: "missed", abandonedRunId: runId },
+        { schemaVersion: 1, kind: "task-added", wave: 2, taskId: "T7", files: ["src/t7.ts"], dependsOn: [], dependents: [], reason: "missed", abandonedRunId: null },
+        { schemaVersion: 1, kind: "task-withdrawn", wave: 2, taskId: "T7", reason: "wrong files", abandonedRunId: runId },
+      ],
+    };
+    const digest = waveFriction(state, 2);
+    expect(digest.gateRuns).toEqual({ completed: 0, retired: 0, abandoned: 1 });
+    expect(digest.planEdits).toBe(3);
+    expect(digest.tasks.find(({ taskId }) => taskId === "T2")).toMatchObject({ addedMidRun: true, heldByForwardFixes: [], planEdits: 1 });
+    expect(waveFriction(base, 2).tasks.find(({ taskId }) => taskId === "T2")).toBeUndefined();
   });
 
   it("sums every Wave's escalations to the run's escalation receipts (property)", () => {

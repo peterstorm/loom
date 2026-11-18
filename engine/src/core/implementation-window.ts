@@ -15,9 +15,10 @@
  * Tasks escalated or are dispatchable, and which one recovery follows. A Task
  * under a dispatch hold (`dispatch-holds.ts`) is outstanding like any other
  * but not dispatchable: a Distill Task until the rest of its Wave is
- * implemented and unreserved (ADR-0068), a Forward Fix's held judge until its
- * fix settles. A held judge's escalation waits for its fix too, so the fix is
- * dispatched before the escalation is put to the operator. A
+ * implemented and unreserved (ADR-0068), a Task until the same-Wave Tasks it
+ * depends on settle (ADR-0081). A held Task's escalation waits for them too,
+ * so what it waits for is dispatched before the escalation is put to the
+ * operator. A
  * spawn owed while stage two leaves an export binding unresolved (the
  * skeleton report's problems, AS-051) is replaced by its repair, because
  * registration would refuse that spawn with the same problems. The
@@ -201,8 +202,8 @@ export function classifyImplementationWindow(
   }
   const withheld = withheldTasks(graph, executing, outstanding);
   const isWithheld = (taskId: string): boolean => withheld.some((entry) => entry.taskId === taskId);
-  // A held judge's escalation is deferred while its Forward Fix is owed: the
-  // fix is what answers it, and once the fix settles the escalation returns.
+  // A held Task's escalation is deferred while what it waits for is owed
+  // (a fix it depends on answers it); once that settles the escalation returns.
   const escalated = derivations.flatMap(({ task, derivation }): readonly EscalatedImplementation[] =>
     derivation.kind === "escalated" && !isWithheld(task.id)
       ? [canonicalRecord({ taskId: task.id, receiptId: derivation.receiptId, failureKinds: derivation.failureKinds })]

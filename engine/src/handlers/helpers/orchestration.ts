@@ -32,10 +32,10 @@
  *   helper orchestration rescope-task --task <task-id> [--add-file <path>]... [--add-sealed-file <path>]... [--remove-file <path>]...
  *                               --reason <text>
  *   helper orchestration add-dependency --task <task-id> --on <task-id> [--on <task-id>]... --reason <text>
- *   helper orchestration add-forward-fix --wave <N> --hold <task-id>... --file <path>...
- *                               --description <text> --reason <text>
+ *   helper orchestration add-task --file <path>... [--sealed-file <path>]... [--depends-on <task-id>]...
+ *                               [--before <task-id>]... --description <text> --reason <text>
  *                               [--agent <agent>] [--new-tests required|existing-tests-sufficient]
- *   helper orchestration withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>
+ *   helper orchestration withdraw-task --task <task-id> --reason <text>
  *   helper orchestration adopt-engine-run-tests --reason <text>
  *   helper orchestration adopt-engine-revision --reason <text>
  *
@@ -223,7 +223,7 @@ import { rescopeTaskOperation } from "./rescope-task";
 import { addDependencyOperation } from "./add-dependency";
 import { adoptEngineRunTestsOperation } from "./adopt-engine-run-tests";
 import { adoptEngineRevisionOperation } from "./adopt-engine-revision";
-import { addForwardFixOperation, withdrawForwardFixOperation } from "./forward-fix-operations";
+import { addTaskOperation, withdrawTaskOperation } from "./task-addition-operations";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
 import { argumentValue, argumentValues, hasFlag, unconsumedValueArguments } from "./cli-args";
@@ -255,12 +255,12 @@ const OPERATOR_OPERATIONS_USAGE: readonly string[] = [
   "  add-dependency --task <task-id> --on <task-id> [--on <task-id>]... --reason <text>",
   "          (makes a pending Task of the active Wave wait for the named Tasks of its Wave or an earlier one; a same-Wave",
   "          dependency is satisfied once it settles its implementation; a cycle is refused; audited and idempotent)",
-  "  add-forward-fix --wave <N> --hold <task-id> [--hold <task-id>]... --file <path> [--file <path>]...",
+  "  add-task --file <path> [--file <path>]... [--sealed-file <path>]... [--depends-on <task-id>]... [--before <task-id>]...",
   "          --description <text> --reason <text> [--agent <implementation agent>] [--new-tests required|existing-tests-sufficient]",
-  "          (appends a Forward Fix Task to the active Wave to change code a completed Wave sealed, when a held Task's judgement of it failed;",
-  "          the held Tasks wait until the fix settles; completed Waves stay untouched; audited and idempotent)",
-  "  withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>",
-  "          (removes a Forward Fix Task that was never dispatched and releases its hold; its audit moves to forward_fix_withdrawals)",
+  "          (appends a Task to the active Wave; it waits for each --depends-on Task, and each pending --before Task of the Wave waits for it;",
+  "          a path a completed Wave sealed joins only through --sealed-file; a cycle is refused; completed Waves stay untouched; audited and idempotent)",
+  "  withdraw-task --task <task-id> --reason <text>",
+  "          (removes a Task add-task appended that was never dispatched, with every dependency edge to it; audited and idempotent)",
   "  adopt-engine-run-tests --reason <text>",
   "          (freezes engine-run test evidence on a graph populated before it existed: from then on only `helper run-tests` runs prove I6",
   "          and test verdicts; needs the frozen manifest's affectedRunner and no reserved attempt; recorded with the reason; idempotent)",
@@ -1978,10 +1978,10 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return rescopeTaskOperation(rest);
       case "add-dependency":
         return addDependencyOperation(rest);
-      case "add-forward-fix":
-        return addForwardFixOperation(rest);
-      case "withdraw-forward-fix":
-        return withdrawForwardFixOperation(rest);
+      case "add-task":
+        return addTaskOperation(rest);
+      case "withdraw-task":
+        return withdrawTaskOperation(rest);
       case "adopt-engine-run-tests":
         return adoptEngineRunTestsOperation(rest);
       case "adopt-engine-revision":

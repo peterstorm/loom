@@ -120,8 +120,8 @@ export function renderTaskImplementationBrief(
     if (task.status === "completed") {
       return { ok: false, error: `Task ${taskId} is completed; it is owed no implementation dispatch` };
     }
-    // A held Task (a withheld Distill Task, ADR-0068, or a Forward Fix's held
-    // judge) is owed no dispatch yet: status does not offer it and
+    // A held Task (a withheld Distill Task, ADR-0068, or a Task waiting for a
+    // same-Wave dependency) is owed no dispatch yet: status does not offer it and
     // registration refuses it, by this same rule.
     const hold = dispatchHoldOf(graph, new Set(graph.executing_tasks ?? []), task);
     if (hold !== null) return { ok: false, error: dispatchHoldMessage(taskId, hold) };
