@@ -5,7 +5,7 @@
 
 import { canonicalStructuralEquals, type ArtifactDigest, type DomainResult, type NonEmpty } from "../orchestration-contract";
 import { allOk, err, freeze, mapNonEmpty, nonEmpty, ok } from "./kernel";
-import type { AcceptanceContract, AcceptanceFreeze, FrozenPathDigest } from "./model";
+import type { AcceptanceContract, AcceptanceFreeze, FrozenPathDigest, RuntimeSeam } from "./model";
 import { frozenPaths } from "./tasks";
 import { observedRoster, recordsRoster, type AcceptanceExpectation, type AcceptanceReportFacts } from "./gate";
 
@@ -41,6 +41,11 @@ export function stampAcceptanceFreezes(
       errors.push(`${contract.id}: frozen paths could not be read to stamp the freeze: ${renderFrozenPathProblems(paths.error)}`);
       return contract;
     }
+    const bypassed = runtimeSeamGaps(contract, observations);
+    if (bypassed.length > 0) {
+      errors.push(`${contract.id}: ${renderRuntimeSeamGaps(bypassed)}`);
+      return contract;
+    }
     const next: AcceptanceFreeze = freeze({ state: "frozen", wave: expectation.wave, paths: paths.value, roster });
     if (contract.freeze.state === "awaiting-red") return freeze({ ...contract, freeze: next });
     if (canonicalStructuralEquals(contract.freeze, next)) return contract;
@@ -50,10 +55,43 @@ export function stampAcceptanceFreezes(
   return errors.length > 0 ? err(errors.join("; ")) : ok(Object.freeze(stamped));
 }
 
+/** One acceptance file that does not reference one declared runtime seam. */
+export type RuntimeSeamGap = Readonly<{ path: string; seam: RuntimeSeam }>;
+
+/** Whether `text` names `symbol` as a whole identifier. */
+const mentions = (text: string, symbol: string): boolean =>
+  new RegExp(`(^|[^\\w$])${symbol.replace(/\$/g, "\\$")}(?![\\w$])`).test(text);
+
+/**
+ * Every (acceptance file, runtime seam) pair where the file's observed text
+ * does not reference the seam (ADR-0088), in declaration order. An acceptance
+ * test that never names the production seam cannot be running through it, as
+ * the fugue-dags DAG test that skipped the host's checkpoint encoding showed.
+ * A file the shell could not read is the frozen-path check's to refuse.
+ */
+export function runtimeSeamGaps(
+  contract: Pick<AcceptanceContract, "acceptance" | "runtimeSeams">,
+  observations: FrozenPathObservations,
+): readonly RuntimeSeamGap[] {
+  const seams = contract.runtimeSeams ?? [];
+  return Object.freeze(contract.acceptance.flatMap(({ path }) => {
+    const observation = observations.get(path);
+    if (observation?.kind !== "digest") return [];
+    return seams.filter(({ symbol }) => !mentions(observation.text, symbol)).map((seam) => freeze({ path, seam }));
+  }));
+}
+
+/** The operator sentence for runtime-seam gaps. */
+export const renderRuntimeSeamGaps = (gaps: readonly RuntimeSeamGap[]): string =>
+  "acceptance tests must run through the production path; " +
+  gaps.map(({ path, seam }) => `'${path}' does not reference runtime seam ${seam.symbol}${seam.source === null ? "" : ` (${seam.source})`}`)
+    .join("; ");
+
 /** What the shell saw at one frozen path: its digest, or why it could not be
  *  read without following a link. */
 export type FrozenPathObservation =
-  | Readonly<{ kind: "digest"; sha256: ArtifactDigest }>
+  /** `text` is the bytes decoded as UTF-8, for the runtime-seam check (ADR-0088). */
+  | Readonly<{ kind: "digest"; sha256: ArtifactDigest; text: string }>
   | Readonly<{ kind: "unreadable"; reason: string }>;
 
 /** The shell's observations, by frozen path. A path with no entry was never

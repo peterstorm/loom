@@ -169,6 +169,9 @@ A contract fixes behavior before the code exists. One task writes the surface co
 - `tests/payload.acceptance.test.ts` — AS-001, FR-002
 **Supported domain:** `tests/payload.acceptance.test.ts`
 **Entry point:** `src/payload/submit-route.ts`
+**Runtime seams:**
+- `encodeNodeCheckpoint` (`@fuguejs/host`: the host checkpoints every node output)
+- `toJson` (response serialization)
 **Statement:** One valid call wins; a second call is refused with AlreadySubmitted.
 
 ### CT-2: Submission slice
@@ -184,6 +187,7 @@ A contract fixes behavior before the code exists. One task writes the surface co
 - `**Acceptance tests:**` lists NEW, dedicated test files, one `- path — FR-n, AS-n` line each, naming only Requirements a test can decide (measured or calibration Requirements stay off). Name every testcase after the Requirement it decides (`AS-001: one call wins`); the engine attributes testcases by that prefix.
 - `**Supported domain:**` (optional) names the acceptance file whose testcases hold the supported and unsupported input table and the relevant laws.
 - `**Entry point:**` (optional) names the production file the acceptance tests reach the code through: a route, a handler, a CLI command. Declare it whenever a later Task builds it. Validation then refuses a Task that claims a covered Requirement but neither writes the entry point nor depends on a Task that does.
+- `**Runtime seams:**` (optional, but required in practice for any route the production runtime wraps) lists the production symbols a request passes through on its way to and from the code: a host's per-node checkpoint encoder, the response serializer, a framework's dispatcher. One ``- `symbol` (source)`` line each. When the contract freezes, the engine refuses it unless every acceptance file references every seam, so the acceptance tests run through the path production takes rather than around it ([ADR-0088](../docs/adr/ADR-0088-acceptance-tests-run-through-declared-runtime-seams.md)). A benchmark that measures a route measures it through the same seams.
 - `**Statement:**` gives the observable behavior and what is refused.
 - Several contracts per feature are normal. A vertical slice with `**Types file:** none` carries the controls that must fail.
 - Contracts need a verification manifest whose test check writes a JUnit report, with the test runner as its own check or the last step of one. Say so in the plan when the project has none, so the operator installs it before Tasks are populated.

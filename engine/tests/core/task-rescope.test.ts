@@ -428,7 +428,7 @@ describe("rescopeTask: contracts, export bindings and the Distill Task, on a pop
         id: "CT-1", title: "Contract",
         declaration: {
           kind: "declared", types: { kind: "file", path: CONTRACT_TYPES }, acceptance: [{ path: ACCEPTANCE, anchors: ["AS-001"] }],
-          supportedDomain: null, entryPoint: null, statement: "It runs.",
+          supportedDomain: null, entryPoint: null, runtimeSeams: [], statement: "It runs.",
         },
       }],
       invariants: [],

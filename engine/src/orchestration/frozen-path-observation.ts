@@ -19,9 +19,10 @@ export function observeFrozenDigests(
 ): FrozenPathObservations {
   return new Map(paths.map((path): readonly [string, FrozenPathObservation] => {
     try {
-      const digest = parseArtifactDigest(sha256Bytes(readRunBytesNoFollow(join(root, path))));
+      const bytes = readRunBytesNoFollow(join(root, path));
+      const digest = parseArtifactDigest(sha256Bytes(bytes));
       return [path, digest.ok
-        ? Object.freeze({ kind: "digest", sha256: digest.value })
+        ? Object.freeze({ kind: "digest", sha256: digest.value, text: Buffer.from(bytes).toString("utf8") })
         : Object.freeze({ kind: "unreadable", reason: "the bytes did not hash to a sha256 digest" })];
     } catch (error) {
       return [path, Object.freeze({ kind: "unreadable", reason: error instanceof Error ? error.message : String(error) })];

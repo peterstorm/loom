@@ -47,6 +47,9 @@ function renderContractProblem(problem: ContractProblem): string {
       `'${path}' is not a repository-relative path — a frozen path may not be absolute or contain '..'`)
     .with({ kind: "entry-point-frozen" }, ({ path }) =>
       `'**Entry point:** ${path}' is a frozen path — name the production file the acceptance tests drive, which claimants write`)
+    .with({ kind: "malformed-runtime-seam" }, ({ line }) =>
+      `runtime seam line '${line}' is not '- \`symbol\` (source)' — name the production symbol a request passes through`)
+    .with({ kind: "duplicate-runtime-seam" }, ({ symbol }) => `runtime seam '${symbol}' is listed twice`)
     .with({ kind: "missing-statement" }, () => "no '**Statement:**' — say what consumers rely on and what is refused")
     .exhaustive();
 }

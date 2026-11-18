@@ -9,7 +9,7 @@ import { match } from "ts-pattern";
 import type { DomainResult, NonEmpty } from "../orchestration-contract";
 import { samePlanPath } from "../plan-path-match";
 import { allOk, err, freeze, mapNonEmpty, nonEmpty, nonEmptyOf, ok } from "./kernel";
-import type { AcceptanceContract, ContractTaskView, PlanContract } from "./model";
+import type { AcceptanceContract, ContractTaskView, PlanContract, RuntimeSeam } from "./model";
 
 /** Every path the freeze covers: the types file (if any), then each acceptance file. */
 export function frozenPaths(contract: Pick<AcceptanceContract, "types" | "acceptance">): NonEmpty<string> {
@@ -151,11 +151,18 @@ export function acceptanceContractsFromPlan(
       types: declaration.types,
       acceptance: declaration.acceptance,
       supportedDomain: declaration.supportedDomain,
+      ...(seamsOf(declaration.runtimeSeams)),
       freeze: freeze({ state: "awaiting-red" }),
       revisions: Object.freeze([]),
     })];
   });
   return errors.length > 0 ? err(Object.freeze(errors)) : ok(Object.freeze(built));
+}
+
+/** The contract field for declared runtime seams: omitted when the plan declared none. */
+function seamsOf(seams: readonly RuntimeSeam[]): Readonly<{ runtimeSeams?: NonEmpty<RuntimeSeam> }> {
+  const declared = nonEmpty(seams);
+  return declared === null ? {} : { runtimeSeams: declared };
 }
 
 /**

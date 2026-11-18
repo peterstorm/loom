@@ -63,6 +63,7 @@ import type {
 import { parseInvariantId } from "./invariant-id";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { COVERABLE_ANCHOR } from "./acceptance-contract";
+import type { RuntimeSeam } from "./acceptance-contract/model";
 import { concatNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
 import { parseExportBindings } from "./skeleton/bindings";
 import type { ExportBindingsDeclaration } from "./skeleton/types";
@@ -393,6 +394,33 @@ function contractTypes(block: string): ContractPart<ContractTypes> {
 }
 
 const ACCEPTANCE_LABEL = /^\*\*Acceptance tests:\*\*/i;
+const RUNTIME_SEAMS_LABEL = /^\*\*Runtime seams:\*\*/i;
+/** `- \`symbol\`` optionally followed by `(source)` or `— source`. */
+const RUNTIME_SEAM_ITEM = /^-\s+`([A-Za-z_$][\w$]*)`(?:\s*\(([^)]+)\)|\s+[—–-]\s+(.+?))?\s*$/;
+
+/**
+ * The `- \`symbol\` (source)` items under `**Runtime seams:**` (ADR-0088): none
+ * when the label is absent, and every malformed or repeated item as a problem.
+ */
+function contractRuntimeSeams(block: string): ContractPart<readonly RuntimeSeam[]> {
+  const list = labelledList(block, RUNTIME_SEAMS_LABEL);
+  if (list.kind === "absent") return parsedPart(Object.freeze([]));
+  if (list.kind === "inline") return refusedPart({ kind: "malformed-runtime-seam", line: list.value });
+  const seams: RuntimeSeam[] = [];
+  const problems: ContractProblem[] = [];
+  for (const line of list.items) {
+    const item = RUNTIME_SEAM_ITEM.exec(line);
+    if (item === null) {
+      problems.push({ kind: "malformed-runtime-seam", line });
+      continue;
+    }
+    const symbol = item[1];
+    if (seams.some((seam) => seam.symbol === symbol)) problems.push({ kind: "duplicate-runtime-seam", symbol });
+    else seams.push(Object.freeze({ symbol, source: (item[2] ?? item[3] ?? "").trim() || null }));
+  }
+  const [problem, ...more] = problems;
+  return problem === undefined ? parsedPart(Object.freeze(seams)) : refusedPart(problem, ...more);
+}
 const ACCEPTANCE_ITEM = /^-\s+`?([^`\s]+)`?\s+[—–-]\s+(.+?)\s*$/;
 
 /** The `- path — FR-n, AS-n` items, every problem in them, and no file twice:
@@ -442,6 +470,7 @@ function parseContract(block: string): ContractDeclaration {
   const supportedDomain = fieldValue(block, "Supported domain");
   const rawEntryPoint = fieldValue(block, "Entry point");
   const entryPoint = rawEntryPoint === null ? null : normalizePlanPath(rawEntryPoint);
+  const runtimeSeams = contractRuntimeSeams(block);
   const statementLine = fieldValue(block, "Statement");
   const statement: ContractPart<string> =
     statementLine === null ? refusedPart({ kind: "missing-statement" }) : parsedPart(statementLine);
@@ -466,7 +495,7 @@ function parseContract(block: string): ContractDeclaration {
     : [];
   // Every problem, in one order: types, acceptance, the cross-part checks,
   // statement. A refused part carries the proof that the list is non-empty.
-  const crossProblems = [...domainProblems, ...unsafeProblems, ...entryProblems];
+  const crossProblems = [...domainProblems, ...unsafeProblems, ...entryProblems, ...partProblems(runtimeSeams)];
   if (types.kind === "refused") {
     return malformedContract(concatNonEmpty([], types.problems, [...partProblems(acceptance), ...crossProblems, ...partProblems(statement)]));
   }
@@ -476,12 +505,14 @@ function parseContract(block: string): ContractDeclaration {
   if (statement.kind === "refused") return malformedContract(concatNonEmpty(crossProblems, statement.problems));
   const [problem, ...more] = crossProblems;
   if (problem !== undefined) return malformedContract(nonEmptyOf(problem, ...more));
+  if (runtimeSeams.kind === "refused") return malformedContract(runtimeSeams.problems);
   return {
     kind: "declared",
     types: types.value,
     acceptance: acceptance.value,
     supportedDomain: supportedDomain === null ? null : normalizePlanPath(supportedDomain),
     entryPoint,
+    runtimeSeams: runtimeSeams.value,
     statement: statement.value,
   };
 }
@@ -561,6 +592,7 @@ function collectStrays(
     { label: "Acceptance tests", s: contracts, home: "Contracts" },
     { label: "Supported domain", s: contracts, home: "Contracts" },
     { label: "Entry point", s: contracts, home: "Contracts" },
+    { label: "Runtime seams", s: contracts, home: "Contracts" },
     { label: "Export bindings", s: fileStructure, home: "File Structure" },
   ];
   for (const { label, s, home } of labelHomes) {

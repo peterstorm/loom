@@ -31,7 +31,18 @@ export type ContractProblem =
   | Readonly<{ kind: "supported-domain-not-acceptance"; path: string }>
   | Readonly<{ kind: "unsafe-path"; path: string }>
   | Readonly<{ kind: "entry-point-frozen"; path: string }>
+  | Readonly<{ kind: "malformed-runtime-seam"; line: string }>
+  | Readonly<{ kind: "duplicate-runtime-seam"; symbol: string }>
   | Readonly<{ kind: "missing-statement" }>;
+
+/**
+ * One production runtime seam a contract's requests pass through (ADR-0088,
+ * loom#199 Cause 5): a symbol the production path calls, such as the host's
+ * per-node checkpoint encoder, and the module that provides it. Every
+ * acceptance file must reference it, so the acceptance tests run through the
+ * path production takes rather than around it.
+ */
+export type RuntimeSeam = Readonly<{ symbol: string; source: string | null }>;
 
 /**
  * What a contract declares: the frozen types surface, the acceptance files and
@@ -51,6 +62,8 @@ export type ContractDeclaration =
        *  binding only: every claimant must write it or wait for a Task that
        *  does. Never persisted, because the freeze does not depend on it. */
       entryPoint: string | null;
+      /** The production runtime seams every acceptance file must reference; possibly none. */
+      runtimeSeams: readonly RuntimeSeam[];
       statement: string;
     }>
   | Readonly<{ kind: "malformed"; problems: NonEmpty<ContractProblem> }>;
@@ -101,6 +114,8 @@ export type AcceptanceContract = Readonly<{
   types: ContractTypes;
   acceptance: NonEmpty<ContractAcceptanceFile>;
   supportedDomain: string | null;
+  /** The production runtime seams every acceptance file must reference (ADR-0088). Absent when the plan declared none. */
+  runtimeSeams?: NonEmpty<RuntimeSeam>;
   freeze: AcceptanceFreeze;
   revisions: readonly ContractRevision[];
 }>;

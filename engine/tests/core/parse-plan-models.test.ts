@@ -307,6 +307,7 @@ describe("parsePlanModels", () => {
           ],
           supportedDomain: "engine/tests/acceptance/payload.acceptance.test.ts",
           entryPoint: null,
+          runtimeSeams: [],
           statement: "One valid call wins; a refused call never supplies bytes.",
         },
       }]);
@@ -325,6 +326,7 @@ describe("parsePlanModels", () => {
         acceptance: [{ path: "t/slice.acceptance.test.ts", anchors: ["AS-010"] }],
         supportedDomain: null,
         entryPoint: null,
+        runtimeSeams: [],
         statement: "The slice runs end to end.",
       });
     });

@@ -5,32 +5,11 @@ import type { PlanContract, TaskGraph } from "../../src/types";
 import { withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec, specDefining } from "../fixtures/spec-index-fixture";
 import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
+import { authoredTask, loadContract } from "../fixtures/load-contract";
 
-const CONTRACT: PlanContract = {
-  id: "CT-1",
-  title: "Load contract",
-  declaration: {
-    kind: "declared",
-    types: { kind: "none", reason: "the slice consumes another surface" },
-    acceptance: [{ path: "tests/load.acceptance.test.ts", anchors: ["FR-001"] }],
-    supportedDomain: null,
-    entryPoint: null,
-    statement: "Loads.",
-  },
-};
+const CONTRACT: PlanContract = loadContract("tests/load.acceptance.test.ts");
 
-const task = (id: string, wave: number, overrides: Partial<AuthoredTask> = {}): AuthoredTask => ({
-  id,
-  description: `task ${id}`,
-  agent: "code-implementer-agent",
-  wave,
-  depends_on: [],
-  spec_anchors: [],
-  spec_contributions: [],
-  verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } },
-  file_list: [`src/${id}.ts`],
-  ...overrides,
-});
+const task = authoredTask;
 
 function populated(contracts: readonly PlanContract[] = [CONTRACT]): TaskGraph {
   const roster = parseAuthoredTaskRoster([

@@ -69,6 +69,13 @@ Then check that every judgement stays repairable. A Requirement that constrains 
 
 Each `JUDGE-N` gap names the Requirement, the phase that builds the constrained code, and the later phase that judges it.
 
+Then check that acceptance runs through production. For each route, handler or job the spec exposes, name the runtime that serves it in production (a host, a framework, a worker loop) and the seams a request passes through there: per-node checkpoint encoding, response serialization, middleware, a dispatcher. Flag as a gap (ID `SEAM-N`):
+
+- A contract covering such a route declares no `**Runtime seams:**`, or omits a seam the production runtime applies
+- An acceptance test or benchmark the plan describes drives the code directly, or through a path production does not take for that route (for example a durable path when production serves it synchronously)
+
+Each `SEAM-N` gap names the route, the production runtime and seam, and the contract or harness that bypasses it.
+
 ### 3.6 Check Requirements Against Recorded Discoveries
 
 Coverage is not enough: a plan can cover a Requirement that the recorded facts make unsatisfiable. For **each** Requirement and plan decision, check it against **every** discovery from step 2.5. Flag as a gap (ID `FEAS-N`) any pair where:
@@ -105,6 +112,7 @@ The report MUST always be written — even when no gaps are found.
 - **FEAS-N** — (Requirement or decision) vs `(document)`: (the discovery it contradicts, and why)
 - **OWN-N** — (the rule): (the sites the plan applies it at, and the missing or contradicting ownership declaration)
 - **JUDGE-N** — (Requirement): (the phase that builds the constrained code, and the later phase that judges it)
+- **SEAM-N** — (route): (the production runtime and seam, and the contract or harness that bypasses it)
 
 (Write "None." if no gaps)
 

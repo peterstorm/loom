@@ -13,6 +13,7 @@ import {
   isExpectedRedAcceptanceFailure,
   isFailedReportTestcase,
   renderFrozenPathDrift,
+  runtimeSeamGaps,
   judgeAcceptance,
   observeAcceptanceFacts,
   parseAcceptanceContracts,
@@ -48,6 +49,7 @@ const PLAN_CONTRACT: PlanContract = {
     acceptance: [{ path: ACCEPTANCE, anchors: ["AS-003", "AS-004"] }],
     supportedDomain: ACCEPTANCE,
     entryPoint: null,
+    runtimeSeams: [],
     statement: "One valid call wins.",
   },
 };
@@ -459,6 +461,29 @@ describe("stampAcceptanceFreezes — the Acceptance Freeze", () => {
     expect(stamped).toEqual({ ok: true, value: [contract(FROZEN)] });
     const again = stampAcceptanceFreezes([contract(FROZEN)], expectation, [facts(expectation, RED_REPORT)], digests);
     expect(again).toEqual({ ok: true, value: [contract(FROZEN)] });
+  });
+
+  it("refuses the freeze while an acceptance file does not reference a declared runtime seam (ADR-0088)", () => {
+    const seamed = (): AcceptanceContract => ({ ...contract(), runtimeSeams: [{ symbol: "encodeNodeCheckpoint", source: "@fuguejs/host" }] });
+    const expectation = acceptanceExpectation([seamed()], TASKS, 1);
+    const bypassing = observations([[TYPES, seen(digest("a"))], [ACCEPTANCE, seen(digest("b"), "const out = dag.run(input);")]]);
+    expect(stampAcceptanceFreezes([seamed()], expectation, [facts(expectation, RED_REPORT)], bypassing)).toEqual({
+      ok: false,
+      error: `CT-1: acceptance tests must run through the production path; '${ACCEPTANCE}' does not reference runtime seam ` +
+        "encodeNodeCheckpoint (@fuguejs/host)",
+    });
+    const through = observations([[TYPES, seen(digest("a"))], [ACCEPTANCE, seen(digest("b"), "restore(encodeNodeCheckpoint(output))")]]);
+    const stamped = stampAcceptanceFreezes([seamed()], expectation, [facts(expectation, RED_REPORT)], through);
+    expect(stamped.ok && stamped.value[0]?.freeze.state).toBe("frozen");
+  });
+
+  it("counts only a whole-identifier reference as reaching a seam", () => {
+    const seams = { acceptance: contract().acceptance, runtimeSeams: [{ symbol: "encode", source: null }] as const };
+    const gaps = (text: string) => runtimeSeamGaps(seams, observations([[ACCEPTANCE, seen(digest("b"), text)]])).length;
+    expect(gaps("encodeNodeCheckpoint(x)")).toBe(1);
+    expect(gaps("x.encode(y)")).toBe(0);
+    expect(gaps("import { encode } from 'host'")).toBe(0);
+    expect(runtimeSeamGaps({ acceptance: contract().acceptance }, observations([[ACCEPTANCE, seen(digest("b"), "")]]))).toEqual([]);
   });
 
   it("refuses to restamp a frozen contract with different bytes", () => {
