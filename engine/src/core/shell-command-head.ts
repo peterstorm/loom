@@ -20,7 +20,8 @@
  */
 
 import { READ_ONLY_STATE_COMMANDS } from "./tool-vocabulary";
-import { isReadOnlyGhInvocation } from "./read-only-gh";
+import { isReadOnlyFilterInvocation } from "./read-only-filters";
+import { GH_INERT_ENVIRONMENT, isReadOnlyGhInvocation } from "./read-only-gh";
 import { isReadOnlyGitInvocation } from "./read-only-git";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
 import { staticSpelling } from "./shell-match-views";
@@ -82,13 +83,16 @@ export function hasReadOnlyHead(segment: string): boolean {
 }
 
 /**
- * Is the segment exactly a read-only `git` or `gh` invocation, one that writes
- * no local file and runs no program? The first word is the command itself (no
- * environment prefix: `GIT_EXTERNAL_DIFF=…` and the gh pager, browser and
- * editor variables run programs), every word is judged by its one static
- * spelling under `spell` (a word the shell could complete into an option at
- * runtime is not admitted), and the verdict is the audited classifier's:
- * `isReadOnlyGitInvocation` (#177) or `isReadOnlyGhInvocation`. The state
+ * Is the segment a `git`, `gh`, `sort`, `uniq` or `find` invocation that
+ * writes no local file and runs no program? Every word after the environment
+ * prefix is judged by its one static spelling under `spell` (a word the shell
+ * could complete into an option at runtime is not admitted), and the verdict is
+ * the audited classifier's: `isReadOnlyGitInvocation` (#177),
+ * `isReadOnlyGhInvocation` or `isReadOnlyFilterInvocation` (#216). The prefix:
+ * none for git (`GIT_EXTERNAL_DIFF=…` runs a program), only
+ * `GH_INERT_ENVIRONMENT` names for gh (its pager, browser and editor variables
+ * run programs), and any for a filter, as for every read-only head (the
+ * loader variables are refused line-wide by `commandNamesRebound`). The state
  * guard spells words as written (`staticSpelling`); the subagent authority
  * guard first pins the values its line binds.
  */
@@ -96,10 +100,155 @@ export function isReadOnlySubcommandInvocation(
   segment: string,
   spell: (word: string) => string | null = staticSpelling,
 ): boolean {
-  const raw = shellWords(stripComment(segment).trim());
-  if (raw[0] === undefined || shellWords(stripEnvPrefix(segment))[0] !== raw[0]) return false;
-  const spellings = raw.map(spell);
-  return isReadOnlyGitInvocation(spellings) || isReadOnlyGhInvocation(spellings);
+  const line = stripComment(segment).trim();
+  const raw = shellWords(line);
+  const prefixLength = raw.length - shellWords(stripEnvPrefix(line)).length;
+  const spellings = raw.slice(prefixLength).map(spell);
+  if (spellings.length === 0) return false;
+  if (isReadOnlyFilterInvocation(spellings)) return true;
+  if (prefixLength === 0 && isReadOnlyGitInvocation(spellings)) return true;
+  const prefixNames = raw.slice(0, prefixLength).map((word) => word.slice(0, word.indexOf("=")));
+  return prefixNames.every((name) => GH_INERT_ENVIRONMENT.has(name)) && isReadOnlyGhInvocation(spellings);
+}
+
+/** Names the shell itself reads: assigning one changes where `~`, `cd`, a
+ *  command or a word resolves, so a guard never treats its assignment as inert. */
+export const SHELL_STATE_NAMES: ReadonlySet<string> = new Set([
+  "HOME", "CDPATH", "PWD", "OLDPWD", "PATH", "ENV", "BASH_ENV", "IFS", "SHELLOPTS", "BASHOPTS",
+  "GLOBIGNORE", "DIRSTACK", "BASH_XTRACEFD", "PROMPT_COMMAND", "PS4",
+]);
+
+/** May `text` set `name` — an assignment, an `export`, a `read`/`printf -v`
+ *  target, an indirection naming it? Any mention but a plain `$name` /
+ *  `${name}` read counts. */
+export const mayRebind = (text: string, name: string): boolean =>
+  new RegExp(`(?<![A-Za-z0-9_$])${name}(?![A-Za-z0-9_])`).test(text.replace(new RegExp(`\\$\\{${name}\\}`, "g"), ""));
+
+/** A builtin that rebinds a command name or runs code in this shell that may:
+ *  `hash`, `alias`, `enable`, `source`/`.` (a file the line does not show), an
+ *  `eval` of runtime-built text; or a function definition. An `eval` of
+ *  literal text needs no rule of its own: a definition in it is on the line. */
+const COMMAND_REBINDERS =
+  /(?:^|[;&|(`\n{!]|\$\(|\b(?:then|do|else|elif|if|while|until|time|command|builtin)\s)\s*(?:(?:hash|alias|enable|source|\.)(?=[\s;&|)]|$)|eval\s[^;&|\n]*[$`])|\bfunction\s|\(\)\s*[{(]/;
+
+/** Variables that decide which program a command name runs, or inject code
+ *  into every program: the search path, bash's command and alias tables, and
+ *  the dynamic loaders' preload and search variables. */
+const RESOLUTION_VARIABLES: readonly string[] = ["PATH", "BASH_CMDS", "BASH_ALIASES"];
+const LOADER_VARIABLE = /(?<![A-Za-z0-9_$])(?:LD|DYLD)_[A-Z_]+/;
+
+/**
+ * May a command name on this line run something other than the program it
+ * names (loom#216)? A function, alias, `hash -p` or `enable -n` rebinds the
+ * name; `source`, `.` and `eval` run code in this shell that may; a `PATH`,
+ * `BASH_CMDS` or `BASH_ALIASES` change re-resolves it; an `LD_*`/`DYLD_*`
+ * variable loads code into it. On such a line no guard trusts a head by its
+ * name: `cat(){ rm "$1"; }; cat <state>` is not a read. The one rule both Bash
+ * guards apply.
+ */
+export function commandNamesRebound(line: string): boolean {
+  return COMMAND_REBINDERS.test(line) ||
+    RESOLUTION_VARIABLES.some((name) => mayRebind(line, name)) ||
+    LOADER_VARIABLE.test(line);
+}
+
+/** Reserved words that open or continue a compound command; the command after one is still judged. */
+const LEADING_RESERVED = /^(?:if|then|else|elif|while|until|do|!|\{)(?=\s|$)\s*/;
+/** Reserved words that close a compound; whatever follows one is redirect syntax or nothing. */
+const CLOSING_RESERVED = /^(?:done|fi|\})(?=\s|$|[<>])\s*/;
+
+/**
+ * A segment with the reserved words around its command removed: `do cat "$f"`
+ * is `cat "$f"`, `if grep -q x f` is `grep -q x f`, `done > out` is `> out`.
+ * Never a function-definition prefix (`cat() { rm …` keeps its head); a line
+ * holding one is refused by `commandNamesRebound`.
+ */
+export function withoutReservedWords(segment: string): string {
+  let rest = stripComment(segment).trim();
+  for (;;) {
+    const next = rest.replace(LEADING_RESERVED, "").replace(CLOSING_RESERVED, "");
+    if (next === rest) return rest;
+    rest = next;
+  }
+}
+
+/** A shell variable name. */
+const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The variable names a segment binds when binding is all it does, else null:
+ * only `NAME=value` words (`F=a G="b c"`), `for NAME [in WORDS]`, or
+ * `read [-r] [-s] NAME…`. Such a segment writes no file; what it binds may
+ * reach a write elsewhere on its line, which a guard judges there.
+ */
+export function bindingNames(segment: string): readonly string[] | null {
+  const line = stripComment(segment).trim();
+  if (line === "") return null;
+  if (stripEnvPrefix(line).trim() === "") {
+    return shellWords(line).map((word) => word.slice(0, word.indexOf("=")));
+  }
+  const words = shellWords(line);
+  if (words[0] === "for" && words[1] !== undefined && NAME.test(words[1]) && (words.length === 2 || words[2] === "in")) {
+    return [words[1]];
+  }
+  if (words[0] === "read") {
+    const names = words.slice(1).filter((word) => word !== "-r" && word !== "-s");
+    return names.length > 0 && names.every((word) => NAME.test(word)) ? names : null;
+  }
+  return null;
+}
+
+/** Characters that end an unquoted redirect target word. */
+const TARGET_END = /[\s;&|<>()]/;
+
+/**
+ * The word every output redirect of the segment writes to, as written
+ * (quotes kept): `> out`, `>> out`, `>| out`, `&> out`, `2>out`. Null when an
+ * output redirect has no target a guard can name: a read-write open (`<>`), a
+ * `>&word` whose word is not a whole fd (it writes the file `word`), or a
+ * process substitution. An fd dup (`2>&1`, `>&-`) and the exact
+ * `2>/dev/null` discard write no file and are not listed.
+ */
+export function outputRedirectTargets(segment: string): readonly string[] | null {
+  const inspected = withoutSafeStderrDiscard(segment);
+  const targets: string[] = [];
+  const named = scanUnquoted<false>(inspected, 0, (c, i) => {
+    if (c !== ">") return CONTINUE;
+    if (inspected[i - 1] === "<") return halt(false);
+    let cursor = i + 1;
+    if (inspected[cursor] === "&") {
+      const dup = classifyFdDupWord(inspected, cursor + 1);
+      return dup.isFdDup ? skip(dup.end) : halt(false);
+    }
+    if (inspected[cursor] === ">" || inspected[cursor] === "|") cursor += 1;
+    while (inspected[cursor] === " " || inspected[cursor] === "\t") cursor += 1;
+    if (inspected[cursor] === "(" || cursor >= inspected.length) return halt(false);
+    const word = targetWord(inspected, cursor);
+    if (word === "") return halt(false);
+    targets.push(word);
+    return skip(cursor + word.length);
+  });
+  return named === false ? null : targets;
+}
+
+/** The redirect target word at `start`: up to the first unquoted space, separator or redirect. */
+function targetWord(text: string, start: number): string {
+  const end = scanUnquoted<number>(text, start, (c, i) => (TARGET_END.test(c) ? halt(i) : CONTINUE)) ?? text.length;
+  return text.slice(start, end);
+}
+
+/**
+ * Is the segment, once its compound syntax is removed, only redirects — the
+ * `done > out` or `} < in` that closes a compound command?
+ */
+export function isRedirectsOnly(text: string): boolean {
+  const words = commandWords(text);
+  for (let k = 0; k < words.length; k++) {
+    const w = words[k] as string;
+    if (PURE_REDIRECT.test(w)) { k++; continue; }
+    if (!FUSED_REDIRECT.test(w)) return false;
+  }
+  return true;
 }
 
 /**

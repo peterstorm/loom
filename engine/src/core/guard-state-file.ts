@@ -20,10 +20,23 @@
  *     for its OWN segment, and never for a protected-dir (ledger / machine
  *     definitions) write;
  *   - a read-only command: head token ∈ READ_ONLY_STATE_COMMANDS (commands
- *     that cannot write a file under any flag) with no output redirect except
- *     the exact stderr discard `2>/dev/null` (quote-aware: any other unquoted
- *     `>` except an fd-dup — `>&` followed by a WHOLE word of digits or exactly
- *     `-` — counts; `2>&1` / `>&2` / `>&-` do not).
+ *     that cannot write a file under any flag), or a read-only git, gh, sort,
+ *     uniq or find invocation, behind any reserved words (`do`, `then`, `!`,
+ *     `{`, …), whose output redirects each name a file with one static
+ *     spelling that, lexically normalized, names no guarded state (loom#216).
+ *     The exact stderr discard `2>/dev/null` and fd-dups (`2>&1`, `>&2`,
+ *     `>&-`) write no file; a runtime, glob, brace or `~` target, `<>`,
+ *     `>&file`, and a relative target on a line that changes directory are
+ *     unknown and block;
+ *   - a binding: only `NAME=value` words, `for NAME in …` or `read NAME…`, of
+ *     a name the shell does not read itself (SHELL_STATE_NAMES). A line that
+ *     binds puts EVERY chain in scope, so `$NAME` cannot carry a guarded path
+ *     into a chain that never names it.
+ *
+ * A guarded line that may rebind a command name (`commandNamesRebound`: a
+ * function, alias, hash, enable, source, an eval of runtime text, PATH,
+ * BASH_CMDS, a loader variable) is blocked outright: no head on it is
+ * trusted by its name.
  *
  * Pattern tests (the front gate, chain scoping, protected-dir checks, and
  * placeholder classification) run against a QUOTE-COLLAPSED view of the
@@ -36,8 +49,7 @@
  *
  * Everything else blocks — including writers nobody enumerated (`patch`,
  * `rsync`, `shred`, `git checkout --`), wrappers (`xargs`, `env`, `timeout`),
- * shells/interpreters executing piped content, and bare `VAR=<state-path>`
- * bindings (the indirection seed of the round-13 bypass).
+ * and shells/interpreters executing piped content.
  *
  * Substitutions (`$(…)`, backticks, `<(…)`, `>(…)`) execute independently and
  * are opaque to segment scoping, so on a guarded line each body is extracted
@@ -99,13 +111,25 @@ import type { HookResult } from "../types";
 import { scanSubstitutions, type SubstitutionContext } from "./shell-substitution";
 import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./guarded-locations";
 import { stripComment, stripEnvPrefix } from "./shell-command";
-import { hasOutputRedirect, hasReadOnlyHead, pipeChains, unquote } from "./shell-command-head";
+import {
+  bindingNames,
+  commandNamesRebound,
+  hasOutputRedirect,
+  hasReadOnlyHead,
+  isRedirectsOnly,
+  outputRedirectTargets,
+  pipeChains,
+  SHELL_STATE_NAMES,
+  unquote,
+  withoutReservedWords,
+} from "./shell-command-head";
 import { MAX_SUBSTITUTION_DEPTH, splitHeredocs } from "./shell-heredoc";
 import {
   knownWordOutput,
   leadingDotPolicyOf,
   OPAQUE_OUTPUT,
   referencesPattern,
+  staticSpelling,
   SUBSTITUTION_PLACEHOLDER_MARK,
   type LeadingDotPolicy,
 } from "./shell-match-views";
@@ -131,7 +155,7 @@ export const WHITELISTED_HELPERS: readonly string[] = [
   "record-retro",
 ];
 
-const ALLOWED_LINE = "Allowed: read-only commands (jq, cat, grep, head, ls, diff, …), read-only git and gh invocations, or whitelisted helpers.";
+const ALLOWED_LINE = "Allowed: read-only commands (jq, cat, grep, head, ls, diff, …), read-only git, gh, sort, uniq and find invocations, loops and variable bindings over reads, output redirected to a named file outside guarded state, or whitelisted helpers.";
 
 const BLOCK: HookResult = {
   kind: "block",
@@ -336,29 +360,108 @@ function decide(command: string, depth: number, scope: GuardScope): HookResult {
   return judgePipeChains(flat.flattened, scope);
 }
 
-/** Judge every pipe-chain of a flattened guarded line: each segment of an
- *  in-scope chain must be a whitelisted helper or a redirect-free read. */
+/** The block for a guarded line on which a command name may run another program. */
+const REBOUND_BLOCK: HookResult = {
+  kind: "block",
+  message: [
+    "BLOCKED: Command referencing loom-guarded state must be read-only.",
+    "This line may rebind a command name (a function, alias, hash, enable, source, eval, PATH, BASH_CMDS or a loader variable), so no command on it is trusted as a read.",
+    "State is managed by hooks and helper scripts only.",
+    ALLOWED_LINE,
+  ].join("\n"),
+};
+
+/** A directory change on the line: every relative path after it may resolve somewhere else. */
+const CHANGES_DIRECTORY = /(?:^|[\s;&|(`{!])(?:cd|pushd|popd)(?=[\s;&|)]|$)/;
+
+/**
+ * The line-wide facts a segment is judged with: whether a command name may be
+ * rebound, whether any segment binds a variable (then every chain is in scope,
+ * since `$NAME` can carry a guarded path into any of them), and whether a
+ * relative redirect target can still be judged by its text.
+ */
+interface LineFacts {
+  readonly binds: boolean;
+  readonly relativeTargetsKnown: boolean;
+}
+
+/**
+ * Judge every pipe-chain of a flattened guarded line (loom#216: by what each
+ * segment can write, not by what it mentions). A line that may rebind a command
+ * name trusts no head. Otherwise every segment of an in-scope chain must be a
+ * whitelisted helper, a binding, or a read whose output redirects all name
+ * known, unguarded files.
+ */
 function judgePipeChains(flattened: string, scope: GuardScope): HookResult {
-  for (const chain of pipeChains(flattened)) {
+  if (commandNamesRebound(flattened)) return REBOUND_BLOCK;
+  const chains = pipeChains(flattened);
+  const facts: LineFacts = {
+    binds: chains.some((chain) => chain.some((segment) => bindingNames(segment) !== null)),
+    relativeTargetsKnown: !CHANGES_DIRECTORY.test(flattened),
+  };
+  for (const chain of chains) {
     // A chain none of whose segments touch a guarded path is out of scope —
-    // `npm install && jq . <state>` must not block on the npm segment.
+    // `npm install && jq . <state>` must not block on the npm segment —
+    // unless the line binds a variable, which may carry a guarded path there.
     // (Tested quote-collapsed, like every pattern site.)
-    if (!chain.some(scope.guardedState)) continue;
-
-    for (const segment of chain) {
-      if (segmentInvokesHelper(segment)) {
-        // The helper vouches for its own segment (including a redirect of its
-        // output into a state file) — but NEVER for a protected-dir write:
-        // ledger and machine-definition forgery stay blocked even here.
-        if (scope.protectedDir(segment) && hasOutputRedirect(segment)) {
-          return blockFor(chain, segment);
-        }
-        continue;
-      }
-      if (!hasReadOnlyHead(segment)) return blockFor(chain, segment);
-      if (hasOutputRedirect(segment)) return blockFor(chain, segment);
-    }
+    if (!facts.binds && !chain.some(scope.guardedState)) continue;
+    const refused = chain.find((segment) => !segmentAdmitted(segment, scope, facts));
+    if (refused !== undefined) return blockFor(chain, refused);
   }
-
   return { kind: "allow" };
+}
+
+/** May this segment of an in-scope chain run? */
+function segmentAdmitted(segment: string, scope: GuardScope, facts: LineFacts): boolean {
+  if (segmentInvokesHelper(segment)) {
+    // The helper vouches for its own segment (including a redirect of its
+    // output into a state file) — but NEVER for a protected-dir write:
+    // ledger and machine-definition forgery stay blocked even here, including
+    // through a target a binding on the line could have aimed there.
+    if (!hasOutputRedirect(segment)) return true;
+    if (scope.protectedDir(segment)) return false;
+    return !facts.binds || redirectsKnownAndUnguarded(segment, facts, scope.protectedDir);
+  }
+  const names = bindingNames(segment);
+  if (names !== null) return names.every((name) => !SHELL_STATE_NAMES.has(name)) && !hasOutputRedirect(segment);
+  const command = withoutReservedWords(segment);
+  const runs = command === "" || isRedirectsOnly(command) || hasReadOnlyHead(command);
+  return runs && (!hasOutputRedirect(command) || redirectsKnownAndUnguarded(command, facts, scope.guardedState));
+}
+
+/**
+ * Does every output redirect of the segment write a file whose one static
+ * spelling, lexically normalized, `guarded` does not match? A runtime, glob,
+ * brace or `~` target, a read-write open and a `>&file` are unknown; a
+ * relative target is unknown on a line that changes directory.
+ */
+function redirectsKnownAndUnguarded(
+  segment: string,
+  facts: LineFacts,
+  guarded: (text: string) => boolean,
+): boolean {
+  const targets = outputRedirectTargets(segment);
+  if (targets === null) return false;
+  return targets.every((word) => {
+    const spelled = staticSpelling(word);
+    if (spelled === null || spelled === "" || spelled.startsWith("~")) return false;
+    if (!facts.relativeTargetsKnown && !spelled.startsWith("/")) return false;
+    return !guarded(spelled) && !guarded(lexicalPath(spelled));
+  });
+}
+
+/**
+ * A path with its empty and `.` segments dropped and each `..` folded into the
+ * segment before it, as text: a/b, a//b, a/./b and a/x/../b all read a/b, so
+ * a guarded directory cannot hide behind a spelling. A `..` with nothing before it
+ * stays, so a target climbing out of the working directory keeps its climb.
+ */
+function lexicalPath(path: string): string {
+  const kept: string[] = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === ".." && kept.length > 0 && kept[kept.length - 1] !== "..") kept.pop();
+    else kept.push(part);
+  }
+  return `${path.startsWith("/") ? "/" : ""}${kept.join("/")}`;
 }

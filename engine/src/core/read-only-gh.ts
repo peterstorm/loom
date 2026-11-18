@@ -12,11 +12,14 @@
  * read as far as the guards are concerned (loom#198, Cause 5). This module
  * says which, and errs toward "no":
  *
- * - the first word is `gh` itself (the caller refuses an environment prefix:
- *   the pager, browser and editor variables name programs gh runs);
+ * - the first word is `gh` itself. The caller admits an environment prefix
+ *   only of {@link GH_INERT_ENVIRONMENT} names (credentials, host, repository,
+ *   colour and prompt switches): the pager, browser, editor and config
+ *   variables name programs gh runs or a directory it writes;
  * - the group and verb are listed in {@link READ_ONLY_GH_INVOCATIONS} (`api`
  *   takes no verb). Verbs that write local files (`pr checkout`, `run
- *   download`, `repo clone`) or switch branches (`pr merge`), `alias` (whose
+ *   download`, `repo clone`) or switch or delete branches (`pr merge`, `pr
+ *   close --delete-branch`), `alias` (whose
  *   `!` aliases run a shell) and `extension` (arbitrary executables) are not;
  * - no option before `--` opens a program the environment names: `--web` /
  *   `-w` (a browser) or `--editor` / `-e` (an editor), in any abbreviation or
@@ -27,10 +30,15 @@
 
 /** Each group's verbs that write no local file; a group with no verbs (`api`) is invoked bare. */
 export const READ_ONLY_GH_INVOCATIONS: ReadonlyMap<string, ReadonlySet<string> | "no-verb"> = new Map<string, ReadonlySet<string> | "no-verb">([
-  ["pr", new Set(["view", "checks", "list", "diff", "status", "create", "comment", "edit"])],
-  ["issue", new Set(["view", "list", "status", "create", "comment", "edit"])],
+  ["pr", new Set(["view", "checks", "list", "diff", "status", "create", "comment", "edit", "ready", "review"])],
+  ["issue", new Set(["view", "list", "status", "create", "comment", "edit", "close", "reopen"])],
   ["run", new Set(["view", "list", "rerun"])],
   ["api", "no-verb"],
+]);
+
+/** Environment names a `gh` invocation may be prefixed with: none names a program or a local path. */
+export const GH_INERT_ENVIRONMENT: ReadonlySet<string> = new Set([
+  "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_REPO", "NO_COLOR", "GH_PROMPT_DISABLED", "GH_NO_UPDATE_NOTIFIER",
 ]);
 
 /** The options that make gh run a program the environment names, by long name and short letter. */

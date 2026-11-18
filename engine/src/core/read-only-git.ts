@@ -64,7 +64,7 @@ const risky = (long: readonly string[] = [], short: readonly string[] = []): Ris
  */
 export const READ_ONLY_GIT_SUBCOMMANDS: ReadonlyMap<string, RiskyOptions> = new Map([
   ...["status", "log", "show", "diff", "rev-parse", "ls-files", "ls-tree", "cat-file", "blame", "describe",
-    "shortlog", "rev-list", "merge-base", "for-each-ref", "show-ref", "name-rev", "version"]
+    "shortlog", "rev-list", "merge-base", "for-each-ref", "show-ref", "name-rev", "version", "check-ignore"]
     .map((subcommand): [string, RiskyOptions] => [subcommand, risky()]),
   ["grep", risky(["open-files-in-pager"], ["O"])],
   ["ls-remote", risky(["upload-pack", "exec"], ["u"])],
@@ -75,14 +75,14 @@ export const READ_ONLY_GIT_SUBCOMMANDS: ReadonlyMap<string, RiskyOptions> = new 
 const SAFE_GLOBAL_FLAGS: ReadonlySet<string> = new Set(["--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs"]);
 
 /** Does `--name[=value]` spell, or abbreviate, one of `options`? */
-function namesLongOption(word: string, options: readonly string[]): boolean {
+export function namesLongOption(word: string, options: readonly string[]): boolean {
   if (!word.startsWith("--")) return false;
   const name = word.slice(2).split("=")[0];
   return options.some((option) => option.startsWith(name));
 }
 
 /** Does a bundle of short options (`-inO`) hold one of `letters`? */
-const bundles = (word: string, letters: readonly string[]): boolean =>
+export const bundles = (word: string, letters: readonly string[]): boolean =>
   /^-[A-Za-z]/.test(word) && letters.some((letter) => word.includes(letter));
 
 /**
