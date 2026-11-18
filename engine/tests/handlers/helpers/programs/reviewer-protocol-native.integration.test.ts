@@ -222,7 +222,7 @@ async function waveFixture() {
 |------|------------|
 | Fixture | Scripted test data |
 `);
-  const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
+  const proof = evaluateTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
     trustedPassEvidence(["src/a.ts"]));
   if (proof.state !== "satisfied") throw new Error("fixture proof construction failed");
   const graph = value(parseTaskGraph({ ...graphFixture([taskFixture({ id: "T1", description: "scripted native fixture",

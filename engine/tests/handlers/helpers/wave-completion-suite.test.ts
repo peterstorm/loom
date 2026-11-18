@@ -230,7 +230,7 @@ function contractTasks(stage: ContractStage): Task[] {
     agent: "code-implementer-agent",
     wave: 2,
     ...(contractWave
-      ? { status: "pending" as const, proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/payload.ts"], redThenGreen: ERA }) }
+      ? { status: "pending" as const, proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/payload.ts"], redThenGreen: ERA }) }
       : { status: "implemented" as const, proof: satisfiedProof(["src/payload.ts"], ERA) }),
     depends_on: ["T1"],
     spec_anchors: ["AS-001"],
@@ -244,7 +244,7 @@ function contractTasks(stage: ContractStage): Task[] {
     agent: "code-implementer-agent",
     wave: 3,
     status: "pending",
-    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/second.ts"], redThenGreen: ERA }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/second.ts"], redThenGreen: ERA }),
     depends_on: ["T1"],
     spec_anchors: ["AS-002"],
     file_list: ["src/second.ts"],

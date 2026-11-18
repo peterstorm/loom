@@ -46,7 +46,7 @@ const plainTask = (id: string): Record<string, unknown> => ({
   depends_on: [],
   file_list: ["src/x.ts"],
   status: "pending",
-  proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/x.ts"] }),
+  proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/x.ts"] }),
 });
 
 const attestationTask = (id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -161,7 +161,7 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
   const result = settleImplementationAttempt({
     id: "T1",
     status: "pending",
-    proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     active_implementation_attempt: attempt,
     implementation_attempt_history: [],
   }, attempt, attempt, {

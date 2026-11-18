@@ -32,6 +32,7 @@ describe("VerificationPolicy Wave Gate parity", () => {
     );
 
     const proof = evaluateTaskProof({
+      declaredArtifactExpectation: "changed",
       verificationPolicy: {
         regression: { kind: "required" },
         newTests: { kind: "waived", reason: "existing-tests-sufficient" },
@@ -53,6 +54,7 @@ describe("VerificationPolicy Wave Gate parity", () => {
     expect(checkNewTests([source]).passed).toBe(false);
 
     const proof = evaluateTaskProof({
+      declaredArtifactExpectation: "changed",
       verificationPolicy: {
         regression: { kind: "waived", reason: "documentation-only" },
         newTests: { kind: "required" },

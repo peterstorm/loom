@@ -58,7 +58,7 @@ const settle = (
   const result = settleImplementationAttempt({
     id: "T1",
     status: "pending",
-    proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     active_implementation_attempt: attempt,
     implementation_attempt_history: history,
   }, attempt, attempt, observation(observedAt), suite(attempt));

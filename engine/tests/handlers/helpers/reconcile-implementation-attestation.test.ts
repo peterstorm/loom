@@ -65,7 +65,7 @@ function fixture(initialBytes: string): Fixture {
     status: "pending",
     depends_on: [],
     file_list: ["src/a.ts"],
-    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
     attempt_artifact_baseline: attemptBaseline,
   }, { executing: false });
   if (!armed.ok) throw new Error(`attestation fixture failed: ${armed.error.kind}`);

@@ -18,6 +18,8 @@ import {
   type TaskLocalByteObservation,
 } from "../../core/implementation-application";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
+import type { DeclaredArtifactBaseline } from "../../core/artifact-baseline";
+import { attemptReopenBaseline } from "../../core/reopen-scope";
 import { sha256Bytes } from "../../core/digest";
 import { isEngineOwnedRuntimePath } from "../../core/engine-runtime-paths";
 import type { DomainResult } from "../../core/orchestration-contract";
@@ -52,23 +54,41 @@ type RequiredTaskBaselines = Readonly<{
   attempt: NonNullable<Task["attempt_artifact_baseline"]>;
   proof: NonNullable<Task["artifact_baseline"]>;
   repository: NonNullable<Task["attempt_repository_baseline"]>;
+  /** A tests-only Task's reopen baseline (ADR-0093); null for every other Task. */
+  reopen: readonly DeclaredArtifactBaseline[] | null;
 }>;
 
-function requireTaskBaselines(task: Task): RequiredTaskBaselines {
+/** Which baseline the attempt's settlement cannot read, named for the unavailable observation. */
+type MissingTaskBaseline = Readonly<{
+  kind: "attempt-artifact" | "first-artifact" | "attempt-repository" | "reopen";
+  message: string;
+}>;
+
+const missing = (kind: MissingTaskBaseline["kind"], message: string): DomainResult<never, MissingTaskBaseline> =>
+  Object.freeze({ ok: false as const, error: Object.freeze({ kind, message }) });
+
+/** Every baseline the attempt's byte observation compares against, or the first one missing. */
+function requireTaskBaselines(task: Task): DomainResult<RequiredTaskBaselines, MissingTaskBaseline> {
   if (task.attempt_artifact_baseline === undefined) {
-    throw new Error("active Implementation Attempt has no attempt_artifact_baseline");
+    return missing("attempt-artifact", "active Implementation Attempt has no attempt_artifact_baseline");
   }
   if (task.artifact_baseline === undefined) {
-    throw new Error("Task has no first artifact_baseline for cumulative Proof");
+    return missing("first-artifact", "Task has no first artifact_baseline for cumulative Proof");
   }
   if (task.attempt_repository_baseline === undefined) {
-    throw new Error("active Implementation Attempt has no attempt_repository_baseline");
+    return missing("attempt-repository", "active Implementation Attempt has no attempt_repository_baseline");
   }
-  return {
-    attempt: task.attempt_artifact_baseline,
-    proof: task.artifact_baseline,
-    repository: task.attempt_repository_baseline,
-  };
+  const reopen = attemptReopenBaseline(task);
+  if (!reopen.ok) return missing("reopen", reopen.error.message);
+  return Object.freeze({
+    ok: true as const,
+    value: Object.freeze({
+      attempt: task.attempt_artifact_baseline,
+      proof: task.artifact_baseline,
+      repository: task.attempt_repository_baseline,
+      reopen: reopen.value,
+    }),
+  });
 }
 
 /** The no-follow read of one repository leaf under the resolved root: the seam
@@ -180,12 +200,21 @@ function observeAvailableTaskScope(
       args.repositoryRoot,
       baselines.repository,
     ).filter((path) => !isEngineOwnedRuntimePath(path, authoritativeStatePath));
+    const reopenScope = baselines.reopen === null
+      ? {}
+      : {
+          reopenScope: {
+            baseline: baselines.reopen,
+            current: captureDeclaredArtifactBaseline(args.repositoryRoot, baselines.reopen.map(({ artifact }) => artifact)),
+          },
+        };
     observed = buildTaskLocalByteObservation({
       authority: args.authority,
       attemptBaseline: baselines.attempt,
       currentAttemptScope,
       proofBaseline: baselines.proof,
       currentProofScope,
+      ...reopenScope,
       parserModifiedPaths,
       priorAttributedPaths,
       repositoryChangedPaths,
@@ -217,8 +246,12 @@ export function observeTaskLocalCompletion(
   args: TaskLocalCompletionArgs,
   ports: TaskLocalCompletionPorts = REAL_TASK_LOCAL_PORTS,
 ): TaskLocalByteObservation {
+  const baselines = requireTaskBaselines(args.task);
+  if (!baselines.ok) {
+    return unavailableTaskLocalByteObservation(args.authority, `Task-local byte observation unavailable: ${baselines.error.message}`);
+  }
   try {
-    return observeAvailableTaskScope(args, requireTaskBaselines(args.task), ports);
+    return observeAvailableTaskScope(args, baselines.value, ports);
   } catch (error) {
     return unavailableTaskLocalByteObservation(
       args.authority,

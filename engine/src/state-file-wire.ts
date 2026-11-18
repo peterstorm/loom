@@ -75,6 +75,7 @@ import {
   parseEffectId,
   parseOrchestrationRunId,
   parseSlotId,
+  canonicalStructuralEquals,
   nonEmpty,
   type NonEmpty,
   type OrchestrationRunId,
@@ -86,8 +87,19 @@ import {
   parseTaskTestResult,
   redThenGreenScope,
   taskRedThenGreenEra,
+  testsOnlyScopeOfProof,
+  writtenContract,
   type RedThenGreenScope,
+  type TaskProof,
+  type TestsOnlyScope,
 } from "./core/proof-obligations";
+import {
+  classifyTestsOnlyScope,
+  parseReopenBaseline,
+  parseTestsOnlyScope,
+  partitionsFileList,
+  reopeningNeedsOf,
+} from "./core/reopen-scope";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import {
   parseSettledFloor,
@@ -122,8 +134,8 @@ import {
   type ParsedTaskVerificationPolicy,
 } from "./core/verification-policy";
 import { isDistillTask, taskRolePolicy } from "./core/distill-task";
-import { taskArtifactExpectation } from "./core/task-artifact-expectation";
-import { MAX_TASK_REOPENING_REASON_LENGTH } from "./core/task-reopening";
+import { taskArtifactExpectation, taskArtifactScope } from "./core/task-artifact-expectation";
+import { MAX_TASK_REOPENING_REASON_LENGTH, sweptDistillTaskIdsOf } from "./core/task-reopening";
 import { reopenedTaskIds, type ReopenedTaskIdsRefusal } from "./core/task-revalidation";
 import {
   isProtectedVerificationPath,
@@ -1165,7 +1177,7 @@ function parseTaskReopeningAudit(
 ): ParseResult<TaskReopeningAudit> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, TASK_REOPENING_AUDIT_FIELDS, [SWEPT_DISTILL_TASK_IDS_FIELD], label);
+  const fieldsError = exactFieldsError(record, TASK_REOPENING_AUDIT_FIELDS, [SWEPT_DISTILL_TASK_IDS_FIELD, "needs"], label);
   if (fieldsError !== null) return parseErr(fieldsError);
   if (record.schemaVersion !== 1 || record.kind !== "implemented-tasks-reopened") {
     return parseErr(`${label} has invalid schema or kind`);
@@ -1185,6 +1197,9 @@ function parseTaskReopeningAudit(
   if (abandonedRunId !== null && !abandonedRunId.ok) {
     return parseErr(`${label}.abandonedRunId: ${abandonedRunId.error.message}`);
   }
+  // Only a tests-only reopening records what it needed (ADR-0093): an absent
+  // field is the default full re-implementation, never spelled out.
+  if (record.needs !== undefined && record.needs !== "tests") return parseErr(`${label}.needs must be "tests" when present`);
   return parseOk(Object.freeze({
     schemaVersion: 1,
     kind: "implemented-tasks-reopened",
@@ -1192,6 +1207,7 @@ function parseTaskReopeningAudit(
     ...reopenedIds.value,
     reason: reason.value,
     abandonedRunId: abandonedRunId === null ? null : abandonedRunId.value,
+    ...(record.needs === "tests" ? { needs: "tests" as const } : {}),
   }));
 }
 
@@ -2213,6 +2229,97 @@ function distillTaskPerWaveError(tasks: readonly Record<string, unknown>[]): str
   return null;
 }
 
+/**
+ * The tests-only scope a stored Task's Proof was derived under, or null
+ * (ADR-0093): its `reopen_scope` while one is in force, which must parse
+ * against `file_list`, sit on a pending Task, and carry a captured
+ * `reopen_baseline` once an attempt has registered; or, once the lineage
+ * settled implemented, the scope its tests-only Proof records. Either way the
+ * Task must be one a tests-only reopening could scope: no attestation, no
+ * Distill Task, no Acceptance Contract writer, regression required. That the
+ * scope names a tests-only reopening of this Task and matches the frozen
+ * classification is proven against the TaskGraph (`testsOnlyLinkError`).
+ */
+function taskTestsOnlyScope(
+  t: Record<string, unknown>,
+  proof: TaskProof,
+  fileList: readonly string[],
+  verification: ParsedTaskVerificationPolicy,
+  scope: RedThenGreenScope,
+  id: string,
+  label: string,
+): TestsOnlyScopeReading {
+  const refused = (problem: string) => Object.freeze({ ok: false as const, error: `${label}: ${problem}` });
+  const reading = t.reopen_scope !== undefined ? liveTestsOnlyScope(t, fileList) : settledTestsOnlyScope(t, proof, fileList);
+  if (!reading.ok) return refused(reading.error);
+  const claimed = reading.value;
+  if (claimed === null) return Object.freeze({ ok: true as const, value: null });
+  if (t.implementation_attestation === true) return refused("a tests-only Task cannot be in attestation mode");
+  if (isDistillTask(t)) return refused("a Distill Task cannot be reopened for tests only");
+  if (writtenContract(scope, id) !== undefined) return refused("an Acceptance Contract writer cannot be reopened for tests only");
+  if (verification.policy.regression.kind !== "required") return refused("a tests-only Task requires regression verification");
+  return Object.freeze({ ok: true as const, value: claimed });
+}
+
+type TestsOnlyScopeReading = Readonly<{ ok: true; value: TestsOnlyScope | null }> | Readonly<{ ok: false; error: string }>;
+
+/** A pending Task's live `reopen_scope`, with its `reopen_baseline` captured once an attempt registered. */
+function liveTestsOnlyScope(t: Record<string, unknown>, fileList: readonly string[]): TestsOnlyScopeReading {
+  const failed = (error: string) => Object.freeze({ ok: false as const, error });
+  const parsed = parseTestsOnlyScope(t.reopen_scope, fileList, "reopen_scope");
+  if (!parsed.ok) return failed(parsed.errors.join("; "));
+  if (t.status !== "pending") return failed("a tests-only reopen_scope requires pending status; its lineage's settlement ends it");
+  if (t.reopen_baseline !== undefined) {
+    const baseline = parseReopenBaseline(t.reopen_baseline, fileList);
+    if (!baseline.ok) return failed(baseline.errors.join("; "));
+  } else if (t.active_implementation_attempt !== undefined || t.attempt_artifact_baseline !== undefined) {
+    return failed("a registered tests-only attempt requires its captured reopen_baseline");
+  }
+  return Object.freeze({ ok: true as const, value: parsed.value });
+}
+
+/** The scope an implemented or completed Task's settled tests-only Proof records, or null. */
+function settledTestsOnlyScope(t: Record<string, unknown>, proof: TaskProof, fileList: readonly string[]): TestsOnlyScopeReading {
+  const settled = t.status === "implemented" || t.status === "completed" ? testsOnlyScopeOfProof(proof.obligations) : null;
+  return settled === null || partitionsFileList(settled.testFiles, settled.implementationFiles, fileList)
+    ? Object.freeze({ ok: true as const, value: settled })
+    : Object.freeze({ ok: false as const, error: "a settled tests-only Proof's test and implementation files must partition file_list in its order" });
+}
+
+/**
+ * Every tests-only scope the Tasks carry or their settled Proofs record,
+ * proven against data the scope does not supply (ADR-0093): the audit at its
+ * `reopening` position is a `needs: "tests"` reopening of the Task's Wave
+ * that named the Task, and its two file lists are exactly the frozen
+ * Test-File Classification of the Task's `file_list`. The first violation, or
+ * null.
+ */
+function testsOnlyLinkError(
+  tasks: readonly Record<string, unknown>[],
+  audits: readonly TaskReopeningAudit[] | undefined,
+  manifest: FrozenVerificationManifest | undefined,
+): string | null {
+  for (const task of tasks) {
+    const parsed = task as Task;
+    const settled = parsed.status === "implemented" || parsed.status === "completed";
+    const claimed = parsed.reopen_scope ?? (settled && parsed.proof !== undefined ? testsOnlyScopeOfProof(parsed.proof.obligations) : null);
+    if (claimed === null) continue;
+    const label = `Task ${parsed.id}: tests-only reopening ${claimed.reopening}`;
+    const audit = audits?.[claimed.reopening];
+    if (audit === undefined) return `${label} names no task_reopening_history entry`;
+    if (reopeningNeedsOf(audit) !== "tests") return `${label} names a reopening that did not record needs "tests"`;
+    const named = (ids: readonly string[]) => ids.some((taskId) => taskId === parsed.id);
+    if (audit.wave !== parsed.wave || !named(audit.reopenedTaskIds) || named(sweptDistillTaskIdsOf(audit))) {
+      return `${label} names a reopening that did not name this Task`;
+    }
+    const frozen = classifyTestsOnlyScope(parsed.file_list ?? [], manifest, claimed.reopening);
+    if (!frozen.ok || !canonicalStructuralEquals(frozen.value, claimed)) {
+      return `${label}'s test and implementation files are not the frozen Test-File Classification of its file_list`;
+    }
+  }
+  return null;
+}
+
 /** Status, review status/generation/run, and exact flat lifecycle invariants. */
 function taskStatusError(
   t: Record<string, unknown>,
@@ -2265,7 +2372,11 @@ function taskStatusError(
     return `${label}: legacy_missing_proof must be true when present`;
   }
 
+  if (t.reopen_baseline !== undefined && t.reopen_scope === undefined) {
+    return `${label}: reopen_baseline belongs to a tests-only reopen_scope and cannot stand without one`;
+  }
   if (t.proof === undefined) {
+    if (t.reopen_scope !== undefined) return `${label}: a tests-only reopen_scope requires the Proof its scope derives`;
     if (t.status === "pending") {
       return t.legacy_missing_proof === undefined
         ? null
@@ -2277,18 +2388,27 @@ function taskStatusError(
   if (t.legacy_missing_proof === true) return `${label}: legacy_missing_proof requires absent Proof`;
   const proof = parseTaskProof(t.proof);
   if (!proof.ok) return `${label}: invalid proof: ${proof.errors.join("; ")}`;
-  // The one expectation rule (`taskArtifactExpectation`): a Distill Task's
-  // stored Proof must be exactly task-completed and behaviour-preserved.
+  const fileList: readonly string[] = Array.isArray(t.file_list) ? t.file_list : [];
+  const testsOnly = taskTestsOnlyScope(t, proof.value, fileList, verification.value, scope, id, label);
+  if (!testsOnly.ok) return testsOnly.error;
+  // The one expectation rule (`taskArtifactScope`): a Distill Task's stored
+  // Proof must be exactly task-completed and behaviour-preserved, and a
+  // tests-only Task's exactly its scope's.
   const expectedObligations = deriveProofObligations({
     verificationPolicy: verification.value.policy,
-    declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
-    declaredArtifactExpectation: taskArtifactExpectation(t),
+    declaredArtifacts: fileList,
+    ...(testsOnly.value === null
+      ? { declaredArtifactExpectation: taskArtifactExpectation(t) }
+      : { testsOnly: testsOnly.value }),
     redThenGreen: taskRedThenGreenEra(scope, id),
   });
   const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
     proof.value.obligations.every((actual, obligationIndex) => {
       const expected = expectedObligations[obligationIndex];
       if (expected === undefined || actual.kind !== expected.kind) return false;
+      if (actual.kind === "test-files-changed" || actual.kind === "implementation-files-unchanged") {
+        return canonicalStructuralEquals(actual, expected);
+      }
       return actual.kind === "declared-artifact-changed" || actual.kind === "declared-artifact-attested"
         ? (expected.kind === "declared-artifact-changed" || expected.kind === "declared-artifact-attested") &&
           actual.artifact === expected.artifact
@@ -2687,12 +2807,14 @@ function migrateParsedTask(
   // carries it again.
   let migrated: Record<string, unknown> = withoutKeys({ ...task, id: identity.value }, "unresolved_repository_paths");
   if (task.proof === undefined && task.status === "pending") {
+    // A Task without Proof carries no reopen_scope (`taskStatusError` refuses
+    // one), so the one scope reader derives its expectation.
     migrated = {
       ...migrated,
       proof: derivePendingTaskProof({
         verificationPolicy: verification.value.policy,
         declaredArtifacts: Array.isArray(task.file_list) ? task.file_list : [],
-        declaredArtifactExpectation: taskArtifactExpectation(task),
+        ...taskArtifactScope({ agent: task.agent, implementation_attestation: task.implementation_attestation }),
         redThenGreen: taskRedThenGreenEra(scope, identity.value),
       }),
     };
@@ -2702,6 +2824,19 @@ function migrateParsedTask(
     const proof = parseTaskProof(task.proof);
     if (!proof.ok) return parseErr(proof.errors.join("; "));
     migrated = { ...migrated, proof: proof.value };
+  }
+  // Already proven against file_list by `taskStatusError`; parsed again so the
+  // Task carries the frozen values, never the raw records.
+  const fileList: readonly string[] = Array.isArray(task.file_list) ? task.file_list : [];
+  if (task.reopen_scope !== undefined) {
+    const reopenScope = parseTestsOnlyScope(task.reopen_scope, fileList);
+    if (!reopenScope.ok) return parseErr(reopenScope.errors.join("; "));
+    migrated = { ...migrated, reopen_scope: reopenScope.value };
+  }
+  if (task.reopen_baseline !== undefined) {
+    const reopenBaseline = parseReopenBaseline(task.reopen_baseline, fileList);
+    if (!reopenBaseline.ok) return parseErr(reopenBaseline.errors.join("; "));
+    migrated = { ...migrated, reopen_baseline: reopenBaseline.value };
   }
   // Parse the persisted record before `Task` can assert Record<string,string>.
   // Non-string values are corrupt protected authority, not alternate spellings
@@ -3136,6 +3271,24 @@ function activeWaveGateInstallationAuditConflict(
     return `active_wave_gate run ${activeWaveGate.runId} contradicts its orphan-recovery installation audit`;
   }
   return null;
+}
+
+/**
+ * The history fields, then every tests-only scope (live or recorded in a
+ * settled Proof) proven against the reopening audit it names and the frozen
+ * classification (ADR-0093): the audits are the only independent record of
+ * which reopenings were tests-only.
+ */
+function parseTaskGraphLinkedHistory(
+  obj: Record<string, unknown>,
+  authority: ParsedTaskGraphAuthorityFields,
+  tasks: readonly Record<string, unknown>[],
+  verificationManifest: FrozenVerificationManifest | undefined,
+): ParseResult<ParsedTaskGraphHistoryFields> {
+  const history = parseTaskGraphHistoryFields(obj, authority.activeWaveGate, authority.waveGateHistory, tasks);
+  if (!history.ok) return history;
+  const testsOnlyLink = testsOnlyLinkError(tasks, history.value.taskReopeningHistory, verificationManifest);
+  return testsOnlyLink === null ? history : parseErr(testsOnlyLink);
 }
 
 function parseTaskGraphHistoryFields(
@@ -3873,12 +4026,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!skeletonFields.ok) return parseErr(skeletonFields.error);
   const authority = parseTaskGraphAuthorityFields(obj, verificationManifest, ownerStampedGraph(tasks.value, obligations.value));
   if (!authority.ok) return parseErr(authority.error);
-  const history = parseTaskGraphHistoryFields(
-    obj,
-    authority.value.activeWaveGate,
-    authority.value.waveGateHistory,
-    tasks.value as Record<string, unknown>[],
-  );
+  const history = parseTaskGraphLinkedHistory(obj, authority.value, tasks.value as Record<string, unknown>[], verificationManifest);
   if (!history.ok) return parseErr(history.error);
 
   return parseOk(taskGraphFromParsedParts(obj, {

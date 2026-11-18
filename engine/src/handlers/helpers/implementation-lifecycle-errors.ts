@@ -19,6 +19,9 @@ export const renderImplementationLifecycleError = (error: ImplementationLifecycl
     .with({ kind: "distill-task-not-attestable" }, ({ taskId }) =>
       `Task ${taskId} is its Wave's distill pass, which proves behaviour-preserved and cannot be attested; ` +
         "a distill pass that changes nothing already settles")
+    .with({ kind: "tests-only-not-attestable" }, ({ taskId }) =>
+      `Task ${taskId} is reopened for tests only, which owes changed test files and so cannot be attested; ` +
+        "its tests-only attempt settles it, and an escalation turns it into a full re-implementation")
     .with({ kind: "proof-already-satisfied" }, ({ taskId }) =>
       `Task ${taskId} already carries satisfied proof; nothing to attest`)
     .with({ kind: "attestation-context-invalid" }, ({ taskId, detail }) =>

@@ -203,7 +203,7 @@ describe("orchestration attest arms implementation re-attestation", () => {
     expect(armImplementationAttestation(variant({ reserved_at: "2026-09-19T00:00:00.000Z" }), { executing: false }))
       .toMatchObject({ ok: false, error: { kind: "live-attempt", operation: "attestation" } });
     const satisfiedProof = evaluateTaskProof(
-      { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
       trustedPassEvidence(["src/a.ts"], { newTestEvidence: "one focused regression" }),
     );
     expect(satisfiedProof.state).toBe("satisfied");

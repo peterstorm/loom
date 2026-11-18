@@ -588,6 +588,8 @@ export const JOINED_TASK_FIELDS = Object.freeze({
   implementation_retry_history_start: "absent",
   implementation_retry_predecessor_receipt_id: "absent",
   implementation_attestation: "absent",
+  reopen_scope: "absent",
+  reopen_baseline: "absent",
   implementation_attempt_history: "empty",
   skeleton_outcomes: "empty",
 } as const satisfies { readonly [Field in keyof Task]-?: JoinedFieldValue });

@@ -67,7 +67,7 @@ describe("classifyImplementationWindow", () => {
       status: "implemented",
       file_list: [],
       proof: evaluateTaskProof(
-        { newTestsRequired: true, declaredArtifacts: [] },
+        { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] },
         trustedPassEvidence([]),
       ),
       test_result: { verdict: "trusted-pass" },

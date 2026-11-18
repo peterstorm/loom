@@ -8,6 +8,7 @@ import { hasStandaloneReviewContext, invalidateTaskReview } from "./review-outpu
 import { newWaveGate, reconcileWaveBlock, waveBlockCauses } from "./wave-gate-model";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { artifactCovers } from "./path-coverage";
+import { withCapturedReopenBaseline } from "./reopen-scope";
 import { dispatchHoldMessage, dispatchHoldOf } from "./dispatch-holds";
 import {
   canonicalArtifactBaselineDigest,
@@ -749,7 +750,10 @@ export function taskExecutionRegistrationError(
 
 /** Preserve the first proof boundary across retries while refreshing the
  * current-attempt boundary. Proof must keep seeing all bytes produced by the
- * task; evidence invalidation must see only bytes produced after this spawn. */
+ * task; evidence invalidation must see only bytes produced after this spawn.
+ * A tests-only Task's first attempt after its reopening also captures its
+ * reopen baseline from `proofBaseline`, the snapshot of `file_list` taken now
+ * (ADR-0093); later attempts keep it. */
 export function registerTaskExecutionBaseline(
   task: Task,
   sha: string,
@@ -758,7 +762,7 @@ export function registerTaskExecutionBaseline(
   repositoryAttemptBaseline: readonly DeclaredArtifactBaseline[] = [],
 ): Task {
   return {
-    ...task,
+    ...withCapturedReopenBaseline(task, proofBaseline),
     start_sha: task.start_sha ?? sha,
     artifact_baseline: task.artifact_baseline ?? proofBaseline,
     attempt_artifact_baseline: attemptBaseline,

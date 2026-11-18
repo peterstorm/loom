@@ -170,6 +170,10 @@ _Avoid_: Distill phase, simplification Task, cleanup Task, refactor Task, distil
 The Wave Gate check that an owned plan invariant has one implementation: its matrix test reaches the owner module and every sibling entry point, and every mutant of the owner's changed lines is killed.
 _Avoid_: Mutation testing (alone — it is one half), owner check (informal)
 
+**Reopen Scope**:
+What a Task reopening says the **Finding** needs: a full re-implementation (the default), or tests only (`reopen-task --needs tests`). A tests-only **Task**'s **Proof Obligations** are a changed test file, no changed implementation file and passing tests, with no red-then-green order; the scope ends when its attempts settle.
+_Avoid_: test-only mode, needs flag, light reopen
+
 ### Requirements and contracts
 
 **Requirement**:

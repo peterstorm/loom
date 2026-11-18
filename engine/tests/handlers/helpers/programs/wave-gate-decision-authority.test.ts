@@ -129,7 +129,7 @@ describe("Wave Gate start effect ordering", () => {
     // Start-ready Tasks, so the start passes its preflight and reaches the
     // Run Directory program publication this case refuses.
     const verification_policy = { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "documentation-only" } } as const;
-    const proof = evaluateTaskProof({ verificationPolicy: taskVerificationPolicy({ verification_policy }), declaredArtifacts: [] },
+    const proof = evaluateTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy: taskVerificationPolicy({ verification_policy }), declaredArtifacts: [] },
       trustedPassEvidence([], { newTestsWritten: false }));
     if (proof.state !== "satisfied") throw new Error("fixture proof must satisfy");
     const initial = graph({
@@ -510,7 +510,7 @@ describe("wave review context authority", () => {
 
   it("accepts and preserves valid non-null proof and test evidence", () => {
     const packetId = "c".repeat(64);
-    const proof = derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] });
+    const proof = derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] });
     const testResult = { verdict: "trusted-pass" as const };
     const packet = packetFor({
       runId: RUN_ID,
@@ -618,7 +618,7 @@ describe("Wave review epoch installation", () => {
         agent: "code-implementer-agent",
         wave: 1,
         status: "pending" as const,
-        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: ["src/x.ts"] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: ["src/x.ts"] }),
         new_tests_required: false,
         depends_on: [],
         file_list: ["src/x.ts"],

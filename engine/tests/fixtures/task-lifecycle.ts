@@ -136,7 +136,7 @@ export function trustedPassEvidence(
  *  (`redThenGreenEra(manifest)`) also owes red-then-green, shown here. */
 export function satisfiedProof(files: readonly string[], era: RedThenGreenEra = "not-owed"): SatisfiedTaskProof {
   const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: files, redThenGreen: era },
+    { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: files, redThenGreen: era },
     trustedPassEvidence(
       files,
       era === "owed-if-new-tests" ? { redThenGreen: shownRedThenGreen(files[0]) } : {},
@@ -152,7 +152,7 @@ export function pendingTaskProof(
   newTestsRequired = true,
   era: RedThenGreenEra = "not-owed",
 ) {
-  return derivePendingTaskProof({ newTestsRequired, declaredArtifacts, redThenGreen: era });
+  return derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired, declaredArtifacts, redThenGreen: era });
 }
 
 export type TaskFixtureInput = TaskCommonMetadata & Readonly<{

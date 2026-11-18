@@ -58,7 +58,7 @@ const registration: ActiveWaveGateRegistration = {
 };
 
 const proof = evaluateTaskProof(
-  { newTestsRequired: true, declaredArtifacts: [] },
+  { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] },
   trustedPassEvidence([]),
 );
 if (proof.state !== "satisfied") throw new Error("proof fixture must be satisfied");

@@ -44,7 +44,7 @@ const testResult = {
 
 function failedTask(taskCompleted = true): Task {
   const proof = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
+    { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
     observedEvidence({ taskCompleted, testResult, filesModified: [], newTestsWritten: false, newTestEvidence: "" }),
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
@@ -414,7 +414,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
 
   it("reopens an implemented task when deleted tests invalidate a previously satisfied proof", () => {
     const satisfiedProof = evaluateTaskProof(
-      { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
       observedEvidence({
         taskCompleted: true,
         testResult,

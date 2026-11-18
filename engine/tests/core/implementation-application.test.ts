@@ -88,7 +88,7 @@ function pendingTask(
     depends_on: [],
     file_list: ["src/a.ts"],
     new_tests_required: false,
-    proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }),
     active_implementation_attempt: attempt,
     attempt_artifact_baseline: baseline("src/a.ts", digest("a")),
     attempt_repository_baseline: [],
@@ -455,7 +455,7 @@ describe("exact transition application", () => {
     for (const semanticAttempt of [1, 2] as const) {
       const attempt = authority(semanticAttempt, `semantic-${semanticAttempt}`);
       const task = pendingTask(attempt, {
-        proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
         new_tests_required: true,
       });
       const result = expectApplied(settleObservedImplementation(
@@ -673,7 +673,7 @@ describe("exact transition application", () => {
     const attempt = authority(1, "proof-description");
     const result = expectApplied(settleObservedImplementation(
       graph(pendingTask(attempt, {
-        proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
         new_tests_required: true,
       })),
       attempt,

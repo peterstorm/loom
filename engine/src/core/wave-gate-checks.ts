@@ -51,10 +51,12 @@ function proofFailureMessage(failure: ProofFailure): string {
       ({ kind, artifact }) => `${kind}:${artifact}`)
     .with({ kind: P.union("untrusted-regression-tests-failed", "untrusted-regression-pass") },
       ({ kind, label }) => `${kind}:${label}`)
+    .with({ kind: "implementation-files-changed" }, ({ kind, artifacts }) => `${kind}:${artifacts.join(",")}`)
     .with({
       kind: P.union(
         "task-not-completed", "test-result-missing", "regression-tests-failed", "new-tests-not-observed",
         "red-then-green-unproven", "attempt-scope-drifted", "declared-artifact-contract-violated",
+        "test-files-not-changed",
       ),
     }, ({ kind }) => kind)
     .exhaustive();

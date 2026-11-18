@@ -346,7 +346,7 @@ describe("modern implementation attempt registration", () => {
     const settled = settleImplementationAttempt(
       {
         ...state.tasks[0]!,
-        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }),
         active_implementation_attempt: plannedAuthority,
       },
       plannedAuthority,
@@ -478,7 +478,7 @@ describe("modern implementation attempt registration", () => {
     });
     if (!old.ok) throw new Error(old.error.errors.join("; "));
     const proof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: ["src/a.ts"] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: ["src/a.ts"] },
       trustedPassEvidence(["src/a.ts"], { newTestsWritten: false, newTestEvidence: "verification waived" }),
     );
     if (proof.state !== "satisfied") throw new Error("fixture proof must be satisfied");

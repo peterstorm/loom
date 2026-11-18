@@ -33,7 +33,7 @@ export function semanticAttemptReceipt(
   const result = settleImplementationAttempt({
     id: taskId,
     status: "pending",
-    proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     active_implementation_attempt: authority,
     implementation_attempt_history: history,
   }, authority, authority, {
