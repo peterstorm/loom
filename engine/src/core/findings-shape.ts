@@ -185,6 +185,32 @@ export type SubjectDigest = string & { readonly [SUBJECT_DIGEST]: true };
  */
 export type SealedSubjectDigest = string & { readonly [SEALED_SUBJECT_DIGEST]: true };
 
+/**
+ * The change classes that narrow a re-review's roster (ADR-0094): a change of
+ * comments only, of documentation files only, or of test files only. Code is
+ * never one: a code change is reviewed by the whole roster.
+ */
+export const NARROWING_CHANGE_CLASSES = ["comment", "doc", "test"] as const;
+export type NarrowingChangeClass = (typeof NARROWING_CHANGE_CLASSES)[number];
+
+/**
+ * The accepted review a narrowed run was judged against: its run, authority
+ * digest, Review Packet and reviewed workspace head.
+ */
+export type ReviewBasisReference = Readonly<{ run_id: string; authority_digest: string; packet_id: string; head_sha: string }>;
+
+/**
+ * How a Review Run's roster was narrowed (ADR-0094): the derived roster it was
+ * narrowed from, the change classes that chose its roles, and the basis the
+ * change was measured against. Present only on a narrowed run and on the
+ * acceptance it records, so neither can pass for a whole-roster review.
+ */
+export type ReviewNarrowing = Readonly<{
+  from: readonly [string, ...string[]];
+  change: readonly [NarrowingChangeClass, ...NarrowingChangeClass[]];
+  basis: ReviewBasisReference;
+}>;
+
 /** Workspace authority is either wholly absent on an unbound/legacy run or complete. */
 export type LegacyReviewRun = Readonly<ReviewRunBase & ReviewRunWorkspaceAuthority & {
   reviewer_protocol?: never;
@@ -201,6 +227,11 @@ export type CurrentReviewRun = Readonly<ReviewRunBase & Extract<ReviewRunWorkspa
    * records as `prior_finding_ids`. Absent on runs installed before it existed.
    */
   subject_digest?: SubjectDigest;
+  /**
+   * How this run's roster (`expected_agents`) was narrowed from the derived
+   * one (ADR-0094). Absent on a run issued its whole derived roster.
+   */
+  narrowing?: ReviewNarrowing;
 }>;
 export type ReviewRun = LegacyReviewRun | CurrentReviewRun;
 
@@ -230,6 +261,8 @@ export type CurrentAcceptedReviewAuthority = Readonly<AcceptedReviewAuthorityBas
    * before it existed: a Successor Carry reviews such a Task in full once.
    */
   subject_digest?: SealedSubjectDigest;
+  /** The narrowing of the run this acceptance closed (ADR-0094); absent on a whole-roster acceptance. */
+  narrowing?: ReviewNarrowing;
 }>;
 export type AcceptedReviewAuthority = LegacyAcceptedReviewAuthority | CurrentAcceptedReviewAuthority;
 
@@ -250,6 +283,12 @@ export interface FindingResolution {
   readonly head_sha: string;
   readonly expected_agents: readonly [string, ...string[]];
   readonly assessments: NonEmptyPriorAssessments;
+  /**
+   * The derived roster a narrowed run's `expected_agents` were narrowed from
+   * (ADR-0094). Present only on a narrowed run's resolution, which retires a
+   * Finding only on its owner's vote.
+   */
+  readonly narrowed_from?: readonly [string, ...string[]];
 }
 
 /** A remediated finding, kept separately from findings a panel proved false. */

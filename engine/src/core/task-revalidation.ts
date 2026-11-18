@@ -15,6 +15,7 @@ import { distillTasksReopenedWith, isDistillTask } from "./distill-task";
 import { nonEmpty, type DomainResult, type NonEmpty, type OrchestrationRunId } from "./orchestration-contract";
 import type { Phase } from "./phases";
 import { derivePendingTaskProof, isTestsOnlyProof, redThenGreenEra, type TestsOnlyScope } from "./proof-obligations";
+import { retainedReviewBasis } from "./review-narrowing";
 import { taskArtifactExpectation } from "./task-artifact-expectation";
 import { parseTaskId, type TaskId } from "./task-id";
 import type { FrozenVerificationManifest } from "./verification-manifest";
@@ -33,6 +34,9 @@ import type { ReopenedTaskIds, Task, TaskGraph } from "../types";
  * (`redThenGreenEra` of the graph's frozen `verificationManifest`, INV-6).
  * `verificationManifest` is required so every caller states its graph's era;
  * `undefined` means the graph has no manifest, which is the legacy era.
+ *
+ * The cleared acceptance is kept as the Task's Review Basis (`review_basis`,
+ * ADR-0094), so its next Wave Gate can choose reviewers by what changed.
  *
  * An attested Task leaves attestation mode here. Every revalidation exists
  * because the Task's bytes may change, and an attestation dispatch forbids any
@@ -70,6 +74,8 @@ export function returnToRevalidation(
   return {
     ...unscoped,
     ...(testsOnly === undefined ? {} : { reopen_scope: testsOnly }),
+    // The cleared acceptance stays as the Review Basis (ADR-0094).
+    ...retainedReviewBasis(task),
     status: "pending",
     proof,
     revalidation_required: true,

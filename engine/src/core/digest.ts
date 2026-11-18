@@ -16,6 +16,9 @@ export function artifactDigestOfBytes(bytes: Uint8Array): ArtifactDigest {
   return digest.value;
 }
 
+/** Whether `raw` is a lowercase hex SHA-256 digest, the grammar every digest here emits. */
+export const isSha256Hex = (raw: unknown): raw is string => typeof raw === "string" && /^[0-9a-f]{64}$/.test(raw);
+
 /** Deterministic SHA-256 over UTF-8 text. */
 export function sha256Hex(text: string): string {
   return sha256Bytes(Buffer.from(text, "utf-8"));

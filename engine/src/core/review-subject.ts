@@ -20,21 +20,19 @@
  *
  * Pure: no I/O, no clock, no randomness.
  */
-import { sha256Hex } from "./digest";
+import { isSha256Hex, sha256Hex } from "./digest";
 import type { Finding, RefutedFinding, SealedSubjectDigest, SubjectDigest } from "./findings-shape";
-
-const SHA256 = /^[0-9a-f]{64}$/;
 
 /** The Subject Digest of one canonically constructed subject record. */
 export const subjectDigestOf = (subject: unknown): SubjectDigest => sha256Hex(JSON.stringify(subject)) as SubjectDigest;
 
 /** A stored Subject Digest, or null when `raw` is no SHA-256 digest. */
 export const parseSubjectDigest = (raw: unknown): SubjectDigest | null =>
-  typeof raw === "string" && SHA256.test(raw) ? raw as SubjectDigest : null;
+  isSha256Hex(raw) ? raw as SubjectDigest : null;
 
 /** A stored sealed Subject Digest, or null when `raw` is no SHA-256 digest. */
 export const parseSealedSubjectDigest = (raw: unknown): SealedSubjectDigest | null =>
-  typeof raw === "string" && SHA256.test(raw) ? raw as SealedSubjectDigest : null;
+  isSha256Hex(raw) ? raw as SealedSubjectDigest : null;
 
 /** What the seal reads of a Task: its active and refuted Findings. */
 export type SealedFindings = Readonly<{

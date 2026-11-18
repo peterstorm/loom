@@ -24,8 +24,9 @@ import { preserveAcceptedReviewRunFindings } from "./findings";
 import { canonicalRecord, canonicalStructuralEquals } from "./orchestration-contract";
 import { appendRetiredWaveReviewRun } from "./retired-wave-review-runs";
 import { reconcileWaveBlock } from "./wave-gate-model";
-import type { WaveGateSuccessionAudit } from "./wave-gate-program";
-import { waveGateAuthorityDigest } from "./wave-review-authority";
+import type { NarrowedTaskReview, WaveGateSuccessionAudit } from "./wave-gate-program";
+import { holdsBasis } from "./review-narrowing";
+import { derivedWaveTaskReview, waveGateAuthorityDigest } from "./wave-review-authority";
 
 /** The registration identity the admission compares against protected state. */
 export type WaveGateRegistrationCandidate = Readonly<{
@@ -183,19 +184,54 @@ function successionProblem(state: TaskGraph, wave: number, succession: WaveGateS
 }
 
 /**
+ * Why a registration's narrowed reviews cannot install over `state`, or null
+ * (ADR-0094). Each Task a start narrowed must still hold, as its Review Basis,
+ * exactly the acceptance the narrowing was measured against, and its derived
+ * roster must still be the one the narrowing was decided from: otherwise the
+ * batch would quietly review it in full against a registration that says it
+ * narrowed.
+ */
+function narrowingProblem(state: TaskGraph, narrowed: readonly NarrowedTaskReview[]): string | null {
+  for (const { taskId, basis, from } of narrowed) {
+    const task = state.tasks.find(({ id }) => id === taskId);
+    if (task === undefined || !holdsBasis(task, basis)) {
+      return `Wave Gate narrows Task ${taskId}'s review against run ${basis.runId}'s acceptance, which is no longer its Review Basis`;
+    }
+    const review = derivedWaveTaskReview(state, 2, task);
+    if (review.kind !== "roster" || !canonicalStructuralEquals(review.roster, from)) {
+      return `Wave Gate narrows Task ${taskId}'s review from a roster its review no longer derives`;
+    }
+  }
+  return null;
+}
+
+/**
+ * What the locked install reads of the run's program registration: its
+ * published Tasks and the issuance plan it froze, its succession (ADR-0091)
+ * and its narrowed reviews (ADR-0094). Passing the registration itself is what
+ * keeps either check from being skipped by omission.
+ */
+export type WaveGateInstallProgram = Readonly<{
+  taskIds: readonly string[];
+  succession?: WaveGateSuccessionAudit;
+  narrowedReviews?: readonly NarrowedTaskReview[];
+}>;
+
+/**
  * The locked install: freshness, admission, abandoned-predecessor supersession
  * and the new active registration, decided together as one pure transition.
  * Only a fresh registration — revision 0, no terminal outcome — may install;
  * that refusal precedes admission, so a stale or terminal candidate is never
- * mistaken for an exact replay. A fresh start that carries accepted reviews
- * passes its `succession`, which must name the protected predecessor.
+ * mistaken for an exact replay. A succession in `program` must name the
+ * protected predecessor; each narrowed review's Task must still hold its
+ * basis and derive the roster it was narrowed from (ADR-0094).
  */
 export function installWaveGateRegistration(
   state: TaskGraph,
   registration: ActiveWaveGateRegistration,
-  publishedTaskIds: readonly string[],
-  succession?: WaveGateSuccessionAudit,
+  program: WaveGateInstallProgram,
 ): WaveGateInstallDecision {
+  const { taskIds: publishedTaskIds, succession, narrowedReviews: narrowed = [] } = program;
   if (registration.revision !== 0 || registration.terminalOutcome !== null) {
     return canonicalRecord({
       kind: "refused",
@@ -209,7 +245,8 @@ export function installWaveGateRegistration(
     case "replay":
       return canonicalRecord({ kind: "replayed", registration: admitted.existing });
     case "install": {
-      const problem = succession === undefined ? null : successionProblem(state, registration.wave, succession);
+      const problem = (succession === undefined ? null : successionProblem(state, registration.wave, succession)) ??
+        narrowingProblem(state, narrowed);
       if (problem !== null) return canonicalRecord({ kind: "refused", message: problem });
       // An abandoned Run is not completion authority. Its review epoch and
       // packet-bound evidence retire with the successor install and it joins

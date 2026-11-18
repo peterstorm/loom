@@ -184,6 +184,16 @@ For every Wave Task except the Wave's Distill Task, which is exempt from review,
 - `comment-analyzer`;
 - `architecture-tech-lead`, appended last, only for a Task that touches an owned Invariant's family (ADR-0047) or writes an Acceptance Contract's types file (ADR-0069).
 
+A re-reviewed Task gets only the roles its change needs ([ADR-0094](adr/ADR-0094-a-re-reviewed-tasks-roster-follows-what-changed.md)). Its Review Basis is its last accepted review, which `reopen-task` and a completed-Wave reopening keep as `review_basis`. `start` reads the basis run's frozen packet bytes, proves them against the accepted head, and compares them with the current bytes and Task context:
+
+- comment-only or doc-only change: `comment-analyzer`;
+- test-only change: `code-reviewer` and `pr-test-analyzer`;
+- a mix: the union;
+- any code, a scope or context change (description, plan context, Requirement trace, owner map, contract surface), no change at all, or a basis that cannot be read and verified: the full roster;
+- always the owner of every prior Finding the Task is issued.
+
+Comment-only is judged by a conservative lexer for TypeScript, JavaScript and Java. Anything it cannot read counts as code, including a lone carriage return, U+2028 or U+2029. The selection is frozen into the registration (`narrowedReviews`) and a restart inherits it. The run and its acceptance record it as `narrowing`, and a new acceptance replaces the kept basis. In a narrowed run a prior Finding retires only on its owner's vote. `start` reports each Task's roster in a `wave-gate-start-roster` line on stderr. If a narrowed Task's derived roster has moved since the start, it is reviewed in full: registration refuses the narrowing, or batch install reports it in a `wave-gate-narrowing-widened` line.
+
 `spec-check-invoker` runs once for the Wave. Each reviewer returns exactly one JSON payload under the schema and rubric its packet carries; the engine derives counts and Finding ids. A critical must state its full basis and an advisory its reason. Structure is not proof of truth or impact. Malformed output is recorded as failed evidence, never as a Finding. See [protocol operations](standalone-review.md#reviewer-protocol-v2).
 
 ### Remediation-aware reviews

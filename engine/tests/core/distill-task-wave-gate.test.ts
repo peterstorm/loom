@@ -35,6 +35,7 @@ import {
   waveTaskReviewRosters,
   type WaveRequestBatch,
 } from "../../src/core/wave-review-authority";
+import { WHOLE_ISSUANCE } from "../../src/core/wave-review-carry-plan";
 import { generateWaveGateSummary } from "../../src/handlers/helpers/complete-wave-gate";
 import { observeWaveSpecCheckDocuments } from "../../src/orchestration/wave-spec-check-documents";
 import { capturedSpecCheck } from "../../src/core/spec-check";
@@ -152,7 +153,7 @@ describe("Wave review roster of a Distill Task (ADR-0068 §6)", () => {
 
   it("refuses any persisted Review Run on it as a roster problem", () => {
     const run = { expected_agents: [] as never, slot_authority: undefined };
-    expect(waveRunRosterProblem(graph, 2, t3!, run)).toEqual({
+    expect(waveRunRosterProblem(graph, 2, t3!, run, WHOLE_ISSUANCE)).toEqual({
       kind: "task-exempt", taskId: "T3", exemption: { kind: "exempt", reason: "distill-task" },
     });
   });

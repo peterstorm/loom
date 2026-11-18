@@ -22,7 +22,7 @@ import { reviewedWorkspaceObservation, type ReviewedWorkspaceObservation } from 
 import { prepareExhaustedWaveGateRestart, sameRestartRegistration, type RestartCarryObservation } from "../../src/core/wave-gate-replacement";
 import type { RegisteredWaveGateProgram, WaveReviewCarryAudit } from "../../src/core/wave-gate-program";
 import { issuedWaveReviewRosters } from "../../src/core/wave-review-authority";
-import { issuedRoles, registeredCarry } from "../../src/core/wave-review-carry-plan";
+import { issuedRoles } from "../../src/core/wave-review-carry-plan";
 import { parseWaveReviewCarryAudit } from "../../src/core/wave-review-carry-audit";
 import { parseSubjectDigest } from "../../src/core/review-subject";
 import {
@@ -161,7 +161,7 @@ describe("Wave Gate restart records the carry plan along the restart lineage", (
     expect(t2.findings).toEqual([]);
     expect(prepared.graph.wave_review_epoch).toBeUndefined();
     expect(issuedWaveReviewRosters([{ taskId: "T1", roster: ROSTER }, { taskId: "T2", roster: ROSTER }],
-      registeredCarry(prepared.registration))).toEqual([{ taskId: "T2", roster: [EXHAUSTED] }]);
+      prepared.registration)).toEqual([{ taskId: "T2", roster: [EXHAUSTED] }]);
   });
 
   it("is re-derived identically, and a different carry plan is a different registration", () => {
@@ -271,8 +271,8 @@ describe("issuedRoles: what a replacement issues for one Task", () => {
   });
 
   it("issuedWaveReviewRosters drops a Task with nothing left to issue", () => {
-    const carry = registeredCarry(restart(exhaustedWave()).registration);
-    expect(issuedWaveReviewRosters([{ taskId: "T1", roster: ROSTER }, { taskId: "T2", roster: ROSTER }], carry))
+    const { registration } = restart(exhaustedWave());
+    expect(issuedWaveReviewRosters([{ taskId: "T1", roster: ROSTER }, { taskId: "T2", roster: ROSTER }], registration))
       .toEqual([{ taskId: "T2", roster: [EXHAUSTED] }]);
   });
 });
@@ -397,7 +397,7 @@ describe("a chained restart keeps every carried slot's original origin", () => {
     const bytes = observe("T2", ["src/t2.ts"]);
     const rebound = value(rebindCarriedReviewRun(t2, carry, {
       runId: nextRunId, authorityDigest: prepared.registration.authorityDigest, protocol: WAVE_REVIEWER_PROTOCOL_V4,
-      generation: 0, packetId, headSha: epoch, bytes: { scope: bytes.scope, headSha: bytes.headSha }, priorFindingIds: [], roster: ROSTER,
+      generation: 0, packetId, headSha: epoch, bytes: { scope: bytes.scope, headSha: bytes.headSha }, priorFindingIds: [], roster: ROSTER, narrowing: undefined,
       subject: SUBJECT_T2, issued: issuedRoles(ROSTER, carry).map((agent) => issuedSlot(agent, packetId.charCodeAt(0) * 100 + ROSTER.indexOf(agent))),
     }));
     const [first, ...rest] = rebound.slot_authority.map((slot) => (slot.carried_from === undefined ? { ...slot, attempted: 2 as const } : slot));
@@ -442,7 +442,7 @@ describe("rebinding a carried Task's Review Run into the replacement run", () =>
   const binding: CarriedRunBinding = {
     runId: "run.next", authorityDigest: DIGEST_B, protocol: WAVE_REVIEWER_PROTOCOL_V4,
     generation: 0, packetId: PACKET_B, headSha: EPOCH_B, bytes: { scope: bytes.scope, headSha: bytes.headSha },
-    priorFindingIds: [], roster: ROSTER, subject: SUBJECT_T2, issued: [freshSlot],
+    priorFindingIds: [], roster: ROSTER, narrowing: undefined, subject: SUBJECT_T2, issued: [freshSlot],
   };
   const task = (): Task => exhaustedWave().tasks[1]!;
   const carry = { kind: "accepted-slots" as const, taskId: "T2", agents: accepted as unknown as readonly [string, ...string[]] };

@@ -22,8 +22,10 @@ import {
   type PersistedWaveBatchCandidate,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
+  type WidenedNarrowing,
   waveReviewView,
   waveTaskReviewRosters,
+  widenedNarrowings,
 } from '../../../core/wave-review-authority';
 import { durableRefutationRequests, publicationResolver } from './durable-requests';
 import { failed } from './program-result';
@@ -66,6 +68,16 @@ export function waveRequests(
   return prepared.value;
 }
 
+/**
+ * Name each Task the registration narrowed that this batch nonetheless
+ * reviews in full because its derived roster moved since the start (ADR-0094),
+ * as one JSON line on the diagnostic output: a voided narrowing is never silent.
+ */
+function reportWidenedNarrowings(runId: string, widened: readonly WidenedNarrowing[]): void {
+  if (widened.length === 0) return;
+  process.stderr.write(`${JSON.stringify({ kind: "wave-gate-narrowing-widened", runId, widened })}\n`);
+}
+
 /** Install one prepared batch's Review Packets: observe the reviewed
  *  workspaces and spec/plan bytes before the lock, then let the pure locked
  *  transition decide; a refusal aborts the state write with its message. */
@@ -77,6 +89,7 @@ export async function installWaveReviewRuns(
   const specCheck = waveBatchSpecCheckAuthority(batch);
   if (!specCheck.ok) throw new Error(specCheck.error.message);
   const preinstall = manager.load();
+  reportWidenedNarrowings(specCheck.value.runId, widenedNarrowings(preinstall, registration.schemaVersion, registration));
   const workspaces = observeReviewedWorkspace(
     waveReviewView(preinstall.tasks.filter(({ id }) => registration.taskIds.includes(id))).reviewed,
   );
@@ -226,7 +239,7 @@ export async function reconcileWaveReviewIssuance(
     }
     const rosters = waveTaskReviewRosters(refreshed, registration.schemaVersion, registration.taskIds);
     if (!rosters.ok) return settled(waveBlocked(handle, rosters.error));
-    const persisted = classifyPersistedWaveBatch(issuedWaveReviewRosters(rosters.value, carry), candidates);
+    const persisted = classifyPersistedWaveBatch(issuedWaveReviewRosters(rosters.value, registration), candidates);
     if (persisted.kind === "incomplete") {
       const expectedBatch = batchFor(refreshed);
       if (expectedBatch.batchEpoch !== epoch.batchEpoch) {

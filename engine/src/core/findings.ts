@@ -61,6 +61,7 @@ import { isRecord } from "./plain-record";
 import { scopeCovers } from "./path-coverage";
 import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseWaveReviewerProtocolDescriptor } from "./reviewer-contract";
 import { acceptedSubjectDigest, parseSubjectDigest } from "./review-subject";
+import { narrowingOf, narrowsRoster, parseReviewNarrowing, parseRoles } from "./review-narrowing";
 
 // The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf
 // volume of this concept (it imports only ./reviewer-contract), so the
@@ -567,10 +568,13 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
   if (firstExpectedAgent === undefined) return null;
   const expectedAgents = [firstExpectedAgent, ...remainingExpectedAgents];
   if (!Array.isArray(resolution.assessments) || resolution.assessments.length === 0) return null;
+  // A narrowed run's resolution names the roster it was narrowed from (ADR-0094) and is judged by the narrowed rule.
+  const narrowedFrom = resolution.narrowed_from === undefined ? undefined : parseNarrowedFrom(resolution.narrowed_from, expectedAgents);
+  if (narrowedFrom === null) return null;
   const parsed = parseResolutionAssessments({ finding, generation: resolution.generation, packetId: resolution.packet_id, assessments: resolution.assessments });
   if (parsed === null) return null;
   if (parsed.some((assessment) => assessment.finding_id !== finding.id) ||
-      !priorFindingRetires(finding.agent, parsed)) return null;
+      !priorFindingRetires(finding.agent, parsed, narrowedFrom === undefined ? "whole" : "narrowed")) return null;
   if (new Set(parsed.map((assessment) => assessment.agent)).size !== parsed.length) return null;
   if (parsed.length !== expectedAgents.length ||
       parsed.some((assessment, index) => assessment.agent !== expectedAgents[index])) return null;
@@ -585,8 +589,15 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
       head_sha: resolution.head_sha,
       expected_agents: [firstExpectedAgent, ...remainingExpectedAgents],
       assessments: [first, ...rest],
+      ...(narrowedFrom === undefined ? {} : { narrowed_from: narrowedFrom }),
     },
   };
+}
+
+/** A resolution's stored `narrowed_from`, or null unless `expectedAgents` narrows it (ADR-0094). */
+function parseNarrowedFrom(raw: unknown, expectedAgents: readonly string[]): readonly [string, ...string[]] | null {
+  const from = parseRoles(raw);
+  return from !== null && narrowsRoster(from, expectedAgents) ? from : null;
 }
 
 /**
@@ -920,6 +931,12 @@ export function reviewRunError(
   }
   if (Object.hasOwn(run, "subject_digest") && (!current || parseSubjectDigest(run.subject_digest) === null)) {
     return `${label}.subject_digest must be a lowercase SHA-256 digest on a current review`;
+  }
+  if (Object.hasOwn(run, "narrowing")) {
+    const narrowing = current ? parseReviewNarrowing(run.narrowing) : null;
+    if (narrowing === null || !Array.isArray(run.expected_agents) || !narrowsRoster(narrowing.from, run.expected_agents)) {
+      return `${label}.narrowing must be a narrowing record on a current review whose expected_agents are a proper part of its roster`;
+    }
   }
   if (typeof run.generation !== "number" || !Number.isSafeInteger(run.generation) || run.generation < 0) {
     return `${label}.generation must be a non-negative safe integer`;
@@ -1554,6 +1571,9 @@ const COUNTER_EVIDENCE = /[\w./-]+\.[A-Za-z0-9]+:\d+/u;
 
 type RetirementVote = Readonly<{ agent: string; verdict: PriorFindingVerdict; reason: string }>;
 
+/** Whether the votes came from a run's whole derived roster or a narrowed part of it (ADR-0094). */
+export type RetirementRoster = "whole" | "narrowed";
+
 /**
  * Whether one prior finding retires on a complete roster's assessments.
  *
@@ -1564,13 +1584,18 @@ type RetirementVote = Readonly<{ agent: string; verdict: PriorFindingVerdict; re
  * keep a remediated finding alive — that is how out-of-scope reviewers
  * carried fixed findings across generations under unanimity. A finding whose
  * owner is not on the roster (recovered view claims, operator overrides) still
- * needs every reviewer to resolve it. Shared by settlement and the stored
- * resolution validator, so a record can only exist if this rule admitted it.
+ * needs every reviewer to resolve it — on a whole roster. A narrowed roster
+ * (ADR-0094) left reviewers out, so there a Finding whose owner did not vote
+ * never retires; it carries forward to a review its owner sits on. Shared by
+ * settlement and the stored resolution validator, so a record can only exist
+ * if this rule admitted it.
  */
-export function priorFindingRetires(owner: string, votes: readonly RetirementVote[]): boolean {
+export function priorFindingRetires(owner: string, votes: readonly RetirementVote[], roster: RetirementRoster): boolean {
   if (votes.length === 0) return false;
   const ownerVote = votes.find(({ agent }) => agent === owner);
-  if (ownerVote === undefined) return votes.every(({ verdict }) => verdict === "resolved_by_remediation");
+  if (ownerVote === undefined) {
+    return roster === "whole" && votes.every(({ verdict }) => verdict === "resolved_by_remediation");
+  }
   return ownerVote.verdict === "resolved_by_remediation" && !votes.some(({ agent, verdict, reason }) =>
     agent !== owner && verdict === "still_present" && COUNTER_EVIDENCE.test(reason));
 }
@@ -1592,7 +1617,7 @@ function resolvedPriorFindingIds(
     if (finding === undefined ||
         (finding.review_generation !== undefined && run.generation <= finding.review_generation)) return false;
     const votes = retirementVotes(run, id);
-    return votes !== null && priorFindingRetires(finding.agent, votes);
+    return votes !== null && priorFindingRetires(finding.agent, votes, narrowingOf(run) === undefined ? "whole" : "narrowed");
   }));
 }
 
@@ -1612,6 +1637,7 @@ function retiredPriorFindings(
       return assessment === undefined ? [] : [{ ...assessment, agent }];
     });
     const [firstAssessment, ...remainingAssessments] = assessments;
+    const narrowing = narrowingOf(run);
     return firstAssessment === undefined || assessments.length !== run.expected_agents.length ? [] : [{
       finding,
       resolution: {
@@ -1621,6 +1647,7 @@ function retiredPriorFindings(
         head_sha: run.head_sha,
         expected_agents: run.expected_agents,
         assessments: [firstAssessment, ...remainingAssessments],
+        ...(narrowing === undefined ? {} : { narrowed_from: narrowing.from }),
       },
     }];
   });
@@ -1647,8 +1674,13 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
   const subject = run.reviewer_protocol === undefined || run.subject_digest === undefined
     ? {}
     : { subject_digest: acceptedSubjectDigest(run.subject_digest, { findings: active, refuted_findings: task.refuted_findings }) };
+  // A narrowed run's acceptance says so (ADR-0094), so no later run reads it as a whole-roster review.
+  const narrowing = narrowingOf(run);
+  // A new acceptance is the Task's Review Basis from now on; the basis a
+  // reopening kept is superseded and goes, so the two never sit side by side.
+  const { review_basis: _superseded, ...unbased } = task;
   return {
-    ...task,
+    ...(run.workspace_scope === undefined ? task : unbased),
     review_status: active.some((finding) => finding.severity === "critical") ? "blocked" : "passed",
     review_error: undefined,
     review_evidence_failures: undefined,
@@ -1663,6 +1695,7 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
         authority_digest: run.wave_gate_authority_digest,
         ...(run.reviewer_protocol === undefined ? {} : { reviewer_protocol: run.reviewer_protocol }),
         ...subject,
+        ...(narrowing === undefined ? {} : { narrowing }),
       },
     }),
     ...activeFindingAggregate(active),

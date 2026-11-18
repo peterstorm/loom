@@ -26,6 +26,7 @@ import {
 } from "./types";
 import { repeatedRetiredRun } from "./core/retired-wave-review-runs";
 import { parseSealedSubjectDigest } from "./core/review-subject";
+import { parseReviewNarrowing } from "./core/review-narrowing";
 import {
   findingIdCollisionError,
   findingsLockstepError,
@@ -2060,58 +2061,122 @@ function taskRepositoryCarryError(
   return null;
 }
 
+/**
+ * Which stored acceptance a record is, and so what it must agree with:
+ * - `accepted`: the Task's live `accepted_review_authority`. Legacy or current;
+ *   a current one closed exactly the Task's `review_generation`.
+ * - `basis`: the `review_basis` a reopening kept (ADR-0094). Always current,
+ *   and from an earlier generation, since the reopening advanced it.
+ */
+type StoredAcceptance =
+  | Readonly<{ kind: "accepted"; reviewGeneration: unknown }>
+  | Readonly<{ kind: "basis" }>;
+
+const ACCEPTANCE_REQUIRED_FIELDS = ["generation", "packet_id", "head_sha", "scope"] as const;
+const ACCEPTANCE_OPTIONAL_FIELDS = ["run_id", "authority_digest", "reviewer_protocol", "subject_digest", "narrowing"] as const;
+
+/**
+ * The one rule for a stored review acceptance, under `prefix` and wire name
+ * `field`: an exact field set, a supported descriptor with complete run
+ * authority on a current one, a canonical sorted unique non-empty scope, and
+ * the sealed Subject Digest (ADR-0091) and narrowing (ADR-0094) only on a
+ * current one. `stored` says what else the record must agree with.
+ */
+function storedAcceptanceError(raw: unknown, prefix: string, field: string, stored: StoredAcceptance): string | null {
+  if (!isRecord(raw)) return `${prefix}: ${field} must be an object`;
+  const authority = raw as Record<string, unknown>;
+  const current = Object.hasOwn(authority, "reviewer_protocol");
+  if (stored.kind === "basis" && !current) {
+    return `${prefix}: ${field} must be a current acceptance naming its reviewer protocol`;
+  }
+  const fields = Object.keys(authority).sort();
+  const allowed: readonly string[] = [...ACCEPTANCE_REQUIRED_FIELDS, ...ACCEPTANCE_OPTIONAL_FIELDS];
+  if (current &&
+      (!parseWaveReviewerProtocolDescriptor(authority.reviewer_protocol).ok || authority.run_id === undefined ||
+        authority.authority_digest === undefined)) {
+    return `${prefix}: current ${field} requires supported descriptor and run authority`;
+  }
+  if (Object.hasOwn(authority, "subject_digest") && (!current || parseSealedSubjectDigest(authority.subject_digest) === null)) {
+    return `${prefix}: ${field}.subject_digest must be a SHA-256 digest on a current acceptance`;
+  }
+  if (Object.hasOwn(authority, "narrowing") && (!current || parseReviewNarrowing(authority.narrowing) === null)) {
+    return `${prefix}: ${field}.narrowing must be a narrowing record on a current acceptance`;
+  }
+  if (fields.some((name) => !allowed.includes(name)) ||
+      !ACCEPTANCE_REQUIRED_FIELDS.every((name) => fields.includes(name))) {
+    return `${prefix}: ${field} has an invalid field set`;
+  }
+  if (typeof authority.generation !== "number" || !Number.isSafeInteger(authority.generation) || authority.generation < 0 ||
+      typeof authority.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(authority.packet_id) ||
+      !isExactGitSha(authority.head_sha)) {
+    return `${prefix}: ${field} has invalid generation, packet_id, or head_sha`;
+  }
+  const scopeError = storedAcceptanceScopeError(authority, prefix, field, current, stored);
+  if (scopeError !== null) return scopeError;
+  if ((authority.run_id === undefined) !== (authority.authority_digest === undefined) ||
+      (authority.run_id !== undefined && (!parseOrchestrationRunId(authority.run_id).ok ||
+        typeof authority.authority_digest !== "string" || !/^[0-9a-f]{64}$/.test(authority.authority_digest)))) {
+    return `${prefix}: ${field} run authority must be complete and valid when present`;
+  }
+  return null;
+}
+
+/**
+ * Why a stored acceptance's scope is invalid, or null when it is valid.
+ * Invalid means: not a non-empty array of canonical review paths, not sorted
+ * and unique, or, on a current live acceptance, closed at a generation other
+ * than the Task's. A basis (always current) closed an earlier generation than
+ * the Task's, so only its scope is pinned.
+ */
+function storedAcceptanceScopeError(
+  authority: Record<string, unknown>,
+  prefix: string,
+  field: string,
+  current: boolean,
+  stored: StoredAcceptance,
+): string | null {
+  if (!Array.isArray(authority.scope) || authority.scope.length === 0) {
+    return `${prefix}: ${field}.scope must be a non-empty canonical path array`;
+  }
+  const rawScope: readonly unknown[] = authority.scope;
+  const scope = rawScope.map((path, pathIndex) => parseReviewPath(path, `${prefix}: ${field}.scope[${pathIndex}]`));
+  const scopeError = scope.find((parsed) => !parsed.ok);
+  if (scopeError !== undefined && !scopeError.ok) return scopeError.errors.join("; ");
+  const scopePaths = scope.map((parsed) => parsed.ok ? parsed.value : "");
+  const canonicalScope = scopePaths.every((path, pathIndex) => path === rawScope[pathIndex]);
+  if (current && stored.kind === "accepted" && (authority.generation !== stored.reviewGeneration || !canonicalScope)) {
+    return `${prefix}: current ${field} must match exact generation and canonical scope`;
+  }
+  if (stored.kind === "basis" && !canonicalScope) {
+    return `${prefix}: ${field}.scope must contain canonical review paths`;
+  }
+  const sortedScopePaths = [...scopePaths].sort();
+  return new Set(scopePaths).size !== scopePaths.length || scopePaths.some((path, pathIndex) => path !== sortedScopePaths[pathIndex])
+    ? `${prefix}: ${field}.scope must be sorted and unique`
+    : null;
+}
+
 /** Issued review packets, recovered writes, and plan context. */
 function taskPacketError(
   t: Record<string, unknown>,
   index: number,
   id: string,
 ): string | null {
+  const prefix = `tasks[${index}] ("${id}")`;
   if (t.accepted_review_authority !== undefined) {
-    if (!isRecord(t.accepted_review_authority)) {
-      return `tasks[${index}] ("${id}"): accepted_review_authority must be an object`;
+    const acceptedError = storedAcceptanceError(
+      t.accepted_review_authority, prefix, "accepted_review_authority", { kind: "accepted", reviewGeneration: t.review_generation },
+    );
+    if (acceptedError !== null) return acceptedError;
+  }
+  if (t.review_basis !== undefined) {
+    // A basis is the acceptance a reopening cleared (ADR-0094); a new
+    // acceptance supersedes it, so the two never stand side by side.
+    if (t.accepted_review_authority !== undefined) {
+      return `${prefix}: review_basis cannot stand beside an accepted_review_authority, which supersedes it`;
     }
-    const authority = t.accepted_review_authority as Record<string, unknown>;
-    const fields = Object.keys(authority).sort();
-    const allowed = ["generation", "packet_id", "head_sha", "scope", "run_id", "authority_digest", "reviewer_protocol", "subject_digest"];
-    if (Object.hasOwn(authority, "reviewer_protocol") &&
-        (!parseWaveReviewerProtocolDescriptor(authority.reviewer_protocol).ok || authority.run_id === undefined ||
-          authority.authority_digest === undefined)) {
-      return `tasks[${index}] ("${id}"): current accepted_review_authority requires supported descriptor and run authority`;
-    }
-    // The sealed Subject Digest (ADR-0091) belongs to a current acceptance only.
-    if (Object.hasOwn(authority, "subject_digest") && (!Object.hasOwn(authority, "reviewer_protocol") ||
-        parseSealedSubjectDigest(authority.subject_digest) === null)) {
-      return `tasks[${index}] ("${id}"): accepted_review_authority.subject_digest must be a SHA-256 digest on a current acceptance`;
-    }
-    if (fields.some((field) => !allowed.includes(field)) ||
-        !["generation", "packet_id", "head_sha", "scope"].every((field) => fields.includes(field))) {
-      return `tasks[${index}] ("${id}"): accepted_review_authority has an invalid field set`;
-    }
-    if (typeof authority.generation !== "number" || !Number.isSafeInteger(authority.generation) || authority.generation < 0 ||
-        typeof authority.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(authority.packet_id) ||
-        !isExactGitSha(authority.head_sha)) {
-      return `tasks[${index}] ("${id}"): accepted_review_authority has invalid generation, packet_id, or head_sha`;
-    }
-    if (!Array.isArray(authority.scope) || authority.scope.length === 0) {
-      return `tasks[${index}] ("${id}"): accepted_review_authority.scope must be a non-empty canonical path array`;
-    }
-    const scope = authority.scope.map((path, pathIndex) => parseReviewPath(path, `tasks[${index}] ("${id}"): accepted_review_authority.scope[${pathIndex}]`));
-    const scopeError = scope.find((parsed) => !parsed.ok);
-    if (scopeError !== undefined && !scopeError.ok) return scopeError.errors.join("; ");
-    const scopePaths = scope.map((parsed) => parsed.ok ? parsed.value : "");
-    if (Object.hasOwn(authority, "reviewer_protocol") && (authority.generation !== t.review_generation ||
-        scopePaths.some((path, pathIndex) => path !== (authority.scope as unknown[])[pathIndex]))) {
-      return `tasks[${index}] ("${id}"): current accepted_review_authority must match exact generation and canonical scope`;
-    }
-    const sortedScopePaths = [...scopePaths].sort();
-    if (new Set(scopePaths).size !== scopePaths.length || scopePaths.some((path, pathIndex) => path !== sortedScopePaths[pathIndex])) {
-      return `tasks[${index}] ("${id}"): accepted_review_authority.scope must be sorted and unique`;
-    }
-    if ((authority.run_id === undefined) !== (authority.authority_digest === undefined) ||
-        (authority.run_id !== undefined && (!parseOrchestrationRunId(authority.run_id).ok ||
-          typeof authority.authority_digest !== "string" || !/^[0-9a-f]{64}$/.test(authority.authority_digest)))) {
-      return `tasks[${index}] ("${id}"): accepted_review_authority run authority must be complete and valid when present`;
-    }
+    const basisError = storedAcceptanceError(t.review_basis, prefix, "review_basis", { kind: "basis" });
+    if (basisError !== null) return basisError;
   }
   if (t.issued_review_packets !== undefined) {
     if (!Array.isArray(t.issued_review_packets)) {

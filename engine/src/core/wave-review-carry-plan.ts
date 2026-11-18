@@ -1,9 +1,11 @@
 /**
- * Reading a registration's carry plan (ADR-0089, ADR-0091): the plan itself,
- * which entry a Task has, and what a run still issues for it. Batch
+ * Reading a registration's issuance plan: its carry plan (ADR-0089, ADR-0091)
+ * and its narrowed reviews (ADR-0094). Which entry a Task has, the roster its
+ * Review Run is issued, and what a run still issues for it. Batch
  * preparation, the locked install, the carried-run rebinding, resume
- * classification, completion admission and completed-run verification all
- * ask here, so "issued = roster minus carried" has one definition.
+ * classification, retries, slot membership, completion admission and
+ * completed-run verification all ask here, so "issued = derived roster,
+ * narrowed, minus carried" has one definition.
  *
  * A leaf below both Wave review authority and the carry rule, so neither has
  * to import the other to read a plan.
@@ -11,12 +13,77 @@
  * Pure: no I/O.
  */
 import {
+  parseNarrowedWaveReviewRoster,
+  type NarrowedWaveReviewRoster,
+  type WaveReviewRoster,
+} from "./agent-catalog-projections";
+import type { ReviewNarrowing, ReviewRun } from "./findings-shape";
+import { canonicalStructuralEquals } from "./orchestration-contract";
+import { basisReferenceOf, narrowingOf } from "./review-narrowing";
+import {
   waveGateOriginOf,
   type AcceptedTaskCarry,
+  type NarrowedTaskReview,
   type WaveGateOriginAudit,
   type WaveReviewCarry,
   type WaveReviewCarryAudit,
+  type WaveReviewNarrowingAudit,
 } from "./wave-gate-program";
+
+/**
+ * How a Task's Review Run is to be issued, as its registration or its
+ * installed run states it (ADR-0094): its whole derived roster, or narrowed to
+ * `roster`, decided from the derived roster `narrowing.from`.
+ */
+export type TaskIssuance =
+  | Readonly<{ kind: "whole" }>
+  | Readonly<{ kind: "narrowed"; roster: readonly string[]; narrowing: ReviewNarrowing }>;
+
+/** The issuance of a Task its registration did not narrow: its whole derived roster. */
+export const WHOLE_ISSUANCE: TaskIssuance = Object.freeze({ kind: "whole" });
+
+/** How `registration` issues `taskId`: as its narrowed review states, else whole. */
+export function registeredIssuance(registration: WaveReviewNarrowingAudit, taskId: string): TaskIssuance {
+  const narrowed = registration.narrowedReviews?.find((entry) => entry.taskId === taskId);
+  return narrowed === undefined
+    ? WHOLE_ISSUANCE
+    : Object.freeze({ kind: "narrowed", roster: narrowed.roster, narrowing: reviewNarrowingOf(narrowed) });
+}
+
+/** How an installed Review Run says it was issued: its recorded narrowing over its own roster, else whole. */
+export function runIssuance(run: ReviewRun): TaskIssuance {
+  const narrowing = narrowingOf(run);
+  return narrowing === undefined ? WHOLE_ISSUANCE : Object.freeze({ kind: "narrowed", roster: run.expected_agents, narrowing });
+}
+
+/**
+ * The review a Task's Review Run is issued (ADR-0094), tagged:
+ * - `whole`: its whole derived roster;
+ * - `narrowed`: the narrowed roster its issuance states, with its narrowing;
+ * - `widened`: its issuance named a narrowing that no longer fits the derived
+ *   roster (decided from another derived roster, or not a proper part of it),
+ *   so it is issued the whole roster. Callers report this; it is never silent.
+ */
+export type IssuedTaskReview =
+  | Readonly<{ kind: "whole"; roster: WaveReviewRoster }>
+  | Readonly<{ kind: "narrowed"; roster: NarrowedWaveReviewRoster; narrowing: ReviewNarrowing }>
+  | Readonly<{ kind: "widened"; roster: WaveReviewRoster; narrowing: ReviewNarrowing }>;
+
+/** The one issued-review accessor: what `issuance` makes of a Task whose derived roster is `derived`. */
+export function issuedTaskReview(derived: WaveReviewRoster, issuance: TaskIssuance): IssuedTaskReview {
+  if (issuance.kind === "whole") return Object.freeze({ kind: "whole", roster: derived });
+  const roster = canonicalStructuralEquals(issuance.narrowing.from, derived)
+    ? parseNarrowedWaveReviewRoster(derived, issuance.roster)
+    : null;
+  return roster === null
+    ? Object.freeze({ kind: "widened", roster: derived, narrowing: issuance.narrowing })
+    : Object.freeze({ kind: "narrowed", roster, narrowing: issuance.narrowing });
+}
+
+/** The Review Run record of a registration's narrowed review, in the State File's spelling. */
+export function reviewNarrowingOf(narrowed: NarrowedTaskReview): ReviewNarrowing {
+  return Object.freeze({ from: narrowed.from, change: narrowed.change, basis: basisReferenceOf(narrowed.basis) });
+}
 
 /**
  * The carry plan a registration froze, with what froze it: a restart's

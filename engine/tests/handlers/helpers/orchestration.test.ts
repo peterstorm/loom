@@ -777,7 +777,7 @@ describe("orchestration CLI", () => {
     const stored = await handle.value.registerProgram(registration);
     if (!stored.ok) throw new Error(stored.error.message);
     await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.value.runId,
-      wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null, runsRoot }, taskIds);
+      wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null, runsRoot }, { taskIds });
     await withFixturePiSession(root, async () => {
       const batch = waveRequests(
         handle.value,

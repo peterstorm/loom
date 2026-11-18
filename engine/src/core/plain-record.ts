@@ -64,6 +64,10 @@ export function hasExactKeys(record: Readonly<UnknownRecord>, keys: readonly str
   return own.length === expected.size && own.every((key) => expected.has(key));
 }
 
+/** The lax guard and its exact-key predicate together, as one type guard. */
+export const isExactRecord = (value: unknown, keys: readonly string[]): value is Readonly<UnknownRecord> =>
+  isRecord(value) && hasExactKeys(value, keys);
+
 /**
  * The exact-key predicate for the strict guard: a plain record (`null` or
  * `Object.prototype` prototype) whose own keys are exactly the SET named by

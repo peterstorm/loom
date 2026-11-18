@@ -129,14 +129,14 @@ describe("admitWaveGateRegistration", () => {
 describe("installWaveGateRegistration", () => {
   it("installs a fresh registration over an otherwise untouched graph", () => {
     const registration = registrationFor(base, 1, ROSTER);
-    const decision = installWaveGateRegistration(base, registration, ROSTER);
+    const decision = installWaveGateRegistration(base, registration, { taskIds: ROSTER });
     expect(decision).toEqual({ kind: "installed", state: { ...base, active_wave_gate: registration }, registration });
   });
 
   it("replays the exact live registration without producing a new graph", () => {
     const registration = registrationFor(base, 1, ROSTER);
     const graph = withActive(registration);
-    expect(installWaveGateRegistration(graph, registration, ROSTER)).toEqual({ kind: "replayed", registration });
+    expect(installWaveGateRegistration(graph, registration, { taskIds: ROSTER })).toEqual({ kind: "replayed", registration });
   });
 
   it.each<readonly [string, Readonly<{ revision?: number; terminalOutcome?: unknown }>]>([
@@ -145,7 +145,7 @@ describe("installWaveGateRegistration", () => {
   ])("refuses a registration carrying %s before admission, even over its own live anchor", (_name, drift) => {
     const stale = registrationFor(base, 1, ROSTER, "run.next", drift);
     for (const graph of [base, withActive(stale)]) {
-      expect(installWaveGateRegistration(graph, stale, ROSTER)).toEqual({
+      expect(installWaveGateRegistration(graph, stale, { taskIds: ROSTER })).toEqual({
         kind: "refused",
         message: "A fresh active Wave Gate registration must start at revision 0 without a terminal outcome",
       });
@@ -159,7 +159,7 @@ describe("installWaveGateRegistration", () => {
       wave: refused.wave,
       authorityDigest: refused.authorityDigest,
     });
-    const decision = installWaveGateRegistration(graph, registration, roster);
+    const decision = installWaveGateRegistration(graph, registration, { taskIds: roster });
     expect(decision.kind).toBe("refused");
     if (decision.kind === "refused") expect(decision.message).toContain(message);
   });
@@ -198,7 +198,7 @@ describe("installWaveGateRegistration", () => {
 
     const install = (graph: TaskGraph): TaskGraph => {
       const registration = registrationFor(graph, 8, WAVE_8);
-      const decision = installWaveGateRegistration(graph, registration, WAVE_8);
+      const decision = installWaveGateRegistration(graph, registration, { taskIds: WAVE_8 });
       if (decision.kind !== "installed") throw new Error(`expected an install, got ${JSON.stringify(decision)}`);
       expect(decision.state.active_wave_gate).toBe(registration);
       return decision.state;

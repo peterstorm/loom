@@ -21,6 +21,7 @@
 
 import type { Phase } from "./phases";
 import { frozenSet } from "./frozen";
+import { narrowsRoster } from "./review-narrowing";
 import { AGENT_CATALOG, AGENT_POLICIES, type AgentKind, type AgentPolicy, type LoomAgentName } from "./model-profiles";
 
 /** Does this catalog Agent require same-turn user interaction in Pi? */
@@ -175,6 +176,42 @@ export type WaveReviewRoster = typeof BASE_WAVE_REVIEW_AGENTS | typeof ARCHITECT
 
 /** Any role a Wave review roster can name. */
 export type WaveReviewRole = WaveReviewRoster[number];
+
+declare const NARROWED_WAVE_REVIEW_ROSTER: unique symbol;
+
+/**
+ * A proper, non-empty part of a derived Wave review roster, in that roster's
+ * order (ADR-0094): the roles a re-reviewed Task's change needs. Minted only by
+ * `narrowedWaveReviewRoster` and `parseNarrowedWaveReviewRoster`, which prove
+ * the subsequence (`narrowsRoster`).
+ */
+export type NarrowedWaveReviewRoster = readonly [WaveReviewRole, ...WaveReviewRole[]] & {
+  readonly [NARROWED_WAVE_REVIEW_ROSTER]: true;
+};
+
+/**
+ * The roster one Wave Review Run is issued: a whole derived roster, or a
+ * narrowed part of one. The deliberate widening of `WaveReviewRoster`: a
+ * narrowed roster exists only as this proven subsequence, never as a free list.
+ */
+export type IssuedWaveReviewRoster = WaveReviewRoster | NarrowedWaveReviewRoster;
+
+/**
+ * The narrowed part of `derived` naming only the roles in `keep`, in roster
+ * order so each role keeps its slot index; null when `keep` covers the whole
+ * roster or none of it, either of which issues the whole roster.
+ */
+export function narrowedWaveReviewRoster(derived: WaveReviewRoster, keep: readonly string[]): NarrowedWaveReviewRoster | null {
+  return parseNarrowedWaveReviewRoster(derived, derived.filter((role) => keep.includes(role)));
+}
+
+/**
+ * `roles` as the narrowed part of `derived` it names, or null when it is not
+ * a proper, non-empty, ordered subsequence of `derived` without repeats.
+ */
+export function parseNarrowedWaveReviewRoster(derived: WaveReviewRoster, roles: readonly string[]): NarrowedWaveReviewRoster | null {
+  return narrowsRoster(derived, roles) ? Object.freeze([...roles]) as unknown as NarrowedWaveReviewRoster : null;
+}
 
 /**
  * Every reason a Wave Task's review carries the architecture lens, each

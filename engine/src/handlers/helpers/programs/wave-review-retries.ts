@@ -19,6 +19,7 @@ import {
 import { reviewerRejectionReason } from '../../../core/wave-reviewer-transcript';
 import { markWaveSpecCheckRetryIssuedTransition, markWaveTaskReviewRetriesIssuedTransition, type WaveTaskReviewRetry } from '../../../core/wave-review-issuance';
 import { waveRunRosterProblem } from '../../../core/wave-review-authority';
+import { registeredIssuance } from '../../../core/wave-review-carry-plan';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { durableCaptureRejection, durableRefutationRequests, isCaptureRejectionOf, publicationResolver } from './durable-requests';
 import { failed, type FacadeDriveResult } from './program-result';
@@ -118,10 +119,11 @@ export async function currentWaveTaskReviewRetries(
     .flatMap((task) => {
       const run = task.review_run;
       if (!registration.taskIds.includes(task.id) || run === undefined) return [];
-      // A current-protocol run must carry the Task's derived roster; a legacy run keeps its structural check.
+      // A current-protocol run must carry the roster the registration issues
+      // the Task (ADR-0094); a legacy run keeps its structural check.
       const inexactSlots = run.reviewer_protocol === undefined
         ? run.slot_authority === undefined || run.slot_authority.length !== run.expected_agents.length
-        : waveRunRosterProblem(graph, registration.schemaVersion, task, run) !== null;
+        : waveRunRosterProblem(graph, registration.schemaVersion, task, run, registeredIssuance(registration, task.id)) !== null;
       if (inexactSlots) {
         throw new Error(`Task ${task.id} active Review Run lacks engine-issued exact slot authority`);
       }

@@ -28,6 +28,7 @@ import {
   waveTaskReviewRosters,
   type WaveRequestBatch,
 } from "../../src/core/wave-review-authority";
+import { WHOLE_ISSUANCE } from "../../src/core/wave-review-carry-plan";
 import type { TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { ADMISSION, ADMISSION_FEE_TABLE_STAMP, FEE_TABLE, someParagraph } from "../fixtures/owner-families";
@@ -287,7 +288,7 @@ describe("waveRunRosterProblem: the one roster-versus-persisted-run check (ADR-0
     return { expected_agents: expected, slot_authority: [first, ...rest] as const };
   };
   const problem = (graph: TaskGraph, run: ReturnType<typeof runOf>) =>
-    waveRunRosterProblem(graph, 2, graph.tasks[0]!, run)?.kind ?? null;
+    waveRunRosterProblem(graph, 2, graph.tasks[0]!, run, WHOLE_ISSUANCE)?.kind ?? null;
 
   it("admits a run carrying the Task's derived roster in slot order: six for owner-mapped, five for a plain Task", () => {
     expect(problem(owned, runOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, slotsOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS)))).toBeNull();
@@ -295,7 +296,7 @@ describe("waveRunRosterProblem: the one roster-versus-persisted-run check (ADR-0
   });
 
   it("refuses expected_agents that differ from the derived roster, in either direction", () => {
-    expect(waveRunRosterProblem(owned, 2, owned.tasks[0]!, runOf(BASE_WAVE_REVIEW_AGENTS, slotsOf(BASE_WAVE_REVIEW_AGENTS))))
+    expect(waveRunRosterProblem(owned, 2, owned.tasks[0]!, runOf(BASE_WAVE_REVIEW_AGENTS, slotsOf(BASE_WAVE_REVIEW_AGENTS)), WHOLE_ISSUANCE))
       .toEqual({ kind: "expected-agents-differ", taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS });
     expect(problem(plain, runOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, slotsOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS))))
       .toBe("expected-agents-differ");
