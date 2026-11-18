@@ -19,7 +19,7 @@ import {
   UTILITY_AGENTS,
   VALID_TRANSITIONS,
 } from "./phase-policy";
-import { stripNamespace } from "../utils/strip-namespace";
+import { extractNamespace, stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
 import { parseArtifactDigest } from "./orchestration-contract/identity";
 import {
@@ -126,8 +126,32 @@ export function detectPhase(agent: string): Phase | "unknown" {
   return "unknown";
 }
 
-/** The plugin namespace Claude Code gives Loom's own agents (`loom:code-reviewer`). */
-const LOOM_NAMESPACE = "loom:";
+/**
+ * Whose agent a spawn names, parsed once from the agent type as the harness
+ * gave it (loom#213):
+ * - `missing`: no agent type at all — a malformed or drifted spawn payload;
+ * - `foreign`: another plugin's namespaced agent, whatever its bare name, or a
+ *   bare name outside Loom's catalog;
+ * - `loom`: a catalog agent, bare or `loom:`-namespaced, with its phase;
+ * - `unknown-loom`: a `loom:` name the catalog does not know — misspelled or missing.
+ *
+ * A harness that gives bare names (Pi) carries no namespace, so there an
+ * unknown name cannot be told from a foreign agent and reads as `foreign`.
+ */
+export type AgentIdentity =
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "foreign" }>
+  | Readonly<{ kind: "loom"; phase: Phase }>
+  | Readonly<{ kind: "unknown-loom" }>;
+
+export function classifyAgent(agentType: string): AgentIdentity {
+  if (agentType.trim() === "") return { kind: "missing" };
+  const namespace = extractNamespace(agentType);
+  if (namespace !== null && namespace !== "loom") return { kind: "foreign" };
+  const phase = detectPhase(stripNamespace(agentType));
+  if (phase !== "unknown") return { kind: "loom", phase };
+  return namespace === "loom" ? { kind: "unknown-loom" } : { kind: "foreign" };
+}
 
 /** `readonly` throughout, like its siblings `ArtifactProbe` and
  *  `PhaseOrderDeps`: this is the gate's DECISION INPUT, and a decision input a
@@ -297,16 +321,20 @@ export function validatePhaseOrder(
   // Allow utility agents
   if (UTILITY_AGENTS.has(bareAgent) || UTILITY_AGENTS.has(bareAgent + "-agent")) return { kind: "allow" };
 
-  const targetPhase = detectPhase(bareAgent);
-
-  // An agent outside Loom's catalog is not phase work, so the phase order is
-  // not its business (loom#213): it cannot advance a phase, and what it may
-  // write in the orchestrated repository is the direct-edit guard's decision
-  // (`core/block-direct-edits.ts`). A Loom-namespaced name the catalog does
-  // not know is a misspelled or missing Loom agent, and is refused.
-  if (targetPhase === "unknown") {
-    if (!input.agentType.startsWith(LOOM_NAMESPACE)) return { kind: "allow" };
-    return {
+  // A foreign agent is not phase work, so the phase order is not its business
+  // (loom#213): it cannot advance a phase, and what it may write in the
+  // orchestrated repository is the direct-edit guard's decision
+  // (`core/block-direct-edits.ts`). On a bare-name harness (Pi) an unknown
+  // name is foreign too, so there a misspelled Loom agent passes this gate
+  // and is still held by the direct-edit guard.
+  const judged = match(classifyAgent(input.agentType))
+    .returnType<Readonly<{ phase: Phase }> | HookResult>()
+    .with({ kind: "foreign" }, (): HookResult => ({ kind: "allow" }))
+    .with({ kind: "missing" }, (): HookResult => ({
+      kind: "block",
+      message: "BLOCKED: The spawn names no agent type, so its phase cannot be judged.",
+    }))
+    .with({ kind: "unknown-loom" }, (): HookResult => ({
       kind: "block",
       message: [
         "BLOCKED: Unrecognized Loom agent type during loom orchestration.",
@@ -317,8 +345,11 @@ export function validatePhaseOrder(
         "  brainstorm-agent, specify-agent, clarify-agent, architecture-agent,",
         "  plan-alignment-agent, code-implementer-agent, ts-test-agent, frontend-agent, etc.",
       ].join("\n"),
-    };
-  }
+    }))
+    .with({ kind: "loom" }, ({ phase }) => ({ phase }))
+    .exhaustive();
+  if (!("phase" in judged)) return judged;
+  const targetPhase = judged.phase;
 
   const state = loadedState;
   const currentPhase: Phase = state.current_phase ?? "init";

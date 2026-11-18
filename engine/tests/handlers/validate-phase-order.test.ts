@@ -11,7 +11,8 @@ import {
 import { realArtifactProbe } from "../../src/orchestration/artifact-probe";
 import type { ArtifactProbe, ArtifactState } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import { VALID_TRANSITIONS } from "../../src/core/phase-policy";
-import { validatePhaseOrder, type PhaseOrderDeps } from "../../src/core/validate-phase-order";
+import { classifyAgent, validatePhaseOrder, type PhaseOrderDeps } from "../../src/core/validate-phase-order";
+import validatePhaseOrderHook from "../../src/handlers/pre-tool-use/validate-phase-order";
 import type { TaskGraph } from "../../src/types";
 import { sha256Hex } from "../../src/core/digest";
 import {
@@ -263,10 +264,71 @@ describe("an agent outside Loom's catalog is not phase work", () => {
     expect(validatePhaseOrder({ agentType, prompt }, executing())).toEqual({ kind: "allow" });
   });
 
+  it("treats another plugin's agent as foreign even when its bare name is a Loom agent's", () => {
+    expect(classifyAgent("other:specify-agent")).toEqual({ kind: "foreign" });
+    expect(validatePhaseOrder({ agentType: "other:specify-agent", prompt: "Write the spec" }, executing()))
+      .toEqual({ kind: "allow" });
+  });
+
+  it.each([
+    ["loom:specify-agent", { kind: "loom", phase: "specify" }],
+    ["specify-agent", { kind: "loom", phase: "specify" }],
+    ["loom:rogue-agent", { kind: "unknown-loom" }],
+    ["general-purpose", { kind: "foreign" }],
+    ["", { kind: "missing" }],
+    ["  ", { kind: "missing" }],
+  ])("classifies %j", (agentType, identity) => {
+    expect(classifyAgent(agentType)).toEqual(identity);
+  });
+
+  it("refuses a spawn that names no agent type", () => {
+    expect(validatePhaseOrder({ agentType: "", prompt: "Run tests" }, executing())).toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("names no agent type"),
+    });
+  });
+
   it("refuses a Loom-namespaced name the catalog does not know", () => {
     expect(validatePhaseOrder({ agentType: "loom:rogue-agent", prompt: "Run tests" }, executing())).toMatchObject({
       kind: "block",
       message: expect.stringContaining("Unrecognized Loom agent type"),
+    });
+  });
+
+  describe("through the Claude Code shell, which keeps the namespace", () => {
+    const previous = process.env.LOOM_STATE_PATH;
+    let dir = "";
+    beforeEach(() => {
+      dir = makeTmpDir();
+      process.env.LOOM_STATE_PATH = join(dir, "active_task_graph.json");
+      writeFileSync(process.env.LOOM_STATE_PATH, JSON.stringify(executing().loadState()));
+    });
+    afterEach(() => {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const spawn = (subagent_type: string, prompt: string) =>
+      validatePhaseOrderHook(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type, prompt } }), []);
+
+    it("judges a namespaced Loom reviewer as execute work: it reaches the execute artifact gate", async () => {
+      // The fixture names no plan, so execute's prerequisite refuses: proof the
+      // reviewer was classified as Loom execute work, not foreign or unknown.
+      expect(await spawn("loom:code-reviewer", "Review the frozen scope")).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("Missing prerequisite for execute phase"),
+      });
+    });
+
+    it("orders a namespaced Loom phase agent by its phase", async () => {
+      expect(await spawn("loom:specify-agent", "Implement T3")).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("Invalid phase transition: execute → specify"),
+      });
+    });
+
+    it("admits a general-purpose agent whose prompt names architecture", async () => {
+      expect(await spawn("general-purpose", "Read rules/architecture.md first")).toEqual({ kind: "allow" });
     });
   });
 

@@ -48,8 +48,8 @@ export const realPhaseOrderDeps: PhaseOrderDeps = {
 const handler = failClosedGuard("validate-phase-order", (input) => {
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
-  // The agent type is passed as the harness named it: the core strips the
-  // namespace itself and reads it to tell a Loom agent from any other.
+  // Never strip the namespace here: the core needs it to tell a Loom agent
+  // from another plugin's agent of the same bare name.
   return validatePhaseOrder({
     agentType: (input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? "",
     prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
