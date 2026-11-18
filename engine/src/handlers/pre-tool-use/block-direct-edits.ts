@@ -25,6 +25,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
   shouldBlockDirectEdit,
+  type CallerWriteMode,
   UNRESOLVED,
   unresolvedTargets,
   type ActiveRosterProbe,
@@ -35,6 +36,9 @@ import {
   type OrchestratedRepository,
 } from "../../core/block-direct-edits";
 import { nonEmpty } from "../../core/acceptance-contract/kernel";
+import type { ImplementationBinding } from "../../core/implementation-binding";
+import { StateManager } from "../../state-manager";
+import { callerWriteModeOf, type TaskGraphSource } from "../attestation-mode";
 import { observeTaskGraphProjectBoundary, protectedDirs, subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
 import { readActiveAgentRoles, type ActiveAgent } from "../../machine/ledger";
 import { parseCanonicalTaskGraphPointer } from "../../machine/task-graph-pointer";
@@ -333,26 +337,51 @@ export function artifactWriteRequest(
   return { callerAgentId: input.agent_id ?? null, targetPath, projectRoot };
 }
 
+/** The calling Agent and its attempted binding (`null` binding: not a rostered implementation Agent). */
+export type CallerBinding = Readonly<{ callerId: string; binding: ImplementationBinding | null }>;
+
 /**
- * Adapter for core's `ImplementationBindingProbe`. The CALLER's binding is
- * attempted HERE, before the decision, inside the same handler that decides —
- * Claude runs separate PreToolUse hooks in parallel, so no other hook's work
- * can be relied on to have landed first. Every other rostered implementation
- * Agent answers its observed (never published) state.
+ * The caller's own binding, attempted HERE, before the decision, inside the
+ * same handler that decides — Claude runs separate PreToolUse hooks in
+ * parallel, so no other hook's work can be relied on to have landed first.
  */
-function callerBindingProbe(
+function callerBinding(
   input: PreToolUseInput,
   sessionId: SessionId,
   roster: readonly ActiveAgent[] | null,
-): ImplementationBindingProbe {
+): CallerBinding | null {
   const callerId = parseReportedAgentId(input.agent_id ?? "");
-  const callerBinding = callerId === null
+  return callerId === null
     ? null
-    : ensureRosteredImplementationBinding({ sessionId, agentId: callerId, roster });
-  return (agentId) => agentId === callerId && callerBinding !== null
-    ? callerBinding
+    : { callerId, binding: ensureRosteredImplementationBinding({ sessionId, agentId: callerId, roster }) };
+}
+
+/**
+ * Adapter for core's `ImplementationBindingProbe`: the caller answers its
+ * attempted binding, every other rostered implementation Agent its observed
+ * (never published) state.
+ */
+function callerBindingProbe(sessionId: SessionId, caller: CallerBinding | null): ImplementationBindingProbe {
+  return (agentId) => caller !== null && agentId === caller.callerId && caller.binding !== null
+    ? caller.binding
     : observeImplementationBinding(sessionId, agentId);
 }
+
+/**
+ * Adapter for core's `callerWriteMode` (ADR-0085): the caller's bound attempt
+ * names its Task, whose mode the session's recorded TaskGraph answers (the
+ * graph the attempt binding reads; `graphOf` is that resolver). A caller with
+ * no bound attempt answers `undefined`.
+ */
+export const claudeCallerWriteMode = (
+  sessionId: SessionId | null,
+  caller: CallerBinding | null,
+  graphOf: (sessionId: SessionId) => TaskGraphSource = (id) => () => StateManager.fromSession(id),
+) => (): CallerWriteMode | undefined => {
+  const binding = caller?.binding;
+  if (sessionId === null || binding?.kind !== "bound") return undefined;
+  return callerWriteModeOf(binding.authority.taskId, graphOf(sessionId), `session ${sessionId}`);
+};
 
 // Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
 // NON-blocking for PreToolUse — silently waving the edit past the guard.
@@ -361,6 +390,7 @@ const handler: HookHandler = failClosedGuard("block-direct-edits", (parsed) => {
   // unparseable session id reaches core unchanged, which blocks on it.
   const sessionId = parseSessionId(parsed.session_id);
   const roster = sessionId === null ? null : activeRosterProbe(sessionId);
+  const caller = sessionId === null ? null : callerBinding(parsed, sessionId, roster);
   return shouldBlockDirectEdit(
     parsed.tool_name,
     parsed.session_id,
@@ -368,8 +398,9 @@ const handler: HookHandler = failClosedGuard("block-direct-edits", (parsed) => {
     () => roster,
     {
       artifactWrite: artifactWriteRequest(parsed),
-      implementationBinding: sessionId === null ? undefined : callerBindingProbe(parsed, sessionId, roster),
+      implementationBinding: sessionId === null ? undefined : callerBindingProbe(sessionId, caller),
       locateEdit: claudeEditSite(parsed, sessionId),
+      callerWriteMode: claudeCallerWriteMode(sessionId, caller),
     },
   );
 });
