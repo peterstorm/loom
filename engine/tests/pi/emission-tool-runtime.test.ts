@@ -68,7 +68,7 @@ import {
   frozenPayloadSchemaParameters,
   type EmissionToolAcknowledgment,
 } from "../../src/core/emission-tool";
-import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { REVIEWER_PAYLOAD_EXAMPLE_V2, WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4 } from "../../src/core/reviewer-contract";
 import { piEmissionCallFrames } from "../../../pi/transcript-adapter";
 import { piReviewerCaptureObservation } from "../../../pi/review-capture";
 import { validReviewerArgumentsV2, whitespaceOnlyArguments } from "../fixtures/emission-arguments";
@@ -97,12 +97,14 @@ import {
  *  that decisively classified the route unconstrained). */
 const malformedArguments = (cell: RegistryCell): unknown => {
   switch (cell.kind) {
-    case "reviewer-payload":
-      return {
-        schemaVersion: cell.version === "v2" ? "2" : "3",
-        kind: cell.version === "v2" ? "standalone-review" : "standalone-successor-review",
-        findings: JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]),
-      };
+    case "reviewer-payload": {
+      const envelope = {
+        v2: { schemaVersion: "2", kind: "standalone-review" },
+        v3: { schemaVersion: "3", kind: "standalone-successor-review" },
+        v4: { schemaVersion: "4", kind: "wave-review", prior_findings: "[]" },
+      }[cell.version];
+      return { ...envelope, findings: JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]) };
+    }
     case "judge-verdict":
       return {
         criterion: "extensibility",
@@ -121,6 +123,17 @@ const malformedArguments = (cell: RegistryCell): unknown => {
  *  (`observedEmissionTool`: the exact definition the extension's readiness
  *  command registers, with the observation record around its execute). */
 const SHELL_REQUEST_ID = "req-emission-tool-t5-shell";
+
+/** The AD-5 whitespace-only prose for one cell. The shared fixture carries the
+ *  v2 reviewer envelope; the Wave v4 cell (ADR-0084) needs its own envelope,
+ *  so its finding's claim is blanked inside the v4 example instead. */
+const whitespaceOnlyArgumentsFor = (cell: RegistryCell): unknown =>
+  cell.kind === "reviewer-payload" && cell.version === "v4"
+    ? {
+      ...WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4,
+      findings: WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4.findings.map((finding) => ({ ...finding, claim: "   " })),
+    }
+    : whitespaceOnlyArguments(cell.kind);
 
 /** The AD-10 always-accept control: a shell execute that SKIPS the engine's
  *  admission gate acknowledges whatever arguments it receives — exactly the
@@ -218,12 +231,12 @@ describe("real pi validateToolArguments against the exact frozen registry bytes"
     for (const registryCell of REGISTRY_CELLS) {
       if (registryCell.kind === "reviewer-payload" && registryCell.version === "v3") {
         // The v3 successor schema carries no advisory prose field; the
-        // disagreement is defined for the three prose-bearing cells.
+        // disagreement is defined for the prose-bearing cells.
         continue;
       }
       const parameters = frozenPayloadSchemaParameters(cellSchemaBytes(registryCell));
       const tool = { name: registryCell.spec.toolName, description: "d", parameters };
-      const args = whitespaceOnlyArguments(registryCell.kind);
+      const args = whitespaceOnlyArgumentsFor(registryCell);
       // PI HALF: the real validator admits the whitespace-only prose.
       const validated = validateToolArguments(
         tool as never,

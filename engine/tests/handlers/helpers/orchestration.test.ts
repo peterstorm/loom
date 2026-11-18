@@ -26,7 +26,9 @@ import { selectVerdictSource } from "../../../src/core/emission-ingestion";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../../src/core/emission-tool";
 import { captureKey } from "../../../src/core/harness-capture";
 import { observeEmissionCalls } from "../../../src/core/emission-observation";
-import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
+import {
+  REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4, parseWaveReviewerProtocolDescriptor, type ReviewerDraftV2,
+} from "../../../src/core/reviewer-contract";
 import { type GateDeps } from "../../../src/core/wave-gate-checks";
 import { BASE_WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
@@ -68,6 +70,7 @@ import {
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
 import { trustedPassEvidence } from "../../fixtures/task-lifecycle";
+import { issuedDescriptorWavePayload } from "../../fixtures/wave-reviewer-payload";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -89,13 +92,21 @@ function currentCritical(file: string, claim: string): ReviewerDraftV2 {
   if (example?.severity !== "critical") throw new Error("issued contract example requires critical basis");
   return { ...example, file, line: 1, claim };
 }
+/**
+ * The payload a protected current Review Run's own descriptor admits
+ * (ADR-0084): v4 for a freshly started Wave Gate, v2 for one registered
+ * before it. The run is read from the State File, so its descriptor is wire
+ * data; a run without one is a legacy run and has no JSON payload at all.
+ */
 function currentWavePayload(
-  run: Readonly<{ generation: number; packet_id: string }>,
+  run: Readonly<{ generation: number; packet_id: string; reviewer_protocol?: unknown }>,
   findings: readonly ReviewerDraftV2[] = [],
   priors: readonly Readonly<{ finding_id: string; verdict: string; reason: string }>[] = [],
 ): string {
-  return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: run.packet_id,
-    generation: run.generation, prior_findings: priors, findings });
+  const descriptor = parseWaveReviewerProtocolDescriptor(run.reviewer_protocol);
+  if (!descriptor.ok) throw new Error(`fixture requires a current Wave Review Run descriptor: ${descriptor.error.message}`);
+  return issuedDescriptorWavePayload(descriptor.value, () => ({ packetId: run.packet_id, generation: run.generation }),
+    { prior_findings: priors, findings });
 }
 
 /**
@@ -649,6 +660,17 @@ describe("prepareOrphanedWaveGateRecovery", () => {
       schemaVersion: 2, kind: "wave-gate", input: { wave: 1 },
       orphanRecovery: { previousRunId: activeRunId, previousAuthorityDigest: authorityDigest },
     });
+  });
+
+  it("registers the replacement under Wave reviewer protocol v4, whatever its predecessor issued (ADR-0084)", () => {
+    const prepared = prepareOrphanedWaveGateRecovery(
+      graph(), { runId: activeRunId, wave: 1, authorityDigest }, "/runs", "run.orphan-replacement", "/runs",
+    );
+    if (!prepared.ok) throw new Error(prepared.message);
+    const { registration } = prepared.value;
+    if (registration.schemaVersion !== 2) throw new Error("orphan recovery must register a schema-2 Wave Gate");
+    expect(registration.reviewerProtocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
+    expect(registration.reviewerProtocol).not.toEqual(REVIEWER_PROTOCOL_V2);
   });
 
   it("clears the completion-suite receipt so the replacement graph satisfies the lockstep invariant", () => {
@@ -2187,10 +2209,13 @@ describe("orchestration CLI", () => {
       })),
     }));
     const beforeSubmission = readFileSync(statePath);
+    // A freshly started Wave Gate issues v4 (ADR-0084): the payload carries no
+    // packet identity, so the refusal below comes from the protected slot join.
+    expect(protectedGraph.tasks[0]?.review_run?.["reviewer_protocol"]).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     const submitted = (await runCli([
       "submit", "--runs-root", runsRoot, "--run", runDir,
       "--request", reviewer.requestId, "--slot", reviewer.slotId, "--attempt", "1",
-    ], currentWavePayload({ generation: 0, packet_id: "f".repeat(64) }), root));
+    ], currentWavePayload({ generation: 0, packet_id: "f".repeat(64), reviewer_protocol: WAVE_REVIEWER_PROTOCOL_V4 }), root));
 
     expect(submitted.status).not.toBe(0);
     expect(submitted.stderr).toContain("does not belong to Task T1's exact current Review Packet slot");
@@ -3016,9 +3041,11 @@ describe("orchestration CLI", () => {
     expect(startedGraph.active_wave_gate.runsRoot).toBe(runsRoot);
     const acceptedPartialClaim = "preserve accepted partial packet finding";
     const partialRequest = initial.requests.find(({ authority }) => authority.role === "code-reviewer")!.authority;
+    expect(startedGraph.tasks[0]!.review_run["reviewer_protocol"]).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     const partial = (await runCli(["submit", "--runs-root", runsRoot, "--run", oldRun,
       "--request", partialRequest.requestId, "--slot", partialRequest.slotId, "--attempt", "1"],
-      currentWavePayload({ generation: startedGraph.tasks[0]!.review_generation, packet_id: oldPacketId }, [
+      currentWavePayload({ generation: startedGraph.tasks[0]!.review_generation, packet_id: oldPacketId,
+        reviewer_protocol: WAVE_REVIEWER_PROTOCOL_V4 }, [
         { severity: "advisory", file: "src/x.ts", line: 4, claim: acceptedPartialClaim, reason: "Scripted partial improvement" },
       ], [{ finding_id: activeFinding.id, verdict: "still_present", reason: "still present in partial evidence" }]), root));
     expect(partial.status, partial.stderr).toBe(0);
@@ -3120,6 +3147,8 @@ describe("orchestration CLI", () => {
     expect(batch.requests).toHaveLength(1 + BASE_WAVE_REVIEW_AGENTS.length);
     expect(batch.requests.every(({ authority }) =>
       authority.runId === "run.wave-orphan-replacement" && authority.attempt === 1)).toBe(true);
+    // ADR-0084: the replacement is a new registration and issues v4.
+    expect(JSON.parse(readFileSync(join(replacementRun, "program.json"), "utf8")).reviewerProtocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
 
     const after = JSON.parse(readFileSync(statePath, "utf8")) as {
       spec_check?: unknown;
@@ -3346,6 +3375,10 @@ describe("orchestration CLI", () => {
     };
     expect(replacement.kind).toBe("spawn-batch");
     expect(replacement.runId).toBe("run.wave-replacement");
+    // ADR-0084: replacing an archived v1 run registers the current Wave protocol, v4.
+    expect(JSON.parse(readFileSync(join(replacementRun, "program.json"), "utf8"))).toMatchObject({
+      schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4,
+    });
     expect(replacement.requests).toHaveLength(1 + BASE_WAVE_REVIEW_AGENTS.length);
     expect(replacement.requests.every(({ authority }) => authority.runId === "run.wave-replacement" && authority.attempt === 1)).toBe(true);
 

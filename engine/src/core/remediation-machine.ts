@@ -2,7 +2,7 @@ import { ENGINE_EVIDENCE_POLICY, isEngineEvidencePath } from "./engine-owned-pat
 import { frozenSet } from "./frozen";
 import { createHash } from "node:crypto";
 import { match } from "ts-pattern";
-import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
+import { parseReviewerProtocolDescriptorV2 } from "./reviewer-contract";
 import { parseStandaloneReviewerProtocolV3 } from "./standalone-lineage-contract";
 import { compareStrings } from "./ordering";
 import {
@@ -628,7 +628,7 @@ function parsedCanonicalStandaloneResult(
     ...versionFields,
   ], "standaloneResult");
   if (!record.ok || (record.value.schema_version !== 1 && record.value.schema_version !== 2 && record.value.schema_version !== 3) ||
-      (record.value.schema_version === 2 && !parseReviewerProtocolDescriptor(record.value.reviewer_protocol).ok) ||
+      (record.value.schema_version === 2 && !parseReviewerProtocolDescriptorV2(record.value.reviewer_protocol).ok) ||
       (record.value.schema_version === 3 && !parseStandaloneReviewerProtocolV3(record.value.reviewer_protocol).ok) ||
       record.value.subject_id !== "standalone-review") {
     return fail(canonicalRecord({

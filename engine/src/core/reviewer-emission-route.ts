@@ -14,11 +14,10 @@
  */
 
 import { STANDALONE_REVIEWER_ROLES } from "./standalone-review-scope";
-import { CURRENT_REVIEWER_PROTOCOL } from "./reviewer-contract";
+import { parseReviewerProtocolDescriptorFor } from "./reviewer-contract";
 import { parseStandaloneReviewerProtocolV3 } from "./standalone-lineage-contract";
 import {
   canonicalRecord,
-  canonicalStructuralEquals,
   type AgentRequestAuthority,
   type ContextDigest,
   type DomainResult,
@@ -50,8 +49,8 @@ export function reviewerEmissionEligible(request: Pick<AgentRequestAuthority, "r
 /**
  * Project a raw durable program registration onto the protocol the claim mint
  * reads, ACCEPTING ONLY the frozen descriptors: a schema-2 registration must
- * carry the exact current reviewer protocol and a schema-3 successor the
- * exact frozen v3 protocol — a drifted descriptor is a refusal (unavailable
+ * carry the exact v2 protocol, or for a Wave Gate the exact v4 protocol
+ * (ADR-0084), and a schema-3 successor the exact frozen v3 protocol — a drifted descriptor is a refusal (unavailable
  * evidence), never an extraction downgrade of a corrupt issuance. `null` is
  * the ordinary no-reviewer-program arm.
  */
@@ -64,8 +63,9 @@ export function projectRegisteredReviewerProtocol(raw: unknown): DomainResult<Is
   if (schemaVersion === 1) return { ok: true, value: canonicalRecord({ schemaVersion: 1 as const }) };
   const descriptor = Object.getOwnPropertyDescriptor(record, "reviewerProtocol")?.value;
   if (schemaVersion === 2) {
-    return canonicalStructuralEquals(descriptor, CURRENT_REVIEWER_PROTOCOL)
-      ? { ok: true, value: canonicalRecord({ schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }) }
+    const parsed = parseReviewerProtocolDescriptorFor(kind, descriptor);
+    return parsed.ok
+      ? { ok: true, value: canonicalRecord({ schemaVersion: 2 as const, reviewerProtocol: parsed.value }) }
       : { ok: false, error: "program registration does not carry the exact frozen reviewer protocol descriptor" };
   }
   if (schemaVersion === 3 && kind === "standalone-review") {

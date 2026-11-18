@@ -23,7 +23,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0006](ADR-0006-lc1-reaches-production-by-projection.md) | LC-1 reaches production by projection, not by checkpoint | Accepted | — |
 | [ADR-0007](ADR-0007-curated-public-surface.md) | A facade publishes a curated Public Surface, not the union of its volumes | Accepted | — |
 | [ADR-0008](ADR-0008-versioned-defect-family-installation-authority.md) | Version Defect-Family evidence at the verified-index installation seam | Accepted | — |
-| [ADR-0009](ADR-0009-versioned-reviewer-protocol.md) | Version reviewer evidence at issued protocol authority | Accepted (2026-09-10) | — |
+| [ADR-0009](ADR-0009-versioned-reviewer-protocol.md) | Version reviewer evidence at issued protocol authority | Accepted (2026-09-10) | Wave packet/generation join superseded by ADR-0084 |
 | [ADR-0010](ADR-0010-standalone-finding-lineage.md) | Explicit standalone Finding and disposition lineage | Accepted (2026-09-16) | — |
 | [ADR-0011](ADR-0011-type-driven-fp-approach-and-panel-provenance.md) | Retain the selected type-driven FP approach and panel provenance | Accepted | — |
 | [ADR-0012](ADR-0012-preferred-strict-sampling-with-exact-route-qualification.md) | Preferred strict sampling, with exact-route qualification | Accepted | — |
@@ -98,3 +98,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0081](ADR-0081-the-active-wave-plan-is-edited-by-audited-operations.md) | The active Wave's plan is edited by audited operations | Accepted (2026-11-17) | — |
 | [ADR-0082](ADR-0082-a-package-manifest-and-its-lockfile-belong-to-one-task.md) | A package manifest and its lockfile belong to one Task | Accepted (2026-11-17) | — |
 | [ADR-0083](ADR-0083-a-run-records-its-friction-and-a-retro-reads-it-first.md) | A run records its friction, and a retro reads it first | Accepted (2026-11-17) | — |
+| [ADR-0084](ADR-0084-wave-reviewer-payloads-carry-no-packet-identity.md) | Wave reviewer payloads carry no packet identity; the issued subject binds it | Accepted (2026-11-17) | partly supersedes ADR-0009 |

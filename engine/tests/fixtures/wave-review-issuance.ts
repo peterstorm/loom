@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ContextPacket } from "../../src/core/context-packets";
 import { parseOrchestrationRunId, type DomainResult } from "../../src/core/orchestration-contract";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import {
   prepareWaveReviewBatch,
   taskReviewScope,
@@ -59,7 +59,7 @@ export const waveRegistrationFixture = (schemaVersion: 1 | 2, taskIds: readonly 
   taskIds,
   authorityDigest: "a".repeat(64),
   ...(schemaVersion === 2
-    ? { schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }
+    ? { schemaVersion: 2 as const, reviewerProtocol: REVIEWER_PROTOCOL_V2 }
     : { schemaVersion: 1 as const }),
 });
 

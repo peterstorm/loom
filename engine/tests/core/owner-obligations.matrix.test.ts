@@ -55,7 +55,7 @@ import {
 } from "../../src/core/implementation-brief";
 import { parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 import { OWNER_MAP_SECTION, renderOwnerMapSection } from "../../src/core/owner-verification/owner-map";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { prepareWaveReviewBatch } from "../../src/core/wave-review-authority";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
@@ -251,7 +251,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     if (!runId.ok) throw new Error(runId.error.message);
     const batch = prepareWaveReviewBatch(
       runId.value,
-      { schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: "a".repeat(64) },
+      { schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: "a".repeat(64) },
       parsed.value,
       1,
       [observedWorkspace("T1", files, files.map((path) => ({ path, bytes: Buffer.from(`// ${path}\n`) })))],

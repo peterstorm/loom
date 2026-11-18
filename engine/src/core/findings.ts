@@ -59,7 +59,7 @@ import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 import { isExactGitSha } from "./git-sha";
 import { isRecord } from "./plain-record";
 import { scopeCovers } from "./path-coverage";
-import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseReviewerProtocolDescriptor } from "./reviewer-contract";
+import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseWaveReviewerProtocolDescriptor } from "./reviewer-contract";
 
 // The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf
 // volume of this concept (it imports only ./reviewer-contract), so the
@@ -892,7 +892,7 @@ export function reviewRunError(
   if (!isRecord(raw)) return `${label} must be an object`;
   const run = raw as Record<string, unknown>;
   const current = Object.hasOwn(run, "reviewer_protocol");
-  if (current && (!parseReviewerProtocolDescriptor(run.reviewer_protocol).ok ||
+  if (current && (!parseWaveReviewerProtocolDescriptor(run.reviewer_protocol).ok ||
       !parseOrchestrationRunId(run.wave_gate_run_id).ok || run.workspace_scope === undefined || run.slot_authority === undefined)) {
     return `${label} current review requires supported descriptor, workspace and slots`;
   }

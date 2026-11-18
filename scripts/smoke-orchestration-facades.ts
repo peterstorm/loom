@@ -288,14 +288,15 @@ function reviewerOutput(
     return JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings });
   }
   check(wave.value.taskRun !== null && wave.value.task !== null, "reviewer packet cannot use spec-check authority");
-  return JSON.stringify({
-    schemaVersion: 2, kind: "wave-review", packetId: wave.value.taskRun.packetId,
-    generation: wave.value.taskRun.generation,
-    prior_findings: wave.value.task.priorFindings.map(({ id: finding_id }) => ({
-      finding_id, verdict: "still_present", reason: "Scripted smoke does not claim prior remediation.",
-    })),
-    findings,
-  });
+  const prior_findings = wave.value.task.priorFindings.map(({ id: finding_id }) => ({
+    finding_id, verdict: "still_present", reason: "Scripted smoke does not claim prior remediation.",
+  }));
+  // The issued descriptor selects the envelope (ADR-0084): a v4 Wave payload
+  // carries no packet identity; a v2-registered run still echoes it.
+  return JSON.stringify(packet.reviewerProtocol.version === 4
+    ? { schemaVersion: 4, kind: "wave-review", prior_findings, findings }
+    : { schemaVersion: 2, kind: "wave-review", packetId: wave.value.taskRun.packetId,
+        generation: wave.value.taskRun.generation, prior_findings, findings });
 }
 
 function refutationOutput(

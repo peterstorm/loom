@@ -5,11 +5,14 @@
  * absent — each produce the next TaskGraph plus the replacement run's exact
  * registration. The shell re-derives the transition under the state lock and
  * compares registrations with the matching `same…Registration` predicate.
+ * A replacement is a new Wave Gate registration and issues the current Wave
+ * reviewer protocol (v4, ADR-0084) whatever its predecessor issued: every
+ * request is reissued, so no reviewer straddles the two protocols.
  */
 import type { ReviewRunSlotAuthority, Task, TaskGraph } from "../types";
 import { captureKey } from "./harness-capture";
 import { canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId } from "./orchestration-contract";
-import { CURRENT_REVIEWER_PROTOCOL } from "./reviewer-contract";
+import { WAVE_REVIEWER_PROTOCOL_V4 } from "./reviewer-contract";
 import { resetWaveGateReviewAuthority } from "./wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import { waveGateAuthorityDigest, waveRunRosterProblem } from "./wave-review-authority";
@@ -120,7 +123,7 @@ export function prepareExhaustedWaveGateRestart(
   const exhaustedSlots = Object.freeze(outstanding.map(({ task, slot }) => `${task.id}/${slot.agent}`));
   const registration: RegisteredWaveGateProgram = Object.freeze({
     schemaVersion: 2,
-    reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4,
     kind: "wave-gate",
     input: Object.freeze({ wave }),
     taskIds: previous.taskIds,
@@ -222,7 +225,7 @@ export function prepareOrphanedWaveGateRecovery(
   });
   const registration: RegisteredWaveGateProgram = Object.freeze({
     schemaVersion: 2,
-    reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4,
     kind: "wave-gate",
     input: Object.freeze({ wave: expected.wave }),
     taskIds,

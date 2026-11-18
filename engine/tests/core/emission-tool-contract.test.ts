@@ -110,7 +110,7 @@ describe("the registered Pi tool surface carries the frozen bytes for every supp
 
   it("enumerates every supported registry cell (a vacuous pass would prove nothing)", () => {
     expect(cells.map(({ kind, version }) => `${kind}/${version}`)).toEqual([
-      "reviewer-payload/v2", "reviewer-payload/v3", "judge-verdict/v1", "refutation-verdict/v1",
+      "reviewer-payload/v2", "reviewer-payload/v3", "reviewer-payload/v4", "judge-verdict/v1", "refutation-verdict/v1",
     ]);
   });
 

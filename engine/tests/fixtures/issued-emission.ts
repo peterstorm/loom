@@ -42,11 +42,12 @@ export const OTHER_CONTEXT_DIGEST: ContextDigest = value(parseContextDigest("dea
 
 export const REVIEWER_V2 = mintEmissionBinding({ requestId: "request:emission-v2", kind: "reviewer-payload", version: "v2" });
 export const REVIEWER_V3 = mintEmissionBinding({ requestId: "request:emission-v3", kind: "reviewer-payload", version: "v3" });
+export const REVIEWER_V4 = mintEmissionBinding({ requestId: "request:emission-v4", kind: "reviewer-payload", version: "v4" });
 export const JUDGE_V1 = mintEmissionBinding({ requestId: "request:emission-judge", kind: "judge-verdict", version: "v1" });
 export const REFUTATION_V1 = mintEmissionBinding({ requestId: "request:emission-refutation", kind: "refutation-verdict", version: "v1" });
 
 /** Every frozen registry cell, as one minted binding each. */
-export const REGISTRY_CELLS: readonly IssuedEmissionBinding[] = [REVIEWER_V2, REVIEWER_V3, JUDGE_V1, REFUTATION_V1];
+export const REGISTRY_CELLS: readonly IssuedEmissionBinding[] = [REVIEWER_V2, REVIEWER_V3, REVIEWER_V4, JUDGE_V1, REFUTATION_V1];
 
 export const emissionRouteFor = (
   binding: IssuedEmissionBinding,
@@ -54,7 +55,7 @@ export const emissionRouteFor = (
 ): IssuedSpawnEmissionRoute => Object.freeze({ kind: "emission", binding, contextDigest });
 
 /** Legal issued-claim construction follows the production ADT: v1 carries no
- *  digest; v2/v3 require the binding's frozen digest. */
+ *  digest; v2/v3/v4 require the binding's frozen digest. */
 export const claimOf = (
   binding: IssuedEmissionBinding,
   contextDigest: ContextDigest = CONTEXT_DIGEST,

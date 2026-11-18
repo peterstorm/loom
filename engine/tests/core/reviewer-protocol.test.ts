@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { z } from "zod/v4";
 import {
-  STANDALONE_V3_ENVELOPE_HINT, parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3, renderReviewerPayloadDiagnostic, renderReviewerWireContract,
+  STANDALONE_V3_ENVELOPE_HINT, parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3, parseWaveReviewerPayloadV4,
+  renderReviewerPayloadDiagnostic, renderReviewerWireContract,
 } from "../../src/core/reviewer-protocol";
 import { REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, STANDALONE_SUCCESSOR_ROSTER_RULE } from "../../src/core/standalone-lineage-contract";
 import {
-  CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_LIMITS,
+  REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_LIMITS,
   REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, reviewerPayloadV2Schema,
+  WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4,
   type FindingBasis, type ReviewerDraftV2, type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
@@ -315,8 +317,8 @@ describe("authoritative generated wire contract", () => {
     expect(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2)).toBe("3ac3395301c1d38f41cd93accb19b942e832d7ebced990976335208259f40c37");
     expect(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1)).toBe("4f36c09cc1e7c27e2d8ff36c86ad22c7723c1a4715bd9c198bbed40e2c2f3a6b");
     expect(new TextEncoder().encode(REVIEWER_PAYLOAD_SCHEMA_V2).byteLength).toBeLessThanOrEqual(12 * 1024);
-    expect(CURRENT_REVIEWER_PROTOCOL.schemaDigest).toBe(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2));
-    expect(CURRENT_REVIEWER_PROTOCOL.rubricDigest).toBe(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1));
+    expect(REVIEWER_PROTOCOL_V2.schemaDigest).toBe(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2));
+    expect(REVIEWER_PROTOCOL_V2.rubricDigest).toBe(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1));
     expect(REVIEWER_IMPACT_RUBRIC_V1.endsWith("\n")).toBe(true);
     expect(REVIEWER_IMPACT_RUBRIC_V1.endsWith("\n\n")).toBe(false);
   });
@@ -328,16 +330,29 @@ describe("authoritative generated wire contract", () => {
     // bytes): the same value, in the one compact spelling.
     const schema = orFail(compactSchemaOf(source), describeCompactSchemaError);
     expect(schema.value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
+    // One compact schema, then the examples in section order: standalone v2,
+    // Wave v4 (ADR-0084), standalone successor v3.
     expect(json).toEqual([
-      schema.text, JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2), JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, null, 2),
+      schema.text,
+      JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2),
+      JSON.stringify(WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4, null, 2),
+      JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, null, 2),
     ]);
     // Every reviewer spawn pays for the fragment. The pin stops the
-    // pretty-printed schema, or a second (v3) schema, from creeping in: the
-    // successor section adds only its shape, roster rule and example (issue #185).
-    expect(bytes(rendered).length).toBeLessThanOrEqual(13 * 1024);
+    // pretty-printed schema, or a second (v3 or v4) schema, from creeping in:
+    // the successor section adds only its shape, roster rule and example
+    // (issue #185), and the Wave v4 section only its heading and example
+    // (ADR-0084). Measured at 14138 bytes once the v4 section landed, past
+    // the former 13 KiB pin.
+    expect(bytes(rendered).length).toBeLessThanOrEqual(14 * 1024);
     expect(rendered).toContain(STANDALONE_SUCCESSOR_ROSTER_RULE);
     expect(parseReviewerPayloadV2(bytes(json[1]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V2 });
-    expect(parseStandaloneReviewerPayloadV3(bytes(json[2]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V3 });
+    expect(parseWaveReviewerPayloadV4(bytes(json[2]))).toEqual({ ok: true, value: WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4 });
+    expect(parseStandaloneReviewerPayloadV3(bytes(json[3]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V3 });
+    deepFrozen(WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4);
+    // The v4 example carries no packet identity: the issued subject binds it.
+    expect(json[2]).not.toContain("packetId");
+    expect(json[2]).not.toContain("generation");
     deepFrozen(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3);
     // The successor example shows each thing a verdict can copy from the roster: a
     // repairable path, a decision reference, and nothing when the prior cannot be judged.

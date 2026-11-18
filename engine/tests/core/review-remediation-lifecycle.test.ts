@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerDraftV2Schema } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerDraftV2Schema } from "../../src/core/reviewer-contract";
 import { attributeFindings, claimsOfSeverity, preserveAcceptedReviewRunFindings } from "../../src/core/findings";
 import type { CurrentReviewRun, CurrentReviewRunEvidence } from "../../src/types";
 
 function currentLifecycleTask(generation: number): Task {
   const findings = attributeFindings([{ protocolVersion: 2, ...reviewerDraftV2Schema.parse({ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], file: "src/x.ts", claim: "  original\n assertion " }) }], "old-reviewer");
-  const run: CurrentReviewRun = { reviewer_protocol: CURRENT_REVIEWER_PROTOCOL, generation, packet_id: PACKET, head_sha: HEAD,
+  const run: CurrentReviewRun = { reviewer_protocol: REVIEWER_PROTOCOL_V2, generation, packet_id: PACKET, head_sha: HEAD,
     expected_agents: AGENTS, prior_finding_ids: findings.map(({ id }) => id), evidence: [],
     slot_authority: [{ agent: AGENTS[0], slot_id: "slot:first", attempted: 1, request_id: "request:first:1", context_digest: "c".repeat(64) },
       { agent: AGENTS[1], slot_id: "slot:second", attempted: 1, request_id: "request:second:1", context_digest: "d".repeat(64) }],
@@ -56,7 +56,7 @@ describe("current stored review lifecycle properties", () => {
       expect(last.task.findings).toHaveLength(count * 2);
       expect(last.task.resolved_findings?.[0]?.finding).toEqual(task.findings?.[0]);
       expect(last.task.resolved_findings?.[0]?.resolution.assessments.map(({ reason }) => reason)).toEqual(["  exact\n assessment ", "  exact\n assessment "]);
-      expect(last.task.accepted_review_authority?.reviewer_protocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+      expect(last.task.accepted_review_authority?.reviewer_protocol).toEqual(REVIEWER_PROTOCOL_V2);
       const completed = parseTaskGraph(JSON.parse(JSON.stringify(graph(last.task))));
       if (!completed.ok) throw new Error(JSON.stringify(completed));
       expect(completed.value.tasks[0]?.resolved_findings).toEqual(last.task.resolved_findings);

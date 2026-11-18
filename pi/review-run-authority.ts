@@ -118,12 +118,12 @@ type PiRegisteredReviewProgram =
   | Readonly<{
       kind: "standalone-review" | "wave-gate";
       schemaVersion: 2;
-      reviewerProtocol: Readonly<{ schemaDigest: string }>;
+      reviewerProtocol: Readonly<{ version: 2 | 4; schemaDigest: string }>;
     }>
   | Readonly<{
       kind: "standalone-review";
       schemaVersion: 3;
-      reviewerProtocol: Readonly<{ schemaDigest: string }>;
+      reviewerProtocol: Readonly<{ version: 3; schemaDigest: string }>;
     }>;
 
 type PiIssuedReviewRequest = Readonly<{

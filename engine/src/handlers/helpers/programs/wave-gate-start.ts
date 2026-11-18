@@ -5,7 +5,7 @@
  * authority and handing over to the resume reducer.
  */
 import { realpathSync } from 'node:fs';
-import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
+import { WAVE_REVIEWER_PROTOCOL_V4 } from '../../../core/reviewer-contract';
 import { parseRunDirectoryReference, type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { admitWaveGateRegistration } from '../../../core/wave-gate-registration';
 import { TASK_GRAPH_PATH } from '../../../config';
@@ -77,7 +77,7 @@ export function prepareWaveGateFacadeStart(
     const prepared: PreparedWaveGateStart = Object.freeze({
       runId: destination.value.runId,
       registration: Object.freeze({
-        schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: Object.freeze({ wave }),
+        schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4, kind: "wave-gate", input: Object.freeze({ wave }),
         taskIds, authorityDigest,
       }),
     });

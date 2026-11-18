@@ -716,7 +716,7 @@ for (const probe of probes) {
 let dormantRefused = false;
 try { modules.get("zod/v4/core/util.js").namespace.randomString(); } catch (error) { dormantRefused = error.message === "ambient sentinel"; }
 if (!dormantRefused) throw Error("dormant entropy was granted");
-process.stdout.write(JSON.stringify({ schema: leaf.CURRENT_REVIEWER_PROTOCOL.schemaDigest, rubric: leaf.CURRENT_REVIEWER_PROTOCOL.rubricDigest, valid: valid.length, invalid: invalid.length, sentinels: probes.length }));
+process.stdout.write(JSON.stringify({ schema: leaf.REVIEWER_PROTOCOL_V2.schemaDigest, rubric: leaf.REVIEWER_PROTOCOL_V2.rubricDigest, valid: valid.length, invalid: invalid.length, sentinels: probes.length }));
 `;
 
 describe("audited in-process SAX runtime closure", () => {

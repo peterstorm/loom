@@ -192,7 +192,7 @@ function issuedEmissionVersionOf(
 ): EmissionSchemaVersion | null {
   if (parsed === null || parsed.kind !== "registered") return null;
   if (parsed.program.kind !== "standalone-review" && parsed.program.kind !== "wave-gate") return null;
-  return parsed.program.schemaVersion === 2 ? "v2" : parsed.program.schemaVersion === 3 ? "v3" : null;
+  return parsed.program.schemaVersion === 1 ? null : `v${parsed.program.reviewerProtocol.version}`;
 }
 
 /**

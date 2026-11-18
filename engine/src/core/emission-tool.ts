@@ -17,8 +17,8 @@
 
 import { z } from "zod/v4";
 import { sha256Hex } from "./digest";
-import { REVIEWER_PAYLOAD_SCHEMA_V2, type ReviewerProtocolFailure } from "./reviewer-contract";
-import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "./reviewer-protocol";
+import { REVIEWER_PAYLOAD_SCHEMA_V2, WAVE_REVIEWER_PAYLOAD_SCHEMA_V4, type ReviewerProtocolFailure } from "./reviewer-contract";
+import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3, parseWaveReviewerPayloadV4 } from "./reviewer-protocol";
 import { STANDALONE_REVIEWER_SCHEMA_V3 } from "./standalone-lineage-contract";
 import { JUDGE_VERDICT_SCHEMA_V1, judgeVerdictV1Schema } from "./panel-contract";
 import { REFUTATION_VERDICT_SCHEMA_V1, refutationVerdictV1Schema } from "./review-panel";
@@ -54,14 +54,14 @@ export type EmissionToolName =
  * compound union of the valid pairs would type away the degradation the
  * capability ADT exists to express.
  */
-export type EmissionSchemaVersion = "v2" | "v3" | "v1";
+export type EmissionSchemaVersion = "v2" | "v3" | "v4" | "v1";
 
 /** The closed vocabulary as data, for boundary parses of untrusted claimed
  *  version strings (the mint refuses a non-member before any registry lookup).
  *  Its consumers are `issueEmissionBinding`'s boundary parse here and the
  *  panel verdict source record parse (panel-verdict-source), which admits a
  *  durable record's schema version through the same vocabulary. */
-export const EMISSION_SCHEMA_VERSIONS: readonly EmissionSchemaVersion[] = Object.freeze(["v2", "v3", "v1"]);
+export const EMISSION_SCHEMA_VERSIONS: readonly EmissionSchemaVersion[] = Object.freeze(["v2", "v3", "v4", "v1"]);
 
 /**
  * The emission edge's closed refusal-code vocabulary — parse, don't validate:
@@ -147,8 +147,8 @@ const verdictArgsParser = (schema: z.ZodType): EmissionPayloadParser => (raw: Ui
 
 /**
  * The frozen registry: each of the three cataloged producer payload kinds
- * mapped to its emission tool spec — reviewer-payload (v2 current + v3
- * standalone-successor, the same parsers the fallback uses), judge-verdict
+ * mapped to its emission tool spec — reviewer-payload (v2 standalone and
+ * Wave, v3 standalone-successor, v4 Wave — the same parsers the fallback uses), judge-verdict
  * (v1, the current external snake_case contract of serializeJudgeVerdict),
  * and refutation-verdict (v1, the current external contract of
  * serializeRefutationVerdict). A new producer kind is one entry here plus
@@ -167,6 +167,10 @@ export const EMISSION_TOOL_SPECS = Object.freeze({
       v3: Object.freeze({
         schemaBytes: STANDALONE_REVIEWER_SCHEMA_V3,
         parsePayload: parseStandaloneReviewerPayloadV3,
+      }),
+      v4: Object.freeze({
+        schemaBytes: WAVE_REVIEWER_PAYLOAD_SCHEMA_V4,
+        parsePayload: parseWaveReviewerPayloadV4,
       }),
     }),
   }),

@@ -14,7 +14,7 @@ import {
   type HarnessResultIdentity,
 } from "../../src/core/harness-capture";
 import { admitIssuedEmissionArguments, EMISSION_TOOL_SPECS, emissionToolFamily, issueEmissionBinding } from "../../src/core/emission-tool";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import type { EmissionCallFrame } from "../../src/core/emission-observation";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
@@ -1358,14 +1358,14 @@ describe("the engine capture seam selects the canonical emission source", () => 
     // descriptor certifies the SAME frozen bytes the registry cell carries,
     // so a binding minted from the registration and a binding minted from the
     // registry are the same identity.
-    expect(CURRENT_REVIEWER_PROTOCOL.schemaDigest).toBe(V2_DIGEST);
+    expect(REVIEWER_PROTOCOL_V2.schemaDigest).toBe(V2_DIGEST);
     const registered = {
       schemaVersion: 2 as const,
       kind: "wave-gate" as const,
       input: { wave: 1 },
       taskIds: ["T1"],
       authorityDigest: "b".repeat(64),
-      reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+      reviewerProtocol: REVIEWER_PROTOCOL_V2,
     };
     const program = await created.value.registerProgram(registered);
     if (!program.ok) throw new Error(program.error.message);

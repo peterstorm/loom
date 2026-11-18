@@ -142,7 +142,7 @@ import {
   parseFrozenVerificationManifest,
   type FrozenVerificationManifest,
 } from "./core/verification-manifest";
-import { parseReviewerProtocolDescriptor } from "./core/reviewer-contract";
+import { parseWaveReviewerProtocolDescriptor } from "./core/reviewer-contract";
 import { parseTestEvidenceField, type EngineRunTestEvidence } from "./core/test-evidence-authority";
 import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
@@ -1800,7 +1800,7 @@ function taskPacketError(
     const fields = Object.keys(authority).sort();
     const allowed = ["generation", "packet_id", "head_sha", "scope", "run_id", "authority_digest", "reviewer_protocol"];
     if (Object.hasOwn(authority, "reviewer_protocol") &&
-        (!parseReviewerProtocolDescriptor(authority.reviewer_protocol).ok || authority.run_id === undefined ||
+        (!parseWaveReviewerProtocolDescriptor(authority.reviewer_protocol).ok || authority.run_id === undefined ||
           authority.authority_digest === undefined)) {
       return `tasks[${index}] ("${id}"): current accepted_review_authority requires supported descriptor and run authority`;
     }

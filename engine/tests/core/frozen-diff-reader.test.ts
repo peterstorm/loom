@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildReviewerContextPacket, encodeByteSection } from "../../src/core/context-packets";
 import { parseRequestId } from "../../src/core/orchestration-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import {
   FROZEN_DIFF_PAGE_UNITS, STANDALONE_FROZEN_DIFF_SECTION, freezeDiff, observeReadCoverage, readCoverageGaps,
 } from "../../src/core/standalone-read-coverage";
@@ -33,7 +34,7 @@ function fixture() {
   const source = value(encodeByteSection("standalone-frozen-source", JSON.stringify({ schemaVersion: 1, headRevision: "head", files: [] })));
   const diff = value(encodeByteSection(STANDALONE_FROZEN_DIFF_SECTION, JSON.stringify(DIFF)));
   const packet = value(buildReviewerContextPacket({ requestId: value(parseRequestId("request:diff-reader")), role: "code-reviewer",
-    requiredSkill: "none", fixedContext: [source, diff], variableContext: [] }));
+    requiredSkill: "none", fixedContext: [source, diff], variableContext: [] }, REVIEWER_PROTOCOL_V2));
   const path = join(root, "packet.json");
   writeFileSync(path, JSON.stringify(packet));
   const args = ["--packet", path, "--request", packet.requestId, "--digest", packet.digest, "--role", packet.role, "--skill", "none"];
@@ -96,7 +97,7 @@ describe("frozen diff reader pages", () => {
     roots.push(root);
     const source = value(encodeByteSection("standalone-frozen-source", JSON.stringify({ schemaVersion: 1, headRevision: "head", files: [] })));
     const packet = value(buildReviewerContextPacket({ requestId: value(parseRequestId("request:no-diff")), role: "code-reviewer",
-      requiredSkill: "none", fixedContext: [source], variableContext: [] }));
+      requiredSkill: "none", fixedContext: [source], variableContext: [] }, REVIEWER_PROTOCOL_V2));
     const path = join(root, "packet.json");
     writeFileSync(path, JSON.stringify(packet));
     const refused = run(["--packet", path, "--request", packet.requestId, "--digest", packet.digest, "--role", packet.role, "--skill", "none", "--diff", "src/big.ts"]);

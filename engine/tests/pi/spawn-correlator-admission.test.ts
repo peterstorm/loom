@@ -12,7 +12,7 @@ import { issueEmissionBinding } from "../../src/core/emission-tool";
 import { issuedReviewerPayloadClaim } from "../../src/core/issued-emission-capability";
 import { DESKTOP_VLLM_ROUTE } from "../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import type { AdmittedSpawnItem } from "../../src/core/spawn-admission";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
 import { createRunDirectory, openRegisteredRunDirectory } from "../../src/orchestration/run-directory-handle";
@@ -46,7 +46,7 @@ describe("recording the admission decision with a Pi spawn correlator", () => {
   it("records an emission-enabled child with the route it was admitted on", async () => {
     const request = agentRequestAuthority(RUN);
     const runsRoot = await stagedRun(request);
-    const claim = issuedReviewerPayloadClaim({ schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }, request);
+    const claim = issuedReviewerPayloadClaim({ schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2 }, request);
     const binding = issueEmissionBinding({ requestId: claim.requestId, kind: claim.producerKind, version: claim.version, schemaDigest: claim.schemaDigest });
     if (!binding.ok) throw new Error(binding.error.message);
     const admitted: AdmittedSpawnItem = {
@@ -102,7 +102,7 @@ describe("admission when the child's route cannot be resolved", () => {
     const routing = await hostileServedRouting();
     cleanups.push(routing.remove);
     const request = agentRequestAuthority(RUN);
-    const classified = classifyPiIssuedReviewRequest(RUN, { kind: "wave-gate", schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }, request);
+    const classified = classifyPiIssuedReviewRequest(RUN, { kind: "wave-gate", schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2 }, request);
     if (!classified.ok) throw new Error(classified.error.message);
     const qualified = withEnvOverlaySync({ PI_CODING_AGENT_DIR: routing.dir, ...routing.parentEnv }, () =>
       qualifyPiIssuedReviewRequest(classified.value, { role: "code-reviewer", harnessBinding: { pi: DESKTOP_VLLM_ROUTE } }));

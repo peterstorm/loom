@@ -17,7 +17,7 @@ import {
   type TaskProof,
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
-import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
+import { parseWaveReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { taskRolePolicy, type TaskRolePolicy } from "./distill-task";
@@ -1026,7 +1026,7 @@ export function prepareWaveReviewBatch(
   specCheckObservation: WaveSpecCheckObservation,
 ): DomainResult<WaveRequestBatch, WaveReviewPreparationError> {
   if (registration.schemaVersion === 2) {
-    const protocol = parseReviewerProtocolDescriptor(registration.reviewerProtocol);
+    const protocol = parseWaveReviewerProtocolDescriptor(registration.reviewerProtocol);
     if (!protocol.ok) return failure(protocol.error.message);
   }
   const specCheckDocuments = specCheckObservation.authority;
@@ -1263,7 +1263,7 @@ export function prepareWaveReviewBatch(
       variableContext: Object.freeze([]),
     };
     const packet = subject.taskId !== null && registration.schemaVersion === 2
-      ? buildReviewerContextPacket(packetInput)
+      ? buildReviewerContextPacket(packetInput, registration.reviewerProtocol)
       : buildContextPacket(packetInput);
     if (!packet.ok) return failure(packet.error.message);
     const authority = mintAgentRequestAuthority({
