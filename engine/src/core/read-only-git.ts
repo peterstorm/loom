@@ -33,6 +33,8 @@
  * out of reach here, as it is for a plain `git status` in the same directory.
  */
 
+import { bundles, namesLongOption } from "./option-words";
+
 /** The options of one subcommand that run a command or write a file outside `.git`. */
 export type RiskyOptions = Readonly<{
   /** Long option names, matched in every abbreviation, bare or with `=value`. */
@@ -73,17 +75,6 @@ export const READ_ONLY_GIT_SUBCOMMANDS: ReadonlyMap<string, RiskyOptions> = new 
 
 /** Global options that take no value and change nothing git writes. */
 const SAFE_GLOBAL_FLAGS: ReadonlySet<string> = new Set(["--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs"]);
-
-/** Does `--name[=value]` spell, or abbreviate, one of `options`? */
-export function namesLongOption(word: string, options: readonly string[]): boolean {
-  if (!word.startsWith("--")) return false;
-  const name = word.slice(2).split("=")[0];
-  return options.some((option) => option.startsWith(name));
-}
-
-/** Does a bundle of short options (`-inO`) hold one of `letters`? */
-export const bundles = (word: string, letters: readonly string[]): boolean =>
-  /^-[A-Za-z]/.test(word) && letters.some((letter) => word.includes(letter));
 
 /**
  * Does this simple command, given as each word's one static spelling (null

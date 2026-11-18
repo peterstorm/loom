@@ -33,8 +33,9 @@
  *     a `git` invocation that writes nothing outside the repository's own
  *     `.git` (`read-only-git.ts`: `git -C <checkout> fetch`). On a typed
  *     line that may rebind a command name (`commandNamesRebound`: `hash`,
- *     `alias`, `enable`, a function, `source`, an `eval` of runtime text,
- *     `PATH`, a loader variable) no segment is read-only by its head. A bare
+ *     `alias`, `enable`, a function, `source`, `trap`, `mapfile`, an `eval`
+ *     that may do one, `PATH`, a loader variable) no segment is read-only by
+ *     its head. A bare
  *     assignment of an inert name (`inertNamesOf`: `T=$CLAUDE_JOB_DIR/tmp`,
  *     whose every read the guard splices) names a path without writing above
  *     it; every other assignment is judged as a write over what it names.

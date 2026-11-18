@@ -20,11 +20,11 @@
  */
 
 import { READ_ONLY_STATE_COMMANDS } from "./tool-vocabulary";
-import { isReadOnlyFilterInvocation } from "./read-only-filters";
+import { FILTER_INERT_ENVIRONMENT, isReadOnlyFilterInvocation } from "./read-only-filters";
 import { GH_INERT_ENVIRONMENT, isReadOnlyGhInvocation } from "./read-only-gh";
 import { isReadOnlyGitInvocation } from "./read-only-git";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
-import { staticSpelling } from "./shell-match-views";
+import { collapseVariants, hasRuntimePart, staticSpelling } from "./shell-match-views";
 import {
   classifyFdDupWord,
   splitCommandSegmentsWithOps,
@@ -82,19 +82,37 @@ export function hasReadOnlyHead(segment: string): boolean {
   return head !== undefined && (READ_ONLY_STATE_COMMANDS.has(commandName(head)) || isReadOnlySubcommandInvocation(segment));
 }
 
+/** One audited read-only classifier and the environment names its command
+ *  may be prefixed with: a name outside the set may make it write or run. */
+type ReadOnlyClassifier = Readonly<{
+  environment: ReadonlySet<string>;
+  reads: (spellings: readonly (string | null)[]) => boolean;
+}>;
+
+/** Each classifier owns its prefix rule: none for git (`GIT_EXTERNAL_DIFF=…`
+ *  runs a program), credentials and host for gh (its pager, browser and editor
+ *  variables run programs), the locale for the filters (`TMPDIR` is where
+ *  `sort` spills). */
+const READ_ONLY_CLASSIFIERS: readonly ReadOnlyClassifier[] = [
+  { environment: new Set<string>(), reads: isReadOnlyGitInvocation },
+  { environment: GH_INERT_ENVIRONMENT, reads: isReadOnlyGhInvocation },
+  { environment: FILTER_INERT_ENVIRONMENT, reads: isReadOnlyFilterInvocation },
+];
+
+/** The names a run of `NAME=value` words assigns. */
+const assignmentNames = (words: readonly string[]): readonly string[] =>
+  words.map((word) => word.slice(0, word.indexOf("=")));
+
 /**
  * Is the segment a `git`, `gh`, `sort`, `uniq` or `find` invocation that
  * writes no local file and runs no program? Every word after the environment
  * prefix is judged by its one static spelling under `spell` (a word the shell
- * could complete into an option at runtime is not admitted), and the verdict is
- * the audited classifier's: `isReadOnlyGitInvocation` (#177),
- * `isReadOnlyGhInvocation` or `isReadOnlyFilterInvocation` (#216). The prefix:
- * none for git (`GIT_EXTERNAL_DIFF=…` runs a program), only
- * `GH_INERT_ENVIRONMENT` names for gh (its pager, browser and editor variables
- * run programs), and any for a filter, as for every read-only head (the
- * loader variables are refused line-wide by `commandNamesRebound`). The state
- * guard spells words as written (`staticSpelling`); the subagent authority
- * guard first pins the values its line binds.
+ * could complete into an option at runtime is not admitted), the prefix by
+ * the classifier's own environment set, and the verdict is the audited
+ * classifier's: `isReadOnlyGitInvocation` (#177), `isReadOnlyGhInvocation` or
+ * `isReadOnlyFilterInvocation` (#216). The state guard spells words as written
+ * (`staticSpelling`); the subagent authority guard first pins the values its
+ * line binds.
  */
 export function isReadOnlySubcommandInvocation(
   segment: string,
@@ -105,10 +123,9 @@ export function isReadOnlySubcommandInvocation(
   const prefixLength = raw.length - shellWords(stripEnvPrefix(line)).length;
   const spellings = raw.slice(prefixLength).map(spell);
   if (spellings.length === 0) return false;
-  if (isReadOnlyFilterInvocation(spellings)) return true;
-  if (prefixLength === 0 && isReadOnlyGitInvocation(spellings)) return true;
-  const prefixNames = raw.slice(0, prefixLength).map((word) => word.slice(0, word.indexOf("=")));
-  return prefixNames.every((name) => GH_INERT_ENVIRONMENT.has(name)) && isReadOnlyGhInvocation(spellings);
+  const prefixNames = assignmentNames(raw.slice(0, prefixLength));
+  return READ_ONLY_CLASSIFIERS.some(({ environment, reads }) =>
+    prefixNames.every((name) => environment.has(name)) && reads(spellings));
 }
 
 /** Names the shell itself reads: assigning one changes where `~`, `cd`, a
@@ -118,18 +135,20 @@ export const SHELL_STATE_NAMES: ReadonlySet<string> = new Set([
   "GLOBIGNORE", "DIRSTACK", "BASH_XTRACEFD", "PROMPT_COMMAND", "PS4",
 ]);
 
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /** May `text` set `name` — an assignment, an `export`, a `read`/`printf -v`
  *  target, an indirection naming it? Any mention but a plain `$name` /
  *  `${name}` read counts. */
-export const mayRebind = (text: string, name: string): boolean =>
-  new RegExp(`(?<![A-Za-z0-9_$])${name}(?![A-Za-z0-9_])`).test(text.replace(new RegExp(`\\$\\{${name}\\}`, "g"), ""));
+export function mayRebind(text: string, name: string): boolean {
+  const literal = escapeRegExp(name);
+  return new RegExp(`(?<![A-Za-z0-9_$])${literal}(?![A-Za-z0-9_])`).test(text.replace(new RegExp(`\\$\\{${literal}\\}`, "g"), ""));
+}
 
-/** A builtin that rebinds a command name or runs code in this shell that may:
- *  `hash`, `alias`, `enable`, `source`/`.` (a file the line does not show), an
- *  `eval` of runtime-built text; or a function definition. An `eval` of
- *  literal text needs no rule of its own: a definition in it is on the line. */
-const COMMAND_REBINDERS =
-  /(?:^|[;&|(`\n{!]|\$\(|\b(?:then|do|else|elif|if|while|until|time|command|builtin)\s)\s*(?:(?:hash|alias|enable|source|\.)(?=[\s;&|)]|$)|eval\s[^;&|\n]*[$`])|\bfunction\s|\(\)\s*[{(]/;
+/** Builtins that rebind a command name (`hash`, `alias`, `enable`), run a file
+ *  in this shell that may (`source`, `.`), or run shell text later in this
+ *  shell (`trap` before a command, `mapfile -C` per line read). */
+const REBINDING_HEADS: ReadonlySet<string> = new Set(["hash", "alias", "enable", "source", ".", "trap", "mapfile", "readarray"]);
 
 /** Variables that decide which program a command name runs, or inject code
  *  into every program: the search path, bash's command and alias tables, and
@@ -137,20 +156,56 @@ const COMMAND_REBINDERS =
 const RESOLUTION_VARIABLES: readonly string[] = ["PATH", "BASH_CMDS", "BASH_ALIASES"];
 const LOADER_VARIABLE = /(?<![A-Za-z0-9_$])(?:LD|DYLD)_[A-Z_]+/;
 
+/** How deep a literal `eval` is followed into the text it runs; deeper fails closed. */
+const MAX_EVAL_DEPTH = 4;
+
 /**
  * May a command name on this line run something other than the program it
- * names (loom#216)? A function, alias, `hash -p` or `enable -n` rebinds the
- * name; `source`, `.` and `eval` run code in this shell that may; a `PATH`,
- * `BASH_CMDS` or `BASH_ALIASES` change re-resolves it; an `LD_*`/`DYLD_*`
- * variable loads code into it. On such a line no guard trusts a head by its
- * name: `cat(){ rm "$1"; }; cat <state>` is not a read. The one rule both Bash
- * guards apply.
+ * names (loom#216)? Judged per segment by the command each one runs, as the
+ * head walker resolves it (`analyzeCommandHead`: behind reserved words, case
+ * patterns, assignment prefixes, quotes and backslashes; then behind
+ * `command`, `builtin`, `time` and the other wrappers):
+ *
+ * - a rebinding builtin (`REBINDING_HEADS`) or a function definition
+ *   (`name()`, `name ( )`, `function name`, with any compound body);
+ * - an `eval` of runtime-built text, or of literal text that does either;
+ * - in any spelling bash may give the line (`collapseVariants`), a mention of
+ *   `PATH`, `BASH_CMDS` or `BASH_ALIASES` other than a plain read, or of an
+ *   `LD_*`/`DYLD_*` variable.
+ *
+ * On such a line no guard trusts a head by its name: `cat(){ rm "$1"; }; cat
+ * <state>` is not a read. The one rule both Bash guards apply.
  */
 export function commandNamesRebound(line: string): boolean {
-  return COMMAND_REBINDERS.test(line) ||
-    RESOLUTION_VARIABLES.some((name) => mayRebind(line, name)) ||
-    LOADER_VARIABLE.test(line);
+  return reboundAt(line, 0);
 }
+
+function reboundAt(line: string, depth: number): boolean {
+  if (depth > MAX_EVAL_DEPTH) return true;
+  const views = collapseVariants(line);
+  if (views === null) return true;
+  const resolutionChanged = [line, ...views].some((text) =>
+    RESOLUTION_VARIABLES.some((name) => mayRebind(text, name)) || LOADER_VARIABLE.test(text));
+  return resolutionChanged || pipeChains(line).flat().some((segment) => segmentRebinds(segment, depth));
+}
+
+/** Does this one simple command rebind a command name, or run text that may? */
+function segmentRebinds(segment: string, depth: number): boolean {
+  if (definesFunction(commandWords(withoutReservedWords(segment)))) return true;
+  const analyzed = analyzeCommandHead(segment);
+  if (analyzed === null) return false;
+  const { head, args } = resolvedInterpreter(analyzed.head, analyzed.args) ?? analyzed;
+  if (REBINDING_HEADS.has(head)) return true;
+  if (head !== "eval") return false;
+  const program = args.join(" ");
+  return hasRuntimePart(program) || reboundAt(program, depth + 1);
+}
+
+/** A name word directly followed by `(` `)` (`cat()`, `cat ( )`), or the
+ *  `function` keyword at the head: a function definition, whatever its body. */
+const definesFunction = (words: readonly string[]): boolean =>
+  unquote(words[0] ?? "") === "function" ||
+  words.some((word, index) => words[index + 1] === "(" && words[index + 2] === ")" && /^[\\A-Za-z_][\\\w.:-]*$/.test(word));
 
 /** Reserved words that open or continue a compound command; the command after one is still judged. */
 const LEADING_RESERVED = /^(?:if|then|else|elif|while|until|do|!|\{)(?=\s|$)\s*/;

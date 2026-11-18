@@ -1,6 +1,6 @@
 /**
  * The state-file guard judges what a line can write, not what it mentions
- * (loom#216, following #198 Cause 5). Three halves:
+ * (loom#216, following #198 Cause 5). Three groups:
  *
  *  - a line that may rebind a command name never trusts a read-only head, so
  *    `cat(){ rm "$1"; }; cat <state>` cannot pass as a read;
@@ -35,12 +35,42 @@ describe("a line that may rebind a command name trusts no read-only head", () =>
     ["dot", `. /tmp/defs.sh; cat ${GUARDED}`],
     ["eval of runtime text", `eval "$DEFS"; cat ${GUARDED}`],
     ["eval of a literal definition", `eval 'cat(){ rm "$1"; }'; cat ${GUARDED}`],
+    // PR #219 review: a rebinding builtin in any command position.
+    ["hash inside a literal eval", `eval 'hash -p /bin/rm cat'; cat ${GUARDED}`],
+    ["enable inside a literal eval", `eval 'enable -n echo'; echo ${GUARDED}`],
+    ["alias inside a double-quoted eval", `eval "alias cat=rm"; cat ${GUARDED}`],
+    ["a nested literal eval", `eval "eval 'hash -p /bin/rm cat'"; cat ${GUARDED}`],
+    ["an escaped hash", `\\hash -p /bin/rm cat; cat ${GUARDED}`],
+    ["a quoted hash", `'hash' -p /bin/rm cat; cat ${GUARDED}`],
+    ["hash behind an assignment prefix", `x=1 hash -p /bin/rm cat; cat ${GUARDED}`],
+    ["an escaped enable behind a prefix", `x=1 \\enable -n cat; cat ${GUARDED}`],
+    ["hash in a case arm", `case a in a) hash -p /bin/rm cat;; esac; cat ${GUARDED}`],
+    ["hash in a later case arm", `case a in b) true;; a) hash -p /bin/rm cat;; esac; cat ${GUARDED}`],
+    ["hash behind command", `command hash -p /bin/rm cat; cat ${GUARDED}`],
+    ["source behind builtin", `builtin source /tmp/defs.sh; cat ${GUARDED}`],
+    ["hash behind time", `time hash -p /bin/rm cat; cat ${GUARDED}`],
+    ["alias in a then branch", `if true; then alias cat=rm; fi; cat ${GUARDED}`],
+    ["hash after a negation", `! hash -p /bin/rm cat; cat ${GUARDED}`],
+    ["hash in a group", `{ hash -p /bin/rm cat; }; cat ${GUARDED}`],
+    ["hash on its own line", `hash -p /bin/rm cat\ncat ${GUARDED}`],
+    ["a spaced function definition", `cat ( ) { rm "$1"; }; cat ${GUARDED}`],
+    ["a brace-less function body", `cat() if rm "$1"; then :; fi; cat ${GUARDED}`],
+    ["a DEBUG trap", `trap 'hash -p /bin/rm cat' DEBUG; cat ${GUARDED}`],
+    ["a mapfile callback", `mapfile -C 'hash -p /bin/rm cat' -c 1 x < /tmp/l; cat ${GUARDED}`],
+    ["BASH_ALIASES", `BASH_ALIASES[cat]=rm; cat ${GUARDED}`],
+    ["a quote-split PATH declaration", `declare P""ATH=/tmp/evil; cat ${GUARDED}`],
+    ["a quote-split PATH read", `read 'PA'TH <<< /tmp/evil; cat ${GUARDED}`],
   ])("blocks: %s", (_name, command) => {
     expect(guardDecision(command)).toBe("block");
   });
 
-  it("a plain read of PATH rebinds nothing", () => {
-    expect(guardDecision(`echo "$PATH"; cat ${GUARDED}`)).toBe("allow");
+  it.each([
+    ["a plain read of PATH", `echo "$PATH"; cat ${GUARDED}`],
+    ["a rebinder's name as an argument", `echo hash alias enable source; cat ${GUARDED}`],
+    ["a rebinder's name in a pattern", `grep -n "hash -p" ${GUARDED}`],
+    ["find's dot", `find . -path ./.claude/state -prune -o -type f -print`],
+  ])("rebinds nothing: %s", (_name, command) => {
+    expect(guardDecision(command)).toBe("allow");
   });
 });
 
@@ -48,6 +78,7 @@ describe("commands that write nothing are admitted whatever they mention", () =>
   it.each([
     ["sort and uniq in a pipe", `grep -o x ${GUARDED} | sort -u | uniq -c | head`],
     ["sort with keys", `jq -r '.tasks[].id' ${GUARDED} | sort -t, -k2,2nr`],
+    ["sort under a locale prefix", `jq -r '.tasks[].id' ${GUARDED} | LC_ALL=C sort -u`],
     ["comm, tac, rev, paste, column", `cat ${GUARDED} | rev | tac | paste -sd, | column -t`],
     ["find with prune and print", "find . -path ./.claude/state -prune -o -type f -print"],
     ["a for loop over reads", `for f in ${GUARDED} ${MARKER}; do cat "$f"; done`],
@@ -65,9 +96,26 @@ describe("commands that write nothing are admitted whatever they mention", () =>
     ["gh with a substituted token", `GH_TOKEN=$(gh auth token) gh issue comment 1 --body "${MARKER}"`],
     ["gh pr review", `gh pr review 1 --comment --body "${GUARDED}"`],
     ["a helper's own state redirect on a binding line", `F=x; bun cli.ts helper set-phase execute > ${GUARDED}`],
+    ["gh issue reopen", `gh issue reopen 1 --comment "${MARKER}"`],
+    ["gh pr ready", `gh pr ready "${GUARDED}"`],
   ])("allows: %s", (_name, command) => {
     expect(guardDecision(command)).toBe("allow");
   });
+
+  it.each(["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_REPO", "NO_COLOR", "GH_PROMPT_DISABLED", "GH_NO_UPDATE_NOTIFIER"])(
+    "allows a gh prefix of %s",
+    (name) => {
+      expect(guardDecision(`${name}=x gh issue comment 1 --body "${GUARDED}"`)).toBe("allow");
+    },
+  );
+
+  it.each(["HOME", "CDPATH", "PWD", "OLDPWD", "PATH", "ENV", "BASH_ENV", "IFS", "SHELLOPTS", "BASHOPTS",
+    "GLOBIGNORE", "DIRSTACK", "BASH_XTRACEFD", "PROMPT_COMMAND", "PS4"])(
+    "blocks a binding of the shell-state name %s on a guarded line",
+    (name) => {
+      expect(guardDecision(`${name}=/tmp/x; cat ${GUARDED}`)).toBe("block");
+    },
+  );
 });
 
 describe("every write that reaches guarded state stays blocked", () => {
@@ -77,6 +125,7 @@ describe("every write that reaches guarded state stays blocked", () => {
     ["sort -o bundled", `sort -uo ${GUARDED} /tmp/x`],
     ["sort -T into a guarded dir", `sort -T .claude/state ${GUARDED}`],
     ["sort --compress-program", `sort --compress-program=sh ${GUARDED}`],
+    ["sort spilling into a guarded TMPDIR", `TMPDIR=.claude/state sort ${GUARDED}`],
     ["uniq with an output operand", `uniq /tmp/x ${GUARDED}`],
     ["find -delete", "find .claude/state -name '*.json' -delete"],
     ["find -exec", "find .claude/state -exec rm {} +"],

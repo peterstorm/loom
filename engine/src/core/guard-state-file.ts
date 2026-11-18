@@ -33,9 +33,10 @@
  *     binds puts EVERY chain in scope, so `$NAME` cannot carry a guarded path
  *     into a chain that never names it.
  *
- * A guarded line that may rebind a command name (`commandNamesRebound`: a
- * function, alias, hash, enable, source, an eval of runtime text, PATH,
- * BASH_CMDS, a loader variable) is blocked outright: no head on it is
+ * A guarded line that may rebind a command name (`commandNamesRebound`: in
+ * any command position, a function definition, alias, hash, enable, source,
+ * trap, mapfile, or an eval that may do one; PATH, BASH_CMDS, BASH_ALIASES or
+ * a loader variable in any spelling) is blocked outright: no head on it is
  * trusted by its name.
  *
  * Pattern tests (the front gate, chain scoping, protected-dir checks, and
@@ -365,7 +366,7 @@ const REBOUND_BLOCK: HookResult = {
   kind: "block",
   message: [
     "BLOCKED: Command referencing loom-guarded state must be read-only.",
-    "This line may rebind a command name (a function, alias, hash, enable, source, eval, PATH, BASH_CMDS or a loader variable), so no command on it is trusted as a read.",
+    "This line may rebind a command name (a function, alias, hash, enable, source, trap, mapfile, eval, PATH, BASH_CMDS, BASH_ALIASES or a loader variable), so no command on it is trusted as a read.",
     "State is managed by hooks and helper scripts only.",
     ALLOWED_LINE,
   ].join("\n"),

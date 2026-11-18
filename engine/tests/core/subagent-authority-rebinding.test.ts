@@ -41,6 +41,10 @@ describe("a read-only head is not trusted on a line that may rebind a command na
     ["BASH_CMDS hashes cat to rm", `BASH_CMDS[cat]=/bin/rm; cat -r ${MACHINES}`],
     ["a preloaded library runs inside cat", `LD_PRELOAD=/tmp/evil.so cat -r ${MACHINES}`],
     ["eval may define a function", `eval "$DEFS"; cat -r ${MACHINES}`],
+    ["hash inside a literal eval", `eval 'hash -p /bin/rm cat'; cat -r ${MACHINES}`],
+    ["an escaped hash", `\\hash -p /bin/rm cat; cat -r ${MACHINES}`],
+    ["hash behind an assignment prefix", `x=1 hash -p /bin/rm cat; cat -r ${MACHINES}`],
+    ["hash in a case arm", `case a in a) hash -p /bin/rm cat;; esac; cat -r ${MACHINES}`],
   ])("refuses: %s", (_name, command) => {
     expect(verdict(command)).toBe("authority-path-write");
   });
