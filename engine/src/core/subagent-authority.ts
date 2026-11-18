@@ -32,8 +32,10 @@
  *     plain path is a read-only segment, whatever paths it names, and so is
  *     a `git` invocation that writes nothing outside the repository's own
  *     `.git` (`read-only-git.ts`: `git -C <checkout> fetch`). On a typed
- *     line that may rebind a command name (`hash`, `alias`, `enable`, a
- *     function) no segment is read-only by its head. A bare
+ *     line that may rebind a command name (`commandNamesRebound`: `hash`,
+ *     `alias`, `enable`, a function, `source`, `trap`, `mapfile`, an `eval`
+ *     that may do one, `PATH`, a loader variable) no segment is read-only by
+ *     its head. A bare
  *     assignment of an inert name (`inertNamesOf`: `T=$CLAUDE_JOB_DIR/tmp`,
  *     whose every read the guard splices) names a path without writing above
  *     it; every other assignment is judged as a write over what it names.
@@ -109,13 +111,16 @@ import { scanSubstitutions } from "./shell-substitution";
 import { stripComment, type SegmentOp } from "./shell-command";
 import {
   analyzeCommandHead,
+  commandNamesRebound,
   commandWords,
   hasReadOnlyHead,
   isReadOnlySubcommandInvocation,
   headBase,
+  mayRebind,
   pipeChains,
   placedPipeChains,
   resolvedInterpreter,
+  SHELL_STATE_NAMES,
   shellWords,
   splitFusedRedirect,
   unquote,
@@ -579,7 +584,7 @@ type LineShell = Readonly<{
   splittingRebound: boolean;
   /** lastpipe or physical `cd` may be on: where a segment runs no longer follows from the separators. */
   separatorsUnreliable: boolean;
-  /** A command name may be rebound (`hash`, `alias`, `enable`, a function): no script is trusted by its path. */
+  /** A command name may run another program (`commandNamesRebound`): no head or script is trusted by its name. */
   commandsRebound: boolean;
 }>;
 
@@ -759,13 +764,6 @@ function lineVariables(sites: readonly SegmentSite[], inherited: BoundVariables)
   return bound;
 }
 
-/** Names the shell itself reads: assigning one changes where `~`, `cd`, a
- *  command or a word resolves, so its assignment is never inert. */
-const SHELL_STATE_NAMES: ReadonlySet<string> = new Set([
-  "HOME", "CDPATH", "PWD", "OLDPWD", "PATH", "ENV", "BASH_ENV", "IFS", "SHELLOPTS", "BASHOPTS",
-  "GLOBIGNORE", "DIRSTACK", "BASH_XTRACEFD", "PROMPT_COMMAND", "PS4",
-]);
-
 /** Line text that may read a variable where the guard does not see it read:
  *  `source`/`.` (a file run in this shell), `set -a`/`allexport` (every
  *  assignment exported), a nameref, an indirect expansion. */
@@ -805,11 +803,6 @@ function inertNamesOf(text: string, sites: readonly SegmentSite[]): ReadonlySet<
     readsOnlyPlainly(text, name)));
 }
 
-/** Does `text` mention `name` other than by a plain read — an assignment, a
- *  `printf -v`/`read` target, an indirection naming it? */
-const mayRebind = (text: string, name: string): boolean =>
-  new RegExp(`(?<![A-Za-z0-9_$])${name}(?![A-Za-z0-9_])`).test(text.replace(new RegExp(`\\$\\{${name}\\}`, "g"), ""));
-
 /** The variable whose characters split an unquoted expansion's value into words. */
 const SPLITTING_VARIABLE = "IFS";
 
@@ -829,9 +822,6 @@ function splittingRebound(text: string, sites: readonly SegmentSite[]): boolean 
 /** Bash's lastpipe option runs a pipeline's last command in this shell; physical `cd`
  *  resolves `..` after symlinks. Either breaks the separator walk. */
 const SEPARATORS_UNRELIABLE = /\blastpipe\b|\bset\s+[-+][A-Za-z]*P|\bphysical\b/;
-
-/** A command name rebound on the line: `hash -p`, an alias, `enable`, a function. */
-const COMMANDS_REBOUND = /(?:^|[;&|(`\n]|\$\()\s*(?:hash|alias|enable)\b|\bfunction\s|\(\)\s*[{(]/;
 
 /** Line text that may set a variable whose name the guard does not see
  *  written: a builtin that assigns a name it is given (`read "$n"`, `printf -v`,
@@ -861,7 +851,7 @@ function withLineShell(command: string, sites: readonly SegmentSite[], scope: Pa
       searchPathRebound: shell.searchPathRebound || mayRebind(command, CD_SEARCH_VARIABLE),
       splittingRebound: shell.splittingRebound || splittingRebound(command, sites),
       separatorsUnreliable: shell.separatorsUnreliable || SEPARATORS_UNRELIABLE.test(command),
-      commandsRebound: shell.commandsRebound || COMMANDS_REBOUND.test(command),
+      commandsRebound: shell.commandsRebound || commandNamesRebound(command),
     },
   };
 }
@@ -1631,7 +1621,8 @@ function judgeSegment(
     .map((target) => wordTouches(target, scope, true))
     .find((touched) => touched !== null) ?? null;
   // A typed line that may rebind a command name (`hash -p /bin/rm cat`, an
-  // alias, a function) may run anything under a read-only head's name.
+  // alias, a function, `PATH`, a loader variable) may run anything under a
+  // read-only head's name.
   const headsTrusted = !(scope.mode === "typed" && scope.shell.commandsRebound);
   const { pinnedValue } = segmentBindings(scope);
   const readOnly = headsTrusted && (invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||

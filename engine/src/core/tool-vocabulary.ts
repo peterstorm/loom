@@ -78,11 +78,12 @@ export const TEST_COMMAND_PATTERNS: readonly string[] = [
  *
  * Membership criterion: the command must be unable to write a file under ANY
  * flag combination. Deliberately excluded, with the flag that disqualifies
- * them: `sort` (-o), `uniq` (second file operand), `less` (-o/-O),
- * `xxd` (-r <outfile>), `base64` (macOS -o), `file` (-C compiles the
- * magic database and WRITES `<name>.mgc` into the cwd — a guarded cwd makes
- * that a state-dir write), `sed`/`awk` (-i / in-script
- * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
+ * them: `sort` (-o), `uniq` (second file operand) and `find` (-delete/-exec),
+ * whose invocations without those are admitted by `read-only-filters.ts`;
+ * `less` (-o/-O), `xxd` (-r <outfile>), `base64` (macOS -o), `file` (-C
+ * compiles the magic database and WRITES `<name>.mgc` into the cwd — a
+ * guarded cwd makes that a state-dir write), `sed`/`awk` (-i / in-script
+ * `w`/`print >`), `git` (checkout/restore rewrite the
  * work tree — a `git checkout -- <state>` is a verdict-restore forgery; its
  * read-only invocations are admitted by `read-only-git.ts` instead, and `gh`'s
  * by `read-only-gh.ts`, through `isReadOnlySubcommandInvocation`),
@@ -116,4 +117,6 @@ export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = frozenSet([
   "cut", "tr", "nl", "od", "hexdump", "strings",
   "echo", "printf", "test", "[", "[[", "true", "false",
   "pwd", "dirname", "basename", "readlink", "realpath", "du",
+  "comm", "tac", "rev", "paste", "join", "fold", "column", "expand", "unexpand",
+  "cksum", "b2sum", "sha224sum", "sha384sum", "sha512sum",
 ]);
