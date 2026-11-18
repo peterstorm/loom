@@ -1,21 +1,30 @@
 # Loom
 
-Loom is a Claude Code plugin and native Pi package for delivering complex software through explicit requirements, architecture, parallel implementation Waves, and evidence-backed quality gates.
+**Loom is an orchestration engine for AI coding agents.** You give it a feature request; it runs a phase pipeline to an architecture, decomposes the work into dependency-ordered Waves of parallel agents, and refuses to advance a Wave until evidence — not claims — says the work is done. It ships as a Claude Code plugin and a native Pi package over one harness-neutral TypeScript engine.
 
-It combines:
+Agents do semantic work. The engine owns deterministic mechanics: state, scope, request identity, model and Skill routing, retries, transcripts, aggregation, state transitions, Git staging, publication — all code-owned and auditable. Users make the real choices.
 
-- a full feature pipeline — **brainstorm → specify → clarify → architecture → plan alignment → plan design review → decompose → execute**;
-- opt-in architecture panels with competing design lenses and adversarial judges;
-- Wave Gates that require proof, tests, spec alignment, multi-Agent review, critical-Finding adjudication, advisory disposition, and full lint;
-- standalone PR review and end-to-end review/remediation workflows;
-- reusable Skills — architecture, implementation, tests, security, frontend, refactoring (`deepen`, `distill`), design stress-testing (`grill`), retrospectives, PR remediation, and lint;
-- a two-tier fail-closed linter;
-- a fail-closed rules gate that blocks code edits until the project's rules and Skills are loaded and adherence is stated;
-- one harness-neutral TypeScript engine with Claude Code and Pi adapters.
+## Why Loom exists
 
-The engine owns deterministic mechanics. Agents do semantic work; users make real choices. Scope, request identity, model/Skill routing, retries, transcripts, rosters, aggregation, state transitions, Git staging, and publication are code-owned and auditable.
+A multi-agent coding session left to its own devices fails in familiar ways. Each failure below is answered by a mechanism, not a plea in a prompt:
 
-How each guarantee is enforced — every guardrail, every determinism device and the prompt-only failure mode it replaces, plus what honestly remains open — is mapped mechanism-by-mechanism in the [Feature & Guard Map](docs/feature-guard-map.md), checked against the code at a pinned revision.
+| What goes wrong | What Loom does instead |
+|---|---|
+| The agent grades its own homework — runs its own tests, reports green | Where the plan requires it, only tests the **engine itself executed** count as proof: `helper run-tests` runs the frozen manifest's runner and issues a receipt bound to the repository root and the manifest's digest. The agent names files; the engine owns execution and the receipt's slot. |
+| Run state lives in the chat — a `/clear`, a crash or a restart loses it | The **State File** (also called the TaskGraph) is the protected record of the run, written by the engine in atomic transitions. Harness hooks make the guards unavoidable: they run before, after and around every tool call. |
+| Nobody can say who wrote what | During a run the parent session **cannot edit files directly**; changes go through attributed Agents, and every fact in the evidence ledger carries its origin. |
+| "Done" is prose | A Task reaches `implemented` only when the engine's **proof obligations** for it are satisfied — completion, regression, new tests, changed declared artifacts, red-then-green test-first evidence where the plan owes it. |
+| Reviewers are re-issued wholesale for one-line fixes, so humans bypass review | A fresh Wave Gate **carries unchanged Tasks' accepted reviews** and issues a changed Task only the reviewers its change needs — a comment fix gets one reviewer, a code change the full roster. |
+| Late or duplicate evidence silently overwrites outcomes | Settlement is exactly one outcome in one atomic transition; late evidence for older bytes settles nothing, and decided questions stay decided until their bytes change. |
+
+Under all of it sits a **fail-closed** rule: when the engine cannot tell whether a gate ran — a crash, a missing runtime, an unobservable state — it blocks, it does not pass.
+
+## The idea, in four rules
+
+1. **One protected state.** The State File is created before planning starts, so phase order and artifact prerequisites are enforced from the first hook. Agents never write it; the engine's transitions do.
+2. **Evidence over claims.** Every test run, file write and review lands in an append-only ledger with provable origin. What cannot be evidenced is not proof.
+3. **Judgment stays with agents, choice stays with you.** Agents decide *how*; the engine decides *what counts*; the user decides *what the architecture is* and *what happens to each advisory Finding*.
+4. **Everything auditable.** Guards, gates, reviews, mutations and recoveries are engine code with recorded decisions — see the [Feature & Guard Map](docs/feature-guard-map.md), which maps every mechanism to its enforcement and names what honestly remains open.
 
 ## Quick start
 
@@ -48,43 +57,15 @@ bash scripts/sync-pi-agents.sh
 
 Then run `/reload` in Pi. Git and npm install forms are documented in [Using Loom with Pi](docs/pi-usage.md).
 
-### Common commands
+### First run
 
 ```text
 /loom "Add email/password authentication"
-/loom --panel "Redesign the ingestion pipeline"
-/loom --panel=4 "Add multi-tenant authorization"
-/loom --status
-
-/retro
-/retro --wave 2
-
-/wave-gate
-/review-pr
-/review-pr tests
-/review-and-fix --no-push
-/security-audit
-
-/brainstorming
-/specify "Feature description"
-/clarify path/to/spec.md
-/spec-check
-/lint-project
 ```
 
-Skip flags exist for explicit lifecycle bypasses:
+That one command drives the whole pipeline below. `/loom --status` shows where a run stands; `/retro` writes its retrospective at the end.
 
-```text
-/loom --skip-brainstorm "..."
-/loom --skip-specify "..."          # requires an existing spec
-/loom --skip-clarify "..."
-/loom --skip-plan-alignment "..."
-/loom --skip-plan-design-review "..."   # no design review of the plan before decompose
-```
-
-`/loom --complete` and `--abort` are not implemented lifecycle flags. After the final Wave Gate, `/retro` writes the run's retrospective, and `helper complete-orchestration` archives the TaskGraph and lifts the guards. The guarded cleanup helper is only for deliberately abandoning an unfinished run. See [Operations](docs/operations.md).
-
-## Full feature flow
+## A run, end to end
 
 ```text
 Feature request
@@ -113,33 +94,55 @@ Brainstorm → Spec → Clarify? → Architecture → Plan alignment → Plan de
 | Plan design review (a gate, not a phase) | `code-reviewer`, `type-design-analyzer`, `architecture-tech-lead` | `plan_design_review` in protected state, bound to the plan's SHA-256 |
 | Decompose | `decompose-agent` | validated Tasks/Waves installed in protected state |
 
-The State File (the protected record of the run, also called the TaskGraph) is created before planning starts, so hooks enforce phase order and artifact prerequisites throughout. Each phase is described in [Workflows](docs/workflows.md).
+Each phase is described in [Workflows](docs/workflows.md).
 
-### Architecture panel
+### The architecture phase, with or without a panel
 
-`/loom --panel` changes the architecture phase only. The default panel uses **3 designers** and **3 judges**, and the catalog contains **5 lenses**: `simplicity-first`, `type-driven-fp`, `risk-security-first`, `performance-first`, and `codebase-conventionist`. Designers each produce one candidate through one lens, judges score every candidate against one criterion, and the engine aggregates the scores. The ranking is advice: the user chooses, and one normal architecture plan comes out.
+The default architecture phase is one architect agent producing one plan. `/loom --panel` replaces it with a competition: **3 designers** each produce one candidate through one of the catalog's **5 lenses** (`simplicity-first`, `type-driven-fp`, `risk-security-first`, `performance-first`, `codebase-conventionist`), **3 judges** score every candidate against one criterion each, and the engine aggregates. The ranking is advice; the user chooses, and one normal architecture plan comes out.
 
-### Execution Waves
+### Execution: Waves
 
-Decompose produces dependency-ordered Tasks grouped into Waves. Tasks in one Wave run in parallel; Waves advance one at a time. A Task reaches `implemented` only when the engine's proof obligations for it are satisfied: Agent completion, regression tests, new tests and changed declared artifacts, as its policy requires. While a run is active the parent session cannot edit files directly; changes go through attributed Agents so the evidence stays meaningful.
+Decompose produces dependency-ordered Tasks grouped into Waves. Tasks in one Wave run in parallel; Waves advance one at a time. Three things shape an agent's life inside a Wave:
 
-Test evidence is engine-owned where the plan requires it: when the run's frozen Verification Manifest declares an affected runner, only tests the engine itself executed count as proof — `helper run-tests` runs that runner over the named files and issues a receipt bound to the repository root and the manifest's digest, and an Agent's own test commands are recorded but never admitted.
+- **Proof, not assertion.** Besides the proof obligations above, stop checks run when an agent tries to stop with contract obligations open, and an attempt that fails gets exactly one retry before terminal escalation — there is no attempt 3.
+- **Engine-run test evidence.** When the run's frozen Verification Manifest declares an affected runner, only tests the engine executed count as proof (see [Why Loom exists](#why-loom-exists)).
+- **The Distill Task.** Every Wave with implementation files carries one engine-added Distill Task: once every other Task has settled, a fresh `distill-agent` simplifies the Wave's implemented code. The Wave Gate cannot start before it runs. It is itself exempt from review; the other Tasks' Review Packets read the distilled bytes.
 
-Every Wave with implementation files also carries one engine-added Distill Task: once every other Task of the Wave has settled, a fresh `distill-agent` simplifies the Wave's implemented code, and the Wave Gate cannot start before it does. It is itself exempt from review; the other Tasks' Review Packets read the distilled bytes.
+A plan may declare **Acceptance Contracts**. Each contract's Task writes a declarations-only types file and acceptance tests, which freeze the moment they are observed failing (red), every test named after the Requirement it decides; the frozen files change only through an audited Contract Revision. Acceptance tests must run through the runtime seams the contract declares — the freeze is refused while an acceptance file does not reference a declared seam — so an acceptance suite cannot pass on a path production never takes.
 
-A plan may declare Acceptance Contracts. Each contract's Task writes a declarations-only types file and acceptance tests, which freeze the moment they are observed failing (red), every test named after the Requirement it decides; the frozen files change only through an audited Contract Revision. Acceptance tests must run through the runtime seams the contract declares — the freeze is refused while an acceptance file does not reference a declared seam — so an acceptance suite cannot pass on a path production never takes.
+## The Wave Gate
 
-## Wave Gate
+`/wave-gate` is a registered, resumable program — the gate a Wave passes before the next one opens. In one pass it:
 
-`/wave-gate` is a registered, resumable program. It creates an immutable Review Packet per Task, issues the reviewers, runs one Wave-level spec check, routes critical Findings to a Refutation Panel, asks the user to dispose of advisories, runs the project's frozen checks and full-tier lint, and then advances the Wave in one protected write. A re-reviewed Task is issued only the reviewers its change needs: a comment fix gets one reviewer, a code change the full roster ([Feature & Guard Map](docs/feature-guard-map.md) §4.9).
+1. creates an **immutable Review Packet per Task** — the exact bytes, plan context and Requirement trace the reviewers will see;
+2. issues the reviewers and collects their verdicts;
+3. runs one **Wave-level spec check** against the requirements;
+4. routes critical Findings to a **Refutation Panel**;
+5. pauses for the user to dispose of advisory Findings — every decision recorded on the TaskGraph, anchored to the reviewed bytes;
+6. runs the project's frozen checks and full-tier lint;
+7. advances the Wave in **one protected write**.
 
-Each Task is reviewed by `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer` and `comment-analyzer`. `architecture-tech-lead` joins for a Task that touches an owned Invariant's family or writes an Acceptance Contract's types file.
+Each Task is reviewed by `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer` and `comment-analyzer`; `architecture-tech-lead` joins for a Task that touches an owned Invariant's family or writes an Acceptance Contract's types file. A re-reviewed Task is issued only the reviewers its change needs, judged against its last accepted review ([Feature & Guard Map](docs/feature-guard-map.md) §4.9).
 
 Reviewers return one JSON object. The engine assigns Finding ids and counts; a critical must state its evidence. Malformed output is recorded as a failed review, never as a Finding. The reviewer protocol is versioned and machine-stamped into the reviewer definitions: a Wave Gate registered now issues protocol v4, in which the engine itself binds the Review Packet ID and Review Generation (a mistyped hash can no longer exhaust a final attempt); a fresh standalone review admits protocol v2 bytes; a run started under an older protocol finishes under it. Details: [standalone review → Reviewer Protocol v2](docs/standalone-review.md#reviewer-protocol-v2).
 
-Critical Findings are adjudicated by a Refutation Panel. **Default panel size is 3.** Every verifier applies one assigned lens to every critical. The refutation-lens catalog is `reproduction`, `intent`, `blast-radius`, `security`, and `test-coverage`; baseline selection always includes reproduction and intent. A strict majority must refute; ties keep the Finding. A clean rerun cannot erase an old blocker by omission: every reviewer must assess every earlier Finding before it can be resolved.
+**The Refutation Panel** adjudicates critical Findings. Default panel size is 3; every verifier applies one assigned lens to every critical. The refutation-lens catalog is `reproduction`, `intent`, `blast-radius`, `security`, and `test-coverage`; baseline selection always includes reproduction and intent. A strict majority must refute; ties keep the Finding. A clean rerun cannot erase an old blocker by omission: every reviewer must assess every earlier Finding before it can be resolved.
 
-The gate's advisory pause records each decision — fixed, deferred or dismissed, always with a reason — on the TaskGraph, anchored to the reviewed bytes. Abandoning the gate run to act on one advisory no longer loses the decisions on the rest, and a decided advisory returns to reviewers only when its bytes change. A restarted or fresh Wave Gate carries unchanged Tasks' accepted reviews instead of re-issuing the full roster; a fresh start binds the carry to a Subject Digest sealed into each acceptance, and `start wave-gate --fresh-review` forces a full re-review.
+**Decisions survive the gate.** The advisory pause records fixed, deferred or dismissed — always with a reason — on the TaskGraph, so abandoning the gate run to act on one advisory loses nothing, and a decided advisory returns to reviewers only when its bytes change. A restarted or fresh Wave Gate carries unchanged Tasks' accepted reviews instead of re-issuing the full roster; a fresh start binds the carry to a Subject Digest sealed into each acceptance, and `start wave-gate --fresh-review` forces a full re-review.
+
+## Finishing a run
+
+After the final Wave Gate, `/retro` reads what the engine recorded — gate runs, reopenings, retries, escalations, Findings — and writes the run's retrospective into the project's retros directory under .claude (created on first write); a retro never blocks, it improves the environment the next run works in. `helper complete-orchestration` archives the TaskGraph and lifts the guards. `/loom --complete` and `--abort` are **not** implemented lifecycle flags; the guarded cleanup helper is only for deliberately abandoning an unfinished run. See [Operations](docs/operations.md).
+
+Skip flags exist for explicit lifecycle bypasses:
+
+```text
+/loom --skip-brainstorm "..."
+/loom --skip-specify "..."          # requires an existing spec
+/loom --skip-clarify "..."
+/loom --skip-plan-alignment "..."
+/loom --skip-plan-design-review "..."   # no design review of the plan before decompose
+```
 
 ## Standalone workflows
 
@@ -151,8 +154,20 @@ The gate's advisory pause records each decision — fixed, deferred or dismissed
 | `/brainstorming`, `/specify`, `/clarify` | Idea exploration, WHAT/WHY requirements, and ambiguity resolution, without starting a full run. |
 | `/spec-check` | Read-only audit of the implementation against each requirement. |
 | `/lint-project` | Sets up and runs the linter over a project. |
+| `/retro [--wave N]` | Retrospective of one Wave, a whole run, or any session, inside or outside Loom. |
 
 Loom's linter runs regex rules after every edit and structural rules at the Wave Gate; both tiers fail closed. Rules and configuration: [Lint rules](lint-rules/README.md).
+
+## What Loom does not claim
+
+The [Feature & Guard Map](docs/feature-guard-map.md) §8 keeps the honest residuals; the short form:
+
+- The **parent session is trusted** at the boundary that starts and stops a run — Loom hardens everything inside the run, not the harness around it.
+- **Report artifacts live in an agent-writable environment**: a runner's JUnit XML can be edited after the fact by anything the agent could reach; engine-run evidence closes this at the receipt, not the file.
+- **Coverage is only as good as the seeded cells** — a spec check proves what the requirement trace names, nothing else.
+- **Attribution has gaps in contended sessions**: evidence attributes by harness events, and two agents writing the same file in one window can blur it.
+- **I6 test-first proof reads the logged history** — an unlogged write (an interpreter, a generator) is invisible to it.
+- Legacy graphs that predate engine-run evidence keep the older agent-command residuals by design.
 
 ## Documentation
 
