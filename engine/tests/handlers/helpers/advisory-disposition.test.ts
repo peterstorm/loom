@@ -8,15 +8,15 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anchorDigest } from "../../../src/core/advisory-disposition";
-import { parseFindingId } from "../../../src/core/findings";
 import { reviewedWorkspaceObservation } from "../../../src/core/reviewed-workspace";
 import { taskReviewScope } from "../../../src/core/wave-review-authority";
 import { newWaveGate } from "../../../src/core/wave-gate-model";
 import { createAdvisoryDispositionOperation, type ReviewedWorkspaceObserver } from "../../../src/handlers/helpers/advisory-disposition";
 import { ORCHESTRATION_OPERATIONS } from "../../../src/handlers/helpers/orchestration-operations";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../../src/handler-routes";
-import type { Finding, TaskGraph } from "../../../src/types";
+import type { TaskGraph } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { findingFixture } from "../../fixtures/finding";
 import { i6PlanTask } from "../../fixtures/i6-plan-task";
 import { i6RunnerManifest } from "../../fixtures/i6-runner-manifest";
 import { value } from "../../fixtures/parse-result";
@@ -32,13 +32,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function advisory(id: string, file: string): Finding {
-  const findingId = parseFindingId(id);
-  if (findingId === null) throw new Error(`fixture Finding id ${id} is invalid`);
-  return { id: findingId, agent: "code-reviewer", severity: "advisory", file, line: 1, claim: `${id} advice` };
-}
-
-const ADVICE = advisory("code-reviewer-1", "src/t1.ts");
+const ADVICE = findingFixture("code-reviewer-1", "advisory", "src/t1.ts");
 
 /** Wave 1 current: T1 carries one advisory, T2 none. */
 function installState(): string {
@@ -104,6 +98,13 @@ describe("disposition shell", () => {
     const before = readFileSync(statePath, "utf8");
     expect(await createAdvisoryDispositionOperation(quiet, observe)(STDIN)).toEqual({ kind: "allow" });
     expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
+  it("reports only once committed: a failed report is never a refusal that left the record behind", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => { throw new Error("stdout closed"); });
+    const statePath = installState();
+    await expect(createAdvisoryDispositionOperation(quiet, observer("v1"))(STDIN)).rejects.toThrow("stdout closed");
+    expect(written(statePath).advisory_dispositions).toHaveLength(1);
   });
 
   it("observes only the named Tasks of the active Wave", async () => {

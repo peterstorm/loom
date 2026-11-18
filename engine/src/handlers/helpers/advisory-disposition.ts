@@ -9,7 +9,12 @@
 
 import { taskGraphPath } from "../../config";
 import { anyActiveSubagent } from "../../machine/ledger";
-import { parseDispositionInput, recordAdvisoryDispositions } from "../../core/advisory-disposition-record";
+import { advisoryDecisionTasks } from "../../core/advisory-disposition";
+import {
+  parseDispositionInput,
+  recordAdvisoryDispositions,
+  type DispositionOutcome,
+} from "../../core/advisory-disposition-record";
 import type { ReviewedWorkspaceObservation } from "../../core/reviewed-workspace";
 import { StateManager } from "../../state-manager";
 import type { HookResult, Task } from "../../types";
@@ -35,26 +40,29 @@ export function createAdvisoryDispositionOperation(
     if (manager === null) return { kind: "error", message: `disposition: No task graph at ${statePath}` };
     const refusal = subagentActiveRefusal(subagentActive, statePath, OPERATION);
     if (refusal !== null) return { kind: "error", message: `disposition: ${refusal}` };
+    let outcome: DispositionOutcome;
     try {
       const graph = manager.load();
-      const named = graph.tasks.filter((task) =>
-        task.wave === graph.current_wave && request.value.some(({ taskId }) => taskId === task.id));
+      const named = graph.current_wave === undefined
+        ? []
+        : advisoryDecisionTasks(graph, graph.current_wave).filter((task) => request.value.some(({ taskId }) => taskId === task.id));
       const workspaces = observe(named);
-      const outcome = await manager.updateAndReturn((locked) => {
+      outcome = await manager.updateAndReturn((locked) => {
         assertQuiescentUnderLock(subagentActive, statePath, OPERATION);
         const decided = recordAdvisoryDispositions(locked, request.value, workspaces);
         if (!decided.ok) throw new Error(decided.error.message);
         return { state: decided.value.graph, value: decided.value };
       });
-      process.stdout.write(`${JSON.stringify({
-        kind: "advisory-dispositions-recorded",
-        recorded: outcome.recorded,
-        unchanged: outcome.unchanged,
-      }, null, 2)}\n`);
-      return { kind: "allow" };
     } catch (error) {
       return { kind: "error", message: `disposition refused without changing state: ${describeCause(error)}` };
     }
+    // Reported only once committed: a failed write here can never read as a refusal.
+    process.stdout.write(`${JSON.stringify({
+      kind: "advisory-dispositions-recorded",
+      recorded: outcome.recorded,
+      unchanged: outcome.unchanged,
+    }, null, 2)}\n`);
+    return { kind: "allow" };
   };
 }
 

@@ -42,14 +42,13 @@ import {
 } from "./orchestration-contract";
 import type { ReviewerProtocolDescriptor } from "./reviewer-contract";
 import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
-import { issuedPriorFindings } from "./advisory-disposition";
 import type {
   CarriedReviewAuthority,
   RegisteredWaveGateProgram,
   WaveReviewCarry,
   WaveReviewCarryAudit,
 } from "./wave-gate-program";
-import { taskReviewScope, waveReviewStanding, waveTaskReviewRoster } from "./wave-review-authority";
+import { taskReviewScope, waveReviewPriorFindings, waveReviewStanding, waveTaskReviewRoster } from "./wave-review-authority";
 import { issuedRoles, waveReviewCarryOf } from "./wave-review-carry-plan";
 
 /** The reviewed workspace a carry is judged against: its canonical scope and content head. */
@@ -118,8 +117,8 @@ export type AcceptanceTerms = Readonly<{ protocol: ReviewerProtocolDescriptor; r
 /**
  * The terms carried slots are judged by: an acceptance's terms, and the prior
  * Finding ids a fresh issuance over those bytes would select
- * (`issuedPriorFindings`, ADR-0090). A run whose priors differ assessed
- * another set than the replacement would issue.
+ * (`waveReviewPriorFindings` on the `fresh` basis, ADR-0090). A run whose
+ * priors differ assessed another set than the replacement would issue.
  */
 export type CarryTerms = AcceptanceTerms & Readonly<{ priorFindingIds: readonly string[] }>;
 
@@ -263,7 +262,7 @@ function taskCarry(
     protocol,
     roster: review.roster,
     bytes: { scope: admitted.value.scope, headSha: admitted.value.headSha },
-    priorFindingIds: issuedPriorFindings(task, graph.advisory_dispositions, admitted.value.artifacts).map(({ id }) => id),
+    priorFindingIds: waveReviewPriorFindings(graph, task, admitted.value.artifacts, "fresh").ids,
   };
   const run = task.review_run;
   if (run !== undefined) {

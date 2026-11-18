@@ -10,6 +10,7 @@
  */
 
 import {
+  advisoryDecisionTasks,
   advisoryDisposition,
   anchorDigest,
   standingDispositions,
@@ -91,7 +92,8 @@ export function parseDispositionInput(stdin: string): DomainResult<readonly Disp
 /**
  * Append one record per entry whose standing decision differs, or refuse the
  * whole request: outside the execute phase, for an advisory the active Wave's
- * decision request would not issue (`waveAdvisories`), for an invalid
+ * decision request would not issue (`advisoryDecisionTasks`,
+ * `waveAdvisories`: the set approval counts), for an invalid
  * decision, or when a named Task's reviewed workspace was not observed over
  * its current review scope. Allowed while the Wave Gate is paused on its
  * advisories and after it is abandoned. Idempotent: a repeated request
@@ -106,7 +108,7 @@ export function recordAdvisoryDispositions(
   if (graph.current_phase !== "execute" || wave === undefined) {
     return refuse("not-executing", `advisory dispositions are recorded in the execute phase; the phase is ${graph.current_phase}`);
   }
-  const waveTasks = graph.tasks.filter((task) => task.wave === wave);
+  const waveTasks = advisoryDecisionTasks(graph, wave);
   const advisories = waveAdvisories(waveTasks);
   const standing = standingDispositions(graph.advisory_dispositions);
   const recorded: AdvisoryDisposition[] = [];
@@ -117,14 +119,11 @@ export function recordAdvisoryDispositions(
     if (advisory === undefined || task === undefined) {
       return refuse("unknown-advisory", `${entry.taskId}:${entry.findingId} is not an advisory of a Task in the active Wave ${wave}`);
     }
+    const unobserved = `${task.id}'s reviewed workspace was not observed over its current review scope`;
     const observation = workspaces.find(({ taskId }) => taskId === task.id);
-    const admitted = observation === undefined
-      ? null
-      : admitReviewedWorkspace(task.id, taskReviewScope(task), observation);
-    if (admitted === null || !admitted.ok) {
-      return refuse("workspace-unobserved", `${task.id}'s reviewed workspace was not observed over its current review scope` +
-        (admitted === null ? "" : `: ${admitted.error}`));
-    }
+    if (observation === undefined) return refuse("workspace-unobserved", unobserved);
+    const admitted = admitReviewedWorkspace(task.id, taskReviewScope(task), observation);
+    if (!admitted.ok) return refuse("workspace-unobserved", `${unobserved}: ${admitted.error}`);
     const built = advisoryDisposition({
       wave,
       taskId: entry.taskId,

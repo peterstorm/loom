@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { BASE_WAVE_REVIEW_AGENTS, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
 import { advisoryDisposition, anchorDigest } from "../../src/core/advisory-disposition";
-import { parseFindingId, preserveAcceptedReviewRunFindings } from "../../src/core/findings";
+import { preserveAcceptedReviewRunFindings } from "../../src/core/findings";
 import type {
   CurrentAcceptedReviewAuthority,
   CurrentDraftFinding,
@@ -33,6 +33,7 @@ import {
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskCommonMetadata, TaskGraph } from "../../src/types";
 import type { ReviewerProtocolDescriptor } from "../../src/core/reviewer-contract";
+import { findingFixture } from "../fixtures/finding";
 import { activeWaveGateFixture, graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { value } from "../fixtures/parse-result";
 
@@ -306,22 +307,33 @@ describe("a restart names each reviewed Task it did not carry, and why", () => {
       .toEqual([{ taskId: "T1", reason: { kind: "acceptance-off-lineage", runId: "run.earliest" } }]);
   });
 
-  it("judges a carried run's priors against the ones a fresh issuance selects over the current bytes (ADR-0090)", () => {
-    const adviceId = parseFindingId("code-reviewer-9");
-    if (adviceId === null) throw new Error("fixture Finding id is invalid");
-    const advice = { id: adviceId, agent: ROSTER[0]!, severity: "advisory" as const, file: "src/t2.ts", line: 1, claim: "advice" };
-    const withAdvice = (dispositions?: TaskGraph["advisory_dispositions"]): TaskGraph => {
-      const state = exhaustedWave({ run: predecessorRun(accepted, { prior_finding_ids: [advice.id] }) });
+  describe("a carried run's priors are judged against a fresh issuance over the current bytes (ADR-0090)", () => {
+    const advice = findingFixture("code-reviewer-9", "advisory", "src/t2.ts");
+    const dismissed = value(advisoryDisposition({ wave: 1, taskId: "T2", findingId: advice.id, decision: "dismissed",
+      reason: "false positive", target: null, anchor: anchorDigest(advice.file, observe("T2", ["src/t2.ts"]).artifacts) }));
+    const withAdvice = (priorIds: readonly string[], dispositions?: TaskGraph["advisory_dispositions"]): TaskGraph => {
+      const state = exhaustedWave({ run: predecessorRun(accepted, { prior_finding_ids: priorIds }) });
       const [first, t2] = state.tasks;
       return { ...state, tasks: [first!, { ...t2!, findings: [advice], advisory_findings: [advice.claim] }],
         ...(dispositions === undefined ? {} : { advisory_dispositions: dispositions }) };
     };
-    expect(restart(withAdvice()).registration.restart?.carry?.carried).toContainEqual(
-      { kind: "accepted-slots", taskId: "T2", agents: accepted });
-    const dismissed = value(advisoryDisposition({ wave: 1, taskId: "T2", findingId: advice.id, decision: "dismissed",
-      reason: "false positive", target: null, anchor: anchorDigest(advice.file, observe("T2", ["src/t2.ts"]).artifacts) }));
-    expect(restart(withAdvice([dismissed])).notCarried)
-      .toEqual([{ taskId: "T2", reason: { kind: "drift", fields: ["prior-findings"] } }]);
+
+    it("carries a run that issued the advisory while nothing is decided", () => {
+      expect(restart(withAdvice([advice.id])).registration.restart?.carry?.carried).toContainEqual(
+        { kind: "accepted-slots", taskId: "T2", agents: accepted });
+    });
+
+    it("names prior-findings drift when the advisory was dismissed after the run issued it", () => {
+      expect(restart(withAdvice([advice.id], [dismissed])).notCarried)
+        .toEqual([{ taskId: "T2", reason: { kind: "drift", fields: ["prior-findings"] } }]);
+    });
+
+    it("carries the accepted slots of a run that already omitted an advisory dismissed over unchanged bytes", () => {
+      const prepared = restart(withAdvice([], [dismissed]));
+      expect(prepared.notCarried).toEqual([]);
+      expect(prepared.registration.restart?.carry?.carried).toContainEqual(
+        { kind: "accepted-slots", taskId: "T2", agents: accepted });
+    });
   });
 
   it("names a run with no accepted slot", () => {

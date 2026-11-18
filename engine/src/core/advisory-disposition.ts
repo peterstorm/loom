@@ -12,21 +12,27 @@
  * The list is append-only; the latest record for an advisory is its standing
  * decision. One constructor (`advisoryDisposition`) builds a record for the
  * operation and for the State File parser, so neither holds a value the other
- * would refuse. `waveAdvisories` is the one derivation of the advisories a
- * Wave Gate issues for decision: the decision request, the approval gate and
- * the operation all read it. Pure.
+ * would refuse. `advisoryDecisionTasks` is the one derivation of the Tasks a
+ * Wave Gate counts advisories over, and `waveAdvisories` the one derivation of
+ * their advisories: the decision request, the approval gate and the operation
+ * all read both. Pure.
  */
 
-import { ADVISORY_DECISIONS, type AdvisoryDecision, type AdvisoryDisposition } from "./advisory-disposition-shape";
+import {
+  ADVISORY_DECISIONS,
+  type AdvisoryDecision,
+  type AdvisoryDisposition,
+  type AnchorDigest,
+} from "./advisory-disposition-shape";
 import { sha256Bytes, sha256Hex } from "./digest";
 import { parseFindingId } from "./findings";
 import type { DomainResult } from "./orchestration-contract";
 import { hasExactKeys, isRecord } from "./plain-record";
 import type { ReviewedArtifact } from "./reviewed-workspace";
 import { parseTaskId } from "./task-id";
-import type { Finding, Task } from "../types";
+import type { Finding, Task, TaskGraph } from "../types";
 
-export type { AdvisoryDecision, AdvisoryDisposition } from "./advisory-disposition-shape";
+export type { AdvisoryDecision, AdvisoryDisposition, AnchorDigest } from "./advisory-disposition-shape";
 
 const isAdvisoryDecision = (raw: unknown): raw is AdvisoryDecision =>
   ADVISORY_DECISIONS.some((decision) => decision === raw);
@@ -34,11 +40,9 @@ const isAdvisoryDecision = (raw: unknown): raw is AdvisoryDecision =>
 /** The longest reason or target an operator may give. */
 const MAX_DISPOSITION_TEXT_LENGTH = 500;
 
-/** A sha256 over the bytes an advisory anchors to (`anchorDigest`). */
-type AnchorDigest = string;
-
 const freeze = Object.freeze;
 const fail = (error: string) => freeze({ ok: false as const, error });
+const succeed = <T>(value: T) => freeze({ ok: true as const, value });
 
 /** Operator text: a trimmed, non-blank string of at most `MAX_DISPOSITION_TEXT_LENGTH` characters. */
 function dispositionText(raw: unknown, label: string): DomainResult<string, string> {
@@ -46,10 +50,14 @@ function dispositionText(raw: unknown, label: string): DomainResult<string, stri
   if (raw.trim().length === 0) return fail(`${label} must not be blank`);
   if (raw.trim() !== raw) return fail(`${label} must not start or end with whitespace`);
   if (raw.length > MAX_DISPOSITION_TEXT_LENGTH) return fail(`${label} is at most ${MAX_DISPOSITION_TEXT_LENGTH} characters`);
-  return freeze({ ok: true as const, value: raw });
+  return succeed(raw);
 }
 
-const isAnchor = (raw: unknown): raw is AnchorDigest => typeof raw === "string" && /^[0-9a-f]{64}$/.test(raw);
+/** The anchor parser: a lower-case sha256 hex digest, or null. With `anchorDigest`, the only mint of `AnchorDigest`. */
+const parseAnchorDigest = (raw: unknown): AnchorDigest | null =>
+  typeof raw === "string" && /^[0-9a-f]{64}$/.test(raw) ? raw as AnchorDigest : null;
+
+const hasTarget = (raw: unknown): boolean => raw !== null && raw !== undefined;
 
 export type AdvisoryDispositionInput = Readonly<{
   wave: unknown;
@@ -64,50 +72,48 @@ export type AdvisoryDispositionInput = Readonly<{
 /**
  * The one constructor: a positive Wave, a Task id, a Finding id, one of the
  * three decisions with a reason, a target only for a deferral, and an anchor
- * exactly when the decision suppresses reissue.
+ * exactly when the decision suppresses reissue. Each variant is built in the
+ * State File's field order.
  */
 export function advisoryDisposition(input: AdvisoryDispositionInput): DomainResult<AdvisoryDisposition, string> {
-  const { wave, findingId, decision, anchor } = input;
+  const { wave, decision } = input;
   if (typeof wave !== "number" || !Number.isSafeInteger(wave) || wave < 1) return fail("wave must be a positive integer");
   const taskId = parseTaskId(input.taskId, "taskId");
   if (!taskId.ok) return fail(taskId.error.errors.join("; "));
-  if (typeof findingId !== "string" || parseFindingId(findingId) === null) {
-    return fail("findingId must be a Finding id (no colon or whitespace)");
-  }
+  const findingId = parseFindingId(input.findingId);
+  if (findingId === null) return fail("findingId must be a Finding id (no colon or whitespace)");
   if (!isAdvisoryDecision(decision)) return fail(`decision must be one of ${ADVISORY_DECISIONS.join(", ")}`);
   const reason = dispositionText(input.reason, "reason");
   if (!reason.ok) return reason;
-  let target: string | null = null;
-  if (input.target !== null && input.target !== undefined) {
-    if (decision !== "deferred") return fail("target is only for a deferred advisory");
-    const parsed = dispositionText(input.target, "target");
-    if (!parsed.ok) return parsed;
-    target = parsed.value;
-  }
-  let suppressing: AnchorDigest | null = null;
+  const head = { schemaVersion: 1 as const, wave, taskId: taskId.value, findingId, decision, reason: reason.value };
+  if (decision !== "deferred" && hasTarget(input.target)) return fail("target is only for a deferred advisory");
   if (decision === "fixed") {
-    if (anchor !== null) return fail("a fixed advisory carries no anchor");
-  } else {
-    if (!isAnchor(anchor)) return fail(`a ${decision} advisory needs the sha256 anchor of the bytes it was decided over`);
-    suppressing = anchor;
+    return input.anchor === null
+      ? succeed(freeze({ ...head, decision, target: null, anchor: null }))
+      : fail("a fixed advisory carries no anchor");
   }
-  return freeze({
-    ok: true as const,
-    value: freeze({
-      schemaVersion: 1 as const,
-      wave,
-      taskId: taskId.value,
-      findingId,
-      decision,
-      reason: reason.value,
-      target,
-      anchor: suppressing,
-    }),
-  });
+  const anchor = parseAnchorDigest(input.anchor);
+  if (anchor === null) return fail(`a ${decision} advisory needs the sha256 anchor of the bytes it was decided over`);
+  if (decision === "dismissed" || !hasTarget(input.target)) return succeed(freeze({ ...head, decision, target: null, anchor }));
+  const target = dispositionText(input.target, "target");
+  return target.ok ? succeed(freeze({ ...head, decision, target: target.value, anchor })) : target;
 }
 
 /** An advisory's identity, as the advisory decision request names it: `<task>:<finding-id>`. */
 const advisoryIdentity = (taskId: string, findingId: string): string => `${taskId}:${findingId}`;
+
+/**
+ * The Tasks whose advisories Wave `wave`'s gate counts: every Task of that
+ * Wave, in graph order. The decision request, the approval gate and the
+ * disposition operation all read this one set (ADR-0090). It needs no gate
+ * registration, so the operation reads it alike while the gate is paused and
+ * after it is abandoned. While a gate is live the set cannot move: add-task
+ * and withdraw-task are refused under a live gate, and the decision's
+ * membership check refuses a registration whose Tasks differ from it.
+ */
+export function advisoryDecisionTasks(graph: Pick<TaskGraph, "tasks">, wave: number): readonly Task[] {
+  return freeze(graph.tasks.filter((task) => task.wave === wave));
+}
 
 /**
  * One advisory a Wave Gate's decision request issues: an advisory Finding of
@@ -173,18 +179,19 @@ export function anchorDigest(file: string | null, artifacts: readonly ReviewedAr
   const digestOf = (artifact: ReviewedArtifact): string =>
     artifact.contentBase64 === null ? "absent" : sha256Bytes(Buffer.from(artifact.contentBase64, "base64"));
   const own = file === null ? undefined : artifacts.find(({ path }) => path === file);
-  if (own !== undefined) return sha256Hex(JSON.stringify(["file", own.path, digestOf(own)]));
-  return sha256Hex(JSON.stringify(["task", artifacts.map((artifact) => [artifact.path, digestOf(artifact)])]));
+  const material = own === undefined
+    ? JSON.stringify(["task", artifacts.map((artifact) => [artifact.path, digestOf(artifact)])])
+    : JSON.stringify(["file", own.path, digestOf(own)]);
+  return sha256Hex(material) as AnchorDigest;
 }
 
 /**
  * The prior Findings a fresh review of `task` is issued over `artifacts`, its
  * reviewed bytes: every active Finding but an advisory whose standing
  * disposition is `deferred` or `dismissed` and whose anchor still matches
- * those bytes. Every review issuance and the restart carry check read it, so
- * a run's `prior_finding_ids` and its packet's priors cannot disagree. A
- * Finding left out stays active on the Task, because a run resolves only the
- * priors it issued.
+ * those bytes. The rule behind `waveReviewPriorFindings`, which every issuing
+ * site reads. A Finding left out stays active on the Task, because a run
+ * resolves only the priors it issued.
  */
 export function issuedPriorFindings(
   task: Pick<Task, "id" | "findings">,
@@ -195,8 +202,9 @@ export function issuedPriorFindings(
   const standing = standingDispositions(dispositions);
   return freeze(findings.filter((finding) => {
     if (finding.severity !== "advisory") return true;
-    const anchor = standing.get(advisoryIdentity(task.id, finding.id))?.anchor ?? null;
-    return anchor === null || anchor !== anchorDigest(finding.file, artifacts);
+    const decided = standing.get(advisoryIdentity(task.id, finding.id));
+    if (decided === undefined || decided.decision === "fixed") return true;
+    return decided.anchor !== anchorDigest(finding.file, artifacts);
   }));
 }
 
@@ -213,7 +221,7 @@ const DISPOSITION_FIELDS = ["schemaVersion", "wave", "taskId", "findingId", "dec
 
 /** `advisory_dispositions` as the State File holds it, each record through the one constructor. */
 export function parseAdvisoryDispositions(raw: unknown): DomainResult<readonly AdvisoryDisposition[] | undefined, string> {
-  if (raw === undefined) return freeze({ ok: true as const, value: undefined });
+  if (raw === undefined) return succeed(undefined);
   if (!Array.isArray(raw)) return fail("advisory_dispositions must be an array when present");
   const entries: readonly unknown[] = raw;
   const parsed: AdvisoryDisposition[] = [];
@@ -229,5 +237,5 @@ export function parseAdvisoryDispositions(raw: unknown): DomainResult<readonly A
     if (!built.ok) return fail(`${label}: ${built.error}`);
     parsed.push(built.value);
   }
-  return freeze({ ok: true as const, value: freeze(parsed) });
+  return succeed(freeze(parsed));
 }

@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
+  advisoryDecisionTasks,
   advisoryDisposition,
   anchorDigest,
   issuedPriorFindings,
@@ -16,23 +17,17 @@ import {
   type AdvisoryDispositionInput,
 } from "../../src/core/advisory-disposition";
 import { parseDispositionInput, recordAdvisoryDispositions } from "../../src/core/advisory-disposition-record";
-import { parseFindingId } from "../../src/core/findings";
 import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { waveAdvisoryApprovalRefusal } from "../../src/core/wave-gate-membership";
 import type { RegisteredWaveGateProgram } from "../../src/core/wave-gate-program";
 import { reviewedWorkspaceObservation, type ReviewedWorkspaceObservation } from "../../src/core/reviewed-workspace";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Finding, Task, TaskGraph } from "../../src/types";
+import { findingFixture as finding } from "../fixtures/finding";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { value } from "../fixtures/parse-result";
 
 const ANCHOR = "a".repeat(64);
-
-function finding(id: string, severity: Finding["severity"], file: string | null = "src/t1.ts"): Finding {
-  const findingId = parseFindingId(id);
-  if (findingId === null) throw new Error(`fixture Finding id ${id} is invalid`);
-  return { id: findingId, agent: "code-reviewer", severity, file, line: file === null ? null : 3, claim: `${id} claim` };
-}
 
 const ADVISORY = finding("code-reviewer-1", "advisory");
 const ELSEWHERE = finding("code-reviewer-2", "advisory", "README.md");
@@ -253,6 +248,52 @@ describe("waveAdvisoryApprovalRefusal: approval needs a disposition on every iss
   it("admits approval once each one has a standing disposition, whatever it decided", () => {
     expect(waveAdvisoryApprovalRefusal(graph([decided("T1", "code-reviewer-1"), decided("T2", "legacy-advisory-1")]), registration))
       .toBeNull();
+  });
+});
+
+describe("advisoryDecisionTasks: approval counts exactly the advisories the operation accepts", () => {
+  const record = (graph: TaskGraph, identities: readonly string[], workspaces: readonly ReviewedWorkspaceObservation[]) =>
+    recordAdvisoryDispositions(graph, value(parseDispositionInput(JSON.stringify({
+      dispositions: identities.map((finding) => ({ finding, decision: "fixed", reason: "fixing it" })),
+    }))), workspaces);
+
+  it("is every Task of the Wave, in graph order", () => {
+    const tasks = [task("T1", []), task("T2", [], { wave: 2 }), task("T3", [])];
+    expect(advisoryDecisionTasks({ tasks }, 1).map(({ id }) => id)).toEqual(["T1", "T3"]);
+    expect(advisoryDecisionTasks({ tasks }, 2).map(({ id }) => id)).toEqual(["T2"]);
+  });
+
+  it("refuses approval naming exactly the advisories the operation records, and admits it once they are recorded (property)", () => {
+    const taskArb = fc.record({
+      wave: fc.constantFrom(1, 2),
+      shape: fc.constantFrom("findings", "legacy"),
+      severities: fc.array(fc.constantFrom<Finding["severity"]>("critical", "advisory"), { maxLength: 3 }),
+    });
+    fc.assert(fc.property(fc.array(taskArb, { minLength: 1, maxLength: 4 }), (shapes) => {
+      const tasks = shapes.map(({ wave, shape, severities }, index) => {
+        const id = `T${index + 1}`;
+        const findings = severities.map((severity, at) => finding(`code-reviewer-${at + 1}`, severity, `src/t${index + 1}.ts`));
+        return shape === "findings"
+          ? task(id, findings, { wave })
+          : task(id, undefined, { wave, advisory_findings: findings.filter(({ severity }) => severity === "advisory").map(({ claim }) => claim) });
+      });
+      const graph = graphFixture(tasks);
+      const registration: RegisteredWaveGateProgram = {
+        schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2, kind: "wave-gate", input: { wave: 1 },
+        taskIds: tasks.filter(({ wave }) => wave === 1).map(({ id }) => id), authorityDigest: "a".repeat(64),
+      };
+      const workspaces = tasks.map(({ id }) => observe(id, { [`src/${id.toLowerCase()}.ts`]: "bytes" }));
+      const every = waveAdvisories(tasks).map(({ identity }) => identity);
+      const accepted = every.filter((identity) => record(graph, [identity], workspaces).ok);
+      const refusal = waveAdvisoryApprovalRefusal(graph, registration);
+      if (accepted.length === 0) {
+        expect(refusal).toBeNull();
+        return;
+      }
+      expect(refusal).toContain(`no disposition (${accepted.join(", ")})`);
+      const recorded = value(record(graph, accepted, workspaces));
+      expect(waveAdvisoryApprovalRefusal(recorded.graph, registration)).toBeNull();
+    }));
   });
 });
 

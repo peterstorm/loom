@@ -45,7 +45,7 @@ import {
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
 import { waveReviewView } from "./wave-review-authority";
-import { waveAdvisories } from "./advisory-disposition";
+import { advisoryDecisionTasks, waveAdvisories } from "./advisory-disposition";
 
 export type WavePreparationError = Readonly<{
   kind: "wave-preparation-rejected";
@@ -251,7 +251,7 @@ export function deriveWaveGateDriveStep(
   if (!projected.ok) return preparationFailure(projected.error.message);
   const state = projected.value;
   if (state.kind === "awaiting-advisory-decision") {
-    const material = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, snapshot.waveTasks);
+    const material = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, advisoryDecisionTasks(snapshot.graph, snapshot.wave));
     return material.ok
       ? canonicalRecord({ ok: true, value: canonicalRecord({ kind: "await-advisory-decision", material: material.value, state }) })
       : material;
@@ -275,7 +275,7 @@ export function deriveWaveAdvisoryNextAction(
   if (!isCanonicalWaveReadiness(snapshot) || state.runId !== snapshot.registration.runId) {
     return preparationFailure("advisory action requires canonical readiness for this lifecycle run");
   }
-  const request = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, snapshot.waveTasks);
+  const request = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, advisoryDecisionTasks(snapshot.graph, snapshot.wave));
   if (!request.ok) return request;
   const actionRequest = waveAdvisoryDecisionActionRequest(request.value);
   if (!actionRequest.ok) return actionRequest;

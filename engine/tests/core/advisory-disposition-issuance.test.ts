@@ -9,9 +9,11 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { advisoryDisposition, anchorDigest } from "../../src/core/advisory-disposition";
-import { parseFindingId } from "../../src/core/findings";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
-import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
+import type { CurrentReviewRun, CurrentReviewRunEvidence, CurrentReviewRunSlotAuthority } from "../../src/core/findings-shape";
+import { captureKey } from "../../src/core/harness-capture";
+import { REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4 } from "../../src/core/reviewer-contract";
+import { prepareExhaustedWaveGateRestart } from "../../src/core/wave-gate-replacement";
 import type { RegisteredWaveGateProgram } from "../../src/core/wave-gate-program";
 import {
   prepareWaveReviewBatch,
@@ -22,8 +24,9 @@ import {
 } from "../../src/core/wave-review-authority";
 import { installWaveReviewRunsTransition } from "../../src/core/wave-review-issuance";
 import { observeWaveSpecCheckDocuments } from "../../src/orchestration/wave-spec-check-documents";
-import type { Finding, Task, TaskGraph } from "../../src/types";
+import type { Task, TaskGraph } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { findingFixture } from "../fixtures/finding";
 import { value } from "../fixtures/parse-result";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import { activeWaveGateFixture, fileOf, protectedGraphFixture, siblingTaskFixture } from "../fixtures/task-lifecycle";
@@ -37,14 +40,8 @@ const PLAN_FILE = ".claude/plans/2026-11-18-dispositions.md";
 const RUN_ID = value(parseOrchestrationRunId("run.dispositions"));
 const AUTHORITY = "a".repeat(64);
 
-function finding(id: string, severity: Finding["severity"]): Finding {
-  const findingId = parseFindingId(id);
-  if (findingId === null) throw new Error(`fixture Finding id ${id} is invalid`);
-  return { id: findingId, agent: "code-reviewer", severity, file: fileOf("T1"), line: 2, claim: `${id} claim` };
-}
-
-const ADVISORY = finding("code-reviewer-1", "advisory");
-const CRITICAL = finding("code-reviewer-2", "critical");
+const ADVISORY = findingFixture("code-reviewer-1", "advisory", fileOf("T1"));
+const CRITICAL = findingFixture("code-reviewer-2", "critical", fileOf("T1"));
 
 const t1: Task = siblingTaskFixture({
   id: "T1", status: "implemented", spec_anchors: [], spec_contributions: [], files_modified: [fileOf("T1")],
@@ -143,5 +140,59 @@ describe("issuance over advisory dispositions", () => {
       registration, batch, workspaces: [workspaceOf("v1")], specCheckObservation: documentsOf(root),
     });
     expect(replay.ok && replay.value.tasks).toEqual(installed.tasks);
+  });
+});
+
+describe("a restart over a dismissed advisory carries the accepted slots (ADR-0089, ADR-0090)", () => {
+  const current: RegisteredWaveGateProgram = { ...registration, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4 };
+
+  /** Issue under `registration` over the `v1` bytes, then accept every slot of T1's run but the last, which exhausts attempt 2. */
+  function exhaustedAfterIssue(graph: TaskGraph, under: RegisteredWaveGateProgram) {
+    const root = projectWithPlan();
+    const batch = value(prepareWaveReviewBatch(RUN_ID, { ...under, input: { wave: 1 } }, graph, 1, [workspaceOf("v1")], documentsOf(root)));
+    const installed = installWaveReviewRunsTransition(graph, {
+      registration: under, batch, workspaces: [workspaceOf("v1")], specCheckObservation: documentsOf(root),
+    });
+    if (!installed.ok) throw new Error(installed.error.message);
+    const run = installed.value.tasks[0]!.review_run;
+    if (run?.reviewer_protocol === undefined) throw new Error("T1 must hold a current Review Run");
+    const [first, ...rest] = run.slot_authority;
+    const exhaustedAgent = (rest[rest.length - 1] ?? first).agent;
+    const exhaust = (slot: CurrentReviewRunSlotAuthority): CurrentReviewRunSlotAuthority =>
+      (slot.agent === exhaustedAgent ? { ...slot, attempted: 2 } : slot);
+    const evidence: readonly CurrentReviewRunEvidence[] = run.slot_authority.filter(({ agent }) => agent !== exhaustedAgent)
+      .map((slot) => ({ protocolVersion: 2, agent: slot.agent, slot_id: slot.slot_id, attempted: slot.attempted,
+        request_id: slot.request_id, context_digest: slot.context_digest, prior_assessments: [], new_findings: [] }));
+    const t1Run: CurrentReviewRun = { ...run, evidence, slot_authority: [exhaust(first), ...rest.map(exhaust)] };
+    const exhausted: TaskGraph = { ...installed.value, tasks: [{ ...installed.value.tasks[0]!, review_run: t1Run }] };
+    return { exhausted, run: t1Run, exhaustedAgent, slotId: (rest[rest.length - 1] ?? first).slot_id };
+  }
+
+  it("rebuilds the replacement's run with the carried run's prior ids, carrying every accepted slot", () => {
+    const graph = graphOf({ advisory_dispositions: [dismissedOver("v1")] });
+    const { exhausted, run, exhaustedAgent, slotId } = exhaustedAfterIssue(graph, current);
+    expect(run.prior_finding_ids).toEqual([CRITICAL.id]);
+
+    const prepared = prepareExhaustedWaveGateRestart(exhausted, RUN_ID, current, "run.replacement", "/runs",
+      new Set([captureKey(slotId, 2)]), { workspaces: [workspaceOf("v1")], issuedRosters: new Map() });
+    if (!prepared.ok) throw new Error(prepared.message);
+    const accepted = run.expected_agents.filter((agent) => agent !== exhaustedAgent);
+    expect(prepared.value.notCarried).toEqual([]);
+    expect(prepared.value.registration.restart?.carry?.carried).toEqual([{ kind: "accepted-slots", taskId: "T1", agents: accepted }]);
+
+    const replacementId = value(parseOrchestrationRunId("run.replacement"));
+    const replacement = prepared.value.registration;
+    const root = projectWithPlan();
+    const batch = value(prepareWaveReviewBatch(replacementId, { ...replacement, input: { wave: 1 } }, prepared.value.graph, 1,
+      [workspaceOf("v1")], documentsOf(root)));
+    const rebuilt = installWaveReviewRunsTransition(prepared.value.graph, {
+      registration: replacement, batch, workspaces: [workspaceOf("v1")], specCheckObservation: documentsOf(root),
+    });
+    if (!rebuilt.ok) throw new Error(rebuilt.error.message);
+    const rebuiltRun = rebuilt.value.tasks[0]!.review_run!;
+    expect(rebuiltRun.prior_finding_ids).toEqual(run.prior_finding_ids);
+    expect(rebuiltRun.slot_authority!.filter(({ carried_from }) => carried_from !== undefined).map(({ agent }) => agent))
+      .toEqual(accepted);
+    expect(rebuiltRun.evidence).toEqual(run.evidence);
   });
 });

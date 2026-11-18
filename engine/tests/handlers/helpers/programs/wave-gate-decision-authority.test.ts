@@ -904,15 +904,17 @@ describe("waveGateDecisionMismatch", () => {
   });
 
   /**
-   * The decision id is derived from the advisories of the registration's OWN
-   * tasks. A registration naming a subset therefore expects a different id —
-   * which is the point: approving "the advisories" must name which ones.
+   * The decision id is derived from the advisories of the Wave's Tasks
+   * (`advisoryDecisionTasks`), the set the request, the approval gate and the
+   * disposition operation share (ADR-0090). A registration whose Tasks are not
+   * that set is refused whichever id it names, so approval can never count a
+   * set other than the one the request issued.
    */
-  it("derives the expected id from only the registration's tasks", () => {
+  it("refuses a registration whose Tasks differ from the Wave's, whichever id it names", () => {
     const subset = registration({ taskIds: ["T1"] });
-    expect(waveGateDecisionMismatch(graph(), subset, RUN_ID, pendingDecisionId()))
-      .toContain("is not the exact pending advisory request");
-    expect(waveGateDecisionMismatch(graph(), subset, RUN_ID, waveAdvisoryDecisionRequestId(RUN_ID, [TASKS[0]!])))
-      .toBeNull();
+    for (const decisionId of [pendingDecisionId(), waveAdvisoryDecisionRequestId(RUN_ID, [TASKS[0]!])]) {
+      expect(waveGateDecisionMismatch(graph(), subset, RUN_ID, decisionId))
+        .toBe("registered Wave Gate Tasks differ from the current Wave's Tasks");
+    }
   });
 });

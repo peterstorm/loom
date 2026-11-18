@@ -22,7 +22,6 @@ import {
 } from "./orchestration-contract";
 import type { IssuedWaveReviewerProtocol } from "./review-output";
 import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
-import { issuedPriorFindings } from "./advisory-disposition";
 import type { WaveReviewRole } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
 import { carriedAcceptanceProblem, rebindCarriedReviewRun } from "./wave-review-carry";
@@ -213,7 +212,7 @@ export function installWaveReviewRunsTransition(
         packetId: taskRun.packetId,
         headSha: taskRun.headSha,
         bytes: { scope: currentWorkspace.scope, headSha: currentWorkspace.headSha },
-        priorFindingIds: issuedPriorFindings(task, locked.advisory_dispositions, currentWorkspace.artifacts).map(({ id }) => id),
+        priorFindingIds: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts, "fresh").ids,
         roster: expectedAgents,
         issued: currentSlots,
       });
@@ -256,7 +255,7 @@ export function installWaveReviewRunsTransition(
         packet_id: taskRun.packetId,
         head_sha: taskRun.headSha,
         expected_agents: expectedAgents,
-        prior_finding_ids: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts).map(({ id }) => id),
+        prior_finding_ids: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts, "installed").ids,
         evidence: [],
         ...(registration.schemaVersion === 2
           ? { reviewer_protocol: registration.reviewerProtocol, slot_authority: currentSlots }

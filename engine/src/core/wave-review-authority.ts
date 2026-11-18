@@ -115,22 +115,37 @@ export function taskReviewScope(task: Pick<Task, "file_list" | "files_modified">
 }
 
 /**
- * The prior Findings a Wave review of `task` carries, over `artifacts`, its
- * reviewed bytes: a Review Run already installed keeps exactly the priors it
- * issued; otherwise a fresh issuance selects them (`issuedPriorFindings`,
- * ADR-0090). The batch epoch, the Review Packet and the installed Review Run
- * all read this, so the priors a reviewer is shown are the ones its run
- * requires it to assess.
+ * Which priors `waveReviewPriorFindings` selects:
+ * - `installed`: the priors the Task's installed Review Run issued, kept
+ *   exactly; with no run installed, a fresh issuance's. The batch epoch, the
+ *   Review Packet and the Review Run install read this.
+ * - `fresh`: a fresh issuance's over the bytes, whatever run is installed. A
+ *   restart's carry check compares an installed run's priors against it.
+ */
+export type PriorFindingBasis = "installed" | "fresh";
+
+/** The prior Findings a Wave review is issued, and their ids in the same order. */
+export type WaveReviewPriors = Readonly<{ findings: readonly Finding[]; ids: readonly string[] }>;
+
+/**
+ * The prior Findings a Wave review of `task` carries over `artifacts`, its
+ * reviewed bytes (ADR-0090). Every site that issues or compares a Review
+ * Run's priors reads this one selector, so the priors a reviewer is shown are
+ * the ones its run requires it to assess, and a carried run is judged against
+ * the set a fresh issuance would select. A fresh issuance is
+ * `issuedPriorFindings`.
  */
 export function waveReviewPriorFindings(
   graph: Pick<TaskGraph, "advisory_dispositions">,
   task: Task,
   artifacts: readonly ReviewedArtifact[],
-): readonly Finding[] {
+  basis: PriorFindingBasis,
+): WaveReviewPriors {
   const run = task.review_run;
-  if (run === undefined) return issuedPriorFindings(task, graph.advisory_dispositions, artifacts);
-  const issued = new Set(run.prior_finding_ids);
-  return Object.freeze((task.findings ?? []).filter(({ id }) => issued.has(id)));
+  const findings = basis === "fresh" || run === undefined
+    ? issuedPriorFindings(task, graph.advisory_dispositions, artifacts)
+    : (task.findings ?? []).filter(({ id }) => run.prior_finding_ids.includes(id));
+  return Object.freeze({ findings: Object.freeze(findings), ids: Object.freeze(findings.map(({ id }) => id)) });
 }
 
 /** The Wave review packet section labels; spec-check reads both by name. */
@@ -1155,7 +1170,7 @@ export function prepareWaveReviewBatch(
       modified: task.files_modified ?? [],
       completionAnchors: task.spec_anchors ?? [],
       contributions: task.spec_contributions ?? [],
-      priorFindingIds: waveReviewPriorFindings(graph, task, workspace.artifacts).map(({ id }) => id),
+      priorFindingIds: waveReviewPriorFindings(graph, task, workspace.artifacts, "installed").ids,
       reviewedHeadSha: workspace.headSha,
     })),
     specFile: graph.spec_file ?? null,
@@ -1284,7 +1299,7 @@ export function prepareWaveReviewBatch(
         modifiedFiles: task.files_modified ?? [],
         proof: task.proof ?? null,
         testResult: task.test_result ?? null,
-        priorFindings: reviewedTask === null ? [] : waveReviewPriorFindings(graph, task, reviewedTask.workspace.artifacts),
+        priorFindings: reviewedTask === null ? [] : waveReviewPriorFindings(graph, task, reviewedTask.workspace.artifacts, "installed").findings,
       },
       packetId: taskRun?.packetId ?? null,
       specFile: graph.spec_file,

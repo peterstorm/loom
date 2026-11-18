@@ -216,9 +216,10 @@ import {
 } from "./programs";
 import { advisoryDecisionApproved, waveAdvisoryApprovalRefusal, waveGateDecisionMismatch } from "../../core/wave-gate-membership";
 import { advisoryDispositionOperation } from "./advisory-disposition";
+import { advisoryDecisionTasks } from "../../core/advisory-disposition";
 import { parseUserDecision } from "../../core/user-decision";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
-import { parseOrchestrationOperation } from "./orchestration-operations";
+import { parseOrchestrationOperation, type OrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { reopenTaskOperation } from "./reopen-task";
@@ -571,7 +572,7 @@ async function observedAdvisoryApprovalFromParsed(
   if (findingCounts.kind !== "known" || findingCounts.value.advisory === 0) {
     return Object.freeze({ kind: "not-approved" });
   }
-  const decisionId = waveAdvisoryDecisionRequestId(observation.runId, readiness.value.waveTasks);
+  const decisionId = waveAdvisoryDecisionRequestId(observation.runId, advisoryDecisionTasks(readiness.value.graph, readiness.value.wave));
   try {
     const approved = advisoryDecisionApproved(await opened.value.readEvents(), decisionId);
     return Object.freeze({ kind: approved ? "approved" : "not-approved" });
@@ -1963,6 +1964,12 @@ const TASK_GRAPH_OPERATIONS = Object.freeze({
   "adopt-engine-revision": adoptEngineRevisionOperation,
 } as const satisfies Readonly<Record<string, (args: readonly string[]) => Promise<HookResult>>>);
 
+type TaskGraphOperation = keyof typeof TASK_GRAPH_OPERATIONS;
+
+/** Whether `operation` is one of `TASK_GRAPH_OPERATIONS`: an own key, so no inherited name dispatches. */
+const isTaskGraphOperation = (operation: OrchestrationOperation): operation is TaskGraphOperation =>
+  Object.hasOwn(TASK_GRAPH_OPERATIONS, operation);
+
 /**
  * The façade's entry point, composed over how each run-advancing operation
  * obtains its `Emission`: the process's own (`processEmission`) in
@@ -1973,6 +1980,7 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
     const operation = parseOrchestrationOperation(args[0]);
     if (operation === null) return usage();
     const rest = args.slice(1);
+    if (isTaskGraphOperation(operation)) return TASK_GRAPH_OPERATIONS[operation](rest);
 
     switch (operation) {
       case "status":
@@ -2001,9 +2009,6 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return decideOperation(stdin, rest, emission());
       case "disposition":
         return advisoryDispositionOperation(stdin);
-      case "remediate": case "attest": case "reopen-task": case "rescope-task": case "add-dependency":
-      case "add-task": case "withdraw-task": case "adopt-engine-run-tests": case "adopt-engine-revision":
-        return TASK_GRAPH_OPERATIONS[operation](rest);
     }
   };
 }
