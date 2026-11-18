@@ -23,26 +23,27 @@ import type {
   SurvivorDiagnostic,
 } from "../../src/core/owner-verification/types";
 import {
-  NO_TASK_OWNER_CHECK,
+  judgeTaskOwnerCheck,
   parseTaskOwnerCheckRecord,
   recordedTaskOwnerCheck,
   renderTaskOwnerCheckBlock,
   renderTaskOwnerCheckReport,
   sortTaskOwnerFindings,
   TASK_OWNER_CHECK_BASH_TIMEOUT_MS,
-  TASK_OWNER_CHECK_NOT_RUN,
   taskOwnerCheckDigest,
   taskOwnerCheckDuty,
   taskOwnerCheckRecordJson,
   taskOwnerCheckResult,
-  taskOwnerCheckStanding,
   taskOwnerCheckStopVerdict,
   taskOwnerCheckUnavailable,
+  type JudgedObligation,
   type OwedTaskOwnerCheck,
+  type RecordedTaskOwnerCheck,
   type TaskOwnerCheckGraph,
   type TaskOwnerCheckObservation,
   type TaskOwnerCheckResult,
 } from "../../src/core/task-owner-check";
+import { TASK_RECORD_CHECK_OFF, TASK_RECORD_NOT_RUN, taskRecordStanding, type TaskRecordDigest } from "../../src/core/task-record";
 import type { Task } from "../../src/types";
 import { contract, task } from "../fixtures/contract-status-fixtures";
 import { ownerObligation } from "../fixtures/owner-obligation";
@@ -149,7 +150,21 @@ describe("taskOwnerCheckDuty — who owes the check, and over what", () => {
   it("owes a later Wave's sibling writer, which does not answer the matrix test's findings", () => {
     const duty = owed(FAMILY, "T3");
     expect(duty.obligations).toEqual([{ obligation: ADMISSION, due: [OWNER, SIBLING_A, SIBLING_B], answers: false }]);
-    expect(duty.digested).toEqual([SIBLING_A, SIBLING_B, OWNER, MATRIX].sort());
+    expect(duty.digested).toEqual([OWNER, SIBLING_A, SIBLING_B, MATRIX]);
+  });
+
+  it("carries the frozen runner when an owed obligation needs mutation, and none when every one is exempt", () => {
+    const duty = owed(FAMILY, "T1");
+    expect(duty.mutation === "owed" && duty.runner).toEqual(mutationManifest().affectedRunner);
+    const exempt = ownerObligation({ ...ADMISSION, mutation: { kind: "exempt", reason: "the rule is a lookup table no mutant can change" } });
+    const exemptOnly = owed({ ...graphOf([T1]), owner_obligations: [exempt], verification_manifest: mutationManifest({ affectedRunner: undefined }) }, "T1");
+    expect(exemptOnly.mutation).toBe("exempt-only");
+    expect("runner" in exemptOnly).toBe(false);
+  });
+
+  it("owes no duty it could not run: an obligation needing mutation with no runner frozen is off, never a runner-less duty", () => {
+    expect(taskOwnerCheckDuty({ ...graphOf([T1]), verification_manifest: mutationManifest({ affectedRunner: undefined }) }, "T1"))
+      .toEqual({ kind: "off", reason: "no-affected-runner" });
   });
 
   it("owes nothing for a family whose matrix test a concurrent Task is still writing", () => {
@@ -223,27 +238,51 @@ const REFUSED = taskOwnerCheckResult([verdict(COVERED, {
 })]);
 const MIXED = taskOwnerCheckResult([verdict({ kind: "missing", paths: [SIBLING_B] }, { kind: "red-baseline", failures: ["matrix > admits"] })]);
 
+/** A record of one run over `duty`, through its one constructor; a refusal is a broken fixture. */
+function recorded(duty: OwedTaskOwnerCheck, digest: TaskRecordDigest, result: TaskOwnerCheckResult): RecordedTaskOwnerCheck {
+  const built = recordedTaskOwnerCheck(duty, digest, result);
+  if (!built.ok) throw new Error(`fixture: ${built.error}`);
+  return built.value;
+}
+
+/** The judged obligations of `result` under `duty`; a result the duty refuses is a broken fixture. */
+function judgedOf(duty: OwedTaskOwnerCheck, result: TaskOwnerCheckResult): readonly JudgedObligation[] {
+  const judgement = judgeTaskOwnerCheck(duty, result);
+  if (judgement.kind !== "judged") throw new Error(`fixture: ${judgement.reason}`);
+  return judgement.judged;
+}
+
+const FOREIGN = taskOwnerCheckResult([{ ...verdict(COVERED, verified([SURVIVOR])), invariant: ownerObligation({ ...ADMISSION, invariant: "INV-7" }).invariant }]);
+
 describe("the record's wire form", () => {
-  const DIGEST = taskOwnerCheckDigest(owed(FAMILY, "T1"), []);
+  const DUTY = owed(FAMILY, "T1");
+  const DIGEST = taskOwnerCheckDigest(DUTY, []);
 
   it.each([
     ["clean", CLEAN], ["survivors", SURVIVORS], ["missing", MISSING], ["red baseline", RED], ["refused run", REFUSED],
     ["unavailable", taskOwnerCheckUnavailable("no Git repository here")],
   ] as const)("round-trips a %s result", (_name, result) => {
-    const record = recordedTaskOwnerCheck("T1", DIGEST, result);
+    const record = recorded(DUTY, DIGEST, result);
     expect(parseTaskOwnerCheckRecord(JSON.parse(taskOwnerCheckRecordJson(record)))).toEqual({ ok: true, value: record });
   });
 
   it("serializes equal records to equal bytes", () => {
-    expect(taskOwnerCheckRecordJson(recordedTaskOwnerCheck("T1", DIGEST, CLEAN)))
-      .toBe(taskOwnerCheckRecordJson(recordedTaskOwnerCheck("T1", DIGEST, taskOwnerCheckResult([verdict(COVERED, verified([]))]))));
+    expect(taskOwnerCheckRecordJson(recorded(DUTY, DIGEST, CLEAN)))
+      .toBe(taskOwnerCheckRecordJson(recorded(DUTY, DIGEST, taskOwnerCheckResult([verdict(COVERED, verified([]))]))));
   });
 
-  const valid = (): Record<string, unknown> => JSON.parse(taskOwnerCheckRecordJson(recordedTaskOwnerCheck("T1", DIGEST, SURVIVORS)));
+  it("refuses to record a result for an Invariant the duty does not owe, or a duty with no Task id", () => {
+    expect(recordedTaskOwnerCheck(DUTY, DIGEST, FOREIGN)).toEqual({
+      ok: false, error: "the result is not of this duty: it judged INV-7, which Task T1 does not owe at its stop",
+    });
+    expect(recordedTaskOwnerCheck({ ...DUTY, taskId: "" }, DIGEST, CLEAN)).toEqual({ ok: false, error: "a Task owner record needs a Task id" });
+  });
+
+  const valid = (): Record<string, unknown> => JSON.parse(taskOwnerCheckRecordJson(recorded(DUTY, DIGEST, SURVIVORS)));
   it.each([
     ["another schema", (raw: Record<string, unknown>) => ({ ...raw, schemaVersion: 2 }), "schemaVersion must be 1"],
     ["another kind", (raw: Record<string, unknown>) => ({ ...raw, kind: "loom-task-mutation-record" }), "kind must be"],
-    ["an unknown key", (raw: Record<string, unknown>) => ({ ...raw, extra: 1 }), "taskOwnerCheckRecord.extra is not allowed"],
+    ["an unknown key", (raw: Record<string, unknown>) => ({ ...raw, extra: 1 }), "unknown key(s) extra"],
     ["a digest that is not sha256", (raw: Record<string, unknown>) => ({ ...raw, digest: "abc" }), "sha256 hex digest"],
     ["no verdict", (raw: Record<string, unknown>) => ({ ...raw, result: { kind: "verdicts", verdicts: [] } }), "at least one verdict"],
     ["a verdict the gate's parser refuses", (raw: Record<string, unknown>) => ({ ...raw, result: { kind: "verdicts", verdicts: [{}] } }), "verdicts[0]"],
@@ -258,30 +297,28 @@ describe("the record's wire form", () => {
 describe("sortTaskOwnerFindings — who answers each finding", () => {
   const answering = owed(FAMILY, "T1");
   const reporting = owed(FAMILY, "T3");
-  const verdictsOf = (result: TaskOwnerCheckResult): readonly InvariantVerdict[] => result.kind === "verdicts" ? result.verdicts : [];
 
   it("a Task listing the matrix test answers a missing path and a survivor", () => {
-    expect(sortTaskOwnerFindings(answering, verdictsOf(MISSING)).blocking.map(({ kind }) => kind)).toEqual(["missing-siblings"]);
-    expect(sortTaskOwnerFindings(answering, verdictsOf(SURVIVORS)).blocking.map(({ kind }) => kind)).toEqual(["survivor"]);
+    expect(sortTaskOwnerFindings(judgedOf(answering, MISSING)).blocking.map(({ kind }) => kind)).toEqual(["missing-siblings"]);
+    expect(sortTaskOwnerFindings(judgedOf(answering, SURVIVORS)).blocking.map(({ kind }) => kind)).toEqual(["survivor"]);
   });
 
   it("a Task not listing the matrix test only reports them, naming the file that answers", () => {
-    const sorted = sortTaskOwnerFindings(reporting, verdictsOf(SURVIVORS));
+    const sorted = sortTaskOwnerFindings(judgedOf(reporting, SURVIVORS));
     expect(sorted.blocking).toEqual([]);
     expect(sorted.noted).toEqual([expect.stringContaining(`only ${MATRIX} answers this, and this Task does not list it`)]);
   });
 
   it("a red baseline and an infrastructure verdict are noted for any Task", () => {
     for (const duty of [answering, reporting]) {
-      expect(sortTaskOwnerFindings(duty, verdictsOf(RED))).toEqual({ blocking: [], noted: [expect.stringContaining("is red against the unmutated workspace")] });
-      expect(sortTaskOwnerFindings(duty, verdictsOf(REFUSED))).toEqual({ blocking: [], noted: [expect.stringContaining("infrastructure failure (spawn-failed)")] });
+      expect(sortTaskOwnerFindings(judgedOf(duty, RED))).toEqual({ blocking: [], noted: [expect.stringContaining("is red against the unmutated workspace")] });
+      expect(sortTaskOwnerFindings(judgedOf(duty, REFUSED))).toEqual({ blocking: [], noted: [expect.stringContaining("infrastructure failure (spawn-failed)")] });
     }
   });
 
-  it("a verdict for an Invariant the duty does not owe is reported, never trusted", () => {
-    const other = { ...verdict(COVERED, verified([SURVIVOR])), invariant: ownerObligation({ ...ADMISSION, invariant: "INV-7" }).invariant };
-    expect(sortTaskOwnerFindings(answering, [other])).toEqual({
-      blocking: [], noted: ["INV-7: the record judged an Invariant this Task does not owe at its stop"],
+  it("a result for an Invariant the duty does not owe is never judged: it reads as unavailable", () => {
+    expect(judgeTaskOwnerCheck(answering, FOREIGN)).toEqual({
+      kind: "unavailable", reason: "its record is not of this duty: it judged INV-7, which Task T1 does not owe at its stop",
     });
   });
 });
@@ -293,7 +330,7 @@ describe("taskOwnerCheckStopVerdict — what one stop does", () => {
     ({ kind: "observed", duty, standing: { kind: "current", result }, command: COMMAND });
 
   it("is idle when the Task owes nothing", () => {
-    expect(taskOwnerCheckStopVerdict("T1", NO_TASK_OWNER_CHECK)).toEqual({ kind: "idle" });
+    expect(taskOwnerCheckStopVerdict("T1", TASK_RECORD_CHECK_OFF)).toEqual({ kind: "idle" });
   });
 
   it("blocks for a record that is missing or stale", () => {
@@ -331,6 +368,11 @@ describe("taskOwnerCheckStopVerdict — what one stop does", () => {
       .toEqual({ kind: "note", note: expect.stringContaining("this Task does not list it") });
   });
 
+  it("notes a current record that judged an Invariant the duty does not owe", () => {
+    expect(taskOwnerCheckStopVerdict("T1", current(FOREIGN)))
+      .toEqual({ kind: "note", note: expect.stringContaining("its record is not of this duty: it judged INV-7") });
+  });
+
   it("notes every fault", () => {
     expect(taskOwnerCheckStopVerdict("T1", { kind: "unavailable", reason: "EIO" }))
       .toEqual({ kind: "note", note: "Task owner check for T1 did not hold the stop (EIO); the stop proceeds and the Wave Gate judges" });
@@ -339,10 +381,10 @@ describe("taskOwnerCheckStopVerdict — what one stop does", () => {
   it("reads a record of another Task or other bytes as stale", () => {
     const digest = taskOwnerCheckDigest(duty, []);
     const other = taskOwnerCheckDigest(duty, [{ path: OWNER, bytes: null }]);
-    expect(taskOwnerCheckStanding(TASK_OWNER_CHECK_NOT_RUN, "T1", digest)).toEqual({ kind: "not-run" });
-    expect(taskOwnerCheckStanding(recordedTaskOwnerCheck("T1", digest, CLEAN), "T1", digest)).toEqual({ kind: "current", result: CLEAN });
-    expect(taskOwnerCheckStanding(recordedTaskOwnerCheck("T1", other, CLEAN), "T1", digest)).toEqual({ kind: "stale" });
-    expect(taskOwnerCheckStanding(recordedTaskOwnerCheck("T2", digest, CLEAN), "T1", digest)).toEqual({ kind: "stale" });
+    expect(taskRecordStanding(TASK_RECORD_NOT_RUN, "T1", digest)).toEqual({ kind: "not-run" });
+    expect(taskRecordStanding(recorded(duty, digest, CLEAN), "T1", digest)).toEqual({ kind: "current", result: CLEAN });
+    expect(taskRecordStanding(recorded(duty, other, CLEAN), "T1", digest)).toEqual({ kind: "stale" });
+    expect(taskRecordStanding(recorded(duty, digest, CLEAN), "T2", digest)).toEqual({ kind: "stale" });
   });
 });
 
@@ -350,7 +392,7 @@ describe("what the implementer reads", () => {
   const duty = owed(FAMILY, "T1");
 
   it("the report names each verdict, then each finding in the gate's words and how to answer it", () => {
-    const report = renderTaskOwnerCheckReport(duty, SURVIVORS);
+    const report = renderTaskOwnerCheckReport("T1", judgeTaskOwnerCheck(duty, SURVIVORS));
     expect(report).toContain("Task owner check for T1: 1 finding(s) this Task answers in its matrix test.");
     expect(report).toContain(`- INV-1 (matrix test ${MATRIX}): coverage reaches every path due at this stop; mutation generated 4`);
     expect(report).toContain(`INV-1: mutant survived at ${OWNER}:2:11 (comparison-flip)`);
@@ -358,9 +400,9 @@ describe("what the implementer reads", () => {
   });
 
   it("the report of a clean, a noted and an unavailable run", () => {
-    expect(renderTaskOwnerCheckReport(duty, CLEAN).split("\n")[0]).toBe("Task owner check for T1: clean.");
-    expect(renderTaskOwnerCheckReport(duty, RED)).toContain("nothing for this Task to answer.\n");
-    expect(renderTaskOwnerCheckReport(duty, taskOwnerCheckUnavailable("no root")))
+    expect(renderTaskOwnerCheckReport("T1", judgeTaskOwnerCheck(duty, CLEAN)).split("\n")[0]).toBe("Task owner check for T1: clean.");
+    expect(renderTaskOwnerCheckReport("T1", judgeTaskOwnerCheck(duty, RED))).toContain("nothing for this Task to answer.\n");
+    expect(renderTaskOwnerCheckReport("T1", judgeTaskOwnerCheck(duty, taskOwnerCheckUnavailable("no root"))))
       .toBe("Task owner check for T1: unavailable — no root. It did not decide and will not block your stop.");
   });
 

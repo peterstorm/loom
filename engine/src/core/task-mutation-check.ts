@@ -36,16 +36,29 @@ import { match } from "ts-pattern";
 import type { AcceptanceExpectation } from "./acceptance-contract/gate";
 import { judgeAffectedRun } from "./affected-stop-check";
 import type { AffectedRunVerdict } from "./affected-stop-check-types";
-import { sha256Bytes, sha256Hex } from "./digest";
 import { taskRolePolicy } from "./distill-task";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { failure, isNonEmpty, mapNonEmpty, nonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
-import { compareStrings } from "./ordering";
 import { TASK_MUTATION_OPERATORS, type TaskMutant, type TaskMutationOperator } from "./owner-verification/mutation-plan";
 import { contractTaskIdsOf } from "./owner-verification/obligations";
 import type { MatrixTestReport, MatrixTestRun } from "./owner-verification/types";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { isRecord, type UnknownRecord } from "./plain-record";
+import {
+  exactKeys,
+  parseTaskRecord,
+  recordedTask,
+  taskRecordDigest,
+  taskRecordJson,
+  type RecordedTask,
+  type TaskFileBytes,
+  type TaskRecord,
+  type TaskRecordDigest,
+  type TaskRecordObservation,
+  type TaskRecordStanding,
+  type TaskRecordStopVerdict,
+  type TaskRecordWire,
+} from "./task-record";
 import { parseJunitTestcasesUnder } from "./report-run-root";
 import { frozenRedThenGreenEra } from "./proof-obligations";
 import { isTestFileBySuffixes } from "./test-file-classification";
@@ -176,28 +189,14 @@ export function taskMutationDuty(
 // The digest
 // ---------------------------------------------------------------------------
 
-declare const TASK_MUTATION_DIGEST: unique symbol;
-
-/** The identity of what one mutation run judged: only `taskMutationDigest` and the record parser hold one. */
-export type TaskMutationDigest = string & { readonly [TASK_MUTATION_DIGEST]: true };
-
-const DIGEST = /^[0-9a-f]{64}$/;
-const mintDigest = (hex: string): TaskMutationDigest => hex as TaskMutationDigest;
-
-/** One declared file as a run saw it: its bytes, or null when it does not exist. */
-export type TaskFileBytes = Readonly<{ path: string; bytes: Uint8Array | null }>;
-
 /**
- * The digest of a Task's base and declared files. It is independent of the
- * order the files are given in, and it changes when the base, the set of
- * paths, a file's presence or a single byte of a file changes.
+ * The digest of a Task's base and declared files (`taskRecordDigest`, the
+ * shared rule). It is independent of the order the files are given in, and it
+ * changes when the base, the set of paths, a file's presence or a single byte
+ * of a file changes.
  */
-export function taskMutationDigest(startSha: string | null, files: readonly TaskFileBytes[]): TaskMutationDigest {
-  const entries = files
-    .map(({ path, bytes }): readonly [string, string | null] => [path, bytes === null ? null : sha256Bytes(bytes)])
-    .sort(([left], [right]) => compareStrings(left, right));
-  return mintDigest(sha256Hex(JSON.stringify(["loom-task-mutation-digest-v1", startSha, entries])));
-}
+export const taskMutationDigest = (startSha: string | null, files: readonly TaskFileBytes[]): TaskRecordDigest =>
+  taskRecordDigest("loom-task-mutation-digest-v1", [startSha], files);
 
 // ---------------------------------------------------------------------------
 // One runner execution
@@ -459,43 +458,26 @@ export function taskMutationResultOf(runs: readonly TaskMutantRun[], candidates:
 export const TASK_MUTATION_RECORD_KIND = "loom-task-mutation-record" as const;
 export const TASK_MUTATION_RECORD_SCHEMA_VERSION = 1 as const;
 
-/**
- * What a Task's last mutation run left: nothing (`not-run`), or its result
- * bound to the digest of the bytes it judged.
- */
-export type TaskMutationRecord =
-  | Readonly<{ kind: "not-run" }>
-  | Readonly<{ kind: "recorded"; taskId: string; digest: TaskMutationDigest; result: TaskMutationResult }>;
+/** What a Task's last mutation run left: nothing (`not-run`), or its result bound to the digest of the bytes it judged. */
+export type TaskMutationRecord = TaskRecord<TaskMutationResult>;
 
-export type RecordedTaskMutation = Extract<TaskMutationRecord, { kind: "recorded" }>;
+export type RecordedTaskMutation = RecordedTask<TaskMutationResult>;
 
-export const TASK_MUTATION_NOT_RUN: TaskMutationRecord = Object.freeze({ kind: "not-run" });
+export const recordedTaskMutation = (taskId: string, digest: TaskRecordDigest, result: TaskMutationResult): RecordedTaskMutation =>
+  recordedTask(taskId, digest, result);
 
-export const recordedTaskMutation = (taskId: string, digest: TaskMutationDigest, result: TaskMutationResult): RecordedTaskMutation =>
-  Object.freeze({ kind: "recorded", taskId, digest, result });
+const WIRE: TaskRecordWire = Object.freeze({
+  kind: TASK_MUTATION_RECORD_KIND,
+  schemaVersion: TASK_MUTATION_RECORD_SCHEMA_VERSION,
+  path: "taskMutationRecord",
+});
 
 /** The record's wire document. Property order is fixed, so equal records serialize to equal bytes. */
-export function taskMutationRecordJson({ taskId, digest, result }: RecordedTaskMutation): string {
-  return JSON.stringify({
-    schemaVersion: TASK_MUTATION_RECORD_SCHEMA_VERSION,
-    kind: TASK_MUTATION_RECORD_KIND,
-    taskId,
-    digest,
-    result,
-  });
-}
+export const taskMutationRecordJson = (record: RecordedTaskMutation): string => taskRecordJson(WIRE, record);
 
 const isList = (raw: unknown): raw is readonly unknown[] => Array.isArray(raw);
 const isPosition = (raw: unknown): raw is number => isCount(raw) && raw > 0;
 const isText = (raw: unknown): raw is string => typeof raw === "string" && raw !== "";
-
-/** The keys a record of this shape holds, or the refusal naming any other. */
-function exactKeys(raw: Readonly<UnknownRecord>, keys: readonly string[], path: string): string | null {
-  const unknown = Object.keys(raw).filter((key) => !keys.includes(key));
-  const missing = keys.filter((key) => !(key in raw));
-  if (unknown.length > 0) return `${path} has unknown key(s) ${unknown.join(", ")}`;
-  return missing.length > 0 ? `${path} lacks ${missing.join(", ")}` : null;
-}
 
 function parseSurvivor(raw: unknown, path: string): DomainResult<TaskSurvivor, string> {
   if (!isRecord(raw)) return failure(`${path} must be an object`);
@@ -581,49 +563,21 @@ function parseResult(raw: unknown, path: string): DomainResult<TaskMutationResul
 }
 
 /** A record document as a record, or the first reason it is not one. */
-export function parseTaskMutationRecord(raw: unknown): DomainResult<RecordedTaskMutation, string> {
-  const path = "taskMutationRecord";
-  if (!isRecord(raw)) return failure(`${path} must be an object`);
-  const shape = exactKeys(raw, ["schemaVersion", "kind", "taskId", "digest", "result"], path);
-  if (shape !== null) return failure(shape);
-  if (raw.schemaVersion !== TASK_MUTATION_RECORD_SCHEMA_VERSION) return failure(`${path}.schemaVersion must be ${TASK_MUTATION_RECORD_SCHEMA_VERSION}`);
-  if (raw.kind !== TASK_MUTATION_RECORD_KIND) return failure(`${path}.kind must be "${TASK_MUTATION_RECORD_KIND}"`);
-  if (!isText(raw.taskId)) return failure(`${path}.taskId must be a non-empty string`);
-  if (typeof raw.digest !== "string" || !DIGEST.test(raw.digest)) return failure(`${path}.digest must be a sha256 hex digest`);
-  const result = parseResult(raw.result, `${path}.result`);
-  return result.ok ? success(recordedTaskMutation(raw.taskId, mintDigest(raw.digest), result.value)) : result;
-}
+export const parseTaskMutationRecord = (raw: unknown): DomainResult<RecordedTaskMutation, string> => parseTaskRecord(raw, WIRE, parseResult);
 
 // ---------------------------------------------------------------------------
 // The stop
 // ---------------------------------------------------------------------------
 
-/** How a Task's record stands against its files now: its result, when it judged these very bytes. */
-export type TaskMutationStanding =
-  | Readonly<{ kind: "not-run" }>
-  | Readonly<{ kind: "stale" }>
-  | Readonly<{ kind: "current"; result: TaskMutationResult }>;
-
-/** The record's standing for `taskId` at `digest`: a record of another Task or of other bytes is stale. */
-export function taskMutationStanding(record: TaskMutationRecord, taskId: string, digest: TaskMutationDigest): TaskMutationStanding {
-  if (record.kind === "not-run") return Object.freeze({ kind: "not-run" });
-  return record.taskId === taskId && record.digest === digest
-    ? Object.freeze({ kind: "current", result: record.result })
-    : Object.freeze({ kind: "stale" });
-}
+/** How a Task's record stands against its files now (`taskRecordStanding`). */
+export type TaskMutationStanding = TaskRecordStanding<TaskMutationResult>;
 
 /**
  * What a stop shell observed for the mutation arm: the Task owes nothing, or
  * its record's standing with the command that refreshes it, or the fault that
  * kept the shell from reading either.
  */
-export type TaskMutationObservation =
-  | Readonly<{ kind: "off" }>
-  | Readonly<{ kind: "observed"; standing: TaskMutationStanding; command: string }>
-  | Readonly<{ kind: "unavailable"; reason: string }>;
-
-/** The observation of a stop that asks nothing of the mutation arm. */
-export const NO_TASK_MUTATION_CHECK: TaskMutationObservation = Object.freeze({ kind: "off" });
+export type TaskMutationObservation = TaskRecordObservation<TaskMutationResult>;
 
 /** Why the mutation arm would hold a stop open. */
 export type TaskMutationBlockCause =
@@ -637,11 +591,7 @@ export type TaskMutationBlockCause =
  * mutation site on a changed line, passes; an inconclusive or unavailable
  * run, and every fault, is a note and the stop proceeds.
  */
-export type TaskMutationStopVerdict =
-  | Readonly<{ kind: "idle" }>
-  | Readonly<{ kind: "passed" }>
-  | Readonly<{ kind: "note"; note: string }>
-  | Readonly<{ kind: "failing"; cause: TaskMutationBlockCause; command: string }>;
+export type TaskMutationStopVerdict = TaskRecordStopVerdict<TaskMutationBlockCause>;
 
 /** Why an inconclusive run judged nothing, as the helper and a stop note both say it. */
 const inconclusiveText = (invalid: number): string =>

@@ -2,8 +2,9 @@
  * The Task mutation check's runtime record and what a stop observes of it
  * (ADR-0071). Every effect that reads or writes the record lives here or in
  * the shared record file (`task-record-file.ts`), and nothing here decides:
- * the wire form, the digest and the standing are the pure core's
- * (`core/task-mutation-check.ts`).
+ * the wire form and the digest are the check's pure core
+ * (`core/task-mutation-check.ts`), the standing is the Task records' shared
+ * rule (`core/task-record.ts`).
  *
  * - The record is the `task-mutation` Task record: one file per repository
  *   and Task in the runtime directory, keyed by Task and written atomically.
@@ -17,21 +18,19 @@
 
 import { subagentDir } from "../config";
 import type { LoomCommands } from "../core/loom-cli-command";
-import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { success, type DomainResult } from "../core/orchestration-contract/identity";
 import {
   parseTaskMutationRecord,
-  TASK_MUTATION_NOT_RUN,
   taskMutationDigest,
   taskMutationRecordJson,
-  taskMutationStanding,
   type OwedTaskMutation,
   type RecordedTaskMutation,
-  type TaskMutationDigest,
   type TaskMutationObservation,
   type TaskMutationRecord,
 } from "../core/task-mutation-check";
+import { taskRecordStanding, type TaskRecordDigest } from "../core/task-record";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
-import { observeDeclaredFiles, readTaskRecordJson, taskRecordPath, writeTaskRecordFile } from "./task-record-file";
+import { observeDeclaredFiles, readTaskRecord, taskRecordPath, writeTaskRecordFile } from "./task-record-file";
 
 /** Where the record of `taskId` in the repository at `root` is kept. */
 export function taskMutationRecordPath(root: CanonicalRepositoryRoot, taskId: string, directory: string = subagentDir()): string {
@@ -44,12 +43,7 @@ export function readTaskMutationRecord(
   taskId: string,
   directory: string = subagentDir(),
 ): DomainResult<TaskMutationRecord, string> {
-  const path = taskMutationRecordPath(root, taskId, directory);
-  const read = readTaskRecordJson(path);
-  if (!read.ok) return read;
-  if (read.value.kind === "absent") return success(TASK_MUTATION_NOT_RUN);
-  const parsed = parseTaskMutationRecord(read.value.raw);
-  return parsed.ok ? parsed : failure(`${path}: ${parsed.error}`);
+  return readTaskRecord(taskMutationRecordPath(root, taskId, directory), parseTaskMutationRecord);
 }
 
 /** Keep `record`, replacing the Task's earlier one. Atomic: a stop never reads half a record. The path written, or why not. */
@@ -62,7 +56,7 @@ export function writeTaskMutationRecord(
 }
 
 /** The digest of the Task's base and declared files as they are beneath `root` now. */
-export function observeTaskMutationDigest(root: CanonicalRepositoryRoot, duty: OwedTaskMutation): DomainResult<TaskMutationDigest, string> {
+export function observeTaskMutationDigest(root: CanonicalRepositoryRoot, duty: OwedTaskMutation): DomainResult<TaskRecordDigest, string> {
   const files = observeDeclaredFiles(root, duty.declared);
   return files.ok ? success(taskMutationDigest(duty.startSha, files.value)) : files;
 }
@@ -84,7 +78,7 @@ export function observeTaskMutation(
     if (!record.ok) return Object.freeze({ kind: "unavailable", reason: `its record is unreadable: ${record.error}` });
     return Object.freeze({
       kind: "observed",
-      standing: taskMutationStanding(record.value, duty.taskId, digest.value),
+      standing: taskRecordStanding(record.value, duty.taskId, digest.value),
       command: commands.mutationCheck(duty.taskId),
     });
   };

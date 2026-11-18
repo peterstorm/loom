@@ -35,39 +35,52 @@ test. The implementer that could have answered each finding had already stopped.
   owner stamp, when it is a Distill, ADR or Contract Task, or when no obligation is owed at its stop. An
   obligation is owed at the stop when the Task touches its family (`taskOwnerDuty`: owner, sibling or
   matrix test), the Task's Wave owes it at the gate (`owesInWave`), and both the owner and the matrix test
-  are settled at the stop.
+  are settled at the stop. A duty that owes mutation carries the frozen runner; one whose every obligation is
+  mutation-exempt carries none; an obligation owing mutation with no runner frozen leaves the Task owing nothing
+  (`no-affected-runner`), so a runner-less mutating duty cannot be built.
 - **Settled at the stop** (`isSettledAtStop`, beside `duePaths` in `core/owner-verification/obligations.ts`,
   one listing rule for both): no Task lists the path, a Task of an earlier Wave does, or the stopping Task
   does. A path only another Task of the same Wave lists is that Task's work in flight.
 - **Coverage** reaches the owner and each sibling settled at the stop (`duePathsAtStop`), a subset of what
-  the gate asks (`duePaths`).
+  the gate asks (`duePaths`). The duty computes these paths once, and the run reads them from the duty.
 - **Mutation** is the gate's own plan: `waveBaseOf`, `mutationPlan` under `MUTANT_CAP_PER_INVARIANT`, one
   isolated worktree per obligation, the frozen `affectedRunner` over the matrix test.
 - **One run, shared.** `verifyObligations` in `orchestration/owner-verification-runner.ts` is the
-  per-obligation run both callers use. The gate passes `duePaths` and the plain runner; the Task check
-  passes `duePathsAtStop` and a runner that refuses to launch a run its deadline cannot hold. The gate's
-  verdicts are unchanged.
+  per-obligation run both callers use, over a non-empty list of runs each carrying its due paths, returning a
+  non-empty list of verdicts. The gate pairs its runs with `duePaths`; the Task check pairs each owed
+  obligation's run (`obligationRunOf`) with the duty's own paths, and launches each matrix-test run through a
+  runner that refuses one its deadline cannot hold. The gate's verdicts are unchanged.
 - **Deadline 480 s.** A run launches only while the time left holds its whole limit. A refused run is the
   gate's own `spawn-failed` outcome naming the deadline, so its obligation's mutation half is an
   infrastructure verdict and coverage is still judged.
 - **Result.** The gate's `InvariantVerdict` per owed obligation, or `unavailable` when the check could not
-  run at all (no repository root, files that changed while it ran, a throw). Survivors and missing paths
-  print in the gate's words (`renderOwnerVerificationFailure`).
+  run at all (no repository root, files that changed while it ran, a throw). A result is read against the duty
+  (`judgeTaskOwnerCheck`), each verdict paired with the obligation it judged; one that judged an Invariant the
+  duty does not owe reads as `unavailable`. Survivors and missing paths print in the gate's words
+  (`renderOwnerVerificationFailure`).
 
 ### 2. The record
 One runtime file per repository and Task beside the Task mutation record, written atomically and read
-under the one absence rule, with the Task id encoded injectively (ADR-0071 §3, one shared module now). It
-holds the result and a digest of the Task's `start_sha`, the owed obligations, and the bytes or absence of
-the owner, the settled siblings, the matrix test and every file the Task declares. The helper digests
-before and after its run; a difference records `unavailable`.
+under the one absence rule, with the Task id encoded injectively (ADR-0071 §3). It holds the result and a
+digest of the Task's `start_sha`, the owed obligations, and the bytes or absence of the owner, the settled
+siblings, the matrix test and every file the Task declares. The helper digests before and after its run; a
+difference records `unavailable`. `recordedTaskOwnerCheck` takes the duty and refuses a result for an
+Invariant the duty does not owe.
+
+Both Task records share one pure core, `core/task-record.ts`, generic over the result: the digest rule and
+its brand, the wire envelope and its parser, the standing (not run, stale, current), the stop observation
+and the stop verdict. The file I/O is shared too (`orchestration/task-record-file.ts`). The Task mutation
+check's record, digest and outputs are unchanged.
 
 ### 3. The stop arm
 A fourth name in `STOP_CHECK_NAMES`, `owner`, with its own counter capped at 2, no runner and no lock,
-joined into the one combined block message.
+joined into the one combined block message. The block decision's slots are a record keyed by
+`STOP_CHECK_NAMES`, with a payload type per name and one constructor (`someChecks`) that refuses a record
+naming no check, so a further check adds a name, not a type variant.
 
 - **Blocks** on a missing or stale record, and on missing paths or survivors of an obligation whose matrix
   test the Task lists.
-- **Notes and proceeds** on the same findings of an obligation whose matrix test the Task does not list
+- **Notes and proceeds** on a record of another duty, on the same findings of an obligation whose matrix test the Task does not list
   (only the matrix test answers either: the gate's remedy is to strengthen it, and a Task cannot write a
   file it does not declare), on a red baseline (usually a sibling's unfinished work, as ADR-0071 rules),
   on an infrastructure verdict, on an `unavailable` result, at the cap and on every fault. The note

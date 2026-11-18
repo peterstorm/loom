@@ -20,8 +20,6 @@ import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handl
 import { runStopChecks } from "../../src/handlers/subagent-stop/stop-checks";
 import type { StopChecksOutcome } from "../../src/core/affected-stop-check-types";
 import { NO_CHANGED_FILES } from "../../src/core/changed-files";
-import { NO_TASK_MUTATION_CHECK } from "../../src/core/task-mutation-check";
-import { NO_TASK_OWNER_CHECK } from "../../src/core/task-owner-check";
 import type { Task, TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
@@ -35,6 +33,7 @@ import {
 } from "../fixtures/stop-check-plan-fixtures";
 import { ACCEPTANCE_REPORT, argvOf } from "../fixtures/stop-check-runners";
 import { graphFixture } from "../fixtures/task-lifecycle";
+import { TASK_RECORD_CHECK_OFF } from "../../src/core/task-record";
 
 const TYPES = "engine/src/core/ledger-types.ts";
 const LEDGER = "engine/tests/acceptance/ledger.acceptance.test.ts";
@@ -286,8 +285,8 @@ async function liveStop(graph: TaskGraph, taskId: string): Promise<LiveStop> {
     taskId,
     agentKey: "s.a",
     changedFiles: () => ({ kind: "observed", changed: NO_CHANGED_FILES }),
-    taskMutation: () => NO_TASK_MUTATION_CHECK,
-    taskOwnerCheck: () => NO_TASK_OWNER_CHECK,
+    taskMutation: () => TASK_RECORD_CHECK_OFF,
+    taskOwnerCheck: () => TASK_RECORD_CHECK_OFF,
     hookStartedAtMs: Date.now(),
   }, ports);
   return { outcome, launched };

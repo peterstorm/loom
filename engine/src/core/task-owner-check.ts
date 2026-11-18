@@ -6,15 +6,19 @@
  *
  * Every decision of the check lives here, and each has one home:
  * - `taskOwnerCheckDuty`: whether a Task owes the check, over which
- *   obligations, what each one's matrix test must reach at this stop, and
- *   whether the Task answers its findings. `helper owner-check`, the stop arm
- *   and the implementation brief all ask it.
+ *   obligations, what each one's matrix test must reach at this stop, whether
+ *   the Task answers its findings, and the runner its mutation needs.
+ *   `helper owner-check`, the stop arm and the implementation brief all ask it.
  * - `taskOwnerCheckDigest`: the identity of what one run judged, over the
  *   Task's base, the owed obligations and the bytes of every family input.
  * - `taskOwnerCheckResult` / `taskOwnerCheckUnavailable`: the run's result,
  *   the gate's own `InvariantVerdict` per obligation, or why it could not run.
+ * - `judgeTaskOwnerCheck`: a result read against the duty, each verdict
+ *   paired with the obligation it judged; a verdict for an Invariant the duty
+ *   does not owe is refused. `recordedTaskOwnerCheck` builds a record only
+ *   through it, and the stop reads every record through it.
  * - `parseTaskOwnerCheckRecord` and `taskOwnerCheckRecordJson`: the record's
- *   wire form, parsed and never cast.
+ *   wire form, in the envelope the Task records share (`task-record.ts`).
  * - `sortTaskOwnerFindings`: which findings the Task answers (they may block)
  *   and which it only reports. Only the matrix test answers a missing path or
  *   a survivor, so only a Task that lists the matrix test is held for one.
@@ -30,11 +34,9 @@
 
 import { match } from "ts-pattern";
 import type { TaskGraph } from "../types";
-import { sha256Bytes, sha256Hex } from "./digest";
 import { taskRolePolicy } from "./distill-task";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
-import { failure, isNonEmpty, nonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
-import { compareStrings } from "./ordering";
+import { failure, isNonEmpty, mapNonEmpty, nonEmpty, nonEmptyOf, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
 import {
   contractTaskIdsOf,
   duePathsAtStop,
@@ -42,14 +44,29 @@ import {
   obligationsDigest,
   owesInWave,
   taskOwnerDuty,
+  verifyOwed,
 } from "./owner-verification/obligations";
 import { parseInvariantVerdicts } from "./owner-verification/parse";
 import type { InvariantVerdict, OwnerObligation, OwnerVerificationFailure } from "./owner-verification/types";
 import { invariantVerdictFailures, renderMutationVerdict, renderOwnerVerificationFailure } from "./owner-verification/verdict";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { invariantRoles } from "./plan-paths";
-import { exactRecordErrors, isRecord, parseExactRecord, type UnknownRecord } from "./plain-record";
-import type { TaskFileBytes } from "./task-mutation-check";
+import { isRecord } from "./plain-record";
+import {
+  exactKeys,
+  parseTaskRecord,
+  recordedTask,
+  taskRecordDigest,
+  taskRecordJson,
+  type RecordedTask,
+  type TaskFileBytes,
+  type TaskRecord,
+  type TaskRecordDigest,
+  type TaskRecordObservation,
+  type TaskRecordStanding,
+  type TaskRecordStopVerdict,
+  type TaskRecordWire,
+} from "./task-record";
 import type { AffectedRunner } from "./verification-manifest";
 
 /** The longest one `helper owner-check` run may take; a run it cannot launch in time is refused, never half-judged. */
@@ -74,7 +91,9 @@ export type TaskOwnerCheckOffReason =
   /** A Contract Task writes compiling stubs, which owe no owner verification. */
   | "contract-task"
   /** No obligation the Task touches is owed at its stop. */
-  | "nothing-owed";
+  | "nothing-owed"
+  /** An owed obligation needs mutation, but no `affectedRunner` is frozen (population refuses such a plan; the gate reports `runner-missing`). */
+  | "no-affected-runner";
 
 /** The one line each off reason reads as. */
 export const TASK_OWNER_CHECK_OFF_TEXT: Readonly<Record<TaskOwnerCheckOffReason, string>> = Object.freeze({
@@ -85,6 +104,7 @@ export const TASK_OWNER_CHECK_OFF_TEXT: Readonly<Record<TaskOwnerCheckOffReason,
   "contract-task": "a Contract Task's stubs owe no owner verification",
   "nothing-owed": "no owned Invariant this Task touches is owed at its stop: the Wave owes none of them, or its owner or matrix test " +
     "is another Task of this Wave's work in flight, which the Wave Gate judges",
+  "no-affected-runner": "an owned Invariant this Task touches owes mutation, but no affectedRunner is frozen; the Wave Gate reports it as runner-missing",
 });
 
 /** One obligation a Task owes at its stop. */
@@ -96,20 +116,24 @@ export type StopObligation = Readonly<{
   answers: boolean;
 }>;
 
-/** A Task that owes the check: its obligations, its base, the runner and what the digest covers. */
+/**
+ * A Task that owes the check: its obligations, its base and what the digest
+ * covers, and the runner its mutation needs. A duty whose obligations owe
+ * mutation always carries the frozen runner; one whose every obligation is
+ * mutation-exempt carries none. A duty that owes mutation with no runner
+ * cannot be built.
+ */
 export type OwedTaskOwnerCheck = Readonly<{
   kind: "owed";
   taskId: string;
   wave: number;
   /** The Task's base commit, or null when the Task records none. */
   startSha: string | null;
-  /** The frozen runner; absent only when every owed obligation is mutation-exempt (population refuses otherwise). */
-  runner: AffectedRunner | undefined;
   /** In stamp order. */
   obligations: NonEmpty<StopObligation>;
-  /** Every path the digest covers, sorted and unique: each owner, due path and matrix test, and every file the Task declares. */
+  /** Every path the digest covers, each once: each owner, due path and matrix test, then every file the Task declares. */
   digested: NonEmpty<string>;
-}>;
+}> & (Readonly<{ mutation: "owed"; runner: AffectedRunner }> | Readonly<{ mutation: "exempt-only" }>);
 
 export type TaskOwnerCheckDuty = Readonly<{ kind: "off"; reason: TaskOwnerCheckOffReason }> | OwedTaskOwnerCheck;
 
@@ -117,6 +141,11 @@ const off = (reason: TaskOwnerCheckOffReason): TaskOwnerCheckDuty => Object.free
 
 /** The graph the duty reads. */
 export type TaskOwnerCheckGraph = Pick<TaskGraph, "tasks" | "acceptance_contracts" | "owner_obligations" | "verification_manifest">;
+
+/** The list with every repeat after its first occurrence dropped; non-empty because its head always stays. */
+function firstOccurrences<T>([head, ...tail]: NonEmpty<T>): NonEmpty<T> {
+  return nonEmptyOf(head, ...tail.filter((value, index) => value !== head && tail.indexOf(value) === index));
+}
 
 /**
  * Whether `taskId` owes the Task owner check under `graph`, and over which
@@ -129,13 +158,13 @@ export type TaskOwnerCheckGraph = Pick<TaskGraph, "tasks" | "acceptance_contract
 export function taskOwnerCheckDuty(graph: TaskOwnerCheckGraph, taskId: string): TaskOwnerCheckDuty {
   const task = graph.tasks.find(({ id }) => id === taskId);
   if (task === undefined) return off("unknown-task");
-  const touched = taskOwnerDuty(graph, task.file_list ?? []);
+  const fileList = task.file_list ?? [];
+  const touched = taskOwnerDuty(graph, fileList);
   if (touched.kind === "unstamped") return off("unstamped");
   if (!taskRolePolicy(task).schedulesFamilies) return off("exempt-role");
   if (task.agent === DECISION_RECORD_AGENT) return off("decision-record-task");
   const contractTaskIds = contractTaskIdsOf(graph);
   if (contractTaskIds.has(task.id)) return off("contract-task");
-  const fileList = task.file_list ?? [];
   const owed = nonEmpty(touched.touched
     .filter((obligation) =>
       owesInWave(graph.tasks, contractTaskIds, task.wave, obligation) &&
@@ -143,64 +172,49 @@ export function taskOwnerCheckDuty(graph: TaskOwnerCheckGraph, taskId: string): 
       isSettledAtStop(graph.tasks, task, obligation.matrixTest))
     .map((obligation): StopObligation => Object.freeze({
       obligation,
-      due: frozen(duePathsAtStop(graph.tasks, task, obligation)),
+      due: duePathsAtStop(graph.tasks, task, obligation),
       answers: invariantRoles(fileList, obligation).matrixTest,
     })));
   if (owed === null) return off("nothing-owed");
-  const declared = fileList.map(normalizePlanPath).filter(isRepoRelativePlanPath);
-  // Never null: every owed obligation's due paths lead with its owner.
-  const digested = nonEmpty([
-    ...new Set([...owed.flatMap(({ obligation, due }) => [...due, obligation.matrixTest]), ...declared]),
-  ].sort(compareStrings));
-  if (digested === null) return off("nothing-owed");
-  const startSha = task.start_sha === undefined || task.start_sha === "" ? null : task.start_sha;
-  return Object.freeze({
-    kind: "owed",
+  const [first, ...rest] = owed;
+  const [lead, ...dueRest] = first.due;
+  const digested = firstOccurrences<string>([
+    lead,
+    ...dueRest,
+    first.obligation.matrixTest,
+    ...rest.flatMap(({ obligation, due }) => [...due, obligation.matrixTest]),
+    ...fileList.map(normalizePlanPath).filter(isRepoRelativePlanPath),
+  ]);
+  const fields = {
+    kind: "owed" as const,
     taskId: task.id,
     wave: task.wave,
-    startSha,
-    runner: graph.verification_manifest?.affectedRunner,
-    obligations: frozen(owed),
-    digested: frozen(digested),
-  });
-}
-
-/** A non-empty list frozen in place: `Object.freeze` would type it as `readonly T[]` and lose the tuple. */
-function frozen<T>(list: NonEmpty<T>): NonEmpty<T> {
-  Object.freeze(list);
-  return list;
+    startSha: task.start_sha === undefined || task.start_sha === "" ? null : task.start_sha,
+    obligations: nonEmptyOf(first, ...rest),
+    digested,
+  };
+  const runner = graph.verification_manifest?.affectedRunner;
+  if (verifyOwed(owed.map(({ obligation }) => obligation)).length === 0) return Object.freeze({ ...fields, mutation: "exempt-only" });
+  return runner === undefined ? off("no-affected-runner") : Object.freeze({ ...fields, mutation: "owed", runner });
 }
 
 // ---------------------------------------------------------------------------
 // The digest
 // ---------------------------------------------------------------------------
 
-declare const TASK_OWNER_CHECK_DIGEST: unique symbol;
-
-/** The identity of what one owner-check run judged: only `taskOwnerCheckDigest` and the record parser hold one. */
-export type TaskOwnerCheckDigest = string & { readonly [TASK_OWNER_CHECK_DIGEST]: true };
-
-const DIGEST = /^[0-9a-f]{64}$/;
-const mintDigest = (hex: string): TaskOwnerCheckDigest => hex as TaskOwnerCheckDigest;
-
 /**
  * The digest of a duty's base, its owed obligations (each with what its
  * matrix test must reach and whether the Task answers it) and the bytes of
- * the files given. Independent of the order the files are given in; any
- * change to the base, the obligations, the set of paths, a file's presence or
- * one byte changes it.
+ * the files given, by the shared rule (`taskRecordDigest`).
  */
-export function taskOwnerCheckDigest(duty: OwedTaskOwnerCheck, files: readonly TaskFileBytes[]): TaskOwnerCheckDigest {
-  const entries = files
-    .map(({ path, bytes }): readonly [string, string | null] => [path, bytes === null ? null : sha256Bytes(bytes)])
-    .sort(([left], [right]) => compareStrings(left, right));
+export function taskOwnerCheckDigest(duty: OwedTaskOwnerCheck, files: readonly TaskFileBytes[]): TaskRecordDigest {
   const obligations = duty.obligations.map(({ obligation, due, answers }) => [obligation.invariant, due, answers]);
   const stamp = obligationsDigest(duty.obligations.map(({ obligation }) => obligation));
-  return mintDigest(sha256Hex(JSON.stringify(["loom-task-owner-check-digest-v1", duty.startSha, stamp, obligations, entries])));
+  return taskRecordDigest("loom-task-owner-check-digest-v1", [duty.startSha, stamp, obligations], files);
 }
 
 // ---------------------------------------------------------------------------
-// One run's result
+// One run's result, judged against the duty
 // ---------------------------------------------------------------------------
 
 /**
@@ -216,12 +230,43 @@ export type TaskOwnerCheckResult =
 
 export const taskOwnerCheckUnavailable = (reason: string): TaskOwnerCheckResult => Object.freeze({ kind: "unavailable", reason });
 
-/** The result of a run's verdicts: `unavailable` when it judged no obligation, which a run over an owed duty never does. */
-export function taskOwnerCheckResult(verdicts: readonly InvariantVerdict[]): TaskOwnerCheckResult {
-  const judged = nonEmpty(verdicts);
-  return judged === null
-    ? taskOwnerCheckUnavailable("the run judged no obligation")
-    : Object.freeze({ kind: "verdicts", verdicts: frozen(judged) });
+export const taskOwnerCheckResult = (verdicts: NonEmpty<InvariantVerdict>): TaskOwnerCheckResult =>
+  Object.freeze({ kind: "verdicts", verdicts });
+
+/** One verdict with the obligation it judged. */
+export type JudgedObligation = Readonly<{ owed: StopObligation; verdict: InvariantVerdict }>;
+
+/** A result read against the duty: each verdict paired with its obligation, or why the check could not decide. */
+export type TaskOwnerCheckJudgement =
+  | Readonly<{ kind: "judged"; judged: NonEmpty<JudgedObligation> }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+/** Each verdict paired with the obligation of the duty it judged, or the refusal naming the first Invariant the duty does not owe. */
+function pairVerdicts(duty: OwedTaskOwnerCheck, [head, ...tail]: NonEmpty<InvariantVerdict>): DomainResult<NonEmpty<JudgedObligation>, string> {
+  const pairOf = (verdict: InvariantVerdict): DomainResult<JudgedObligation, string> => {
+    const owed = duty.obligations.find(({ obligation }) => obligation.invariant === verdict.invariant);
+    return owed === undefined
+      ? failure(`it judged ${verdict.invariant}, which Task ${duty.taskId} does not owe at its stop`)
+      : success(Object.freeze({ owed, verdict }));
+  };
+  const first = pairOf(head);
+  if (!first.ok) return first;
+  const rest: JudgedObligation[] = [];
+  for (const verdict of tail) {
+    const paired = pairOf(verdict);
+    if (!paired.ok) return paired;
+    rest.push(paired.value);
+  }
+  return success(nonEmptyOf(first.value, ...rest));
+}
+
+/** A result as the duty reads it: a result that judged an Invariant the duty does not owe is `unavailable`, never trusted. */
+export function judgeTaskOwnerCheck(duty: OwedTaskOwnerCheck, result: TaskOwnerCheckResult): TaskOwnerCheckJudgement {
+  if (result.kind === "unavailable") return result;
+  const paired = pairVerdicts(duty, result.verdicts);
+  return paired.ok
+    ? Object.freeze({ kind: "judged", judged: paired.value })
+    : Object.freeze({ kind: "unavailable", reason: `its record is not of this duty: ${paired.error}` });
 }
 
 // ---------------------------------------------------------------------------
@@ -231,34 +276,37 @@ export function taskOwnerCheckResult(verdicts: readonly InvariantVerdict[]): Tas
 export const TASK_OWNER_CHECK_RECORD_KIND = "loom-task-owner-check-record" as const;
 export const TASK_OWNER_CHECK_RECORD_SCHEMA_VERSION = 1 as const;
 
+const WIRE: TaskRecordWire = Object.freeze({
+  kind: TASK_OWNER_CHECK_RECORD_KIND,
+  schemaVersion: TASK_OWNER_CHECK_RECORD_SCHEMA_VERSION,
+  path: "taskOwnerCheckRecord",
+});
+
 /** What a Task's last owner-check run left: nothing (`not-run`), or its result bound to the digest of what it judged. */
-export type TaskOwnerCheckRecord =
-  | Readonly<{ kind: "not-run" }>
-  | Readonly<{ kind: "recorded"; taskId: string; digest: TaskOwnerCheckDigest; result: TaskOwnerCheckResult }>;
+export type TaskOwnerCheckRecord = TaskRecord<TaskOwnerCheckResult>;
 
-export type RecordedTaskOwnerCheck = Extract<TaskOwnerCheckRecord, { kind: "recorded" }>;
+export type RecordedTaskOwnerCheck = RecordedTask<TaskOwnerCheckResult>;
 
-export const TASK_OWNER_CHECK_NOT_RUN: TaskOwnerCheckRecord = Object.freeze({ kind: "not-run" });
-
-export const recordedTaskOwnerCheck = (taskId: string, digest: TaskOwnerCheckDigest, result: TaskOwnerCheckResult): RecordedTaskOwnerCheck =>
-  Object.freeze({ kind: "recorded", taskId, digest, result });
+/**
+ * The record of one run over `duty`. It refuses a duty with no Task id and a
+ * result that judged an Invariant the duty does not owe, so a record the
+ * helper writes always pairs with the duty it ran for.
+ */
+export function recordedTaskOwnerCheck(
+  duty: OwedTaskOwnerCheck,
+  digest: TaskRecordDigest,
+  result: TaskOwnerCheckResult,
+): DomainResult<RecordedTaskOwnerCheck, string> {
+  if (duty.taskId === "") return failure("a Task owner record needs a Task id");
+  if (result.kind === "verdicts") {
+    const paired = pairVerdicts(duty, result.verdicts);
+    if (!paired.ok) return failure(`the result is not of this duty: ${paired.error}`);
+  }
+  return success(recordedTask(duty.taskId, digest, result));
+}
 
 /** The record's wire document. Property order is fixed, so equal records serialize to equal bytes. */
-export function taskOwnerCheckRecordJson({ taskId, digest, result }: RecordedTaskOwnerCheck): string {
-  return JSON.stringify({
-    schemaVersion: TASK_OWNER_CHECK_RECORD_SCHEMA_VERSION,
-    kind: TASK_OWNER_CHECK_RECORD_KIND,
-    taskId,
-    digest,
-    result,
-  });
-}
-
-/** Null when `raw` holds exactly `keys`, or the refusal naming each missing and surplus key. */
-function exactKeys(raw: Readonly<UnknownRecord>, keys: readonly string[], path: string): string | null {
-  const shape = parseExactRecord(raw, keys, path);
-  return shape.ok ? null : exactRecordErrors(shape, path, "an object").join("; ");
-}
+export const taskOwnerCheckRecordJson = (record: RecordedTaskOwnerCheck): string => taskRecordJson(WIRE, record);
 
 function parseResult(raw: unknown, path: string): DomainResult<TaskOwnerCheckResult, string> {
   if (!isRecord(raw)) return failure(`${path} must be an object`);
@@ -278,18 +326,7 @@ function parseResult(raw: unknown, path: string): DomainResult<TaskOwnerCheckRes
 }
 
 /** A record document as a record, or the first reason it is not one. */
-export function parseTaskOwnerCheckRecord(raw: unknown): DomainResult<RecordedTaskOwnerCheck, string> {
-  const path = "taskOwnerCheckRecord";
-  if (!isRecord(raw)) return failure(`${path} must be an object`);
-  const shape = exactKeys(raw, ["schemaVersion", "kind", "taskId", "digest", "result"], path);
-  if (shape !== null) return failure(shape);
-  if (raw.schemaVersion !== TASK_OWNER_CHECK_RECORD_SCHEMA_VERSION) return failure(`${path}.schemaVersion must be ${TASK_OWNER_CHECK_RECORD_SCHEMA_VERSION}`);
-  if (raw.kind !== TASK_OWNER_CHECK_RECORD_KIND) return failure(`${path}.kind must be "${TASK_OWNER_CHECK_RECORD_KIND}"`);
-  if (typeof raw.taskId !== "string" || raw.taskId === "") return failure(`${path}.taskId must be a non-empty string`);
-  if (typeof raw.digest !== "string" || !DIGEST.test(raw.digest)) return failure(`${path}.digest must be a sha256 hex digest`);
-  const result = parseResult(raw.result, `${path}.result`);
-  return result.ok ? success(recordedTaskOwnerCheck(raw.taskId, mintDigest(raw.digest), result.value)) : result;
-}
+export const parseTaskOwnerCheckRecord = (raw: unknown): DomainResult<RecordedTaskOwnerCheck, string> => parseTaskRecord(raw, WIRE, parseResult);
 
 // ---------------------------------------------------------------------------
 // Sorting findings
@@ -304,23 +341,15 @@ export function parseTaskOwnerCheckRecord(raw: unknown): DomainResult<RecordedTa
  */
 export type TaskOwnerFindings = Readonly<{ blocking: readonly OwnerVerificationFailure[]; noted: readonly string[] }>;
 
-const isAnswerable = (failure: OwnerVerificationFailure): boolean => failure.kind === "missing-siblings" || failure.kind === "survivor";
-
-/** A verdict the duty does not owe means the record is of another duty, which the digest already rules out: it is reported, never trusted. */
-export function sortTaskOwnerFindings(duty: OwedTaskOwnerCheck, verdicts: readonly InvariantVerdict[]): TaskOwnerFindings {
+export function sortTaskOwnerFindings(judged: readonly JudgedObligation[]): TaskOwnerFindings {
   const blocking: OwnerVerificationFailure[] = [];
   const noted: string[] = [];
-  for (const verdict of verdicts) {
-    const owed = duty.obligations.find(({ obligation }) => obligation.invariant === verdict.invariant);
-    if (owed === undefined) {
-      noted.push(`${verdict.invariant}: the record judged an Invariant this Task does not owe at its stop`);
-      continue;
-    }
+  for (const { owed, verdict } of judged) {
     for (const found of invariantVerdictFailures(verdict)) {
-      if (owed.answers && isAnswerable(found)) blocking.push(found);
-      else if (isAnswerable(found)) {
-        noted.push(`${renderOwnerVerificationFailure(found)} (only ${verdict.matrixTest} answers this, and this Task does not list it)`);
-      } else noted.push(renderOwnerVerificationFailure(found));
+      const answerable = found.kind === "missing-siblings" || found.kind === "survivor";
+      if (answerable && owed.answers) blocking.push(found);
+      else if (answerable) noted.push(`${renderOwnerVerificationFailure(found)} (only ${verdict.matrixTest} answers this, and this Task does not list it)`);
+      else noted.push(renderOwnerVerificationFailure(found));
     }
   }
   return Object.freeze({ blocking: Object.freeze(blocking), noted: Object.freeze(noted) });
@@ -330,28 +359,11 @@ export function sortTaskOwnerFindings(duty: OwedTaskOwnerCheck, verdicts: readon
 // The stop
 // ---------------------------------------------------------------------------
 
-/** How a Task's record stands against its family now: its result, when it judged these very bytes. */
-export type TaskOwnerCheckStanding =
-  | Readonly<{ kind: "not-run" }>
-  | Readonly<{ kind: "stale" }>
-  | Readonly<{ kind: "current"; result: TaskOwnerCheckResult }>;
+/** How a Task's record stands against its family now (`taskRecordStanding`). */
+export type TaskOwnerCheckStanding = TaskRecordStanding<TaskOwnerCheckResult>;
 
-/** The record's standing for `taskId` at `digest`: a record of another Task or of other bytes is stale. */
-export function taskOwnerCheckStanding(record: TaskOwnerCheckRecord, taskId: string, digest: TaskOwnerCheckDigest): TaskOwnerCheckStanding {
-  if (record.kind === "not-run") return Object.freeze({ kind: "not-run" });
-  return record.taskId === taskId && record.digest === digest
-    ? Object.freeze({ kind: "current", result: record.result })
-    : Object.freeze({ kind: "stale" });
-}
-
-/** What a stop shell observed for the owner arm: the Task owes nothing, its record's standing with the refreshing command, or a fault. */
-export type TaskOwnerCheckObservation =
-  | Readonly<{ kind: "off" }>
-  | Readonly<{ kind: "observed"; duty: OwedTaskOwnerCheck; standing: TaskOwnerCheckStanding; command: string }>
-  | Readonly<{ kind: "unavailable"; reason: string }>;
-
-/** The observation of a stop that asks nothing of the owner arm. */
-export const NO_TASK_OWNER_CHECK: TaskOwnerCheckObservation = Object.freeze({ kind: "off" });
+/** What a stop shell observed for the owner arm: the Task owes nothing, its record's standing with the duty and the refreshing command, or a fault. */
+export type TaskOwnerCheckObservation = TaskRecordObservation<TaskOwnerCheckResult, Readonly<{ duty: OwedTaskOwnerCheck }>>;
 
 /** Why the owner arm would hold a stop open. */
 export type TaskOwnerCheckBlockCause =
@@ -363,13 +375,10 @@ export type TaskOwnerCheckBlockCause =
  * The arm's verdict at one stop. It blocks for a check that never ran, ran
  * over other bytes, or left a finding the Task answers; a current record with
  * no finding passes; a record whose findings the Task does not answer, an
- * unavailable run and every fault is a note, and the stop proceeds.
+ * unavailable run, a record of another duty and every fault is a note, and
+ * the stop proceeds.
  */
-export type TaskOwnerCheckStopVerdict =
-  | Readonly<{ kind: "idle" }>
-  | Readonly<{ kind: "passed" }>
-  | Readonly<{ kind: "note"; note: string }>
-  | Readonly<{ kind: "failing"; cause: TaskOwnerCheckBlockCause; command: string }>;
+export type TaskOwnerCheckStopVerdict = TaskRecordStopVerdict<TaskOwnerCheckBlockCause>;
 
 const proceeds = (taskId: string, why: string): TaskOwnerCheckStopVerdict =>
   Object.freeze({ kind: "note", note: `Task owner check for ${taskId} did not hold the stop (${why}); the stop proceeds and the Wave Gate judges` });
@@ -379,9 +388,9 @@ export function taskOwnerCheckStopVerdict(taskId: string, observation: TaskOwner
   if (observation.kind === "unavailable") return proceeds(taskId, observation.reason);
   const { duty, standing, command } = observation;
   if (standing.kind !== "current") return Object.freeze({ kind: "failing", cause: standing, command });
-  const { result } = standing;
-  if (result.kind === "unavailable") return proceeds(taskId, `its last run was unavailable: ${result.reason}`);
-  const { blocking, noted } = sortTaskOwnerFindings(duty, result.verdicts);
+  const judgement = judgeTaskOwnerCheck(duty, standing.result);
+  if (judgement.kind === "unavailable") return proceeds(taskId, `its last run was unavailable: ${judgement.reason}`);
+  const { blocking, noted } = sortTaskOwnerFindings(judgement.judged);
   if (isNonEmpty(blocking)) return Object.freeze({ kind: "failing", cause: Object.freeze({ kind: "findings", findings: blocking, noted }), command });
   if (noted.length > 0) return proceeds(taskId, noted.join("; "));
   return Object.freeze({ kind: "passed" });
@@ -402,7 +411,7 @@ const notedLines = (noted: readonly string[]): readonly string[] =>
   noted.length === 0 ? [] : ["Not blocking (the Wave Gate judges these):", ...noted.map((line) => `- ${line}`)];
 
 /** One verdict's summary line: its coverage, then its mutation half in the gate's words. */
-const verdictSummary = (verdict: InvariantVerdict): string => {
+const verdictSummary = ({ verdict }: JudgedObligation): string => {
   const coverage = match(verdict.coverage)
     .with({ kind: "covered" }, () => "coverage reaches every path due at this stop")
     .with({ kind: "missing" }, ({ paths }) => `coverage misses ${paths.join(", ")}`)
@@ -411,12 +420,12 @@ const verdictSummary = (verdict: InvariantVerdict): string => {
   return `- ${verdict.invariant} (matrix test ${verdict.matrixTest}): ${coverage}; ${renderMutationVerdict(verdict.mutation)}`;
 };
 
-/** What `helper owner-check` prints for one run. */
-export function renderTaskOwnerCheckReport(duty: OwedTaskOwnerCheck, result: TaskOwnerCheckResult): string {
-  const head = `Task owner check for ${duty.taskId}:`;
-  if (result.kind === "unavailable") return `${head} unavailable — ${result.reason}. It did not decide and will not block your stop.`;
-  const { blocking, noted } = sortTaskOwnerFindings(duty, result.verdicts);
-  const summary = result.verdicts.map(verdictSummary);
+/** What `helper owner-check` prints for one run, read against the duty it ran for. */
+export function renderTaskOwnerCheckReport(taskId: string, judgement: TaskOwnerCheckJudgement): string {
+  const head = `Task owner check for ${taskId}:`;
+  if (judgement.kind === "unavailable") return `${head} unavailable — ${judgement.reason}. It did not decide and will not block your stop.`;
+  const { blocking, noted } = sortTaskOwnerFindings(judgement.judged);
+  const summary = mapNonEmpty(judgement.judged, verdictSummary);
   if (blocking.length === 0) {
     return [`${head} ${noted.length === 0 ? "clean" : "nothing for this Task to answer"}.`, ...summary, ...notedLines(noted)].join("\n");
   }

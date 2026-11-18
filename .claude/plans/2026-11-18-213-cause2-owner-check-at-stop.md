@@ -20,11 +20,11 @@ ADR-0071's shape: a helper the implementer runs, and a stop arm that reads the r
 
 **Settled at the stop** (`isSettledAtStop`, next to `duePaths` in `core/owner-verification/obligations.ts`; both read one listing rule, `isDueWhen`): unlisted, listed by an earlier Wave, or listed by the stopping Task.
 
-**Run** (`orchestration/task-owner-check-runner.ts`): `verifyObligations` in `orchestration/owner-verification-runner.ts` is now exported and parameterized by an `ObligationRunScope` (`due`, `execute`); the gate passes `duePaths` and `runOnce`, the Task check passes `duePathsAtStop` and `runOnce` behind its 480 s deadline. `verificationRuns` takes the obligations rather than the gate's branded `OwedVerification`.
+**Run** (`orchestration/task-owner-check-runner.ts`): `verifyObligations` in `orchestration/owner-verification-runner.ts` is now exported. It takes a non-empty list of `ScopedRun`s (each run with its due paths) and an `ObligationRunScope` (`execute`), and returns non-empty verdicts. The gate pairs its runs with `duePaths` and uses `runOnce`; the Task check pairs each owed obligation's run (`obligationRunOf`, now exported from `owed-verification.ts`) with the duty's own `due` and uses `runOnce` behind its 480 s deadline.
 
-**Record** (`orchestration/task-owner-check-record.ts`, on the shared `orchestration/task-record-file.ts` that the Task mutation record now also uses): the gate's verdicts per obligation or `unavailable`, bound to a digest of `start_sha`, the owed obligations and the bytes of every family input and declared file.
+**Record** (`orchestration/task-owner-check-record.ts`, on the shared `orchestration/task-record-file.ts` that the Task mutation record now also uses): the gate's verdicts per obligation or `unavailable`, bound to a digest of `start_sha`, the owed obligations and the bytes of every family input and declared file. `recordedTaskOwnerCheck` takes the duty and refuses verdicts for Invariants it does not owe; the stop reads every record through `judgeTaskOwnerCheck`, the same pairing. Both Task records share the pure core `core/task-record.ts` (digest and brand, envelope, standing, observation, stop verdict).
 
-**Stop arm**: `owner` in `STOP_CHECK_NAMES`, cap 2, heading `## Task owner check`; the slot shape in `core/affected-stop-check.ts` grows by one. `sortTaskOwnerFindings` decides which findings block.
+**Stop arm**: `owner` in `STOP_CHECK_NAMES`, cap 2, heading `## Task owner check`; the block decision's slots in `core/affected-stop-check.ts` are a record keyed by `STOP_CHECK_NAMES` with one constructor. `sortTaskOwnerFindings` decides which findings block.
 
 **Brief**: a `Task owner check` paragraph in the Verification Policy section.
 
@@ -43,3 +43,18 @@ ADR-0071's shape: a helper the implementer runs, and a stop arm that reads the r
 5. The fourth stop arm, wired in the Claude Code dispatcher and the Pi stop.
 6. The brief paragraph.
 7. Tests; docs (`verification.md`, `architecture.md`, `operations.md`, `reference/helpers.md`, `roadmap.md`, the implementation-proof context); ADR-0092.
+
+## Review remediation (PR #229, `pr229-review-1`)
+
+Eighteen accepted advisories, applied in the working tree:
+
+1. Tests: a concurrent same-Wave sibling (covered at the stop, missing at the gate); the helper's fail-open arms (a family file rewritten during the run, an unwritable record directory, a failed pre-run digest, no repository root); a Task whose duty owes nothing at the stop arm.
+2. `OwedTaskOwnerCheck` is a union: mutation owed with a required runner, or exempt-only with none; a duty owing mutation with no runner is off (`no-affected-runner`).
+3. `recordedTaskOwnerCheck` takes the duty and refuses an empty Task id or a foreign verdict; `sortTaskOwnerFindings` takes judged obligations and no longer compensates at read time.
+4. `SomeChecks` is a record keyed by `STOP_CHECK_NAMES` with per-name payloads and one constructor.
+5. `core/task-record.ts` holds what both Task records share; the Task mutation check's outputs are unchanged.
+6. The runner judges coverage over the duty's own due paths.
+7. `digested` and the verdict list are non-empty by construction; the unreachable branches are gone.
+8. Small cleanups; docs (`helpers.md`, `roadmap.md`, a test comment).
+
+`verificationRuns` keeps the gate's `OwedVerification` parameter, as before this change: the Task check no longer calls it.

@@ -36,7 +36,6 @@ import {
   type TaskMutationStanding,
 } from "../../src/core/task-mutation-check";
 import type { TaskMutant } from "../../src/core/owner-verification/mutation-plan";
-import { NO_TASK_OWNER_CHECK } from "../../src/core/task-owner-check";
 import { REPORT_ONLY_STOP_CHECK_PORTS } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import type { StopChecksInput } from "../../src/handlers/subagent-stop/stop-checks";
 import type { Evidence } from "../../src/machine";
@@ -55,6 +54,7 @@ import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
 import { outcomeText, recordingStopCheckPorts, stopsOf } from "../fixtures/stop-check-runners";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { junitReport, mutationManifest, START_SHA, talliedResult, type JunitCase, type MutationManifestOverrides } from "../fixtures/task-mutation";
+import { TASK_RECORD_CHECK_OFF } from "../../src/core/task-record";
 
 const IMPL = "src/ledger.ts";
 const TEST = "src/ledger.test.ts";
@@ -136,23 +136,22 @@ function stopper(space: ReturnType<typeof workspace>, options: StopOptions = {})
       changed: changedFilesAtStop(files.map((path): Evidence => ({ kind: "FileWrite", path: join(root, path), via: "tool" })), root, () => true),
     }),
     taskMutation: options.taskMutation ?? observeTaskMutation(COMMANDS, () => space.records),
-    taskOwnerCheck: () => NO_TASK_OWNER_CHECK,
+    taskOwnerCheck: () => TASK_RECORD_CHECK_OFF,
     hookStartedAtMs: 0,
   };
   return { stop: stopsOf(input, ports, options.root), counts, launches };
 }
 
-const textOf = outcomeText;
 
 describe("the Task mutation check at a stop", () => {
   it("holds a stop whose check never ran, naming the one command, and runs no runner for it", async () => {
     const { stop, counts, launches } = stopper(workspace());
     const outcome = await stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome)).toContain(MUTATION_BLOCK_HEADING);
-    expect(textOf(outcome)).toContain("The check has not run for this Task.");
-    expect(textOf(outcome)).toContain(`  ${COMMAND}`);
-    expect(textOf(outcome)).toContain("blocks at most 1 more time(s)");
+    expect(outcomeText(outcome)).toContain(MUTATION_BLOCK_HEADING);
+    expect(outcomeText(outcome)).toContain("The check has not run for this Task.");
+    expect(outcomeText(outcome)).toContain(`  ${COMMAND}`);
+    expect(outcomeText(outcome)).toContain("blocks at most 1 more time(s)");
     expect(counts.mutation.get(AGENT)).toBe(1);
     expect(launches).toEqual([]);
   });
@@ -161,12 +160,12 @@ describe("the Task mutation check at a stop", () => {
     const { stop, counts } = stopper(workspace());
     const outcomes = [await stop(), await stop()];
     expect(outcomes.map(({ kind }) => kind)).toEqual(["block", "block"]);
-    expect(textOf(outcomes[1]!)).toContain("blocks at most 0 more time(s)");
+    expect(outcomeText(outcomes[1]!)).toContain("blocks at most 0 more time(s)");
     expect(counts.mutation.get(AGENT)).toBe(TASK_MUTATION_STOP_CHECK_MAX_BLOCKS);
     const third = await stop();
     expect(third.kind).toBe("note");
-    expect(textOf(third)).toContain(`stop checks for T2: the Task mutation check reached its ${TASK_MUTATION_STOP_CHECK_MAX_BLOCKS}-block cap`);
-    expect(textOf(third)).not.toContain(MUTATION_BLOCK_HEADING);
+    expect(outcomeText(third)).toContain(`stop checks for T2: the Task mutation check reached its ${TASK_MUTATION_STOP_CHECK_MAX_BLOCKS}-block cap`);
+    expect(outcomeText(third)).not.toContain(MUTATION_BLOCK_HEADING);
     expect(counts.mutation.has(AGENT)).toBe(false);
   });
 
@@ -188,7 +187,7 @@ describe("the Task mutation check at a stop", () => {
     writeFile(space.root, path, "export const changed = true;\n");
     const outcome = await stopper(space).stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome)).toContain("Your files changed after the check last ran");
+    expect(outcomeText(outcome)).toContain("Your files changed after the check last ran");
   });
 
   it("holds a stop whose record names survivors, and lists each as the helper does", async () => {
@@ -196,16 +195,16 @@ describe("the Task mutation check at a stop", () => {
     record(space, SURVIVORS);
     const outcome = await stopper(space).stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome)).toContain(`- ${IMPL}:4:3 guard-removal: \`if (amount <= 0) throw new RangeError();\` → \`;\``);
-    expect(textOf(outcome)).toContain("an equivalent mutant");
+    expect(outcomeText(outcome)).toContain(`- ${IMPL}:4:3 guard-removal: \`if (amount <= 0) throw new RangeError();\` → \`;\``);
+    expect(outcomeText(outcome)).toContain("an equivalent mutant");
   });
 
   it("joins the affected-test check in one block, each arm counting its own blocks", async () => {
     const { stop, counts, launches } = stopper(workspace(), { changed: [IMPL], affected: [FAILING] });
     const outcome = await stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome).indexOf(AFFECTED_BLOCK_HEADING)).toBeGreaterThan(-1);
-    expect(textOf(outcome).indexOf(MUTATION_BLOCK_HEADING)).toBeGreaterThan(textOf(outcome).indexOf(AFFECTED_BLOCK_HEADING));
+    expect(outcomeText(outcome).indexOf(AFFECTED_BLOCK_HEADING)).toBeGreaterThan(-1);
+    expect(outcomeText(outcome).indexOf(MUTATION_BLOCK_HEADING)).toBeGreaterThan(outcomeText(outcome).indexOf(AFFECTED_BLOCK_HEADING));
     expect([counts.affected.get(AGENT), counts.mutation.get(AGENT)]).toEqual([1, 1]);
     expect(launches).toHaveLength(1);
   });
@@ -216,7 +215,7 @@ describe("the Task mutation check at a stop", () => {
     const { stop, counts } = stopper(space, { changed: [IMPL], affected: [FAILING] });
     const outcome = await stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome)).not.toContain(MUTATION_BLOCK_HEADING);
+    expect(outcomeText(outcome)).not.toContain(MUTATION_BLOCK_HEADING);
     expect(counts.mutation.has(AGENT)).toBe(false);
   });
 });
@@ -225,8 +224,8 @@ describe("the Task mutation check fails open", () => {
   const proceeds = async (stop: () => Promise<StopChecksOutcome>, note: string | RegExp): Promise<void> => {
     const outcome = await stop();
     expect(outcome.kind).toBe("note");
-    expect(textOf(outcome)).toMatch(note);
-    expect(textOf(outcome)).not.toContain(MUTATION_BLOCK_HEADING);
+    expect(outcomeText(outcome)).toMatch(note);
+    expect(outcomeText(outcome)).not.toContain(MUTATION_BLOCK_HEADING);
   };
 
   it("for a run that was unavailable, such as a red baseline", async () => {
@@ -281,7 +280,7 @@ describe("the Task mutation check fails open", () => {
     const taskMutation = (): TaskMutationObservation => { asked++; throw new Error("unreachable"); };
     const outcome = await stopper(workspace(), { manifest, taskMutation }).stop();
     expect(outcome.kind).not.toBe("block");
-    expect(textOf(outcome)).not.toContain("Task mutation check");
+    expect(outcomeText(outcome)).not.toContain("Task mutation check");
     expect(asked).toBe(0);
   });
 });

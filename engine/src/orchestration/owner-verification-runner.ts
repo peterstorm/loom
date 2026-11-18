@@ -28,10 +28,11 @@
  *    blocking `real-workspace-changed` failure (SC-004).
  *
  * Step 2 is `verifyObligations`, the one per-obligation run the Task owner
- * check shares (ADR-0092). Its `ObligationRunScope` names what the two
- * callers differ in: the paths due (`duePaths` here, `duePathsAtStop` at a
- * Task's stop) and how one matrix-test run is launched (`runOnce` here,
- * behind the Task check's deadline there).
+ * check shares (ADR-0092). The two callers differ only in the paths each run
+ * must reach (`ScopedRun.due`: `duePaths` by the Wave here, the duty's own
+ * paths at a Task's stop) and in how one matrix-test run is launched
+ * (`ObligationRunScope.execute`: `runOnce` here, behind the Task check's
+ * deadline there).
  *
  * No command text ever comes from the plan: the command is the frozen
  * runner's, formed by `affectedRunnerCheck`, and its time limit is clamped by
@@ -45,7 +46,7 @@
  */
 
 import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser";
-import { failure, success, type DomainResult, type NonEmpty } from "../core/orchestration-contract/identity";
+import { failure, mapNonEmpty, nonEmptyOf, success, type DomainResult, type NonEmpty } from "../core/orchestration-contract/identity";
 import type { ArtifactDigest } from "../core/orchestration-contract";
 import { siblingCoverage } from "../core/owner-verification/coverage";
 import { mutationPlan, applyMutant, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
@@ -133,13 +134,13 @@ function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): Dom
     : infrastructure("alias-config-unresolvable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error.reason}`));
 }
 
-/** The matrix test's reach over the family paths the scope says are due. */
-function coverage(scope: ObligationRunScope, obligation: OwnerObligation): CoverageVerdict {
+/** The matrix test's reach over the family paths its run says are due. */
+function coverage(scope: ObligationRunScope, { run: { obligation }, due }: ScopedRun): CoverageVerdict {
   const aliases = coverageAliases(scope.root, obligation.matrixTest);
   if (!aliases.ok) return coverageInfrastructure(aliases.error);
   return siblingCoverage({
     matrixTest: obligation.matrixTest,
-    due: scope.due(obligation),
+    due,
     aliases: aliases.value,
     read: (path) => readRepositoryText(scope.root, path),
   });
@@ -160,13 +161,11 @@ export type RunMatrixTest = (owner: OwnerVariant) => Promise<MatrixTestRun>;
 export type ExecuteMatrixTest = (workspace: MutationWorkspace, command: MatrixTestCommand, owner: OwnerVariant) => Promise<MatrixTestRun>;
 
 /**
- * What one obligation's run reads besides the obligation itself. The gate and
- * a Task owner check (ADR-0092) differ only here:
- * - `due`: the paths the matrix test must reach, `duePaths` by the Wave at the
- *   gate, `duePathsAtStop` at a Task's stop;
- * - `execute`: how one matrix-test run is launched.
- * The Wave base, the mutation plan, the isolated copy, the run sequencing and
- * the verdict are the same for both.
+ * What every obligation's run reads besides the obligation itself. The gate
+ * and a Task owner check (ADR-0092) differ only in the paths each run must
+ * reach (`ScopedRun.due`) and in `execute`, how one matrix-test run is
+ * launched. The Wave base, the mutation plan, the isolated copy, the run
+ * sequencing and the verdict are the same for both.
  */
 export type ObligationRunScope = Readonly<{
   /** The real workspace. It is only ever read. */
@@ -174,7 +173,6 @@ export type ObligationRunScope = Readonly<{
   /** The Tasks whose listings choose each owner's Wave base. */
   graph: Pick<TaskGraph, "tasks" | "acceptance_contracts">;
   wave: number;
-  due: (obligation: OwnerObligation) => NonEmpty<string>;
   execute: ExecuteMatrixTest;
 }>
 
@@ -283,8 +281,14 @@ async function workspaceDigest(input: OwnerVerificationInput, when: "before" | "
   return observed.value.ok ? success(observed.value.value) : unobserved(observed.value.error);
 }
 
+/**
+ * One obligation's run with the paths its matrix test must reach: `duePaths`
+ * by the Wave at the gate, the duty's own `due` at a Task's stop.
+ */
+export type ScopedRun = Readonly<{ run: ObligationRun; due: NonEmpty<string> }>;
+
 /** Each run's verdict, in run order, and the mutation plan of each obligation whose owner changed in the Wave. */
-export type ObligationRuns = Readonly<{ verdicts: readonly InvariantVerdict[]; plans: ReadonlyMap<InvariantId, MutationPlan> }>;
+export type ObligationRuns = Readonly<{ verdicts: NonEmpty<InvariantVerdict>; plans: ReadonlyMap<InvariantId, MutationPlan> }>;
 
 /**
  * The per-obligation run the gate and a Task owner check share: coverage
@@ -292,26 +296,27 @@ export type ObligationRuns = Readonly<{ verdicts: readonly InvariantVerdict[]; p
  * failure is that obligation's infrastructure verdict; a throw escapes only
  * from a step built to return failures as data, and its caller guards it.
  */
-export async function verifyObligations(scope: ObligationRunScope, runs: readonly ObligationRun[]): Promise<ObligationRuns> {
-  const verdicts: InvariantVerdict[] = [];
+export async function verifyObligations(scope: ObligationRunScope, [first, ...rest]: NonEmpty<ScopedRun>): Promise<ObligationRuns> {
   const plans = new Map<InvariantId, MutationPlan>();
-  for (const run of runs) {
-    const covered = coverage(scope, run.obligation);
+  const verify = async (scoped: ScopedRun): Promise<InvariantVerdict> => {
+    const { run } = scoped;
+    const covered = coverage(scope, scoped);
     const evidence: MutationEvidence = run.kind === "exempt" ? { kind: "exempt" } : await mutationEvidence(scope, run);
     if (evidence.kind === "owner-changed") plans.set(run.obligation.invariant, evidence.plan);
-    verdicts.push(invariantVerdict(run.obligation, covered, evidence));
-  }
-  return { verdicts, plans };
+    return invariantVerdict(run.obligation, covered, evidence);
+  };
+  const head = await verify(first);
+  const tail: InvariantVerdict[] = [];
+  for (const scoped of rest) tail.push(await verify(scoped));
+  return { verdicts: nonEmptyOf(head, ...tail), plans };
 }
 
-/** The gate's scope: the paths due by its Wave, and every run launched as it comes. */
-const gateScope = (input: OwnerVerificationInput): ObligationRunScope => ({
-  root: input.root,
-  graph: input.graph,
-  wave: input.wave,
-  due: (obligation) => duePaths(input.graph.tasks, input.wave, obligation),
-  execute: runOnce,
-});
+/** The gate's scope: every run launched as it comes. */
+const gateScope = (input: OwnerVerificationInput): ObligationRunScope => ({ root: input.root, graph: input.graph, wave: input.wave, execute: runOnce });
+
+/** Each gate run with the paths due by its Wave. */
+const gateRuns = (input: OwnerVerificationInput, runs: NonEmpty<ObligationRun>): NonEmpty<ScopedRun> =>
+  mapNonEmpty(runs, (run) => ({ run, due: duePaths(input.graph.tasks, input.wave, run.obligation) }));
 
 /**
  * The check between its two digest observations. A throw from the
@@ -320,13 +325,13 @@ const gateScope = (input: OwnerVerificationInput): ObligationRunScope => ({
  * workspace outranks the thrown failure.
  */
 async function verifyWave(input: OwnerVerificationInput): Promise<OwnerVerificationObservation> {
-  const planned = verificationRuns(input.owed.obligations, input.manifest.affectedRunner);
+  const planned = verificationRuns(input.owed, input.manifest.affectedRunner);
   if (!planned.ok) return unavailableBecause(planned.error);
   const { runs, verifying, perRunMs } = planned.value;
 
   const before = await workspaceDigest(input, "before");
   if (!before.ok) return unavailableBecause(before.error);
-  const ran = await guarded("verifying the owed obligations", () => verifyObligations(gateScope(input), runs));
+  const ran = await guarded("verifying the owed obligations", () => verifyObligations(gateScope(input), gateRuns(input, runs)));
   const after = await workspaceDigest(input, "after");
   if (!after.ok) return unavailableBecause(after.error);
   if (after.value !== before.value) {

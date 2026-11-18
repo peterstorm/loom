@@ -65,11 +65,11 @@ import {
   type BlockAdmission,
   type Blocking,
   type BlockingChecks,
+  type EveryCheck,
   type StopCheckBlockCaps,
   type StopChecksBlockParts,
 } from "../../core/affected-stop-check";
 import {
-  NO_TASK_MUTATION_CHECK,
   renderTaskMutationBlock,
   taskMutationDuty,
   taskMutationStopVerdict,
@@ -77,13 +77,13 @@ import {
   type TaskMutationObservation,
 } from "../../core/task-mutation-check";
 import {
-  NO_TASK_OWNER_CHECK,
   renderTaskOwnerCheckBlock,
   taskOwnerCheckDuty,
   taskOwnerCheckStopVerdict,
   type OwedTaskOwnerCheck,
   type TaskOwnerCheckObservation,
 } from "../../core/task-owner-check";
+import { TASK_RECORD_CHECK_OFF, type TaskRecordStopVerdict, type TaskRecordUnavailable } from "../../core/task-record";
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../core/changed-files";
 import { sha256Bytes } from "../../core/digest";
 import type { LedgerObservation } from "../../core/red-then-green-types";
@@ -217,21 +217,18 @@ function affectedArm(taskId: string, plan: AffectedPlan, observation: AffectedOb
 /** The repository root the stop resolved, or why it could not. */
 type ResolvedRoot = ReturnType<StopCheckShellPorts["repositoryRoot"]>;
 
-type Unavailable = Readonly<{ kind: "unavailable"; reason: string }>;
-
 /**
  * What a record-reading arm (the Task mutation check, the Task owner check)
- * observes: `idle` for a Task that owes nothing, otherwise its record's
+ * observes: `off` for a Task that owes nothing, otherwise its record's
  * standing through `observe`. A missing root or a throwing observation is
  * `unavailable`, which each arm's verdict reads as a note, never a block.
  */
 function recordObservation<Owed, Observation>(
   owed: Owed | null,
-  idle: Observation,
   resolvedRoot: ResolvedRoot,
   observe: (owed: Owed, root: CanonicalRepositoryRoot) => Observation,
-): Observation | Unavailable {
-  if (owed === null) return idle;
+): Observation | TaskRecordUnavailable | typeof TASK_RECORD_CHECK_OFF {
+  if (owed === null) return TASK_RECORD_CHECK_OFF;
   if (!resolvedRoot.ok) return Object.freeze({ kind: "unavailable", reason: resolvedRoot.reason });
   try {
     return observe(owed, resolvedRoot.root);
@@ -240,16 +237,9 @@ function recordObservation<Owed, Observation>(
   }
 }
 
-/** The verdict both record-reading arms decide into. */
-type RecordArmVerdict<Cause> =
-  | Readonly<{ kind: "idle" }>
-  | Readonly<{ kind: "passed" }>
-  | Readonly<{ kind: "note"; note: string }>
-  | Readonly<{ kind: "failing"; cause: Cause; command: string }>;
-
 /** A record-reading arm's verdict as the stop's result; it runs no runner. */
 const recordArmResult = <Cause>(
-  verdict: RecordArmVerdict<Cause>,
+  verdict: TaskRecordStopVerdict<Cause>,
   render: (cause: Cause, command: string, blocksRemaining: number) => string,
 ): CheckResult =>
   match(verdict)
@@ -264,14 +254,14 @@ const recordArmResult = <Cause>(
 /** The mutation arm's result: `taskMutationStopVerdict` over the record `helper mutation-check` left. */
 function mutationResult(input: StopChecksInput, graph: TaskGraph, resolvedRoot: ResolvedRoot): CheckResult {
   const duty = taskMutationDuty(graph, input.taskId);
-  const observed = recordObservation(duty.kind === "off" ? null : duty, NO_TASK_MUTATION_CHECK, resolvedRoot, input.taskMutation);
+  const observed = recordObservation(duty.kind === "off" ? null : duty, resolvedRoot, input.taskMutation);
   return recordArmResult(taskMutationStopVerdict(input.taskId, observed), renderTaskMutationBlock);
 }
 
 /** The owner arm's result (ADR-0092): `taskOwnerCheckStopVerdict` over the record `helper owner-check` left. */
 function ownerResult(input: StopChecksInput, graph: TaskGraph, resolvedRoot: ResolvedRoot): CheckResult {
   const duty = taskOwnerCheckDuty(graph, input.taskId);
-  const observed = recordObservation(duty.kind === "off" ? null : duty, NO_TASK_OWNER_CHECK, resolvedRoot, input.taskOwnerCheck);
+  const observed = recordObservation(duty.kind === "off" ? null : duty, resolvedRoot, input.taskOwnerCheck);
   return recordArmResult(taskOwnerCheckStopVerdict(input.taskId, observed), renderTaskOwnerCheckBlock);
 }
 
@@ -379,12 +369,12 @@ const notesOf = (results: Results): readonly string[] =>
 type Stopper = Pick<StopChecksInput, "taskId" | "agentKey">;
 
 /** Each blocking check's part of the message, rendered with the blocks its counter leaves: the same checks the block names. */
-const blockParts = (blocking: BlockingChecks<Failing, Failing, Failing, Failing>): StopChecksBlockParts =>
-  mapSomeChecks<Blocking<Failing>, string>(blocking, (name, { failure, blocks }) => failure.part(CAPS[name] - blocks));
+const blockParts = (blocking: BlockingChecks<EveryCheck<Failing>>): StopChecksBlockParts =>
+  mapSomeChecks<EveryCheck<Blocking<Failing>>, string>(blocking, (name, { failure, blocks }) => failure.part(CAPS[name] - blocks));
 
 /** Settle the results into one outcome, writing only the counters the decision names. */
 function settle({ taskId, agentKey }: Stopper, results: Results, issued: Issued, ports: StopCheckShellPorts, extraNotes: readonly string[]): StopChecksOutcome {
-  const decision = stopCheckBlockDecision(issued, {
+  const decision = stopCheckBlockDecision<EveryCheck<Failing>>(issued, {
     acceptance: failingOf(results.acceptance),
     affected: failingOf(results.affected),
     mutation: failingOf(results.mutation),

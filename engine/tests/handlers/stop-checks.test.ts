@@ -30,8 +30,6 @@ import {
   type StopChecksOutcome,
 } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../src/core/changed-files";
-import { NO_TASK_MUTATION_CHECK } from "../../src/core/task-mutation-check";
-import { NO_TASK_OWNER_CHECK } from "../../src/core/task-owner-check";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import {
   ACCEPTANCE_STOP_CHECK_MAX_BLOCKS,
@@ -67,6 +65,7 @@ import {
   observedRun,
   parsedRun,
 } from "../fixtures/stop-check-runners";
+import { TASK_RECORD_CHECK_OFF } from "../../src/core/task-record";
 
 const SURFACE = surface("payload");
 const OWED = "AS-001: one valid call wins";
@@ -259,8 +258,8 @@ function input(
     taskId,
     agentKey: "session.agent",
     changedFiles: () => observation,
-    taskMutation: () => NO_TASK_MUTATION_CHECK,
-    taskOwnerCheck: () => NO_TASK_OWNER_CHECK,
+    taskMutation: () => TASK_RECORD_CHECK_OFF,
+    taskOwnerCheck: () => TASK_RECORD_CHECK_OFF,
     hookStartedAtMs: startedAtMs,
   };
 }

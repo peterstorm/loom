@@ -28,7 +28,7 @@ import { join } from "node:path";
 import { subagentDir } from "../config";
 import { sha256Hex } from "../core/digest";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
-import type { TaskFileBytes } from "../core/task-mutation-check";
+import { TASK_RECORD_NOT_RUN, type RecordedTask, type TaskFileBytes, type TaskRecord } from "../core/task-record";
 import { describeCause } from "../utils/describe-cause";
 import { readFileOrAbsence } from "../utils/file-absence";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
@@ -60,19 +60,22 @@ export function taskRecordPath(kind: TaskRecordKind, root: CanonicalRepositoryRo
   return join(directory, `${kind}.${sha256Hex(root).slice(0, 16)}.${taskIdFileSegment(taskId)}.json`);
 }
 
-/** A record file's JSON value, `absent` when there is no file, or why it cannot be read as JSON. */
-export type TaskRecordRead = Readonly<{ kind: "absent" }> | Readonly<{ kind: "json"; raw: unknown }>;
-
-export function readTaskRecordJson(path: string): DomainResult<TaskRecordRead, string> {
+/** The record at `path`, `not-run` when there is no file, or why it cannot be read as one; `parse` is the check's own record parser. */
+export function readTaskRecord<Result>(
+  path: string,
+  parse: (raw: unknown) => DomainResult<RecordedTask<Result>, string>,
+): DomainResult<TaskRecord<Result>, string> {
   const read = readFileOrAbsence(path);
-  if (read.kind === "absent") return success({ kind: "absent" });
+  if (read.kind === "absent") return success(TASK_RECORD_NOT_RUN);
   if (read.kind === "refused") return failure(`${path}: ${describeCause(read.cause)}`);
+  let raw: unknown;
   try {
-    const raw: unknown = JSON.parse(new TextDecoder().decode(read.bytes));
-    return success({ kind: "json", raw });
+    raw = JSON.parse(new TextDecoder().decode(read.bytes));
   } catch (cause) {
     return failure(`${path} is not JSON: ${describeCause(cause)}`);
   }
+  const parsed = parse(raw);
+  return parsed.ok ? parsed : failure(`${path}: ${parsed.error}`);
 }
 
 /** Write `text` at `path` in `directory`, replacing any earlier record, atomically. The path written, or why not. */

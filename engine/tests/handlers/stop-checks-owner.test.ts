@@ -25,7 +25,6 @@ import {
 } from "../../src/core/affected-stop-check-types";
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import type { CoverageVerdict, MutationVerdict, OwnerObligation } from "../../src/core/owner-verification/types";
-import { NO_TASK_MUTATION_CHECK } from "../../src/core/task-mutation-check";
 import {
   recordedTaskOwnerCheck,
   taskOwnerCheckDuty,
@@ -53,6 +52,7 @@ import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
 import { outcomeText, recordingStopCheckPorts, stopsOf } from "../fixtures/stop-check-runners";
 import { graphFixture } from "../fixtures/task-lifecycle";
 import { junitReport, mutationManifest, START_SHA } from "../fixtures/task-mutation";
+import { TASK_RECORD_CHECK_OFF } from "../../src/core/task-record";
 
 const OWNER = "src/rules/owner.ts";
 const SIBLING = "src/rules/sibling.ts";
@@ -68,11 +68,22 @@ const ADMISSION: OwnerObligation = ownerObligation({
 
 const withStart = (built: Task): Task => ({ ...built, start_sha: START_SHA });
 
-/** T2 writes the owner and the matrix test (it answers), or only the sibling, with the owner and matrix test from Wave 1. */
-const graph = (role: "answers" | "sibling-only" = "answers", mutationCheck: "on" | "off" = "off"): TaskGraph => ({
-  ...graphFixture(role === "answers"
-    ? [withStart(task("T2", 2, [OWNER, MATRIX]))]
-    : [withStart(task("T1", 1, [OWNER, MATRIX])), withStart(task("T2", 2, [SIBLING]))]),
+/**
+ * Who writes the family. `answers`: T2 writes the owner and the matrix test.
+ * `sibling-only`: T2 writes only the sibling, the owner and matrix test landed
+ * in Wave 1. `split`: T1 and T2 of the same Wave write the owner and the
+ * matrix test, so neither is settled at T2's stop.
+ */
+type Role = "answers" | "sibling-only" | "split";
+
+const ROSTERS: Readonly<Record<Role, () => readonly Task[]>> = {
+  "answers": () => [withStart(task("T2", 2, [OWNER, MATRIX]))],
+  "sibling-only": () => [withStart(task("T1", 1, [OWNER, MATRIX])), withStart(task("T2", 2, [SIBLING]))],
+  "split": () => [withStart(task("T1", 2, [OWNER])), withStart(task("T2", 2, [MATRIX]))],
+};
+
+const graph = (role: Role = "answers", mutationCheck: "on" | "off" = "off"): TaskGraph => ({
+  ...graphFixture(ROSTERS[role]()),
   verification_manifest: mutationManifest({ taskMutationCheck: mutationCheck }),
   owner_obligations: [ADMISSION],
 });
@@ -104,12 +115,14 @@ function workspace(): Space {
   return { root: parsed.value, records: tempDir("loom-stop-owner-records-") };
 }
 
-function record({ root, records }: Space, result: TaskOwnerCheckResult, role: "answers" | "sibling-only" = "answers"): void {
+function record({ root, records }: Space, result: TaskOwnerCheckResult, role: Role = "answers"): void {
   const duty = taskOwnerCheckDuty(graph(role), "T2");
   if (duty.kind !== "owed") throw new Error(`the fixture Task owes the check (${duty.reason})`);
   const digest = observeTaskOwnerCheckDigest(root, duty);
   if (!digest.ok) throw new Error(digest.error);
-  const written = writeTaskOwnerCheckRecord(root, recordedTaskOwnerCheck("T2", digest.value, result), records);
+  const built = recordedTaskOwnerCheck(duty, digest.value, result);
+  if (!built.ok) throw new Error(built.error);
+  const written = writeTaskOwnerCheckRecord(root, built.value, records);
   if (!written.ok) throw new Error(written.error);
 }
 
@@ -131,7 +144,7 @@ const MISSING = resultOf({ kind: "missing", paths: [SIBLING] }, verified(false))
 const RED = resultOf({ kind: "covered" }, { kind: "red-baseline", failures: ["matrix > admits"] });
 
 type StopOptions = Readonly<{
-  role?: "answers" | "sibling-only";
+  role?: Role;
   mutationCheck?: "on" | "off";
   taskOwnerCheck?: StopChecksInput["taskOwnerCheck"];
   root?: "unavailable";
@@ -146,23 +159,22 @@ function stopper(space: Space, options: StopOptions = {}) {
     taskId: "T2",
     agentKey: AGENT,
     changedFiles: () => ({ kind: "observed", changed: { kind: "none" } }),
-    taskMutation: options.mutationCheck === "on" ? observeTaskMutation(COMMANDS, () => space.records) : () => NO_TASK_MUTATION_CHECK,
+    taskMutation: options.mutationCheck === "on" ? observeTaskMutation(COMMANDS, () => space.records) : () => TASK_RECORD_CHECK_OFF,
     taskOwnerCheck: options.taskOwnerCheck ?? observeTaskOwnerCheck(COMMANDS, () => space.records),
     hookStartedAtMs: 0,
   };
   return { stop: stopsOf(input, ports, options.root), counts, launches };
 }
 
-const textOf = outcomeText;
 
 describe("the Task owner check at a stop", () => {
   it("holds a stop whose check never ran, naming the one command, and runs no runner for it", async () => {
     const { stop, counts, launches } = stopper(workspace());
     const outcome = await stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome)).toContain(OWNER_BLOCK_HEADING);
-    expect(textOf(outcome)).toContain("The check has not run for this Task.");
-    expect(textOf(outcome)).toContain(`  ${COMMAND}`);
+    expect(outcomeText(outcome)).toContain(OWNER_BLOCK_HEADING);
+    expect(outcomeText(outcome)).toContain("The check has not run for this Task.");
+    expect(outcomeText(outcome)).toContain(`  ${COMMAND}`);
     expect(counts.owner.get(AGENT)).toBe(1);
     expect(launches).toEqual([]);
   });
@@ -173,7 +185,7 @@ describe("the Task owner check at a stop", () => {
     expect(counts.owner.get(AGENT)).toBe(TASK_OWNER_STOP_CHECK_MAX_BLOCKS);
     const third = await stop();
     expect(third.kind).toBe("note");
-    expect(textOf(third)).toContain(`the Task owner check reached its ${TASK_OWNER_STOP_CHECK_MAX_BLOCKS}-block cap`);
+    expect(outcomeText(third)).toContain(`the Task owner check reached its ${TASK_OWNER_STOP_CHECK_MAX_BLOCKS}-block cap`);
     expect(counts.owner.has(AGENT)).toBe(false);
   });
 
@@ -182,7 +194,7 @@ describe("the Task owner check at a stop", () => {
     record(space, CLEAN);
     const outcome = await stopper(space).stop();
     expect(outcome.kind).not.toBe("block");
-    expect(textOf(outcome)).not.toMatch(/owner check/i);
+    expect(outcomeText(outcome)).not.toMatch(/owner check/i);
   });
 
   it.each([OWNER, SIBLING, MATRIX])("reads a clean record as stale once %s changes, and holds the stop", async (path) => {
@@ -191,7 +203,7 @@ describe("the Task owner check at a stop", () => {
     writeFile(space.root, path, "export const changed = true;\n");
     const outcome = await stopper(space).stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome)).toContain("changed after the check last ran");
+    expect(outcomeText(outcome)).toContain("changed after the check last ran");
   });
 
   it.each([
@@ -202,17 +214,31 @@ describe("the Task owner check at a stop", () => {
     record(space, result);
     const outcome = await stopper(space).stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome)).toContain(line);
-    expect(textOf(outcome)).toContain("an equivalent mutant");
+    expect(outcomeText(outcome)).toContain(line);
+    expect(outcomeText(outcome)).toContain("an equivalent mutant");
   });
 
   it("joins the mutation arm in one block, each counting its own blocks", async () => {
     const { stop, counts } = stopper(workspace(), { mutationCheck: "on" });
     const outcome = await stop();
     expect(outcome.kind).toBe("block");
-    expect(textOf(outcome).indexOf(OWNER_BLOCK_HEADING)).toBeGreaterThan(textOf(outcome).indexOf(MUTATION_BLOCK_HEADING));
-    expect(textOf(outcome).indexOf(MUTATION_BLOCK_HEADING)).toBeGreaterThan(-1);
+    expect(outcomeText(outcome).indexOf(OWNER_BLOCK_HEADING)).toBeGreaterThan(outcomeText(outcome).indexOf(MUTATION_BLOCK_HEADING));
+    expect(outcomeText(outcome).indexOf(MUTATION_BLOCK_HEADING)).toBeGreaterThan(-1);
     expect([counts.mutation.get(AGENT), counts.owner.get(AGENT)]).toEqual([1, 1]);
+  });
+});
+
+describe("a Task whose duty owes nothing", () => {
+  it("is never held, says nothing of the arm and never asks its port, when a concurrent Task writes the owner", async () => {
+    let asked = 0;
+    const taskOwnerCheck = (): TaskOwnerCheckObservation => { asked++; throw new Error("the duty owes nothing, so the port is never asked"); };
+    const { stop, counts } = stopper(workspace(), { role: "split", taskOwnerCheck });
+    expect(taskOwnerCheckDuty(graph("split"), "T2")).toEqual({ kind: "off", reason: "nothing-owed" });
+    const outcome = await stop();
+    expect(outcome.kind).not.toBe("block");
+    expect(outcomeText(outcome)).not.toContain("Task owner check");
+    expect(counts.owner.size).toBe(0);
+    expect(asked).toBe(0);
   });
 });
 
@@ -220,8 +246,8 @@ describe("the Task owner check proceeds", () => {
   const proceeds = async (stop: () => Promise<StopChecksOutcome>, note: string): Promise<void> => {
     const outcome = await stop();
     expect(outcome.kind).toBe("note");
-    expect(textOf(outcome)).toContain(note);
-    expect(textOf(outcome)).not.toContain(OWNER_BLOCK_HEADING);
+    expect(outcomeText(outcome)).toContain(note);
+    expect(outcomeText(outcome)).not.toContain(OWNER_BLOCK_HEADING);
   };
 
   it("on a red baseline, usually another Task's unfinished work", async () => {
@@ -293,7 +319,7 @@ describe("the Task owner check on Pi", () => {
         { kind: "read", events: [] },
         { ...REPORT_ONLY_STOP_CHECK_PORTS, repositoryRoot: () => ({ ok: true as const, root: space.root }) },
         (line) => lines.push(line),
-        () => NO_TASK_MUTATION_CHECK,
+        () => TASK_RECORD_CHECK_OFF,
         observeTaskOwnerCheck(COMMANDS, () => space.records),
       );
       expect(note?.message).toMatch(/^stop checks \(report-only on Pi; the agent has already ended\): T2\n/);

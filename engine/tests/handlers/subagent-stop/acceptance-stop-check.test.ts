@@ -25,8 +25,6 @@ import {
 } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runStopChecks, stopChecksReportLine } from "../../../src/handlers/subagent-stop/stop-checks";
 import { NO_CHANGED_FILES } from "../../../src/core/changed-files";
-import { NO_TASK_MUTATION_CHECK } from "../../../src/core/task-mutation-check";
-import { NO_TASK_OWNER_CHECK } from "../../../src/core/task-owner-check";
 import type { TaskGraph } from "../../../src/types";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
 import { parseCanonicalRepositoryRoot } from "../../../src/utils/workspace-digest";
@@ -34,6 +32,7 @@ import { contract, frozenPaths, surface, task } from "../../fixtures/contract-st
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { inMemoryBlockCounters } from "../../fixtures/stop-check-block-counters";
 import { observedRun, parsedRun } from "../../fixtures/stop-check-runners";
+import { TASK_RECORD_CHECK_OFF } from "../../../src/core/task-record";
 
 const SURFACE = surface("payload");
 const REPORT = ".loom/completion-reports/acceptance.junit.xml";
@@ -191,8 +190,8 @@ const input = (taskId: string, overrides: Partial<TaskGraph> = {}) =>
     taskId,
     agentKey: "session.agent",
     changedFiles: () => ({ kind: "observed" as const, changed: NO_CHANGED_FILES }),
-    taskMutation: () => NO_TASK_MUTATION_CHECK,
-    taskOwnerCheck: () => NO_TASK_OWNER_CHECK,
+    taskMutation: () => TASK_RECORD_CHECK_OFF,
+    taskOwnerCheck: () => TASK_RECORD_CHECK_OFF,
     hookStartedAtMs: Date.now(),
   });
 

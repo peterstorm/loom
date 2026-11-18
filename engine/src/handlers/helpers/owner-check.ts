@@ -22,6 +22,7 @@ import type { HookHandler, TaskGraph } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import {
+  judgeTaskOwnerCheck,
   recordedTaskOwnerCheck,
   renderTaskOwnerCheckReport,
   TASK_OWNER_CHECK_OFF_TEXT,
@@ -60,6 +61,10 @@ const PRODUCTION_PORTS: OwnerCheckPorts = Object.freeze({
 
 type Outcome<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; message: string }>;
 
+/** What the helper prints for `result`, read against the duty it ran for. */
+const report = (duty: OwedTaskOwnerCheck, result: TaskOwnerCheckResult): string =>
+  renderTaskOwnerCheckReport(duty.taskId, judgeTaskOwnerCheck(duty, result));
+
 /** The Task id the caller named, or the refusal of the command line. */
 function parseTaskArgument(args: readonly string[]): Outcome<string> {
   const unconsumed = unconsumedValueArguments(args, FLAGS);
@@ -86,10 +91,12 @@ async function runAndRecord(
   const result = after.ok && after.value === before.value
     ? ran
     : taskOwnerCheckUnavailable("the family's files changed while the check ran; run it again once they are settled");
-  const written = writeTaskOwnerCheckRecord(root, recordedTaskOwnerCheck(duty.taskId, before.value, result), ports.recordDirectory);
+  const recorded = recordedTaskOwnerCheck(duty, before.value, result);
+  if (!recorded.ok) return { ok: false, message: `owner-check: the result cannot be recorded (${recorded.error}); the result was:\n${report(duty, result)}` };
+  const written = writeTaskOwnerCheckRecord(root, recorded.value, ports.recordDirectory);
   return written.ok
     ? { ok: true, value: result }
-    : { ok: false, message: `owner-check: the record could not be written (${written.error}); the result was:\n${renderTaskOwnerCheckReport(duty, result)}` };
+    : { ok: false, message: `owner-check: the record could not be written (${written.error}); the result was:\n${report(duty, result)}` };
 }
 
 export function createOwnerCheckHandler(ports: OwnerCheckPorts = PRODUCTION_PORTS): HookHandler {
@@ -116,12 +123,12 @@ export function createOwnerCheckHandler(ports: OwnerCheckPorts = PRODUCTION_PORT
     }
     const root = ports.repositoryRoot(manager.getPath());
     if (!root.ok) {
-      ports.write(`${renderTaskOwnerCheckReport(duty, taskOwnerCheckUnavailable(root.reason))}\n`);
+      ports.write(`${report(duty, taskOwnerCheckUnavailable(root.reason))}\n`);
       return { kind: "passthrough" };
     }
     const outcome = await runAndRecord(graph, duty, root.root, ports);
     if (!outcome.ok) return { kind: "error", message: outcome.message };
-    ports.write(`${renderTaskOwnerCheckReport(duty, outcome.value)}\n`);
+    ports.write(`${report(duty, outcome.value)}\n`);
     return { kind: "passthrough" };
   };
 }

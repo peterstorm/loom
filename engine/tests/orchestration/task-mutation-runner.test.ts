@@ -22,7 +22,6 @@ import {
   mutantsByFile,
   recordedTaskMutation,
   TASK_MUTATION_DEADLINE_MS,
-  TASK_MUTATION_NOT_RUN,
   taskMutationDuty,
   taskMutationUnavailable,
   type FileMutants,
@@ -55,6 +54,7 @@ import {
   type TaskMutationRepo,
   type TaskMutationRepoOptions,
 } from "../fixtures/task-mutation-repo";
+import { TASK_RECORD_NOT_RUN } from "../../src/core/task-record";
 
 const savedStatePath = process.env.LOOM_STATE_PATH;
 const temporary: string[] = [];
@@ -218,8 +218,8 @@ describe("the Task mutation record store", () => {
 
   it("reads no file, and a directory that does not exist, as a check that never ran", () => {
     const { at } = repo();
-    expect(readTaskMutationRecord(at.root, LEDGER.taskId, tempDir())).toEqual({ ok: true, value: TASK_MUTATION_NOT_RUN });
-    expect(readTaskMutationRecord(at.root, LEDGER.taskId, join(tempDir(), "missing"))).toEqual({ ok: true, value: TASK_MUTATION_NOT_RUN });
+    expect(readTaskMutationRecord(at.root, LEDGER.taskId, tempDir())).toEqual({ ok: true, value: TASK_RECORD_NOT_RUN });
+    expect(readTaskMutationRecord(at.root, LEDGER.taskId, join(tempDir(), "missing"))).toEqual({ ok: true, value: TASK_RECORD_NOT_RUN });
   });
 
   it("keeps one record per repository and Task, under a name that holds no path separator", () => {

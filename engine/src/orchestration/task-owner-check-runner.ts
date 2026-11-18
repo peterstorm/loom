@@ -3,9 +3,9 @@
  * `helper owner-check` asks for and decides nothing: the duty is the pure
  * core's (`core/task-owner-check.ts`), and each obligation's run is the Wave
  * Gate's own (`verifyObligations` in `owner-verification-runner.ts`):
- * coverage over the paths due at this stop (`duePathsAtStop`), then the
- * gate's mutation plan over the owner's Wave base, in one isolated worktree,
- * through the frozen `affectedRunner` over the matrix test.
+ * coverage over the paths the duty says are due at this stop, then the gate's
+ * mutation plan over the owner's Wave base, in one isolated worktree, through
+ * the frozen `affectedRunner` over the matrix test.
  *
  * What differs from the gate is only the deadline: a matrix-test run launches
  * only while the time left before `TASK_OWNER_CHECK_DEADLINE_MS` holds its
@@ -19,8 +19,7 @@
  */
 
 import { mapNonEmpty } from "../core/orchestration-contract/identity";
-import { duePathsAtStop } from "../core/owner-verification/obligations";
-import { verificationRuns } from "../core/owner-verification/owed-verification";
+import { obligationRunOf } from "../core/owner-verification/owed-verification";
 import type { MatrixTestRun } from "../core/owner-verification/types";
 import {
   TASK_OWNER_CHECK_DEADLINE_MS,
@@ -33,11 +32,12 @@ import type { TaskGraph } from "../types";
 import { describeCause } from "../utils/describe-cause";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
 import { runOnce } from "./mutation-run-steps";
-import { verifyObligations, type ExecuteMatrixTest, type ObligationRunScope } from "./owner-verification-runner";
+import { verifyObligations, type ExecuteMatrixTest, type ScopedRun } from "./owner-verification-runner";
 
 export type TaskOwnerCheckRunInput = Readonly<{
   /** The real workspace. It is only ever read. */
   root: CanonicalRepositoryRoot;
+  /** The Tasks whose listings choose each owner's Wave base. */
   graph: Pick<TaskGraph, "tasks" | "acceptance_contracts">;
   duty: OwedTaskOwnerCheck;
   now: () => number;
@@ -60,22 +60,12 @@ export function withinDeadline(execute: ExecuteMatrixTest, deadlineMs: number, n
   };
 }
 
-async function decide(input: TaskOwnerCheckRunInput, execute: ExecuteMatrixTest): Promise<TaskOwnerCheckResult> {
-  const { duty } = input;
-  const deadlineMs = input.now() + TASK_OWNER_CHECK_DEADLINE_MS;
-  const planned = verificationRuns(mapNonEmpty(duty.obligations, ({ obligation }) => obligation), duty.runner);
-  if (!planned.ok) return taskOwnerCheckUnavailable(`${planned.error.kind}: ${planned.error.detail}`);
-  const stopping = { id: duty.taskId, wave: duty.wave };
-  const scope: ObligationRunScope = {
-    root: input.root,
-    graph: input.graph,
-    wave: duty.wave,
-    due: (obligation) => duePathsAtStop(input.graph.tasks, stopping, obligation),
-    execute: withinDeadline(execute, deadlineMs, input.now),
-  };
-  const ran = await verifyObligations(scope, planned.value.runs);
-  return taskOwnerCheckResult(ran.verdicts);
-}
+/** Each owed obligation's run with the paths its duty says are due: mutation through the duty's runner unless exempt. */
+const dutyRuns = (duty: OwedTaskOwnerCheck) =>
+  mapNonEmpty(duty.obligations, ({ obligation, due }): ScopedRun => ({
+    run: obligationRunOf(obligation, duty.mutation === "owed" ? duty.runner : undefined),
+    due,
+  }));
 
 /**
  * Run the Task owner check for a Task that owes it. Never throws: whatever a
@@ -84,7 +74,11 @@ async function decide(input: TaskOwnerCheckRunInput, execute: ExecuteMatrixTest)
  */
 export async function runTaskOwnerCheck(input: TaskOwnerCheckRunInput, execute: ExecuteMatrixTest = runOnce): Promise<TaskOwnerCheckResult> {
   try {
-    return await decide(input, execute);
+    const { duty } = input;
+    const deadlineMs = input.now() + TASK_OWNER_CHECK_DEADLINE_MS;
+    const scope = { root: input.root, graph: input.graph, wave: duty.wave, execute: withinDeadline(execute, deadlineMs, input.now) };
+    const ran = await verifyObligations(scope, dutyRuns(duty));
+    return taskOwnerCheckResult(ran.verdicts);
   } catch (cause) {
     return taskOwnerCheckUnavailable(`the check failed while it ran: ${describeCause(cause)}`);
   }

@@ -2,8 +2,9 @@
  * The Task owner check's runtime record and what a stop observes of it
  * (ADR-0092). Every effect that reads or writes the record lives here or in
  * the shared record file (`task-record-file.ts`), and nothing here decides:
- * the duty, the wire form, the digest and the standing are the pure core's
- * (`core/task-owner-check.ts`).
+ * the duty, the wire form and the digest are the check's pure core
+ * (`core/task-owner-check.ts`), the standing is the Task records' shared rule
+ * (`core/task-record.ts`).
  *
  * - The record is the `task-owner-check` Task record, beside the Task
  *   mutation record: one file per repository and Task, keyed by Task and
@@ -18,21 +19,19 @@
 
 import { subagentDir } from "../config";
 import type { LoomCommands } from "../core/loom-cli-command";
-import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { success, type DomainResult } from "../core/orchestration-contract/identity";
 import {
   parseTaskOwnerCheckRecord,
-  TASK_OWNER_CHECK_NOT_RUN,
   taskOwnerCheckDigest,
   taskOwnerCheckRecordJson,
-  taskOwnerCheckStanding,
   type OwedTaskOwnerCheck,
   type RecordedTaskOwnerCheck,
-  type TaskOwnerCheckDigest,
   type TaskOwnerCheckObservation,
   type TaskOwnerCheckRecord,
 } from "../core/task-owner-check";
+import { taskRecordStanding, type TaskRecordDigest } from "../core/task-record";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
-import { observeDeclaredFiles, readTaskRecordJson, taskRecordPath, writeTaskRecordFile } from "./task-record-file";
+import { observeDeclaredFiles, readTaskRecord, taskRecordPath, writeTaskRecordFile } from "./task-record-file";
 
 /** Where the owner-check record of `taskId` in the repository at `root` is kept. */
 export function taskOwnerCheckRecordPath(root: CanonicalRepositoryRoot, taskId: string, directory: string = subagentDir()): string {
@@ -45,12 +44,7 @@ export function readTaskOwnerCheckRecord(
   taskId: string,
   directory: string = subagentDir(),
 ): DomainResult<TaskOwnerCheckRecord, string> {
-  const path = taskOwnerCheckRecordPath(root, taskId, directory);
-  const read = readTaskRecordJson(path);
-  if (!read.ok) return read;
-  if (read.value.kind === "absent") return success(TASK_OWNER_CHECK_NOT_RUN);
-  const parsed = parseTaskOwnerCheckRecord(read.value.raw);
-  return parsed.ok ? parsed : failure(`${path}: ${parsed.error}`);
+  return readTaskRecord(taskOwnerCheckRecordPath(root, taskId, directory), parseTaskOwnerCheckRecord);
 }
 
 /** Keep `record`, replacing the Task's earlier one, atomically. The path written, or why not. */
@@ -63,16 +57,16 @@ export function writeTaskOwnerCheckRecord(
 }
 
 /** The digest of the duty's base, obligations and family inputs as they are beneath `root` now. */
-export function observeTaskOwnerCheckDigest(root: CanonicalRepositoryRoot, duty: OwedTaskOwnerCheck): DomainResult<TaskOwnerCheckDigest, string> {
+export function observeTaskOwnerCheckDigest(root: CanonicalRepositoryRoot, duty: OwedTaskOwnerCheck): DomainResult<TaskRecordDigest, string> {
   const files = observeDeclaredFiles(root, duty.digested);
   return files.ok ? success(taskOwnerCheckDigest(duty, files.value)) : files;
 }
 
 /**
  * The stop shells' observation of one Task that owes the owner check: how its
- * record stands against the family now, with the command that refreshes it
- * (`commands.ownerCheck`). A digest or a record that cannot be read is
- * `unavailable`, which never blocks.
+ * record stands against the family now, with the duty and the command that
+ * refreshes it (`commands.ownerCheck`). A digest or a record that cannot be
+ * read is `unavailable`, which never blocks.
  */
 export function observeTaskOwnerCheck(
   commands: Pick<LoomCommands, "ownerCheck">,
@@ -86,7 +80,7 @@ export function observeTaskOwnerCheck(
     return Object.freeze({
       kind: "observed",
       duty,
-      standing: taskOwnerCheckStanding(record.value, duty.taskId, digest.value),
+      standing: taskRecordStanding(record.value, duty.taskId, digest.value),
       command: commands.ownerCheck(duty.taskId),
     });
   };
