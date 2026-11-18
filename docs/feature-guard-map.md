@@ -47,20 +47,20 @@ Two persistence domains carry all authority:
 | Directory | Contents | Size |
 |---|---|---|
 | `agents/` | 31 Agent definitions (persona + model profile + preloaded Skill) | 31 files |
-| `skills/` | 14 Skills (architecture-tech-lead, code-implementer, deepen, distill, grill, java/ts-test-engineer, lint-project, nextjs-frontend-design, review-and-fix, retro, security-audit, security-expert, ts-test-engineer, vercel-react-best-practices) | 103 files |
-| `commands/` | 10 slash-command runbooks + 10 phase prompt templates | 21 files |
+| `skills/` | 14 Skills (architecture-tech-lead, code-implementer, deepen, distill, grill, java/ts-test-engineer, lint-project, nextjs-frontend-design, review-and-fix, retro, security-audit, security-expert, ts-test-engineer, vercel-react-best-practices) | 104 files |
+| `commands/` | 10 slash-command runbooks + 11 phase prompt templates | 21 files |
 | `rules/` | architecture.md (language-neutral) + java/rust/typescript-patterns.md + property-testing.md | 947 lines |
 | `references/` | spec/plan/ADR templates, design-lens & refutation-lens catalogs, reviewer-wire docs, 13 vendored security lenses, per-command runbooks | 39 files |
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 21 files |
-| `engine/` | The engine: 603 src files / 170.4k lines TS + 923 test files / 260k lines | — |
+| `engine/` | The engine: 603 src files / 170.4k lines TS; `engine/tests/` holds 923 TS files / 260k lines (fixtures and helpers included), of which 811 test files are executed | — |
 | `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 7 scripts |
-| `docs/` | 107 docs incl. **90 ADRs** (index test-enforced) | — |
+| `docs/` | 117 docs incl. **90 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -168,9 +168,15 @@ so scope and duties cannot drift between what was authorized and what the child 
 to regexes over the spawn prompt for any agent type it did not know — a general-purpose
 agent whose brief happened to say "read rules/architecture.md" was refused mid-execute as
 an "invalid phase transition", and the only workaround was rewording the brief to dodge
-the gate. It now places an agent by its identity (the agent type and the session's own
-phase record), never by prompt text; unknown agent types are ungated phase-wise instead
-of guessed at.
+the gate. The gate now classifies the spawn's **identity** first (`classifyAgent`):
+- `loom:<known>` — placed by its catalog phase, then judged by phase order;
+- `foreign` (another plugin's namespace, or a bare name outside the catalog) — the phase
+  order is not its business: allowed here, bounded by the direct-edit guard;
+- `missing` (no agent type at all) — **blocked**;
+- `unknown-loom` (a `loom:` name the catalog does not know) — **blocked** with the
+  recognized-agent list.
+On a bare-name harness (Pi) an unknown name cannot be told from a foreign agent, so a
+misspelled Loom agent passes this gate and is still held by the direct-edit guard.
 
 ### 4.3 The edit gates (PreToolUse on `Edit|Write|MultiEdit`)
 
@@ -302,10 +308,11 @@ security-hunter). Key mechanics:
   pin-machines -- --check` and a byte-compare test keep pin and file in lockstep.
   *Honest residual:* the pin is engine source the user's account can write — see §8.4.
 - **The evidence ledger** (`<session>.evidence.jsonl`) holds **facts only**, four
-  kinds: `FileRead`, `FileWrite` (`via: tool|shell`), `TestRun` (runner at head
-  position + parsed structured report), `SandboxRun` (nonce'd sandbox script).
-  Judgments (trusted, passed, red-then-green) are **computed at read time, never
-  stored**. Transcript text is never a fact.
+  kinds: `FileRead`, `FileWrite` (`via: tool|shell`), `TestRun` (two origins: an
+  `agent-command` runner at head position with a parsed structured report, or an
+  `engine-run` run minted from a `helper run-tests` receipt, §4.6), `SandboxRun`
+  (nonce'd sandbox script). Judgments (trusted, passed, red-then-green) are **computed
+  at read time, never stored**. Transcript text is never a fact.
 - **One minting rule for both harnesses** (ADR-0027): Claude PostToolUse/Failure and
   Pi child tool_result both reduce to a `HarnessToolCall` → `extractEvidence` (pure)
   → append. A matrix test feeds identical fixtures through both adapters and asserts
@@ -464,7 +471,10 @@ security-hunter). Key mechanics:
   "wave-review", prior_findings, findings}` — the engine binds the Review Packet ID
   and Review Generation from the issued subject, so a mistyped hash can no longer
   exhaust a final attempt; a payload still carrying packetId or generation is refused,
-  naming the v4 envelope. Standalone types admit v2 only; v2 bytes are unchanged.
+  naming the v4 envelope. A Wave Gate registered before v4 keeps v2 until it ends; a
+  restart or orphan replacement of it issues v4. Fresh **standalone** reviews still
+  admit exact v2 bytes only — v3 is not a fresh protocol but the explicit-successor
+  descriptor (ADR-0010), and v4 is Wave-only so it cannot collide with it.
 - **Restart carry (ADR-0089, #222, Cause 1b).** After a restart of an exhausted Wave
   Gate, the replacement run issues only spec-check and the exhausted reviewer slots;
   accepted reviewer slots carry by reference (original slot, request and context
@@ -609,7 +619,7 @@ killed" — both engine-observed.
 
 ### 4.13 Persistence
 
-**The State File.** `state-manager.ts` + `state-file-wire.ts` (3.4k lines of pure
+**The State File.** `state-manager.ts` + `state-file-wire.ts` (3.9k lines of pure
 `(unknown → ParseResult)` wire parsers — the whole graph is parsed before use,
 "parse, do not cast"):
 
@@ -687,7 +697,8 @@ Scoping model — "everything is linted; exclusions are explicit and reasoned":
   suffix vs directory entries; an entry that would not mean what its author wrote is
   **refused by name** — empty, bare `/`, `.`/`..` segments, byte-for-byte globs);
 - every subtracting list is **decay-checked**: an exclusion, root, shell, boundary,
-  capability grant, external name, or baseline entry that names nothing fails the run;
+  capability grant, external name, or baseline entry that names nothing fails the run
+  (ADR-0079: a word that lives outside the source is listed as an external name);
 - every opt-in rule family (`boundaries`, `pureModules`, `requireGovernance`,
   `docReferences`) is configured or declined-with-reason; neither is a coverage gap
   that fails the full tier (ADR-0075), and each session in an undecided project starts
@@ -724,7 +735,7 @@ lifecycles, pipelines, invariants **with ownership**, contracts), and specs
 parsers. `plain-record.ts` is the shared exact-parse kernel for untrusted JSON wire
 input. Proven non-empty lists (`nonEmptyOf`) replace every `as NonEmpty` cast.
 
-### 4.17 Active-run mutation surfaces (the #212/#203/#220/#221/#215 wave)
+### 4.17 Active-run mutation surfaces (the #212–#222 campaign)
 
 A live TaskGraph used to be frozen against repair: a wrong file list, a missing dependency,
 a drifting spec or plan could only be suffered until the Wave ended. The campaign gave the
@@ -864,7 +875,8 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **923 test files / 260k lines** under `engine/tests/` (core 293, handlers 193, pi 49,
+- **811 executed test files / 260k lines under `engine/tests/`** (923 TS files there
+  including fixtures and helpers; core 293 test files, handlers 193, pi 49,
   linter 46, orchestration 36, utils 34, machine 30, acceptance 20, security 19, …).
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
   contracts, dual-harness evidence fixtures.
@@ -892,18 +904,23 @@ roster-provability checks.
 
 ## 8. What doesn't work — verified residuals and weak spots
 
-Everything in this section was checked against the code at a28b6d6a. The engine's own
-"Honest limits" documentation is unusually candid; this section adds what the scan
-found beyond it.
+Everything in this section was checked against the code at a28b6d6a and, for the wave
+that followed it, at deb8c369. The engine's own "Honest limits" documentation is
+unusually candid; this section adds what the scans found beyond it.
 
-### 8.1 Test-command classification gap (still open)
+### 8.1 Test-command classification gap (still open, narrower)
 
-`PACKAGE_RUN_HEADS` matches **bare heads** (`npm test`, `npm run test`, `npm run
-verify`, …). `npm --prefix <dir> run verify` — the exact invocation loom's own root
-`package.json` prints — is **not classified**, so the run's pass is untrusted
-(`untrusted-regression-pass`). Safe-side by design (unclassified ⇒ untrusted), but it
-means the canonical verify invocation can never mint trusted evidence as spelled.
-Observed in practice with Pi structured evidence.
+`PACKAGE_RUN_HEADS` matches **bare heads** (`npm run <script>`, `yarn run`, `pnpm run`,
+`bun run`; plus `npm test` / `npm run test` / `npm run verify` in
+`TEST_COMMAND_PATTERNS`). The `npx --prefix <dir> vitest` form **is** classified now
+(`NPX_PREFIX_OPTION` in `machine/extract-evidence.ts` strips the option so the runner
+after it classifies; a quoted or substituted directory never matches). But
+`npm --prefix <dir> run verify` — the exact invocation loom's own root `package.json`
+prints — is **still not classified**: the head starts with `npm --prefix`, which
+matches neither a bare `npm run` head nor a test pattern. Its pass is therefore
+untrusted (`untrusted-regression-pass`). Safe-side by design (unclassified ⇒
+untrusted), and engine-run graphs sidestep it entirely (§4.6); the agent-command path
+still cannot mint trusted evidence from that spelling.
 
 ### 8.2 The evidence ledger sees only what command text names
 
@@ -934,6 +951,14 @@ good as its grammar, bash's grammar is bottomless, and new spellings will occasi
 require new rules — but the walker tests and the shared resolution are what keep the
 fix count converging.
 
+The engine's own README names two residuals this section must carry verbatim, both
+added by #219: the guard **cannot see a symlink** (a read redirected to an unguarded
+name is allowed even if an earlier command made that name a link into guarded state —
+making the link needs a command that names the state path, which the guard blocks, or
+one no text guard can see), and a **working-directory walk** (`cd .claude; cd state; rm
+*.json`) never names a guarded path, though the single-hop form is blocked and a read's
+relative redirect target on a `cd` line is never trusted.
+
 ### 8.4 The pin boundary is the user account
 
 Machine digest pins, Runtime Revision hashes, and Fugue integrity stamps are engine
@@ -958,12 +983,19 @@ strength of §8.3's text-level grammar.
 ### 8.6 Report artifacts live in an agent-writable environment
 
 Report files (JUnit/JSON) are written by the runner into the shared filesystem, with
-documented same-call forgery residuals. The freshness window (call-start − 2s), the
-self-author veto, and exit-ownership narrow the surface, and the sandbox receipt's
-nonce binds it to its artifact path but does not authenticate the artifact against a
-hunter that writes the artifact itself. A security ballot is bound to its issued
-verifier spawn, but the capture file of a run whose subagent evades the shell-string
-guard stays writable (no attestation backs it, so neither harness counts such a slot).
+documented same-call forgery residuals (a "test" script that prints runner-shaped
+JSON, or one that stages a report during the judged call, can still vouch for itself).
+The freshness window (call-start − 2s), the self-author veto, and exit-ownership narrow
+the surface, and the sandbox receipt's nonce binds it to its artifact path but does not
+authenticate the artifact against a hunter that writes the artifact itself. A security
+ballot is bound to its issued verifier spawn, but the capture file of a run whose
+subagent evades the shell-string guard stays writable (no attestation backs it, so
+neither harness counts such a slot).
+
+**Qualification (§4.6):** in a graph that froze engine-run test evidence, the engine
+writes the report at the manifest's path and mints the TestRun from its own receipt, so
+the agent-writable-report residual is closed at the root there; `agent-command` graphs
+(and the pre-#201 history they represent) keep it.
 
 ### 8.7 Coverage is only as good as the seeded cells
 
@@ -990,6 +1022,11 @@ no-`agent_id`-under-contention stand-down itself is unchanged.
 
 ### 8.9 Small drift-prone surfaces
 
+- **The repo's own vocabulary drifted from the code it describes**: `CONTEXT.md`'s
+  Judged Path entry still ends "the fallback is a Forward Fix", while #217 (ADR-0086)
+  deleted forward-fix.ts and made the fallback an added Task through a plan edit.
+  The mechanism is retired; the ubiquitous-language file was not updated in the wave.
+  (Found by this re-audit; a one-line amendment to CONTEXT.md closes it.)
 - The template gate's `FALSE_POSITIVES` set is hand-maintained and has already
   drifted between checkouts once (the `{system}` incident; resolved in main — the set
   now contains it — but the mechanism remains a manual list).
@@ -1052,7 +1089,8 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
   remediation; security-audit program + honest limits; StateManager + wire;
   RunDirHandle; journals/effects; context packets; model policy + Pi adapter; linter
   scoping + programmatic rules + ReDoS safety; test inventory and scripts.
-- Claims marked *(docs)* rest on documentation current at a28b6d6a.
+- Claims marked *(docs)* rest on documentation current at a28b6d6a and, where the wave
+  changed them, at deb8c369.
 
 ---
 
@@ -1078,7 +1116,8 @@ one variable. Re-running the same 3 files with the `LOOM_PI_*`/`PI_*` ambient st
 Operational gotcha for this map's next re-scan: run loom's suite outside a live Pi
 session, or with the `LOOM_PI_*` marker set explicitly unset.
 
-Scope note: the a28b6d6a verdict's provenance —
+Scope note: the a28b6d6a verdict's provenance is the scan session; the deb8c369 verdict
+is this re-audit's. Both were run from the main checkout, not the doc worktree.
 
 ---
 
@@ -1130,20 +1169,6 @@ issued-emission-capability.ts — the emission capability contract ·
 judged-paths.ts — decompose-time rule: a judge never runs after its subject's Wave ·
 ledger-epoch-view.ts — one epoch's facts rendered for I6 ·
 legacy-archive.ts — read-only parsers for historical artifacts ·
-attestation-writes.ts — attestation enforced, not instructed (ADR-0085) ·
-coupled-file-sets.ts — manifest+lockfile belong to one Task (ADR-0082) ·
-engine-owned-paths.ts — every engine path class in one place (#204) ·
-engine-revision-pin.ts — the TaskGraph's engine-revision pin and adoption (#205) ·
-option-words.ts — shared option-word reading for the read-only classifiers ·
-read-only-filters.ts / read-only-gh.ts — audited read-only classifiers for sort/uniq/find and gh (#206) ·
-regression-attribution.ts — sibling in-flight test failures attributed to their owner (ADR-0080) ·
-retro-facts/-record/-status/-triggers.ts — friction facts, audit, report, triggers (ADR-0083) ·
-roster-liveness.ts — never-started/aborted roster entries judged from transcripts (#211) ·
-runner-presets.ts — known runners as affectedRunner presets (#202) ·
-spec-amendment.ts / spec-rejudgement.ts — audited spec amendment and claim re-judgement (ADR-0087) ·
-task-addition.ts / task-dependency-edit.ts / task-rescope.ts / task-scope-rules.ts — the audited active-Wave mutation cores (ADR-0081/#202/#203) ·
-wave-plan-edit.ts — the wave_plan_edits audit ·
-wave-review-carry.ts / wave-review-carry-plan.ts — restart carry of accepted reviewer slots (ADR-0089) ·
 lint-coverage-ignore.ts — the user's silenced-repository list ·
 lint-runtime-skew.ts — did the full-tier lint judge the current bytes ·
 loom-cli-command.ts — every command/path the engine prints that names itself ·
@@ -1181,7 +1206,7 @@ runtime-baseline-restore.ts — restoration rules for implementation settlement 
 scope-classification.ts — standalone-review scope policy ·
 security-* (adjudication/audit-contract/audit-start/coverage/disposition/findings/lenses/lens-select/reports/sandbox/verification) — the audit program's pure machinery ·
 spec-check.ts/spec-trace*.ts — requirement trace and its amendment/migration ·
-standalone-* (30 modules) — the standalone review program: kinds, scope, rosters, read coverage, attempt admission, transcripts, records, lineage, disposition, refutation, successor, checkpoint ·
+standalone-* (19 modules) — the standalone review program: kinds, scope, rosters, read coverage, attempt admission, transcripts, records, lineage, disposition, refutation, successor, checkpoint ·
 stop-check-*.ts — the stop-check planner and note surface ·
 structured-test-report.ts — one test file as its structured report lists it ·
 subagent-authority.ts — which Bash a subagent may not run (ADR-0067 D6) ·
@@ -1195,13 +1220,32 @@ validate-* (phase-order/task-execution/template-substitution) — the spawn-gate
 verification-* (manifest, manifest-install, policy, verified-claim-hashes) — manifest freeze and waivers; hash re-anchoring ·
 test-evidence-{mode,policy,authority}.ts / engine-test-run.ts — the frozen test-evidence mode (#198), the engine-run receipt and its admission (#201) ·
 verify-slice.ts — which part of `npm run verify` one invocation runs ·
-wave-* (30 modules) — the Wave Gate: model, machine (LC-1), checks, membership, registration/replacement, preparation, completion-suite readiness, frozen source, review authority/issuance, transcripts, status facts ·
+wave-* (18 modules) — the Wave Gate: model, machine (LC-1), checks, membership, registration/replacement, preparation, completion-suite readiness, frozen source, review authority/issuance, transcripts, status facts ·
 wire-contract.ts — the Wire Contract's stamping seam ·
-skeleton/* (16 modules) — generation, resolution, conformance, records, refresh, status; pure TS/Java surfaces ·
-shell-* (10 modules) — the shared bash grammar (see §4.4) ·
+skeleton/* (17 modules) — generation, resolution, conformance, records, refresh, status; pure TS/Java surfaces ·
+shell-* (9 modules) — the shared bash grammar (see §4.4) ·
 owner-verification/* (18 modules) — obligations, coverage, import graph, mutation plan, outcome, verdict, integrity ·
 acceptance-contract/* (12 modules) — model, tasks, binding, gate, freeze, wire, stop checks ·
-orchestration-contract/* (11 modules) — the shared kernel: identity, rosters, artifacts, effects, publication, actions
+orchestration-contract/* (12 modules) — the shared kernel: identity, rosters, artifacts, effects, publication, actions
+
+**Added between a28b6d6a and deb8c369** (read from their own source headers, not the
+original sweep):
+
+attestation-writes.ts — attestation enforced, not instructed (ADR-0085) ·
+coupled-file-sets.ts — manifest+lockfile belong to one Task (ADR-0082) ·
+engine-owned-paths.ts — every engine path class in one place (#204) ·
+engine-revision-pin.ts — the TaskGraph's engine-revision pin and adoption (#205) ·
+option-words.ts — shared option-word reading for the read-only classifiers ·
+read-only-filters.ts / read-only-gh.ts — audited read-only classifiers for sort/uniq/find and gh (#206) ·
+regression-attribution.ts — sibling in-flight test failures attributed to their owner (ADR-0080) ·
+retro-facts/-record/-status/-triggers.ts — friction facts, audit, report, triggers (ADR-0083) ·
+roster-liveness.ts — never-started/aborted roster entries judged from transcripts (#211) ·
+runner-presets.ts — known runners as affectedRunner presets (#202) ·
+spec-amendment.ts / spec-rejudgement.ts — audited spec amendment and claim re-judgement (ADR-0087) ·
+task-addition.ts — add/withdraw a Task through an audited plan edit (ADR-0086) ·
+task-dependency-edit.ts / task-rescope.ts / task-scope-rules.ts — the audited active-Wave mutation cores (ADR-0081/#202/#203) ·
+wave-plan-edit.ts — the wave_plan_edits audit ·
+wave-review-carry.ts / wave-review-carry-plan.ts — restart carry of accepted reviewer slots (ADR-0089)
 
 ## Appendix B — other engine directories (file-by-file)
 
