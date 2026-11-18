@@ -39,6 +39,7 @@ import type {
   CurrentReviewRun,
   CurrentReviewRunSlotAuthority,
   IssuedReviewRunSlotAuthority,
+  ReviewNarrowing,
   ReviewSlotOrigin,
   SubjectDigest,
 } from "./findings-shape";
@@ -59,6 +60,7 @@ import type {
   WaveGateSuccessionAudit,
   WaveReviewCarry,
   WaveReviewCarryAudit,
+  WaveReviewNarrowingAudit,
 } from "./wave-gate-program";
 import {
   derivedWaveTaskReview,
@@ -68,7 +70,15 @@ import {
   waveTaskSubjectDigest,
 } from "./wave-review-authority";
 import { sameAuthority } from "./wave-review-carry-audit";
-import { issuedRoles, registeredCarry, waveReviewCarryOf, type RegisteredCarry } from "./wave-review-carry-plan";
+import {
+  issuedRoles,
+  issuedWaveTaskRoster,
+  registeredCarry,
+  registeredNarrowing,
+  reviewNarrowingOf,
+  waveReviewCarryOf,
+  type RegisteredCarry,
+} from "./wave-review-carry-plan";
 
 /** The reviewed workspace a carry is judged against: its canonical scope and content head. */
 export type ReviewedBytes = Readonly<{ scope: readonly string[]; headSha: string }>;
@@ -291,6 +301,13 @@ type CarryContext = Readonly<{
   graph: TaskGraph;
   /** The predecessor's registration. */
   previous: RegisteredWaveGateProgram;
+  /**
+   * The narrowed reviews the new run issues (ADR-0093), which decide the
+   * roster each Task's evidence is judged against: a restart's replacement
+   * inherits its predecessor's; a succession is planned before any Task is
+   * narrowed, and a carried Task is never narrowed.
+   */
+  narrowing: WaveReviewNarrowingAudit;
   predecessor: CarriedReviewAuthority;
   /** The reviewer protocol the new run registers. */
   protocol: ReviewerProtocolDescriptor;
@@ -320,7 +337,8 @@ function acceptedRoster(
 /**
  * The terms `task` is judged by, why it cannot be judged, or null for a Task
  * that owes no review. The roster and the Subject Digest come from one
- * derivation of the Task's review.
+ * derivation of the Task's review; the roster is the one the new run issues
+ * (narrowed, ADR-0093), while the Subject Digest names the derived roster.
  */
 function carryTermsOf(context: CarryContext, task: Task): DomainResult<CarryTerms, NotCarriedReason> | null {
   const { graph, previous, protocol, workspaces } = context;
@@ -339,7 +357,7 @@ function carryTermsOf(context: CarryContext, task: Task): DomainResult<CarryTerm
     ok: true,
     value: {
       protocol,
-      roster: review.roster,
+      roster: issuedWaveTaskRoster(review.roster, registeredNarrowing(context.narrowing, task.id)),
       bytes,
       subject: waveTaskSubjectDigest(graph, task, review, protocol, bytes),
       priorFindingIds: waveReviewPriorFindings(graph, task, admitted.value.artifacts, "fresh").ids,
@@ -432,7 +450,7 @@ export type RestartCarryInput = Readonly<{
 export function planRestartCarry(input: RestartCarryInput): RestartCarryPlan {
   const { graph, previous, previousRunId, protocol, observation } = input;
   const context: CarryContext = {
-    graph, previous, protocol, workspaces: observation.workspaces,
+    graph, previous, protocol, workspaces: observation.workspaces, narrowing: previous,
     predecessor: Object.freeze({ runId: previousRunId, authorityDigest: previous.authorityDigest }),
     source: { kind: "restart", issuedRosters: observation.issuedRosters },
   };
@@ -486,7 +504,7 @@ export function planSuccessorCarry(input: SuccessorCarryInput): SuccessorCarryPl
     });
   }
   const context: CarryContext = {
-    graph, previous: previous.value, protocol, workspaces,
+    graph, previous: previous.value, protocol, workspaces, narrowing: {},
     predecessor: Object.freeze({ runId: predecessor.runId, authorityDigest: predecessor.authorityDigest }),
     source: { kind: "succession" },
   };
@@ -515,6 +533,8 @@ export type CarriedRunBinding = Readonly<{
   /** The prior Finding ids a fresh issuance over `bytes` selects (`CarryTerms`). */
   priorFindingIds: readonly string[];
   roster: NonEmpty<string>;
+  /** How `roster` was narrowed (ADR-0093), which the rebound run records; undefined for a whole roster. */
+  narrowing: ReviewNarrowing | undefined;
   /** The Subject Digest of the Task as the replacement's packets present it. */
   subject: SubjectDigest;
   /** The replacement batch's fresh slots, one per agent the carry does not cover. */
@@ -581,6 +601,7 @@ export function rebindCarriedReviewRun(
     wave_gate_run_id: binding.runId,
     wave_gate_authority_digest: binding.authorityDigest,
     ...(run.subject_digest === undefined ? {} : { subject_digest: binding.subject }),
+    ...(binding.narrowing === undefined ? {} : { narrowing: binding.narrowing }),
   }) };
 }
 
@@ -622,6 +643,9 @@ function successionIsProtected(
  * a Successor Carry is admitted only while its predecessor is a protected
  * retired run of the registration's exact Wave (`retired`), and never for a
  * registration without one. Generation and protocol must match either way.
+ * This run's own acceptance may record a narrowing (ADR-0093) only as the
+ * registration narrowed the Task; an acceptance without one closed the whole
+ * roster, which is never too few reviewers.
  */
 export function waveAcceptanceProblem(
   task: Task,
@@ -635,7 +659,13 @@ export function waveAcceptanceProblem(
       !canonicalStructuralEquals(accepted.reviewer_protocol, registration.reviewerProtocol)) {
     return `Task ${task.id} holds no accepted review at its generation under the registered protocol`;
   }
-  if (accepted.run_id === runId && accepted.authority_digest === registration.authorityDigest) return null;
+  if (accepted.run_id === runId && accepted.authority_digest === registration.authorityDigest) {
+    const narrowed = registeredNarrowing(registration, task.id);
+    return accepted.narrowing === undefined ||
+        (narrowed !== undefined && canonicalStructuralEquals(accepted.narrowing, reviewNarrowingOf(narrowed)))
+      ? null
+      : `Task ${task.id} acceptance records a narrowing its registration did not issue`;
+  }
   const acceptance: CarriedReviewAuthority = { runId: accepted.run_id, authorityDigest: accepted.authority_digest };
   const carry = registeredCarry(registration);
   const entry = waveReviewCarryOf(carry, task.id);

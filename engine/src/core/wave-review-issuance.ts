@@ -25,7 +25,14 @@ import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type { WaveReviewRole } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
 import { carriedAcceptanceProblem, rebindCarriedReviewRun } from "./wave-review-carry";
-import { issuedRoles, registeredCarry, waveReviewCarryOf } from "./wave-review-carry-plan";
+import {
+  issuedRoles,
+  issuedWaveTaskRoster,
+  registeredCarry,
+  registeredNarrowing,
+  reviewNarrowingOf,
+  waveReviewCarryOf,
+} from "./wave-review-carry-plan";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   decideWaveReviewEpochReplay,
@@ -103,6 +110,10 @@ export function waveBatchSpecCheckAuthority(batch: WaveRequestBatch): DomainResu
  * way the carried evidence must still judge the Task's current bytes and
  * Subject Digest, or the install is refused. A freshly installed current run
  * records the Subject Digest its packets present.
+ *
+ * A Task the registration narrowed (ADR-0093) installs a Review Run whose
+ * roster is the narrowed roster and which records how it was narrowed; every
+ * roster comparison here is against that issued roster.
  */
 export function installWaveReviewRunsTransition(
   locked: TaskGraph,
@@ -170,7 +181,9 @@ export function installWaveReviewRunsTransition(
       tasks.push(task);
       continue;
     }
-    const expectedAgents = review.roster;
+    const narrowed = registeredNarrowing(registration, task.id);
+    const expectedAgents = issuedWaveTaskRoster(review.roster, narrowed);
+    const narrowing = narrowed === undefined || expectedAgents === review.roster ? undefined : reviewNarrowingOf(narrowed);
     const currentWorkspace = workspaceByTask.get(task.id);
     const lockedScope = taskReviewScope(task);
     const exactScope = currentWorkspace !== undefined && lockedScope.length === currentWorkspace.scope.length &&
@@ -195,7 +208,7 @@ export function installWaveReviewRunsTransition(
     const subject = registration.schemaVersion === 2
       ? waveTaskSubjectDigest(locked, task, review, registration.reviewerProtocol, bytes)
       : null;
-    const issuedAgents = issuedRoles(expectedAgents, carry);
+    const issuedAgents = issuedRoles<WaveReviewRole>(expectedAgents, carry);
     const authorities: AgentRequestAuthority[] = [];
     for (const authority of reviewAuthorities) {
       const context = readWaveReviewContext(batch.packets, authority.contextDigest);
@@ -223,6 +236,7 @@ export function installWaveReviewRunsTransition(
         bytes,
         priorFindingIds: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts, "fresh").ids,
         roster: expectedAgents,
+        narrowing,
         subject,
         issued: currentSlots,
       });
@@ -245,7 +259,8 @@ export function installWaveReviewRunsTransition(
           canonicalStructuralEquals(run.slot_authority, currentSlots)
         : run.reviewer_protocol === undefined;
       const same = sameProtocol && run.packet_id === taskRun.packetId && run.generation === taskRun.generation &&
-        run.head_sha === taskRun.headSha && waveRunRosterProblem(locked, registration.schemaVersion, task, run) === null &&
+        run.head_sha === taskRun.headSha && waveRunRosterProblem(locked, registration.schemaVersion, task, run, narrowed) === null &&
+        canonicalStructuralEquals(run.reviewer_protocol === undefined ? undefined : run.narrowing, narrowing) &&
         slotAuthority.every((slot, index) => run.slot_authority?.[index]?.slot_id === slot.slot_id) &&
         canonicalStructuralEquals(run.workspace_scope, bytes.scope) &&
         run.workspace_head_sha === (taskRun.workspaceHeadSha ?? taskRun.headSha) &&
@@ -268,7 +283,11 @@ export function installWaveReviewRunsTransition(
         prior_finding_ids: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts, "installed").ids,
         evidence: [],
         ...(registration.schemaVersion === 2
-          ? { reviewer_protocol: registration.reviewerProtocol, slot_authority: currentSlots }
+          ? {
+              reviewer_protocol: registration.reviewerProtocol,
+              slot_authority: currentSlots,
+              ...(narrowing === undefined ? {} : { narrowing }),
+            }
           : { slot_authority: slotAuthority }),
         ...(subject === null ? {} : { subject_digest: subject }),
         workspace_scope: bytes.scope,

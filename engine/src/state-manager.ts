@@ -37,7 +37,7 @@ import {
   type RuntimeWriteBoundary,
 } from "./runtime-compatibility";
 import { installWaveGateRegistration } from "./core/wave-gate-registration";
-import type { WaveGateSuccessionAudit } from "./core/wave-gate-program";
+import type { NarrowedTaskReview, WaveGateSuccessionAudit } from "./core/wave-gate-program";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
@@ -441,17 +441,20 @@ export class StateManager {
    * Install one fresh protected active-run anchor, idempotently for exact
    * replay. A fresh start that carries accepted reviews passes the parsed
    * `succession` its registration records (ADR-0091); the install checks it
-   * against the protected predecessor.
+   * against the protected predecessor. One that narrowed reviews passes its
+   * `narrowed` reviews (ADR-0093); the install checks each Task still holds
+   * the basis its narrowing was measured against.
    */
   async registerActiveWaveGate(
     rawRegistration: unknown,
     publishedTaskIds: readonly string[],
     succession?: WaveGateSuccessionAudit,
+    narrowed: readonly NarrowedTaskReview[] = [],
   ): Promise<ActiveWaveGateRegistration> {
     const parsed = parseActiveWaveGateRegistration(rawRegistration);
     if (!parsed.ok) throw new Error(`Invalid active Wave Gate registration: ${parsed.error}`);
     return this.updateAndReturn((state) => {
-      const decision = installWaveGateRegistration(state, parsed.value, publishedTaskIds, succession);
+      const decision = installWaveGateRegistration(state, parsed.value, publishedTaskIds, succession, narrowed);
       if (decision.kind === "refused") throw new Error(decision.message);
       return decision.kind === "replayed"
         ? { state, value: decision.registration }

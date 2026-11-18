@@ -5,6 +5,9 @@
  * these shapes; the core transitions and membership checks consume them.
  */
 import type { WaveReviewRunRetirement } from "../types";
+import type { WaveReviewRoster } from "./agent-catalog-projections";
+import type { NarrowingChangeClass } from "./findings-shape";
+import type { NonEmpty } from "./orchestration-contract";
 import type { ReviewerProtocolDescriptor } from "./reviewer-contract";
 
 /** Archived schema-1 review programs carry no issued descriptor; current
@@ -111,7 +114,37 @@ export function waveGateOriginOf(registration: WaveGateOriginAudit): WaveGateOri
   return FRESH;
 }
 
-export type RegisteredWaveGateProgram = RegisteredReviewerProtocol & WaveGateOriginAudit & Readonly<{
+/**
+ * The accepted review a narrowed Task's change was measured against
+ * (ADR-0093): its run, authority digest, Review Packet and reviewed head.
+ */
+export type ReviewBasisAuthority = Readonly<{ runId: string; authorityDigest: string; packetId: string; headSha: string }>;
+
+/**
+ * One reviewed Task a start issued only part of its derived roster
+ * (ADR-0093): the roles it issues, in roster order, the derived roster they
+ * were chosen from, the change classes that chose them, and the basis the
+ * change was measured against.
+ */
+export type NarrowedTaskReview = Readonly<{
+  taskId: string;
+  roster: NonEmpty<string>;
+  from: WaveReviewRoster;
+  change: NonEmpty<NarrowingChangeClass>;
+  basis: ReviewBasisAuthority;
+}>;
+
+/**
+ * The narrowed reviews a registration froze (ADR-0093), in registration
+ * order. Absent when every reviewed Task is issued its whole roster, so such
+ * a registration is byte-identical to one written before narrowing existed.
+ */
+export type WaveReviewNarrowingAudit = Readonly<{ narrowedReviews?: NonEmpty<NarrowedTaskReview> }>;
+
+/** What a registration freezes about which roles its batch issues: its origin's carry and its narrowing. */
+export type WaveReviewIssuancePlan = WaveGateOriginAudit & WaveReviewNarrowingAudit;
+
+export type RegisteredWaveGateProgram = RegisteredReviewerProtocol & WaveReviewIssuancePlan & Readonly<{
   kind: "wave-gate";
   input: Readonly<{ wave: number | null }>;
   taskIds: readonly string[];

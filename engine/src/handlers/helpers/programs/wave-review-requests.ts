@@ -226,7 +226,7 @@ export async function reconcileWaveReviewIssuance(
     }
     const rosters = waveTaskReviewRosters(refreshed, registration.schemaVersion, registration.taskIds);
     if (!rosters.ok) return settled(waveBlocked(handle, rosters.error));
-    const persisted = classifyPersistedWaveBatch(issuedWaveReviewRosters(rosters.value, carry), candidates);
+    const persisted = classifyPersistedWaveBatch(issuedWaveReviewRosters(rosters.value, registration), candidates);
     if (persisted.kind === "incomplete") {
       const expectedBatch = batchFor(refreshed);
       if (expectedBatch.batchEpoch !== epoch.batchEpoch) {

@@ -128,6 +128,14 @@ _Avoid_: Packet digest (one request's context), workspace head (the bytes alone)
 A fresh Wave Gate start carrying, without reissuing, the whole-roster acceptance of each Task whose Subject Digest is unchanged since the retired run it succeeds (abandoned, or completed and reopened) accepted it. It rests on a protected retired-run record; `--fresh-review` turns it off. A restart's carry of the same evidence is Carried Review Evidence (ADR-0089).
 _Avoid_: Re-review skip, cached review, review reuse
 
+**Review Basis**:
+The accepted review a Task's re-review is judged against: its current-protocol acceptance, or, once a reopening cleared that, the copy the reopening kept (`review_basis`). The next Wave Gate compares the Task's current bytes and context with the basis run's frozen packet to choose its reviewers (ADR-0093). A legacy acceptance is no basis.
+_Avoid_: Baseline (the implementation proof's pre-attempt bytes), previous review
+
+**Change Class**:
+What changed in a reviewed Task since its Review Basis: comment-only, doc-only, test-only or code, per file; or a scope or context change. It decides a re-review's roster: comment or doc gives `comment-analyzer`, test gives `code-reviewer` and `pr-test-analyzer`, anything else the full roster, and the owners of the issued prior Findings are always added. Anything the classifier cannot read with certainty is code (ADR-0093).
+_Avoid_: Diff type, change kind
+
 **Review Packet**:
 A canonical immutable snapshot binding one Task to its base and head revisions, exact path scope, diffs, postimages, plan context and Proof Obligations. The sole review scope; an empty scope fails rather than broadening to the Wave. Its hashes prove integrity; its registration in protected Task state at publication proves the engine issued it.
 _Avoid_: File list, live diff, review context, fallback scope, self-authenticating recovery packet; for its registration: packet hash, packet signature, inferred provenance

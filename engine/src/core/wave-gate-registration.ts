@@ -24,7 +24,8 @@ import { preserveAcceptedReviewRunFindings } from "./findings";
 import { canonicalRecord, canonicalStructuralEquals } from "./orchestration-contract";
 import { appendRetiredWaveReviewRun } from "./retired-wave-review-runs";
 import { reconcileWaveBlock } from "./wave-gate-model";
-import type { WaveGateSuccessionAudit } from "./wave-gate-program";
+import type { NarrowedTaskReview, WaveGateSuccessionAudit } from "./wave-gate-program";
+import { reviewBasisOf } from "./review-narrowing";
 import { waveGateAuthorityDigest } from "./wave-review-authority";
 
 /** The registration identity the admission compares against protected state. */
@@ -183,18 +184,38 @@ function successionProblem(state: TaskGraph, wave: number, succession: WaveGateS
 }
 
 /**
+ * Why `narrowed` cannot install over `state`, or null (ADR-0093): each Task a
+ * start narrowed must still hold, as its Review Basis, exactly the acceptance
+ * the narrowing was measured against.
+ */
+function narrowingProblem(state: TaskGraph, narrowed: readonly NarrowedTaskReview[]): string | null {
+  const stale = narrowed.find(({ taskId, basis }) => {
+    const task = state.tasks.find(({ id }) => id === taskId);
+    const held = task === undefined ? undefined : reviewBasisOf(task);
+    return held === undefined || held.run_id !== basis.runId || held.authority_digest !== basis.authorityDigest ||
+      held.packet_id !== basis.packetId || held.head_sha !== basis.headSha;
+  });
+  return stale === undefined
+    ? null
+    : `Wave Gate narrows Task ${stale.taskId}'s review against run ${stale.basis.runId}'s acceptance, which is no longer its Review Basis`;
+}
+
+/**
  * The locked install: freshness, admission, abandoned-predecessor supersession
  * and the new active registration, decided together as one pure transition.
  * Only a fresh registration — revision 0, no terminal outcome — may install;
  * that refusal precedes admission, so a stale or terminal candidate is never
  * mistaken for an exact replay. A fresh start that carries accepted reviews
- * passes its `succession`, which must name the protected predecessor.
+ * passes its `succession`, which must name the protected predecessor; one
+ * that narrowed reviews passes its `narrowed` reviews, whose bases each Task
+ * must still hold (ADR-0093).
  */
 export function installWaveGateRegistration(
   state: TaskGraph,
   registration: ActiveWaveGateRegistration,
   publishedTaskIds: readonly string[],
   succession?: WaveGateSuccessionAudit,
+  narrowed: readonly NarrowedTaskReview[] = [],
 ): WaveGateInstallDecision {
   if (registration.revision !== 0 || registration.terminalOutcome !== null) {
     return canonicalRecord({
@@ -209,7 +230,8 @@ export function installWaveGateRegistration(
     case "replay":
       return canonicalRecord({ kind: "replayed", registration: admitted.existing });
     case "install": {
-      const problem = succession === undefined ? null : successionProblem(state, registration.wave, succession);
+      const problem = (succession === undefined ? null : successionProblem(state, registration.wave, succession)) ??
+        narrowingProblem(state, narrowed);
       if (problem !== null) return canonicalRecord({ kind: "refused", message: problem });
       // An abandoned Run is not completion authority. Its review epoch and
       // packet-bound evidence retire with the successor install and it joins

@@ -152,7 +152,7 @@ describe("Wave review roster of a Distill Task (ADR-0068 §6)", () => {
 
   it("refuses any persisted Review Run on it as a roster problem", () => {
     const run = { expected_agents: [] as never, slot_authority: undefined };
-    expect(waveRunRosterProblem(graph, 2, t3!, run)).toEqual({
+    expect(waveRunRosterProblem(graph, 2, t3!, run, undefined)).toEqual({
       kind: "task-exempt", taskId: "T3", exemption: { kind: "exempt", reason: "distill-task" },
     });
   });

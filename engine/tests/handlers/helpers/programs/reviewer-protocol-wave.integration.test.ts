@@ -1095,22 +1095,24 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
     return p;
   }
 
-  /** `reopen-task T6`, then T6 re-implemented over new bytes, as its brief would. */
-  async function reopenAndReimplementT6(p: ReturnType<typeof project>) {
-    const request = value(parseTaskReopeningArgs(["--wave", "1", "--task", "T6", "--reason", "fix the advisory"]));
+  /** `reopen-task <id>`, then the Task re-implemented over `content`, as its brief would. */
+  async function reopenAndReimplement(p: ReturnType<typeof project>, id: string, content: string) {
+    const request = value(parseTaskReopeningArgs(["--wave", "1", "--task", id, "--reason", "fix the advisory"]));
     await new StateManager(p.statePath).update((locked) => {
       const reopened = reopenImplementedTasks(locked, request);
       if (!reopened.ok || reopened.value.kind !== "reopened") throw new Error(JSON.stringify(reopened));
       return reopened.value.graph;
     });
-    writeFileSync(join(p.root, fileOfTask("T6")), "export const t6 = 2;\n");
+    writeFileSync(join(p.root, fileOfTask(id)), content);
     await new StateManager(p.statePath).update((locked) => ({ ...locked, tasks: locked.tasks.map((task) => {
-      if (task.id !== "T6") return task;
-      const reimplemented = implementedTask("T6", [fileOfTask("T6")], fileOfTask("T6"), { spec_anchors: [], spec_contributions: ["FR-001"] });
+      if (task.id !== id) return task;
+      const reimplemented = implementedTask(id, [fileOfTask(id)], fileOfTask(id), { spec_anchors: [], spec_contributions: ["FR-001"] });
       return { ...reimplemented, review_generation: task.review_generation, findings: task.findings,
-        critical_findings: task.critical_findings, advisory_findings: task.advisory_findings };
+        critical_findings: task.critical_findings, advisory_findings: task.advisory_findings,
+        ...(task.review_basis === undefined ? {} : { review_basis: task.review_basis }) };
     }) }));
   }
+  const reopenAndReimplementT6 = (p: ReturnType<typeof project>) => reopenAndReimplement(p, "T6", "export const t6 = 2;\n");
 
   const startCli = (p: ReturnType<typeof project>, runId: string, extra: readonly string[] = []) =>
     cliResult(p, ["start", "wave-gate", "--runs-root", p.runsRoot, "--run", runId, ...extra], JSON.stringify({ wave: 1 }));
@@ -1164,6 +1166,59 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
       JSON.stringify({ kind: "approve" }));
     expect(done.kind, JSON.stringify(done)).toBe("done");
     expect(await resume(p, next)).toEqual(done);
+  }, 180_000);
+
+  it("ADR-0093: a doc-comment fix is reviewed by comment-analyzer alone, frozen into the registration, and completes and replays", async () => {
+    const p = await abandonedAdvisoryRound();
+    await reopenAndReimplement(p, "T5", "/** The T5 constant. */\nexport const t5 = 1;\n");
+    expect(graph(p).tasks[4]!.review_basis?.run_id).toBe("run.first");
+    const started = await startCli(p, "run.second");
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as Action;
+    expect(action.requests?.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", "comment-analyzer"]);
+    const next = value(openRunDirectory(p.runsRoot, "run.second"));
+    const first = registration(value(openRunDirectory(p.runsRoot, "run.first")));
+    const basis = graph(p).tasks[4]!.review_basis!;
+    expect(registration(next).narrowedReviews).toEqual([{ taskId: "T5", roster: ["comment-analyzer"], from: BASE_WAVE_REVIEW_AGENTS,
+      change: ["comment"], basis: { runId: "run.first", authorityDigest: first.authorityDigest, packetId: basis.packet_id, headSha: basis.head_sha } }]);
+    expect(reportedLines(started.stderr)).toContainEqual({ kind: "wave-gate-start-roster", runId: "run.second", rosters: [
+      ...["T1", "T2", "T3", "T4"].map((taskId) => ({ taskId, kind: "carried" })),
+      { taskId: "T5", kind: "narrowed", roster: ["comment-analyzer"], change: ["comment"] },
+      { taskId: "T6", kind: "carried" },
+    ] });
+
+    const [specCheck, comment] = action.requests!;
+    await capture(next, specCheck!.authority, specPass);
+    await capture(next, comment!.authority, payload(next, comment!.authority));
+    const awaiting = await resume(p, next);
+    expect(awaiting.kind, JSON.stringify(awaiting)).toBe("await-user");
+    const t5 = graph(p).tasks[4]!;
+    expect(t5.accepted_review_authority).toMatchObject({ run_id: "run.second",
+      narrowing: { from: BASE_WAVE_REVIEW_AGENTS, change: ["comment"], basis: { run_id: "run.first" } } });
+    const done = await runCli(p, ["decide", "--runs-root", p.runsRoot, "--run", "run.second", "--request", awaiting.request!.requestId],
+      JSON.stringify({ kind: "approve" }));
+    expect(done.kind, JSON.stringify(done)).toBe("done");
+    // The completed-protocol replay checks the narrowed roster it published, not the derived five.
+    expect(await resume(p, next)).toEqual(done);
+  }, 180_000);
+
+  it("ADR-0093: T6's open code-reviewer advisory forces code-reviewer onto its comment-only fix, which retires it", async () => {
+    const p = await abandonedAdvisoryRound();
+    await reopenAndReimplement(p, "T6", "// the T6 constant\nexport const t6 = 1;\n");
+    const started = await startCli(p, "run.second");
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as Action;
+    expect(action.requests?.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", "code-reviewer", "comment-analyzer"]);
+    const next = value(openRunDirectory(p.runsRoot, "run.second"));
+    const [specCheck, ...t6] = action.requests!;
+    await capture(next, specCheck!.authority, specPass);
+    for (const { authority } of t6) await capture(next, authority, payload(next, authority));
+    const awaiting = await resume(p, next);
+    expect(awaiting.kind, JSON.stringify(awaiting)).toBe("await-user");
+    const settled = graph(p).tasks[5]!;
+    expect(settled.findings).toEqual([]);
+    expect(settled.resolved_findings?.at(-1)?.resolution).toMatchObject({ expected_agents: ["code-reviewer", "comment-analyzer"],
+      narrowed_from: BASE_WAVE_REVIEW_AGENTS });
   }, 180_000);
 
   it("--fresh-review carries nothing: every reviewed Task is issued, and the registration is exactly a carry-free start's", async () => {

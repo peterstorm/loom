@@ -1,7 +1,7 @@
 # ADR-0091: A fresh Wave Gate carries unchanged Tasks' accepted reviews
 
 ## Status
-Accepted (2026-11-18). Amends ADR-0089: its Successor Carry extends the restart's accepted-task carry to a fresh start. Issue #213, Cause 5.
+Accepted (2026-11-18). Amends ADR-0089: its Successor Carry extends the restart's accepted-task carry to a fresh start. Issue #213, Cause 5. Extended by ADR-0093: a Task that does not carry is issued only the reviewers its change since its Review Basis needs; the Subject Digest keeps naming the derived roster, and a narrowed acceptance carries like any other.
 
 ## Context
 A Wave Gate that ends without completing is succeeded by a fresh `start wave-gate`: after an abandon (usually followed by `reopen-task` and a re-implementation), or after a completed Wave is reopened because some Task's bytes drifted. Every such fresh start issued spec-check plus the full roster of every reviewed Task. In the run behind #213 an advisory round on one Task of six cost 31 requests, 25 of which repeated reviews already accepted against bytes and context that had not changed.

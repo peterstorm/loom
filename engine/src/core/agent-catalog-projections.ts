@@ -176,6 +176,48 @@ export type WaveReviewRoster = typeof BASE_WAVE_REVIEW_AGENTS | typeof ARCHITECT
 /** Any role a Wave review roster can name. */
 export type WaveReviewRole = WaveReviewRoster[number];
 
+declare const NARROWED_WAVE_REVIEW_ROSTER: unique symbol;
+
+/**
+ * A proper, non-empty part of a derived Wave review roster, in that roster's
+ * order (ADR-0093): the roles a re-reviewed Task's change needs. Minted only by
+ * `issuedWaveReviewRoster`, which proves the subsequence.
+ */
+export type NarrowedWaveReviewRoster = readonly [WaveReviewRole, ...WaveReviewRole[]] & {
+  readonly [NARROWED_WAVE_REVIEW_ROSTER]: true;
+};
+
+/**
+ * The roster one Wave Review Run is issued: a whole derived roster, or a
+ * narrowed part of one. The deliberate widening of `WaveReviewRoster`: a
+ * narrowed roster exists only as this proven subsequence, never as a free list.
+ */
+export type IssuedWaveReviewRoster = WaveReviewRoster | NarrowedWaveReviewRoster;
+
+/**
+ * The roster `derived` issues when only the roles in `keep` are needed: the
+ * derived roster itself when `keep` covers it or names none of it, otherwise
+ * the roles of `derived` that `keep` names, in roster order. Roster order is
+ * kept so each role keeps its slot index.
+ */
+export function issuedWaveReviewRoster(derived: WaveReviewRoster, keep: readonly string[]): IssuedWaveReviewRoster {
+  const kept = derived.filter((role) => keep.includes(role));
+  const [first, ...rest] = kept;
+  if (first === undefined || kept.length === derived.length) return derived;
+  return Object.freeze([first, ...rest]) as unknown as NarrowedWaveReviewRoster;
+}
+
+/**
+ * `roles` as the narrowed part of `derived` it names, or null when it is not
+ * a proper, non-empty, ordered subsequence of `derived` without repeats.
+ */
+export function parseNarrowedWaveReviewRoster(derived: WaveReviewRoster, roles: readonly string[]): NarrowedWaveReviewRoster | null {
+  const issued = issuedWaveReviewRoster(derived, roles);
+  return issued !== derived && issued.length === roles.length && issued.every((role, index) => role === roles[index])
+    ? issued as NarrowedWaveReviewRoster
+    : null;
+}
+
 /**
  * Every reason a Wave Task's review carries the architecture lens, each
  * answered: its packets carry the owner map (ADR-0047), or the Task writes an

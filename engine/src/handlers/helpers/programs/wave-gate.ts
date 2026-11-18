@@ -28,7 +28,6 @@ import {
   waveTaskReviewRosters,
 } from '../../../core/wave-review-authority';
 import { waveAcceptanceProblem } from '../../../core/wave-review-carry';
-import { registeredCarry } from '../../../core/wave-review-carry-plan';
 import { exactObject } from './registration';
 import type { FacadeDriveResult } from './program-result';
 import {
@@ -71,8 +70,9 @@ function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: Regist
     .map((request) => issuedWaveProtocol(handle, registration, request));
   const rosters = waveTaskReviewRosters(graph, registration.schemaVersion, registration.taskIds);
   if (!rosters.ok) throw new Error(`completed Wave Gate roster cannot be derived: ${rosters.error}`);
-  // A role a restart or a fresh start carried (ADR-0089, ADR-0091) was published along the lineage, not by this run.
-  for (const { taskId, roster } of issuedWaveReviewRosters(rosters.value, registeredCarry(registration))) {
+  // A role a restart or a fresh start carried (ADR-0089, ADR-0091) was published along the lineage, not by this run;
+  // a role a narrowed review left out (ADR-0093) was never published.
+  for (const { taskId, roster } of issuedWaveReviewRosters(rosters.value, registration)) {
     if (roster.some((role) => !protocols.some((protocol) =>
       protocol.subject.taskId === taskId && protocol.request.role === role))) {
       throw new Error(`completed Wave Task ${taskId} lacks the complete published reviewer protocol roster`);

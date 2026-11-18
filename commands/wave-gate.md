@@ -54,6 +54,16 @@ JSON line on stderr. Add `--fresh-review` to `start` to carry nothing and
 review every Task in full. The completion suite and spec-check always re-run,
 and carried Findings reach this run's Refutation Panel and advisory decision.
 
+A Task that does not carry but holds a Review Basis (its last accepted review,
+kept when `reopen-task` cleared it) is issued only the reviewers its change
+needs (ADR-0093): a comment-only or doc-only change gets `comment-analyzer`; a
+test-only change gets `code-reviewer` and `pr-test-analyzer`; a mix gets the
+union; any code, scope or context change, or a basis that cannot be read and
+verified, gets the full roster. The owner of every prior Finding the Task is
+issued is always added. `start` names each reviewed Task's roster, and why, in
+one `wave-gate-start-roster` JSON line on stderr. `--fresh-review` narrows
+nothing.
+
 Execute only the one typed action returned by `start`, `resume`, or `decide`:
 
 - `spawn-batch`: spawn every exact request, preserving its model, required
@@ -66,7 +76,8 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   reviewers, or six (`architecture-tech-lead` appended) for a Task touching an
   owned Invariant's family, which carries the owner map (ADR-0047), and for a
   Contract Task writing its contract's types file, which carries the contract
-  surface (ADR-0069). The
+  surface (ADR-0069). A carried Task gets none and a re-reviewed Task may get
+  a narrowed part of its roster (ADR-0093). The
   Wave's Distill Task (agent `distill-agent`, the engine-added pass that
   simplified the Wave's code, ADR-0068) is registered with the Wave but gets no
   reviewer: the other Tasks' packets read the distilled bytes. Never infer the

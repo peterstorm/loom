@@ -147,7 +147,7 @@ describe("a fresh start carries every unchanged Task's accepted review from the 
     expect(plan.notCarried).toEqual([{ taskId: "T6", reason: { kind: "drift", fields: ["head", "subject"] } }]);
     // The batch then issues spec-check plus T6's roster only.
     expect(issuedWaveReviewRosters(graph.tasks.map(({ id }) => ({ taskId: id, roster: ROSTER })),
-      plan.succession === undefined ? undefined : { kind: "succession", audit: plan.succession.carry }))
+      plan.succession === undefined ? {} : { succession: plan.succession }))
       .toEqual([{ taskId: "T6", roster: ROSTER }]);
   });
 

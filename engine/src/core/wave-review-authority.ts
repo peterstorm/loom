@@ -19,8 +19,15 @@ import {
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseWaveReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
-import { issuedRoles, registeredCarry, waveReviewCarryOf, type RegisteredCarry } from "./wave-review-carry-plan";
-import type { RegisteredReviewerProtocol, WaveGateOriginAudit } from "./wave-gate-program";
+import {
+  issuedRoles,
+  issuedWaveTaskRoster,
+  registeredCarry,
+  registeredNarrowing,
+  waveReviewCarryOf,
+  type RosterNarrowing,
+} from "./wave-review-carry-plan";
+import type { RegisteredReviewerProtocol, WaveReviewIssuancePlan } from "./wave-gate-program";
 import type { SubjectDigest } from "./findings-shape";
 import { subjectDigestOf } from "./review-subject";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
@@ -30,6 +37,7 @@ import {
   isWaveReviewRole,
   waveReviewRoster,
   type ArchitectureLensReasons,
+  type IssuedWaveReviewRoster,
   type WaveReviewRole,
   type WaveReviewRoster,
 } from "./agent-catalog-projections";
@@ -97,7 +105,7 @@ export type WaveReviewRegistrationAuthority = Readonly<{
   input: Readonly<{ wave: number }>;
   taskIds: readonly string[];
   authorityDigest: string;
-}> & WaveGateOriginAudit & RegisteredReviewerProtocol;
+}> & WaveReviewIssuancePlan & RegisteredReviewerProtocol;
 
 /**
  * The exact reviewed scope of one Task: its declared and modified paths,
@@ -455,29 +463,34 @@ export function waveTaskReviewRosters(
 }
 
 /**
- * Why a persisted Review Run does not carry its Task's exact derived roster:
+ * Why a persisted Review Run does not carry its Task's exact issued roster:
  * its `expected_agents` differ, its slot authority is missing or does not
  * bind that roster's agents in order, one slot per agent, or the Task is
  * exempt from Wave review and may carry no Review Run at all.
  */
 export type WaveRunRosterProblem =
-  | Readonly<{ kind: "expected-agents-differ" | "slot-authority-differs"; taskId: string; roster: WaveReviewRoster }>
+  | Readonly<{ kind: "expected-agents-differ" | "slot-authority-differs"; taskId: string; roster: IssuedWaveReviewRoster }>
   | Readonly<{ kind: "task-exempt"; taskId: string; exemption: WaveReviewExempt }>;
 
 /**
  * The one roster-versus-persisted-run check. Slot membership, exhausted-run
  * restart, the locked install's replay and reviewer retries all ask this, so
- * a run settles only with the roster the engine derives for it now.
+ * a run settles only with the roster the engine issues it now: the derived
+ * roster narrowed as `narrowing` states (ADR-0093). A caller holding the
+ * registration passes its narrowed review of the Task; slot membership,
+ * which holds only the installed run, passes the run's own (the epoch the
+ * run is bound to commits to the registration's).
  */
 export function waveRunRosterProblem(
   graph: TaskGraph,
   schemaVersion: 1 | 2,
   task: Task,
   run: Pick<ReviewRun, "expected_agents" | "slot_authority">,
+  narrowing: RosterNarrowing | undefined,
 ): WaveRunRosterProblem | null {
   const review = waveTaskReview(graph, schemaVersion, task, run);
   if (review.kind === "exempt") return Object.freeze({ kind: "task-exempt", taskId: task.id, exemption: review });
-  const { roster } = review;
+  const roster = issuedWaveTaskRoster(review.roster, narrowing);
   if (!canonicalStructuralEquals(run.expected_agents, roster)) {
     return Object.freeze({ kind: "expected-agents-differ", taskId: task.id, roster });
   }
@@ -503,18 +516,20 @@ export function waveReviewSubjects(rosters: readonly WaveTaskIssuedRoles[]): rea
 }
 
 /**
- * The rosters a replacement run actually issues (ADR-0089): each reviewed
- * Task's roster less the slots its registration's carry plan carries, and no
- * entry at all for a Task whose whole roster carries. With no plan it is
+ * The roles a run actually issues for each reviewed Task: its derived roster
+ * narrowed as the registration's narrowed review states (ADR-0093), less the
+ * slots the registration's carry plan carries (ADR-0089, ADR-0091), and no
+ * entry at all for a Task whose whole roster carries. With neither it is
  * `rosters` itself, so every subject, slot and request keeps its identity.
  */
 export function issuedWaveReviewRosters(
   rosters: readonly WaveTaskReviewRoster[],
-  carry: RegisteredCarry | undefined,
+  plan: WaveReviewIssuancePlan,
 ): readonly WaveTaskIssuedRoles[] {
-  if (carry === undefined) return rosters;
+  const carry = registeredCarry(plan);
+  if (carry === undefined && plan.narrowedReviews === undefined) return rosters;
   return Object.freeze(rosters.flatMap(({ taskId, roster }): readonly WaveTaskIssuedRoles[] => {
-    const issued = issuedRoles(roster, waveReviewCarryOf(carry, taskId));
+    const issued = issuedRoles(issuedWaveTaskRoster(roster, registeredNarrowing(plan, taskId)), waveReviewCarryOf(carry, taskId));
     return isNonEmpty(issued) ? [Object.freeze({ taskId, roster: issued })] : [];
   }));
 }
@@ -1119,6 +1134,33 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
 }
 
 /**
+ * Why a narrowed Task's batch would issue a prior Finding to a roster that
+ * lacks its owner, or null (ADR-0093). The start chose the narrowed roles with
+ * the owners of the priors it saw; a prior added since (none can be, while no
+ * Review Run is installed) would retire on no owner's vote, so the batch is
+ * refused rather than issued.
+ */
+function narrowedOwnerProblem(
+  graph: TaskGraph,
+  admitted: readonly Readonly<{ task: Task; workspace: ReviewedWorkspaceObservation }>[],
+  derivations: readonly WaveTaskReviewDerivation[],
+  plan: WaveReviewIssuancePlan,
+): string | null {
+  for (const { task, workspace } of admitted) {
+    const narrowing = registeredNarrowing(plan, task.id);
+    const derived = derivations.find(({ taskId }) => taskId === task.id)?.roster;
+    if (narrowing === undefined || derived === undefined) continue;
+    const roles: readonly string[] = issuedWaveTaskRoster(derived, narrowing);
+    const unissued = waveReviewPriorFindings(graph, task, workspace.artifacts, "installed").findings
+      .find(({ agent }) => (derived as readonly string[]).includes(agent) && !roles.includes(agent));
+    if (unissued !== undefined) {
+      return `Task ${task.id} narrowed review omits ${unissued.agent}, the owner of prior Finding ${unissued.id}`;
+    }
+  }
+  return null;
+}
+
+/**
  * The sole Wave review authority derivation.
  *
  * The shell contributes only the exact registered run and byte observations.
@@ -1233,11 +1275,12 @@ export function prepareWaveReviewBatch(
     specFile: graph.spec_file ?? null,
     planFile: graph.plan_file ?? null,
     specCheckDocuments,
-    // The registration's carry plan (a restart's or a fresh start's) decides
-    // which subjects this batch issues, so the epoch commits to it. Absent,
-    // the payload is byte-identical to a batch prepared before carry existed
-    // (ADR-0089, ADR-0091).
+    // The registration's carry plan (a restart's or a fresh start's) and its
+    // narrowed reviews decide which subjects this batch issues, so the epoch
+    // commits to both. Absent, the payload is byte-identical to a batch
+    // prepared before either existed (ADR-0089, ADR-0091, ADR-0093).
     ...(carry === undefined ? {} : { carried: carry.audit.carried }),
+    ...(registration.narrowedReviews === undefined ? {} : { narrowed: registration.narrowedReviews }),
   })));
   if (!batchEpoch.ok) return failure(batchEpoch.error.message);
 
@@ -1245,7 +1288,9 @@ export function prepareWaveReviewBatch(
   // whole roster carries keeps the acceptance its own run recorded.
   const derivations = reviewed.map((task) =>
     waveTaskReviewDerivation(graph, registration.schemaVersion, task, task.review_run));
-  const issuedRosters = issuedWaveReviewRosters(derivations, carry);
+  const issuedRosters = issuedWaveReviewRosters(derivations, registration);
+  const unvoiced = narrowedOwnerProblem(graph, admitted, derivations, registration);
+  if (unvoiced !== null) return failure(unvoiced);
   const issuing = admitted.filter(({ task }) => issuedRosters.some(({ taskId }) => taskId === task.id));
   const taskRuns: WaveTaskRunAuthority[] = [];
   for (const { task, workspace } of issuing) {
