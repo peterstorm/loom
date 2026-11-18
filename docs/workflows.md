@@ -15,6 +15,7 @@ Loom supports one full feature-delivery lifecycle and several standalone quality
 | Security audit | `/security-audit` | No | Yes | Verified findings and a coverage-accounted report |
 | Spec alignment | `/spec-check` | Reads active context when present | No standalone program | Per-requirement drift findings |
 | Requirements only | `/specify`, `/clarify`, `/brainstorming` | Only when invoked by `/loom` | No | Requirements/design artifact |
+| Retrospective | `/retro` `[--wave <N>]` | No | No | A retro report under the run project's .claude/retros/ directory, from the friction the engine recorded |
 | Project lint | `/lint-project` or script | No | No | Regex + structural violations |
 
 Two terms recur. The **TaskGraph** (the State File) is the protected record of one feature run: its phase, Tasks, Waves and evidence. A **Run Directory** is the immutable folder one review, panel, gate or remediation writes its evidence into. Both are described in [Architecture](architecture.md#two-persistence-domains).
@@ -146,6 +147,8 @@ A Wave with implementation files also carries one engine-added Distill Task (`di
 
 **Retry.** A failed attempt gets one retry. Status publishes the retry's exact context, naming what the first attempt failed, and the spawn gate accepts only those bytes. A second failure is a terminal escalation that an operator must resolve; there is no third attempt. A failure of the infrastructure (an unreadable baseline, a Git error) does not consume the retry. Recovery commands: [recovery](reference/recovery.md#implementation-escalation-semantic-attempt-2-exhausted). The attempt and settlement rules: [Implementation attempts and settlement](verification.md#implementation-attempts-and-settlement).
 
+**After the final Wave Gate.** `/retro` writes the run's retrospective from the friction the engine recorded (see [`/retro`](#retro)), and `helper complete-orchestration` archives the TaskGraph and lifts the guards. To abandon an unfinished run deliberately, `helper cleanup-state`. Both are described in [Ending an orchestration](operations.md#ending-an-orchestration).
+
 ## Task proof obligations
 
 The engine derives proof from declared requirements and observed evidence. Depending on Task policy, obligations include:
@@ -275,6 +278,10 @@ The parent must not substitute its own `git add` recipe or inject process outcom
 ## `/security-audit`
 
 A security audit is a registered program with its own run directory. It enumerates the coverage units it will examine, assigns one hunter per unit, has an independent verifier on a different model profile try to refute each claim, and has a critic check the coverage claim against the recorded work. A claim is confirmed only with a sandbox receipt and a verifying ballot; anything less is recorded as a lead without a severity. Publication refuses while coverage is unsettled. Everything else is in [Running a security audit](security-audit.md).
+
+## `/retro`
+
+A retrospective of one Wave (`--wave <N>`), a whole run, or any session, inside or outside Loom. It reads what the engine recorded before anything else: `helper retro-facts` prints, per Wave, the gate runs, reopenings, plan edits, retries, escalations, remediations, Finding counts and the Waves that crossed a retro threshold. Each finding then names a root cause and the layer that fixes it, and goes where it is fixed: a change in the project, or a Loom issue when the orchestration itself failed the run. The report is written to .claude/retros/ as a Markdown file named <YYYY-MM-DD>-<slug>[-wave-<N>].md; while a TaskGraph is live, the direct-edit guard admits exactly that file. A retro never blocks: it improves the environment the next run works in. See [Retrospectives](operations.md#retrospectives) and [ADR-0083](adr/ADR-0083-a-run-records-its-friction-and-a-retro-reads-it-first.md).
 
 ## Standalone requirement workflows
 
