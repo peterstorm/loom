@@ -38,6 +38,34 @@ describe("commentStrippedSource removes comments and nothing a reader could exec
     expect(commentStrippedSource(`const s = "${LINE_SEPARATOR}";\n`)).toBeNull();
   });
 
+  it("keeps the blanks after a division as written, since that `/` may open a regular expression", () => {
+    // After `)` a `/` is a division in `(a) / b` but a regular expression in
+    // `if (x) /a  b/.test(s)`: collapsing its blanks would make two different
+    // patterns strip alike. The CI counterexample `)/  a` is the same shape.
+    const wide = commentStrippedSource("if (x) /a  b/.test(s);\n");
+    const narrow = commentStrippedSource("if (x) /a b/.test(s);\n");
+    expect(wide).not.toBeNull();
+    expect(wide).not.toBe(narrow);
+    expect(commentStrippedSource(")/  a")).toBe(")/  a");
+    expect(commentStrippedSource("x = (a)  /  b;\n  y = 1;\n")).toBe("x = (a) /  b;\ny = 1;");
+  });
+
+  it("reads a `/` after `++` or `--` as a division, and refuses a pattern whose slash may open a comment", () => {
+    // The soak counterexample: after `a++` the `/` divides, so `/ /*` holds a
+    // block comment that a regular-expression reading would swallow.
+    expect(commentStrippedSource("a++/ /*\n*//* block */a")).toBeNull();
+    expect(commentStrippedSource("a++ / b;\n")).toBe("a++ / b;");
+    expect(commentStrippedSource("x = / /* y */;\n")).toBeNull();
+    expect(commentStrippedSource("x = /[/*]/;\n")).toBeNull();
+    expect(commentStrippedSource("x = a + +/re/;\n")).toBe("x = a + +/re/;");
+  });
+
+  it("refuses a template literal on a line where a `/` was read as a division", () => {
+    // `if (x) /`/` is a pattern holding a backtick: read as a division, the
+    // backtick would open a template whose end the lexer would misplace.
+    expect(commentStrippedSource("if (x) /`/.test(s);\ny = `a\n/* b */ c`;\n// `\n")).toBeNull();
+  });
+
   it("reads a CRLF source as it reads the LF one", () => {
     expect(commentStrippedSource("// c\r\nx = 1;\r\n")).toBe(commentStrippedSource("// c\nx = 1;\n"));
     expect(commentStrippedSource("// c\r\nx = 1;\r\n")).toBe("x = 1;");
@@ -45,7 +73,7 @@ describe("commentStrippedSource removes comments and nothing a reader could exec
 });
 
 const fragment = fc.constantFrom(
-  "a", "b1", "return", " ", "  ", "\t", "\n", "\n\n", "(", ")", "{", "}", "[", "]", ";", ",", "=", "+", "++", "-",
+  "a", "b1", "return", " ", "  ", "\t", "\n", "\n\n", "(", ")", "{", "}", "[", "]", ";", ",", "=", "+", "++", "-", "--",
   "*", "/ ", "'s'", "\"d\"", "`t`", "`a${b}c`", "/re/g", "/[/]/", "// line\n", "/* block */", "/*\n*/", "x.y",
   "'//'", "\"/*\"", "`/* t */`", "\\", "'", "\"", "`", "${", "/*", "*/", "//", "\r\n", "\r",
 );

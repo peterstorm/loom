@@ -109,7 +109,19 @@ function triviaStep(lexer: Lexer, char: string, next: string): "next" | "refuse"
     lexer.index += 1;
     return "next";
   }
-  if (char === " " || char === "\t" || char === "\r" || char === "\f" || char === "\v") {
+  if (char === " " || char === "\t" || char === "\f" || char === "\v") {
+    // After a division a `/` may have opened a regular expression running to
+    // this line's end, whose blanks are its text: keep them as written.
+    if (lexer.divisionOnLine) {
+      lexer.out += char;
+      lexer.previousWord = "";
+    } else {
+      lexer.pendingSpace = true;
+    }
+    lexer.index += 1;
+    return "next";
+  }
+  if (char === "\r") {
     lexer.pendingSpace = true;
     lexer.index += 1;
     return "next";
@@ -139,12 +151,16 @@ function tokenStep(lexer: Lexer, char: string): boolean {
     return end !== null;
   }
   if (char === "`") {
+    // A division on this line may have been a pattern holding this backtick;
+    // a template read from it could misplace its end across lines.
+    if (lexer.divisionOnLine) return false;
     emitCode(lexer, "`");
     lexer.mode = "template";
     return true;
   }
   if (char === "/") {
-    const regex = startsRegex(lexer.previous, lexer.previousWord);
+    const afterUpdate = lexer.out.endsWith("++") || lexer.out.endsWith("--");
+    const regex = !afterUpdate && startsRegex(lexer.previous, lexer.previousWord);
     const end = regex ? regexEnd(source, index) : null;
     if (regex && end === null) return false;
     lexer.divisionOnLine ||= end === null;
@@ -177,14 +193,19 @@ function tokenStep(lexer: Lexer, char: string): boolean {
  * removed block comment leaves a line break if it spanned one, otherwise a
  * space, so automatic semicolon insertion reads the result as it read the
  * source. Between code tokens a run of blanks becomes one space, a run of
- * line breaks one line break, and blanks at a line's start or end vanish.
+ * line breaks one line break, and blanks at a line's start or end vanish;
+ * except that after a `/` read as a division the rest of its line keeps its
+ * blanks as written, since that `/` may open a regular expression (after `)`
+ * it can: `if (x) /a  b/.test(s)`).
  *
  * Null for a source holding a line terminator the lexer does not read (a lone
  * carriage return, U+2028, U+2029); an unterminated string, template, regular
- * expression or block comment; a quote inside a regular expression; a
- * backslash outside a literal; and a comment on a line where an earlier `/`
- * was read as a division, since that `/` may have opened a regular expression
- * holding the comment's marker. Idempotent: a stripped source strips to
+ * expression or block comment; a quote inside a regular expression, or a
+ * slash in one that would open a comment were its `/` a division; a
+ * backslash outside a literal; and a comment or template literal on a line
+ * where an earlier `/` was read as a division, since that `/` may have opened
+ * a regular expression holding the comment's marker or the backtick. A `/`
+ * after `++` or `--` is read as a division. Idempotent: a stripped source strips to
  * itself, and it keeps exactly the tokens the TypeScript parser reads.
  */
 export function commentStrippedSource(source: string): string | null {
@@ -229,7 +250,9 @@ function quotedEnd(source: string, start: number, quote: string): number | null 
 
 /**
  * The index after the regular expression opened at `start`, its flags
- * included; null when it does not close on its line or holds a quote.
+ * included; null when it does not close on its line, holds a quote, or holds
+ * a slash that would open a comment were the `/` at `start` a division (inside
+ * a class, or the closing slash itself before `*` or `/`).
  */
 function regexEnd(source: string, start: number): number | null {
   let inClass = false;
@@ -240,6 +263,8 @@ function regexEnd(source: string, start: number): number | null {
       index += 1;
       continue;
     }
+    const opensComment = char === "/" && (source[index + 1] === "*" || source[index + 1] === "/");
+    if (opensComment) return null;
     if (char === "[") inClass = true;
     else if (char === "]") inClass = false;
     else if (char === "/" && !inClass) {
