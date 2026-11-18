@@ -75,21 +75,21 @@ bun {LOOM_DIR}/engine/src/cli.ts helper orchestration add-dependency \
 
 Status then withholds the Task until its dependencies settle, and names it as blocked when one of them escalates. A cycle is refused. The full contract is in `docs/reference/recovery.md` (Ordering Tasks within the active Wave).
 
-## A judgement fails on code a completed Wave sealed
+## A Task the Wave needs that decompose did not plan
 
-A Task of the active Wave whose tests judge code an earlier, completed Wave wrote (a budget, benchmark or acceptance test) may fail its attempt on that code's breach. It cannot change code outside its own file list, `reopen-task` reaches only the active Wave, and a completed Wave is not reopened for this. Never spend the judge's retry on unchanged code, and never relax the judgement.
+The usual case: a Task of the active Wave whose tests judge code an earlier, completed Wave wrote (a budget, benchmark or acceptance test) fails its attempt on that code's breach. It cannot change code outside its own file list, `reopen-task` reaches only the active Wave, and a completed Wave is not reopened for this. Never spend the judge's retry on unchanged code, and never relax the judgement.
 
-With the user's approval, append a Forward Fix to the active Wave for the breaching files, holding the failed judge until it settles:
+With the user's approval, add a Task to the active Wave that takes the breaching files, and make the judge wait for it:
 
 ```bash
-bun {LOOM_DIR}/engine/src/cli.ts helper orchestration add-forward-fix \
-  --wave <N> --hold <judge-task-id> --file <sealed path> [--file <path>]... \
-  --description "<what the fix changes>" --reason "<the failed judgement, with its measured values>"
+bun {LOOM_DIR}/engine/src/cli.ts helper orchestration add-task \
+  --sealed-file <path a completed Wave wrote> [--file <open path>]... --before <judge-task-id> \
+  --description "<what the Task changes>" --reason "<the failed judgement, with its measured values>"
 ```
 
-Keep `--description` and `--reason` to one line with no `{variable}`, no `LOOM_` token and no `Task ID:` binding: the fix Task's brief carries them. A fix whose Task was never dispatched can be withdrawn with `helper orchestration withdraw-forward-fix --wave <N> --task <fix-task-id> --reason "<why>"` and added again.
+Name a path a completed Wave wrote with `--sealed-file`, any other with `--file`. `--depends-on <task-id>` makes the new Task wait for another. Keep `--description` and `--reason` to one line with no `{variable}`, no `LOOM_` token and no `Task ID:` binding: the Task's brief carries them. A Task that was never dispatched can be withdrawn with `helper orchestration withdraw-task --task <task-id> --reason "<why>"` and added again.
 
-Then return to the Phase 5 loop: status owes the fix Task's dispatch (render it with `brief`, adding the breach as `--note`s), and the held judge's next attempt once the fix settles. The preconditions and what the helper writes are in `docs/reference/recovery.md` ("A judgement fails on code a completed Wave sealed").
+Then return to the Phase 5 loop: status owes the new Task's dispatch (render it with `brief`, adding the breach as `--note`s), and the judge's next attempt once it settles. The preconditions and what the helper writes are in `docs/reference/recovery.md` ("Adding a Task to the active Wave").
 
 ## Overriding a false positive
 

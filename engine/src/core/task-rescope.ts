@@ -178,25 +178,40 @@ function unknownRemovals(graph: TaskGraph, task: Task, request: TaskRescopeReque
   return request.remove.filter((path) => !listed.includes(path) && !removedBefore.has(path));
 }
 
+/** The flags an operation names plain and sealed paths with, for its refusal sentences. */
+export type PathFlags = Readonly<{ plain: string; sealed: string }>;
+
+const RESCOPE_FLAGS: PathFlags = Object.freeze({ plain: "--add-file", sealed: "--add-sealed-file" });
+
 /**
- * Why `path` cannot join `task`'s scope in `graph`, or null. A path a
- * completed Wave sealed joins only when `namedSealed`, and a path named
- * sealed must be one.
+ * Why `path` cannot join the scope of the Task `owner` (one Task of `graph`,
+ * or one about to join it) in `graph`, or null. One owner per path within a
+ * Wave; no protected verification path; no Acceptance Contract path frozen
+ * for another Task. A path a completed Wave sealed joins only when
+ * `namedSealed`, and a path named sealed must be one (ADR-0081). Shared by
+ * `rescope-task` and `add-task` (ADR-0086).
  */
-function addRefusal(graph: TaskGraph, task: Task, path: string, completedWaves: ReadonlySet<number>, namedSealed: boolean): string | null {
+export function pathAdmissionRefusal(
+  graph: TaskGraph,
+  owner: Readonly<{ id: string; wave: number }>,
+  path: string,
+  namedSealed: boolean,
+  flags: PathFlags,
+): string | null {
   if (isProtectedVerificationPath(path)) return `${path} is a protected verification path; no Task lists it`;
+  const completedWaves = new Set((graph.wave_gate_history ?? []).map(({ wave }) => wave));
   let sealedBy: Task | undefined;
   for (const other of graph.tasks) {
-    if (other.id === task.id || !(other.file_list ?? []).includes(path)) continue;
-    if (other.wave === task.wave) return `${path} is already ${other.id}'s, in the same Wave`;
+    if (other.id === owner.id || !(other.file_list ?? []).includes(path)) continue;
+    if (other.wave === owner.wave) return `${path} is already ${other.id}'s, in the same Wave`;
     if (completedWaves.has(other.wave)) sealedBy ??= other;
   }
   if (sealedBy !== undefined && !namedSealed) {
-    return `${path} belongs to ${sealedBy.id} of completed Wave ${sealedBy.wave}; name it with --add-sealed-file to take sealed code into ${task.id}`;
+    return `${path} belongs to ${sealedBy.id} of completed Wave ${sealedBy.wave}; name it with ${flags.sealed} to take sealed code into ${owner.id}`;
   }
-  if (sealedBy === undefined && namedSealed) return `${path} is not sealed by a completed Wave; add it with --add-file`;
+  if (sealedBy === undefined && namedSealed) return `${path} is not sealed by a completed Wave; name it with ${flags.plain}`;
   const frozen = (graph.acceptance_contracts ?? []).find((contract) =>
-    contract.contractTask !== task.id && frozenPaths(contract).includes(path));
+    contract.contractTask !== owner.id && frozenPaths(contract).includes(path));
   return frozen === undefined ? null : `${path} is frozen by ${frozen.id}; only its contract Task ${frozen.contractTask} lists it`;
 }
 
@@ -290,12 +305,13 @@ export function rescopeTask(
   if (task.status !== "pending") return refuse("not-pending", `${task.id} is ${task.status}; only a pending Task is re-scoped (reopen it first)`);
   const completedWaves = new Set((graph.wave_gate_history ?? []).map(({ wave }) => wave));
   if (completedWaves.has(task.wave) || task.wave < (graph.current_wave ?? task.wave)) {
-    return refuse("completed-wave", `${task.id} is in completed Wave ${task.wave}; change sealed code with a Forward Fix`);
+    return refuse("completed-wave", `${task.id} is in completed Wave ${task.wave}; take its sealed code into a Task of the active Wave ` +
+      "(rescope-task --add-sealed-file, or add-task --sealed-file)");
   }
   if (isDistillTask(task)) return refuse("distill-task", `${task.id} is a Distill Task; the engine derives its scope`);
   if (task.implementation_attestation === true) return refuse("attested", `${task.id} is armed for attestation; a re-scoped Task needs a fresh implementation, not an attestation`);
   for (const { path, sealed } of additions) {
-    const refusal = addRefusal(graph, task, path, completedWaves, sealed);
+    const refusal = pathAdmissionRefusal(graph, task, path, sealed, RESCOPE_FLAGS);
     if (refusal !== null) return refuse("path-not-addable", refusal);
   }
   for (const path of removed) {
