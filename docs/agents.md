@@ -47,7 +47,7 @@ These are the only Agents that execute a Task. Decompose assigns all of them exc
 
 | Agent | Looks for |
 |---|---|
-| `code-reviewer` | Bugs and breaches of the project's written rules |
+| `code-reviewer` | Bugs, breaches of the project's written rules, and a change that does not do what the Task's description, plan context or named plan document says |
 | `silent-failure-hunter` | Swallowed errors, silent fallbacks, over-broad catches |
 | `pr-test-analyzer` | Behaviour the tests do not cover |
 | `type-design-analyzer` | Types that fail to express or enforce their invariants |
