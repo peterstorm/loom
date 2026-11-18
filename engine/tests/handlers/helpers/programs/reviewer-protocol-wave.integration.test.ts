@@ -38,7 +38,10 @@ import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../.
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
-import type { Finding, TaskGraph } from "../../../../src/types";
+import type { DraftFinding, Finding, Task, TaskGraph } from "../../../../src/types";
+import { supersedeAbandonedWaveGateReview } from "../../../../src/core/wave-gate-registration";
+import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
+import { observeRestartCarry } from "../../../../src/handlers/helpers/programs/wave-gate-replacement";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/wave-frozen-source";
 import { graphFixture, taskFixture, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
@@ -101,28 +104,40 @@ const X_CONTRACT_FILES = [X_SURFACE.types, X_SURFACE.acceptance];
 /** A graph whose Task declares `X_CONTRACT_FILES`, stamped with `X_CONTRACT`: that Task is then a Contract Task writing a types file. */
 const asContractTask = (state: TaskGraph): TaskGraph => ({ ...state, acceptance_contracts: [X_CONTRACT] });
 
-function project(priors: readonly Finding[] = [], declaredFiles: readonly string[] = ["src/x.ts"]) {
+/** One implemented Wave 1 Task with satisfied proof over `declaredFiles`. */
+function implementedTask(id: string, declaredFiles: readonly string[], modified: string,
+  trace: Pick<Task, "spec_anchors" | "spec_contributions">, priors: readonly Finding[] = []): Task {
+  const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: declaredFiles },
+    trustedPassEvidence(declaredFiles));
+  if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");
+  return taskFixture({ id, description: `review fixture ${id}`, agent: "code-implementer-agent", wave: 1,
+    depends_on: [], status: "implemented", proof, file_list: [...declaredFiles], files_modified: [modified],
+    ...trace, test_result: { verdict: "trusted-pass" },
+    test_evidence: "fixture checks passed", new_tests_written: true, new_test_evidence: "fixture tests present",
+    review_generation: 0, review_status: "pending", findings: [...priors],
+    critical_findings: priors.filter(({ severity }) => severity === "critical").map(({ claim }) => claim), advisory_findings: [],
+  });
+}
+
+/** `secondTask` adds T2 over `src/y.ts`, contributing to the Requirement T1 completes. */
+function project(priors: readonly Finding[] = [], declaredFiles: readonly string[] = ["src/x.ts"], secondTask = false) {
   const root = canonicalTempDir("loom-p4-wave-");
   roots.push(root);
   mkdirSync(join(root, "src"));
   mkdirSync(join(root, "runs"));
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
+  writeFileSync(join(root, "src", "y.ts"), "export const y = 2;\n");
   writeFileSync(join(root, "spec.md"), specText);
   writeFileSync(join(root, "plan.md"), "# Model-free plan\n");
   git(root, ["init", "-q"]);
-  git(root, ["add", "src/x.ts", "spec.md", "plan.md"]);
+  git(root, ["add", "src/x.ts", "src/y.ts", "spec.md", "plan.md"]);
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
-  const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: declaredFiles },
-    trustedPassEvidence(declaredFiles));
-  if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");
-  const graph: TaskGraph = { ...graphFixture([taskFixture({ id: "T1", description: "review fixture", agent: "code-implementer-agent", wave: 1,
-    depends_on: [], status: "implemented", proof, file_list: [...declaredFiles], files_modified: ["src/x.ts"],
-    spec_anchors: ["FR-001", "AS-001"], spec_contributions: [], test_result: { verdict: "trusted-pass" },
-    test_evidence: "fixture checks passed", new_tests_written: true, new_test_evidence: "fixture tests present",
-    review_generation: 0, review_status: "pending", findings: [...priors],
-    critical_findings: priors.filter(({ severity }) => severity === "critical").map(({ claim }) => claim), advisory_findings: [],
-  })]), spec_file: join(root, "spec.md"), plan_file: join(root, "plan.md"), spec_trace_version: 2 };
+  const tasks = [
+    implementedTask("T1", declaredFiles, "src/x.ts", { spec_anchors: ["FR-001", "AS-001"], spec_contributions: [] }, priors),
+    ...(secondTask ? [implementedTask("T2", ["src/y.ts"], "src/y.ts", { spec_anchors: [], spec_contributions: ["FR-001"] })] : []),
+  ];
+  const graph: TaskGraph = { ...graphFixture(tasks), spec_file: join(root, "spec.md"), plan_file: join(root, "plan.md"), spec_trace_version: 2 };
   const statePath = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(statePath, JSON.stringify(value(parseTaskGraph(graph))));
   return { root, statePath, runsRoot: join(root, "runs") };
@@ -145,6 +160,8 @@ async function start(p: ReturnType<typeof project>, runId = "run.current", paren
 }
 const resume = (p: ReturnType<typeof project>, handle: RunDirHandle) => runCli(p, ["resume", "--runs-root", p.runsRoot, "--run", handle.runId]);
 const graph = (p: ReturnType<typeof project>) => value(parseTaskGraph(JSON.parse(readFileSync(p.statePath, "utf8"))));
+/** A restart observation under which nothing can carry: these tests pin the full-reset restart. */
+const NO_CARRY_OBSERVED = { workspaces: [], issuedRosters: new Map<string, readonly string[]>() };
 /** The pre-fix shape of an owner-mapped Task's run: the five base reviewers bound, architecture-tech-lead absent. */
 const toBaseFive = (state: TaskGraph): TaskGraph => ({ ...state, tasks: state.tasks.map((task) => {
   const run = task.review_run;
@@ -404,11 +421,11 @@ describe("registered Wave reviewer protocol", () => {
     }) });
     const state = exhausted(graph(p));
     const keys = new Set(state.tasks[0]!.review_run!.slot_authority!.map(({ slot_id }) => captureKey(slot_id, 2)));
-    const restarted = prepareExhaustedWaveGateRestart(state, handle.runId, registration(handle), "run.next", p.runsRoot, keys);
+    const restarted = prepareExhaustedWaveGateRestart(state, handle.runId, registration(handle), "run.next", p.runsRoot, keys, NO_CARRY_OBSERVED);
     if (!restarted.ok) throw new Error(restarted.message);
     expect(restarted.value.registration.restart?.exhaustedSlots)
       .toEqual(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`));
-    expect(prepareExhaustedWaveGateRestart(toBaseFive(state), handle.runId, registration(handle), "run.next", p.runsRoot, keys))
+    expect(prepareExhaustedWaveGateRestart(toBaseFive(state), handle.runId, registration(handle), "run.next", p.runsRoot, keys, NO_CARRY_OBSERVED))
       .toEqual({ ok: false, message: "task T1 Review Packet is not bound to the active epoch and exact reviewer roster" });
   }, 30_000);
 
@@ -498,7 +515,7 @@ describe("registered Wave reviewer protocol", () => {
     }) });
     const state = exhaustedV2(graph(p));
     const keys = new Set(state.tasks[0]!.review_run!.slot_authority!.map(({ slot_id }) => captureKey(slot_id, 2)));
-    const restarted = prepareExhaustedWaveGateRestart(state, handle.runId, v2Registration, "run.next", p.runsRoot, keys);
+    const restarted = prepareExhaustedWaveGateRestart(state, handle.runId, v2Registration, "run.next", p.runsRoot, keys, NO_CARRY_OBSERVED);
     if (!restarted.ok) throw new Error(restarted.message);
     expect(restarted.value.registration).toMatchObject({ schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4,
       restart: { previousRunId: handle.runId, exhaustedSlots: BASE_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`) } });
@@ -768,7 +785,7 @@ describe("registered Wave reviewer protocol", () => {
     expect(graph(p).tasks[0]!.resolved_findings ?? []).toEqual([]);
   }, 60_000);
 
-  it.each(["missing", "ambiguous", "marker-only"] as const)("terminal-blocks %s final payload retries and preserves accepted current Findings on exhausted restart without resolving partial priors", async (mode) => {
+  it.each(["missing", "ambiguous", "marker-only"] as const)("terminal-blocks %s final payload retries and carries accepted current evidence on exhausted restart without resolving partial priors", async (mode) => {
     const priors = mixedPriors();
     const p = project(priors);
     const { handle, action } = await start(p);
@@ -798,11 +815,18 @@ describe("registered Wave reviewer protocol", () => {
     expect((await resume(p, handle)).kind).toBe("blocked");
     const restarted = await runCli(p, ["restart", "--runs-root", p.runsRoot, "--run", handle.runId, "--new-run", "run.restarted"]);
     expect(restarted.kind, JSON.stringify(restarted)).toBe("spawn-batch");
+    // ADR-0089: only spec-check and the exhausted slot are reissued; the four
+    // accepted slots carry their evidence by reference, unfolded, so the prior
+    // roster the reissued reviewer assesses is the one its siblings assessed.
+    expect(restarted.requests?.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", requests[1]!.authority.role]);
     const preserved = graph(p).tasks[0]!;
-    expect(preserved.findings?.slice(0, 2)).toEqual(priors);
-    expect(preserved.findings?.slice(2)).toMatchObject([{ ...criticalDraft, protocolVersion: 2 }, { ...advisory, protocolVersion: 2 }]);
+    expect(preserved.findings).toEqual(priors);
     expect(preserved.resolved_findings ?? []).toEqual([]);
     expect(preserved.review_run?.reviewer_protocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
+    expect(preserved.review_run?.prior_finding_ids).toEqual(priors.map(({ id }) => id));
+    const carriedFindings: readonly DraftFinding[] = (preserved.review_run?.evidence ?? [])
+      .flatMap(({ new_findings }): readonly DraftFinding[] => new_findings);
+    expect(carriedFindings).toMatchObject([{ ...criticalDraft, protocolVersion: 2 }, { ...advisory, protocolVersion: 2 }]);
     const beforeStale = readFileSync(p.statePath);
     await markWaveTaskReviewRetriesIssued(new StateManager(p.statePath), retryAuthority);
     expect(readFileSync(p.statePath)).toEqual(beforeStale);
@@ -814,6 +838,200 @@ describe("registered Wave reviewer protocol", () => {
     expect(refused.stderr).toContain(": request does not belong to the exact current Wave Review Packet slot");
     expect(readFileSync(p.statePath)).toEqual(beforeStale);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0089 (loom#213 Cause 1b): a restart reissues only the exhausted slots.
+// ---------------------------------------------------------------------------
+
+describe("Wave Gate restart carries accepted review evidence", () => {
+  const carriedCritical: ReviewerDraftV2 = { ...criticalDraft, file: "src/y.ts", claim: "carried critical on y" };
+
+  /** Run A exhausted, then restarted through the façade. */
+  async function exhaustedThenRestarted() {
+    const run = await exhausted();
+    const restarted = await runCli(run.p, ["restart", "--runs-root", run.p.runsRoot, "--run", run.previous.runId, "--new-run", "run.restarted"]);
+    return { ...run, restarted, next: value(openRunDirectory(run.p.runsRoot, "run.restarted")) };
+  }
+
+  /**
+   * The restart's crash window: the replacement is registered and its carry
+   * plan committed to protected state, but no resume has installed its batch.
+   * That is exactly what `orchestration restart` commits before it resumes.
+   */
+  async function restartedBeforeFirstResume() {
+    const { p, previous } = await exhausted();
+    const before = graph(p);
+    const carried = value(observeRestartCarry(previous, before, registration(previous), p.root));
+    const exhaustedKeys = new Set(before.tasks.flatMap(({ review_run: run }) => (run?.slot_authority ?? [])
+      .filter((slot) => slot.attempted === 2 && !run!.evidence.some(({ agent }) => agent === slot.agent))
+      .map(({ slot_id }) => captureKey(slot_id, 2))));
+    const next = value(createRunDirectory(p.runsRoot, "run.restarted"));
+    const prepared = value(prepareExhaustedWaveGateRestart(
+      before, previous.runId, registration(previous), next.runId, next.identity.runsRoot, exhaustedKeys, carried));
+    expect(prepared.registration.restart?.carry?.carried.map(({ kind, taskId }) => [kind, taskId]))
+      .toEqual([["accepted-task", "T1"], ["accepted-slots", "T2"]]);
+    value(await next.registerProgram(prepared.registration));
+    await new StateManager(p.statePath).update(() => prepared.graph);
+    return { p, next };
+  }
+
+  /** Run A: T1 accepts every slot; T2 accepts all but its third reviewer, whose attempt 2 exhausts. */
+  async function exhausted() {
+    const p = project([], ["src/x.ts"], true);
+    const { handle, action } = await start(p);
+    const [specCheck, ...reviewers] = action.requests!;
+    const t1 = reviewers.slice(0, BASE_WAVE_REVIEW_AGENTS.length);
+    const t2 = reviewers.slice(BASE_WAVE_REVIEW_AGENTS.length);
+    expect(t2).toHaveLength(BASE_WAVE_REVIEW_AGENTS.length);
+    await capture(handle, specCheck!.authority, specPass);
+    for (const { authority } of t1) await submit(p, handle, authority, payload(handle, authority));
+    expect(graph(p).tasks[0]!.accepted_review_authority?.run_id).toBe(handle.runId);
+    const exhausted = t2[2]!.authority;
+    for (const [index, { authority }] of t2.entries()) {
+      if (authority.requestId === exhausted.requestId) continue;
+      await submit(p, handle, authority, payload(handle, authority, index === 0 ? [carriedCritical] : []));
+    }
+    const packetA = graph(p).tasks[1]!.review_run!.packet_id;
+    value(await handle.rejectCapture(exhausted, "capture failed before its journal append"));
+    const retry = await resume(p, handle);
+    expect(retry.requests).toHaveLength(1);
+    value(await handle.rejectCapture(retry.requests![0]!.authority, "capture failed before its journal append"));
+    expect(await resume(p, handle)).toMatchObject({ kind: "blocked", diagnostic: { message: expect.stringContaining("attempt 2 exhausted") } });
+    return { p, previous: handle, exhausted, packetA };
+  }
+
+  /** Accept the replacement's spec-check and its one reissued slot. */
+  async function settleReplacement(p: ReturnType<typeof project>, next: RunDirHandle, restarted: Action): Promise<Action> {
+    const [specCheck, reissued] = restarted.requests!;
+    await capture(next, specCheck!.authority, specPass);
+    return submit(p, next, reissued!.authority, payload(next, reissued!.authority));
+  }
+
+  it("restart reissues only spec-check and the exhausted slot, carries every accepted slot by reference, and completes after one capture", async () => {
+    const { p, previous, exhausted, packetA, restarted, next } = await exhaustedThenRestarted();
+    expect(restarted.kind, JSON.stringify(restarted)).toBe("spawn-batch");
+    expect(restarted.requests?.map(({ authority }) => [authority.role, authority.runId, authority.attempt])).toEqual([
+      ["spec-check-invoker", "run.restarted", 1], [exhausted.role, "run.restarted", 1],
+    ]);
+    const accepted = BASE_WAVE_REVIEW_AGENTS.filter((agent) => agent !== exhausted.role);
+    const previousDigest = registration(previous).authorityDigest;
+    expect(registration(next).restart?.carry).toEqual({
+      lineage: [{ runId: previous.runId, authorityDigest: previousDigest }],
+      carried: [
+        { kind: "accepted-task", taskId: "T1", roster: BASE_WAVE_REVIEW_AGENTS, acceptance: { runId: previous.runId, authorityDigest: previousDigest } },
+        { kind: "accepted-slots", taskId: "T2", agents: accepted },
+      ],
+    });
+    const rebound = graph(p);
+    // T1 is not reissued: its acceptance stays the one run A recorded.
+    expect(rebound.tasks[0]!.review_run).toBeUndefined();
+    expect(rebound.tasks[0]!.accepted_review_authority?.run_id).toBe(previous.runId);
+    // T2's accepted slots keep run A's slot/request/context identity plus provenance; the exhausted one is fresh.
+    const run = rebound.tasks[1]!.review_run!;
+    expect(run.wave_gate_run_id).toBe("run.restarted");
+    expect(run.evidence.map(({ agent }) => agent)).toEqual(accepted);
+    for (const slot of run.slot_authority ?? []) {
+      if (slot.agent === exhausted.role) {
+        expect(slot).toEqual({ agent: exhausted.role, slot_id: restarted.requests![1]!.authority.slotId, attempted: 1,
+          request_id: restarted.requests![1]!.authority.requestId, context_digest: restarted.requests![1]!.authority.contextDigest });
+      } else {
+        expect(slot).toMatchObject({ carried_from: { run_id: previous.runId, authority_digest: previousDigest, packet_id: packetA } });
+        expect(value(previous.readIssuedRequests()).some(({ slotId, requestId }) => slotId === slot.slot_id && requestId === slot.request_id)).toBe(true);
+      }
+    }
+    // Resume replays the same two requests and writes nothing.
+    const before = readFileSync(p.statePath);
+    expect((await resume(p, next)).requests?.map(({ authority }) => authority.requestId))
+      .toEqual(restarted.requests!.map(({ authority }) => authority.requestId));
+    expect(readFileSync(p.statePath)).toEqual(before);
+
+    // Abandoning the replacement now would fold the carried evidence under the Review Packet that issued it.
+    const folded = supersedeAbandonedWaveGateReview(rebound, "run.restarted", ["T1", "T2"]);
+    expect(folded.tasks[1]!.findings).toMatchObject([{ claim: carriedCritical.claim, review_packet_id: packetA }]);
+
+    // One capture closes T2's roster; its carried critical goes to the Refutation Panel of the replacement run.
+    const panel = await settleReplacement(p, next, restarted);
+    expect(panel.kind, JSON.stringify(panel)).toBe("spawn-batch");
+    const settled = graph(p).tasks[1]!;
+    expect(settled.accepted_review_authority?.run_id).toBe("run.restarted");
+    expect(settled.findings).toMatchObject([{ claim: carriedCritical.claim, review_packet_id: packetA }]);
+    for (const [index, { authority }] of panel.requests!.entries()) {
+      expect(authority).toMatchObject({ role: "review-verifier-agent", runId: "run.restarted" });
+      const material = JSON.parse(Buffer.from(value(next.readContext(authority.contextDigest)).fixedContext
+        .find(({ label }) => label === "wave-refutation-authority")!.bytes).toString()) as { lens: string; findings: readonly { id: string; claim: string }[] };
+      expect(material.findings.map(({ claim }) => claim)).toEqual([carriedCritical.claim]);
+      await capture(next, authority, JSON.stringify({ criterion: material.lens,
+        verdicts: material.findings.map(({ id }) => ({ finding_id: id, verdict: index < 2 ? "refuted" : "upheld", reasoning: "asserted precondition does not hold" })) }));
+    }
+    const done = await resume(p, next);
+    expect(done.kind, JSON.stringify(done)).toBe("done");
+    // A completed replay accepts the carried subjects as published along the lineage.
+    expect(await resume(p, next)).toEqual(done);
+  }, 120_000);
+
+  it.each([
+    ["a whole-roster acceptance", "x.ts", "Task T1 cannot keep the acceptance its restart carried from run run.current: drift in head"],
+    ["carried slots", "y.ts", "Task T2 carried review evidence no longer judges it: drift in head"],
+  ])("the first install refuses %s whose reviewed bytes changed after the restart, and writes nothing", async (_label, file, refusal) => {
+    const { p, next } = await restartedBeforeFirstResume();
+    writeFileSync(join(p.root, "src", file), "export const changed = true;\n");
+    const before = readFileSync(p.statePath);
+    expect(await resume(p, next)).toMatchObject({ kind: "blocked", diagnostic: { message: `internal Wave Gate failure: ${refusal}` } });
+    expect(readFileSync(p.statePath)).toEqual(before);
+  }, 120_000);
+
+  it("a restart names each reviewed Task it does not carry, and why, on its output", async () => {
+    const { p, previous } = await exhausted();
+    writeFileSync(join(p.root, "src", "y.ts"), "export const changed = true;\n");
+    const restarted = await cliResult(p, ["restart", "--runs-root", p.runsRoot, "--run", previous.runId, "--new-run", "run.restarted"]);
+    expect(restarted.status, restarted.stderr).toBe(0);
+    const reported = restarted.stderr.split("\n").flatMap((line) => {
+      try { return [JSON.parse(line) as unknown]; } catch { return []; }
+    });
+    expect(reported).toContainEqual({ kind: "wave-gate-restart-not-carried", runId: "run.restarted",
+      notCarried: [{ taskId: "T2", reason: { kind: "drift", fields: ["head"] } }] });
+    // T2 is issued in full; T1 still carries.
+    expect((JSON.parse(restarted.stdout) as Action).requests?.map(({ authority }) => authority.role))
+      .toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
+    expect(registration(value(openRunDirectory(p.runsRoot, "run.restarted"))).restart?.carry?.carried.map(({ taskId }) => taskId))
+      .toEqual(["T1"]);
+  }, 120_000);
+
+  it("a restart that carries nothing issues exactly the batch it always did; a carry plan enters the epoch", async () => {
+    const p = project([], ["src/x.ts"], true);
+    const { handle } = await start(p);
+    const current = registration(handle);
+    if (current.schemaVersion !== 2) throw new Error("a started Wave Gate registers schema 2");
+    const batchFor = (program: RegisteredWaveGateProgram) => withFixturePiSession(p.root, async () =>
+      waveRequests(handle, program, graph(p), 1, { kind: "state-layout", root: p.root }));
+    const plain = await batchFor(current);
+    const restartedWithoutCarry = await batchFor({ ...current, restart: { previousRunId: "run.previous", exhaustedSlots: ["T2/code-reviewer"] } });
+    expect(restartedWithoutCarry.batchEpoch).toBe(plain.batchEpoch);
+    expect(restartedWithoutCarry.requests.map(({ authority }) => [authority.slotId, authority.requestId]))
+      .toEqual(plain.requests.map(({ authority }) => [authority.slotId, authority.requestId]));
+    const acceptance = { runId: "run.previous", authorityDigest: "c".repeat(64) };
+    const carrying = await batchFor({ ...current, restart: { previousRunId: "run.previous", exhaustedSlots: ["T2/code-reviewer"],
+      carry: { lineage: [acceptance], carried: [{ kind: "accepted-task", taskId: "T1", roster: BASE_WAVE_REVIEW_AGENTS, acceptance }] } } });
+    expect(carrying.batchEpoch).not.toBe(plain.batchEpoch);
+    expect(carrying.subjects).toEqual([{ role: "spec-check-invoker", taskId: null },
+      ...BASE_WAVE_REVIEW_AGENTS.map((role) => ({ role, taskId: "T2" }))]);
+    expect(carrying.taskRuns.map(({ taskId }) => taskId)).toEqual(["T2"]);
+  }, 60_000);
+
+  it("completion refuses a carried acceptance forged outside the recorded restart lineage", async () => {
+    const { p, restarted, next } = await exhaustedThenRestarted();
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, tasks: locked.tasks.map((task) => {
+      const accepted = task.accepted_review_authority;
+      return task.id === "T1" && accepted?.reviewer_protocol !== undefined
+        ? { ...task, accepted_review_authority: { ...accepted, run_id: "run.forged" } } : task;
+    }) }));
+    const settled = await settleReplacement(p, next, restarted);
+    const blocked = settled.kind === "blocked" ? settled : await resume(p, next);
+    expect(blocked).toMatchObject({ kind: "blocked", diagnostic: {
+      message: expect.stringContaining("Task T1 acceptance from run run.forged is neither this run's nor carried along its restart lineage"),
+    } });
+  }, 120_000);
 });
 
 // ---------------------------------------------------------------------------

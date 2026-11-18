@@ -1,7 +1,7 @@
 # ADR-0084: Wave reviewer payloads carry no packet identity; the issued subject binds it
 
 ## Status
-Accepted (2026-11-17). Partly supersedes ADR-0009: the exact packet/generation join of a Wave payload. Issue #213, Cause 1.
+Accepted (2026-11-17). Partly supersedes ADR-0009: the exact packet/generation join of a Wave payload. Issue #213, Cause 1. The "every request is reissued" bullet is superseded by [ADR-0089](ADR-0089-wave-gate-restart-carries-accepted-review-evidence.md) for a restart whose predecessor issued v4: accepted slots carry into the replacement by reference. A v2 predecessor still carries nothing, so no reviewer straddles two protocols.
 
 ## Context
 ADR-0009 required every Wave reviewer payload to echo the exact `packetId` (a 64-hex SHA-256 digest) and

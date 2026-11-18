@@ -14,8 +14,10 @@ import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-
 import type { Task } from '../../../types';
 import { installWaveReviewRunsTransition, waveBatchSpecCheckAuthority } from '../../../core/wave-review-issuance';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
+import { waveReviewCarryOf } from '../../../core/wave-review-carry-plan';
 import {
   classifyPersistedWaveBatch,
+  issuedWaveReviewRosters,
   prepareWaveReviewBatch,
   type PersistedWaveBatchCandidate,
   type WaveRequestBatch,
@@ -157,8 +159,13 @@ export async function reconcileWaveReviewIssuance(
     requests: Parameters<typeof publishReviewInitialBatch>[1],
     packets: Parameters<typeof publishReviewInitialBatch>[2],
   ) => publishReviewInitialBatch(handle, requests, packets, CURRENT_BATCH_LABEL, registration);
+  // A Review Run a restart kept for its carried slots (ADR-0089) belongs to
+  // the predecessor until this batch rebinds it, so it does not count as
+  // installed here.
+  const carry = registration.restart?.carry;
   const initialBatchMissingOrPartial = graph.wave_review_epoch === undefined &&
-    graph.tasks.every((task) => !registration.taskIds.includes(task.id) || task.review_run === undefined);
+    graph.tasks.every((task) => !registration.taskIds.includes(task.id) || task.review_run === undefined ||
+      (waveReviewCarryOf(carry, task.id)?.kind === "accepted-slots" && task.review_run.wave_gate_run_id !== handle.runId));
   if (initialBatchMissingOrPartial) {
     const batch = batchFor(graph);
     // Publication is deterministic and idempotent per context/request slot.
@@ -218,7 +225,7 @@ export async function reconcileWaveReviewIssuance(
     }
     const rosters = waveTaskReviewRosters(refreshed, registration.schemaVersion, registration.taskIds);
     if (!rosters.ok) return settled(waveBlocked(handle, rosters.error));
-    const persisted = classifyPersistedWaveBatch(rosters.value, candidates);
+    const persisted = classifyPersistedWaveBatch(issuedWaveReviewRosters(rosters.value, carry), candidates);
     if (persisted.kind === "incomplete") {
       const expectedBatch = batchFor(refreshed);
       if (expectedBatch.batchEpoch !== epoch.batchEpoch) {

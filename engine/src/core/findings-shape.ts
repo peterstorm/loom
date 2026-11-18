@@ -114,8 +114,31 @@ export type ReviewRunEvidence = LegacyReviewRunEvidence | CurrentReviewRunEviden
  * Run. Legacy runs may omit this field, but exact-slot Wave recovery refuses
  * such runs rather than accepting caller-authored attempt evidence. */
 type ReviewRunSlotBase = Readonly<{ agent: string; slot_id: string; attempted: 1 | 2 }>;
-export type LegacyReviewRunSlotAuthority = ReviewRunSlotBase & Readonly<{ request_id?: never; context_digest?: never }>;
-export type CurrentReviewRunSlotAuthority = ReviewRunSlotBase & Readonly<{ request_id: string; context_digest: string }>;
+export type LegacyReviewRunSlotAuthority = ReviewRunSlotBase & Readonly<{
+  request_id?: never; context_digest?: never; carried_from?: never;
+}>;
+type CurrentReviewRunSlotIdentity = ReviewRunSlotBase & Readonly<{ request_id: string; context_digest: string }>;
+
+/**
+ * The Wave Gate run, its authority digest and the Review Packet that issued a
+ * carried slot's accepted evidence (ADR-0089). Always a run other than the
+ * one whose Review Run holds the slot: the State File refuses a carried slot
+ * naming its own run, or one without evidence.
+ */
+export type ReviewSlotOrigin = Readonly<{ run_id: string; authority_digest: string; packet_id: string }>;
+
+/** A slot this Review Run's own Wave Gate run issued. */
+export type IssuedReviewRunSlotAuthority = CurrentReviewRunSlotIdentity & Readonly<{ carried_from?: never }>;
+
+/**
+ * Carried Review Evidence (ADR-0089): a slot a restart carried into this run
+ * by reference. It keeps the slot, request and context identity of the run
+ * that issued it, so the evidence it accepted still binds exactly; this run
+ * never re-mints identity for work it did not issue.
+ */
+export type CarriedReviewRunSlotAuthority = CurrentReviewRunSlotIdentity & Readonly<{ carried_from: ReviewSlotOrigin }>;
+
+export type CurrentReviewRunSlotAuthority = IssuedReviewRunSlotAuthority | CarriedReviewRunSlotAuthority;
 export type ReviewRunSlotAuthority = LegacyReviewRunSlotAuthority | CurrentReviewRunSlotAuthority;
 
 /**

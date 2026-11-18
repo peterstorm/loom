@@ -218,7 +218,7 @@ The final protected-state commit re-observes the workspace and checks implementa
 
 ### Exhausted reviewer restart
 
-A semantic result receives at most one retry. If Wave reviewer attempt 2 is durably rejected, `/wave-gate` can invoke the registered `restart` operation with a fresh replacement Run Directory. The engine preserves accepted findings and audit evidence, retires stale authority, and issues a fresh packet/epoch. Historical transcripts are not copied or edited.
+A semantic result receives at most one retry. If Wave reviewer attempt 2 is durably rejected, `/wave-gate` can invoke the registered `restart` operation with a fresh replacement Run Directory. The engine retires stale authority and issues a fresh packet/epoch, but only for spec-check and the exhausted slots. Every accepted reviewer slot carries into the replacement by reference, keeping the identity it was accepted under ([ADR-0089](adr/ADR-0089-wave-gate-restart-carries-accepted-review-evidence.md)). A Task whose evidence no longer matches its bytes, Review Generation, prior Findings, roster or reviewer protocol is reissued in full. Historical transcripts are not copied or edited.
 
 ## Standalone `/review-pr`
 

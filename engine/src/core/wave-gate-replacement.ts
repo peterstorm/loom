@@ -6,8 +6,14 @@
  * registration. The shell re-derives the transition under the state lock and
  * compares registrations with the matching `same…Registration` predicate.
  * A replacement is a new Wave Gate registration and issues the current Wave
- * reviewer protocol (v4, ADR-0084) whatever its predecessor issued: every
- * request is reissued, so no reviewer straddles the two protocols.
+ * reviewer protocol (v4, ADR-0084) whatever its predecessor issued.
+ *
+ * A restart carries every accepted reviewer slot of a same-protocol
+ * predecessor into the replacement by reference (ADR-0089) and records the
+ * plan in the registration; only spec-check and the exhausted slots are
+ * reissued. A predecessor under another protocol carries nothing, so no
+ * reviewer straddles two protocols. Orphan recovery always reissues every
+ * request: the predecessor's Run Directory is gone.
  */
 import type { ReviewRunSlotAuthority, Task, TaskGraph } from "../types";
 import { captureKey } from "./harness-capture";
@@ -16,6 +22,9 @@ import { WAVE_REVIEWER_PROTOCOL_V4 } from "./reviewer-contract";
 import { resetWaveGateReviewAuthority } from "./wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import { waveGateAuthorityDigest, waveRunRosterProblem } from "./wave-review-authority";
+import { planRestartCarry, type RestartCarryObservation, type TaskNotCarried } from "./wave-review-carry";
+
+export type { RestartCarryObservation, TaskNotCarried } from "./wave-review-carry";
 
 type ReplacementRefusal = Readonly<{ ok: false; message: string }>;
 
@@ -53,6 +62,9 @@ export type WaveGateRestartPreparation = Readonly<{
   graph: TaskGraph;
   registration: RegisteredWaveGateProgram;
   exhaustedSlots: readonly string[];
+  /** Each reviewed Task this restart issues in full, and why it carried
+   *  nothing. Reported by the restart, never recorded in the registration. */
+  notCarried: readonly TaskNotCarried[];
 }>;
 
 export type WaveGateRestartResult =
@@ -65,7 +77,9 @@ export type WaveGateRestartResult =
  * invalidated. Review Generation stays stable because implementation bytes did
  * not change; fresh packet, epoch, and Run identities reject stale transcripts.
  * `exhaustedAttempts` holds the capture keys the shell proved terminally
- * rejected at attempt 2.
+ * rejected at attempt 2. `carry` is what the shell observed for the carry
+ * decision: a Task carries its accepted evidence only when the observation
+ * proves nothing it judged has changed, and is reset otherwise.
  */
 export function prepareExhaustedWaveGateRestart(
   graph: TaskGraph,
@@ -74,6 +88,7 @@ export function prepareExhaustedWaveGateRestart(
   nextRunId: string,
   nextRunsRoot: string,
   exhaustedAttempts: ReadonlySet<string>,
+  carry: RestartCarryObservation,
 ): WaveGateRestartResult {
   const wave = previous.input.wave;
   if (wave === null || graph.current_phase !== "execute" || graph.current_wave !== wave) {
@@ -117,7 +132,11 @@ export function prepareExhaustedWaveGateRestart(
       message: `Wave Gate restart refused before final-attempt rejection for: ${nonExhausted.map(({ task, slot }) => `${task.id}/${slot.agent}`).join(", ")}`,
     };
   }
-  const resetGraph = resetWaveGateReviewAuthority(graph, previous.taskIds);
+  const plan = planRestartCarry({ graph, previousRunId, previous, protocol: WAVE_REVIEWER_PROTOCOL_V4, observation: carry });
+  const carried = plan.carry;
+  const carriedRunTaskIds = new Set((carried?.carried ?? [])
+    .flatMap((entry) => (entry.kind === "accepted-slots" ? [entry.taskId] : [])));
+  const resetGraph = resetWaveGateReviewAuthority(graph, previous.taskIds, carriedRunTaskIds);
   const replacement = replacementWaveGate(resetGraph, wave, previous.taskIds, nextRunId, nextRunsRoot);
   if (!replacement.ok) return replacement;
   const exhaustedSlots = Object.freeze(outstanding.map(({ task, slot }) => `${task.id}/${slot.agent}`));
@@ -128,7 +147,7 @@ export function prepareExhaustedWaveGateRestart(
     input: Object.freeze({ wave }),
     taskIds: previous.taskIds,
     authorityDigest: replacement.active.authorityDigest,
-    restart: Object.freeze({ previousRunId, exhaustedSlots }),
+    restart: Object.freeze({ previousRunId, exhaustedSlots, ...(carried === undefined ? {} : { carry: carried }) }),
   });
   const nextGraph: TaskGraph = {
     ...resetGraph,
@@ -140,6 +159,7 @@ export function prepareExhaustedWaveGateRestart(
       graph: nextGraph,
       registration,
       exhaustedSlots,
+      notCarried: plan.notCarried,
     }),
   };
 }
@@ -155,11 +175,12 @@ function sameReplacementRegistration(left: RegisteredWaveGateProgram, right: Reg
 }
 
 /** Restart registrations agree on the shared replacement identity and the
- *  exact restart audit (predecessor and ordered exhausted slots). */
+ *  exact restart audit (predecessor, ordered exhausted slots and carry plan). */
 export function sameRestartRegistration(left: RegisteredWaveGateProgram, right: RegisteredWaveGateProgram): boolean {
   return sameReplacementRegistration(left, right) &&
     left.restart?.previousRunId === right.restart?.previousRunId &&
-    canonicalStructuralEquals(left.restart?.exhaustedSlots ?? [], right.restart?.exhaustedSlots ?? []);
+    canonicalStructuralEquals(left.restart?.exhaustedSlots ?? [], right.restart?.exhaustedSlots ?? []) &&
+    canonicalStructuralEquals(left.restart?.carry ?? null, right.restart?.carry ?? null);
 }
 
 export type OrphanedWaveGateRecoveryExpectation = Readonly<{
