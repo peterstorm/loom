@@ -99,7 +99,7 @@ describe("the verifier agent is wired for the execute phase, invisible to dispat
     for (const agent of REVIEW_PANEL_AGENTS) {
       expect(isReviewPanelAgent(agent)).toBe(true);
       expect(isReviewPanelAgent(agent.replace(/-agent$/, ""))).toBe(true);
-      expect(detectPhase(agent, "")).toBe("execute");
+      expect(detectPhase(agent)).toBe("execute");
     }
   });
 

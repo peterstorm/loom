@@ -58,8 +58,10 @@ const GATES: ReadonlyArray<{
   {
     name: "validate-phase-order",
     handler: lazyHandler(() => import("../../../src/handlers/pre-tool-use/validate-phase-order")),
-    toolInput: { subagent_type: "rogue-agent", prompt: "Run tests" },
-    expect: "Unrecognized agent type",
+    // An unknown agent outside Loom's catalog is not phase work (loom#213);
+    // an unknown Loom-namespaced name is the case the gate refuses.
+    toolInput: { subagent_type: "loom:rogue-agent", prompt: "Run tests" },
+    expect: "Unrecognized Loom agent type",
   },
   {
     name: "validate-task-execution",

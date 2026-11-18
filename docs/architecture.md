@@ -59,7 +59,7 @@ bun engine/src/cli.ts <hook-type> <handler> [arguments]
 
 | Hook shim | Event and matcher | Purpose |
 |---|---|---|
-| `validate-phase-order.sh` | PreToolUse: Task/Agent/subagent | Phase sequencing: refuses a phase agent whose prerequisite phase is incomplete, and the decompose spawn until the plan design review is accepted for the plan's current bytes (or skipped). *Fail-closed* |
+| `validate-phase-order.sh` | PreToolUse: Task/Agent/subagent | Phase sequencing: refuses a phase agent whose prerequisite phase is incomplete, and the decompose spawn until the plan design review is accepted for the plan's current bytes (or skipped). An agent is placed in a phase by its identity, never by its prompt. An agent outside Loom's catalog (Claude Code's general-purpose agent, another plugin's agent even when its bare name matches a Loom agent's) is not phase work and passes, because what it may write in the orchestrated repository is `block-direct-edits`' decision. An unknown `loom:` name and a spawn naming no agent type are refused; on Pi, whose agent names are bare, an unknown name cannot be told from a foreign agent and passes. *Fail-closed* |
 | `validate-task-execution.sh` | PreToolUse: Task/Agent/subagent | Expands an implementation brief marker; checks Wave and dependency order and path ownership; reclaims only policy-eligible reservations; writes skeletons; captures baselines; registers attempt and retry authority atomically. *Fail-closed* |
 | `validate-template-substitution.sh` | PreToolUse: Task/Agent/subagent | Refuses a prompt that still holds an unsubstituted `{variable}`. *Fail-closed* |
 | `validate-agent-model.sh` | PreToolUse: Task/Agent/subagent | Refuses a spawn whose model does not match the agent's LLM Profile. *Fail-closed* |
