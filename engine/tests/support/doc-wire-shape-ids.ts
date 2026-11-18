@@ -10,6 +10,7 @@
  */
 
 export const WIRE_SHAPE_IDS = [
+  "advisory-disposition",
   "architecture-panel-journal",
   "completed-wave-reopening",
   "decompose-task-graph",

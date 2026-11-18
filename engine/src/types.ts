@@ -34,6 +34,7 @@ import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/
 import type { SiblingEntryPoint } from "./core/sibling-entry-point";
 import type { InvariantId } from "./core/invariant-id";
 import type { TaskId } from "./core/task-id";
+import type { AdvisoryDisposition } from "./core/advisory-disposition-shape";
 // The G2 values (AD-4) are owned by their dependency-free leaf, which imports
 // nothing from this file, so the canonical Task and TaskGraph declare them.
 import type { ExportBinding, PathSkeletonOutcome, SkeletonRecord } from "./core/skeleton/persisted";
@@ -1514,6 +1515,12 @@ export interface TaskGraph {
   /** Retrospectives written or skipped, per Wave or for the run (ADR-0083), oldest first.
    *  `complete-orchestration` refuses until one covers the run. */
   readonly retro_records?: readonly RetroRecord[];
+  /** The operator's decision on each advisory a Wave Gate raised
+   *  (`orchestration disposition`, ADR-0090), append-only: the latest record
+   *  per advisory stands. A deferred or dismissed advisory is not reissued to
+   *  reviewers while its anchored bytes hold (`issuedPriorFindings`).
+   *  Re-population drops them with the Tasks they named. */
+  readonly advisory_dispositions?: readonly AdvisoryDisposition[];
   /** Accepted quiescent-Wave result bound to the exact active registration. */
   readonly active_wave_completion_suite?: AcceptedWaveCompletionReceipt;
   /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */

@@ -52,7 +52,8 @@ import {
   type MintedAgentRequestAuthority,
   type OrchestrationRunId,
 } from "./orchestration-contract";
-import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
+import { admitReviewedWorkspace, type ReviewedArtifact, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
+import { issuedPriorFindings } from "./advisory-disposition";
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
 import { taskOwnerDuty } from "./owner-verification/obligations";
 import { isOwnerMapRole, OWNER_MAP_SECTION, renderOwnerMapSection } from "./owner-verification/owner-map";
@@ -111,6 +112,40 @@ export type WaveReviewRegistrationAuthority = Readonly<{
  */
 export function taskReviewScope(task: Pick<Task, "file_list" | "files_modified">): readonly string[] {
   return [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])].sort();
+}
+
+/**
+ * Which priors `waveReviewPriorFindings` selects:
+ * - `installed`: the priors the Task's installed Review Run issued, kept
+ *   exactly; with no run installed, a fresh issuance's. The batch epoch, the
+ *   Review Packet and the Review Run install read this.
+ * - `fresh`: a fresh issuance's over the bytes, whatever run is installed. A
+ *   restart's carry check compares an installed run's priors against it.
+ */
+export type PriorFindingBasis = "installed" | "fresh";
+
+/** The prior Findings a Wave review is issued, and their ids in the same order. */
+export type WaveReviewPriors = Readonly<{ findings: readonly Finding[]; ids: readonly string[] }>;
+
+/**
+ * The prior Findings a Wave review of `task` carries over `artifacts`, its
+ * reviewed bytes (ADR-0090). Every site that issues or compares a Review
+ * Run's priors reads this one selector, so the priors a reviewer is shown are
+ * the ones its run requires it to assess, and a carried run is judged against
+ * the set a fresh issuance would select. A fresh issuance is
+ * `issuedPriorFindings`.
+ */
+export function waveReviewPriorFindings(
+  graph: Pick<TaskGraph, "advisory_dispositions">,
+  task: Task,
+  artifacts: readonly ReviewedArtifact[],
+  basis: PriorFindingBasis,
+): WaveReviewPriors {
+  const run = task.review_run;
+  const findings = basis === "fresh" || run === undefined
+    ? issuedPriorFindings(task, graph.advisory_dispositions, artifacts)
+    : (task.findings ?? []).filter(({ id }) => run.prior_finding_ids.includes(id));
+  return Object.freeze({ findings: Object.freeze(findings), ids: Object.freeze(findings.map(({ id }) => id)) });
 }
 
 /** The Wave review packet section labels; spec-check reads both by name. */
@@ -1135,7 +1170,7 @@ export function prepareWaveReviewBatch(
       modified: task.files_modified ?? [],
       completionAnchors: task.spec_anchors ?? [],
       contributions: task.spec_contributions ?? [],
-      priorFindingIds: task.review_run?.prior_finding_ids ?? (task.findings ?? []).map(({ id }) => id),
+      priorFindingIds: waveReviewPriorFindings(graph, task, workspace.artifacts, "installed").ids,
       reviewedHeadSha: workspace.headSha,
     })),
     specFile: graph.spec_file ?? null,
@@ -1240,7 +1275,10 @@ export function prepareWaveReviewBatch(
     // The packet names the role's Skill for the Agent to read; the request's
     // own profile, bindings and Skill are minted from the catalog below.
     const requiredSkill = AGENT_REQUIRED_SKILLS[subject.role];
-    const task = subject.taskId === null ? null : reviewed.find(({ id }) => id === subject.taskId) ?? null;
+    const reviewedTask = subject.taskId === null
+      ? null
+      : admitted.find(({ task: candidate }) => candidate.id === subject.taskId) ?? null;
+    const task = reviewedTask?.task ?? null;
     const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({
       runId,
       wave: registration.input.wave,
@@ -1261,7 +1299,7 @@ export function prepareWaveReviewBatch(
         modifiedFiles: task.files_modified ?? [],
         proof: task.proof ?? null,
         testResult: task.test_result ?? null,
-        priorFindings: task.findings ?? [],
+        priorFindings: reviewedTask === null ? [] : waveReviewPriorFindings(graph, task, reviewedTask.workspace.artifacts, "installed").findings,
       },
       packetId: taskRun?.packetId ?? null,
       specFile: graph.spec_file,

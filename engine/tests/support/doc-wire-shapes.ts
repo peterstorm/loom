@@ -14,6 +14,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseDispositionInput } from "../../src/core/advisory-disposition-record";
 import { prepareDefectFamilyAccounting } from "../../src/core/defect-family-accounting";
 import { parseImplementationBriefRequest } from "../../src/core/implementation-brief";
 import { translateLegacyPanelJournal } from "../../src/core/legacy-archive";
@@ -161,6 +162,11 @@ export const SECURITY_PLACEHOLDERS: PlaceholderTable = {
 const NO_PLACEHOLDERS: PlaceholderTable = {};
 
 export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
+  "advisory-disposition": {
+    format: "json",
+    placeholders: NO_PLACEHOLDERS,
+    parse: (raw) => settle(parseDispositionInput(JSON.stringify(raw))),
+  },
   "architecture-panel-journal": {
     format: "json",
     placeholders: {

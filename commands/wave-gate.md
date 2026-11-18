@@ -61,8 +61,9 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   reviewer: the other Tasks' packets read the distilled bytes. Never infer the
   count; spawn exactly the requests returned.
 - `await-user`: present the advisory findings the request references exactly as
-  supplied, and ask the operator whether to approve them. The only decision a
-  Wave Gate accepts is approval (below).
+  supplied, record the operator's disposition of each, and ask whether to
+  approve them. The only decision a Wave Gate accepts is approval (below), and
+  it is refused until every advisory has a disposition.
 - `blocked`: stop and report the diagnostic. Do not bypass or reconstruct it.
 - `done`: report the completion receipt and newly protected Wave state, alongside the canonical Project Verification Coverage described below. The receipt alone does not claim every project verification category passed. Also relay the completed Wave's line of the status `retro` report (its friction digest), and when status lists `suggested: /retro --wave <N>` for it, tell the user and offer to run `/retro --wave <N>` now; a suggestion never blocks the next Wave (ADR-0083). After the final Wave, run `/retro` for the whole run (or record a deliberate skip), then retire the orchestration with `bun ${LOOM_DIR}/engine/src/cli.ts helper complete-orchestration`, which refuses until a whole-run retro is recorded. Until then, Loom's guards stay on.
 
@@ -91,11 +92,33 @@ and nothing is recorded. Approval lets the gate continue past its advisories to
 lint and completion. To act on an advisory (or a surviving critical) instead, do
 not decide: follow [Acting on a Finding](#acting-on-a-finding).
 
-Classify every advisory before approving. Relevant (in scope for the Task,
-actionable, consistent with project conventions): fix through Acting on a
-Finding. Not relevant (out-of-scope refactor, contradicts a project convention,
-false positive, deliberately deferred): record a one-line reason. Every advisory
-ends fixed, deferred (reason) or dismissed (reason).
+Classify every advisory before approving, and record each classification with
+`helper orchestration disposition` (ADR-0090). Relevant (in scope for the Task,
+actionable, consistent with project conventions): record it `fixed` and fix it
+through Acting on a Finding. Not relevant: record it `deferred` (deliberately
+left for later, optionally with the Wave or Task that takes it as `target`) or
+`dismissed` (out-of-scope refactor, contradicts a project convention, false
+positive), each with a one-line reason. `finding` is `<task>:<finding-id>`, the
+identity the request's advisory artifact names:
+
+<!-- wire-example: advisory-disposition -->
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration disposition <<'JSON'
+{"dispositions":[{"finding":"T3:code-reviewer-2","decision":"deferred","reason":"the retry policy is Wave 5's scope","target":"Wave 5"},{"finding":"T3:comment-analyzer-1","decision":"dismissed","reason":"the comment matches the project convention"},{"finding":"T4:silent-failure-hunter-1","decision":"fixed","reason":"fixing it before the next gate"}]}
+JSON
+```
+
+Approval is refused, naming each advisory, until every advisory the request
+issued has a disposition. A disposition lives on the TaskGraph, not in the run:
+it survives abandoning the run and reopening Tasks, and a decision from an
+earlier gate of the Wave keeps counting. The latest disposition of an advisory
+stands, and repeating one changes nothing. Record dispositions at the pause or
+after abandoning the run; the operation refuses outside the execute Phase,
+while a subagent is active, and for anything but an advisory of the active
+Wave. A deferred or dismissed advisory is not reissued to later reviewers while
+the bytes it was decided over (its own file, or the Task's reviewed files when
+it names none) stay the same; once they change, reviewers assess it again. A
+fixed advisory is always reissued until its reviewer resolves it.
 
 At a contract Wave's pause, read `helper orchestration status` before deciding.
 An `acceptance-freeze-pending` reason names every advisory on a file this
@@ -138,7 +161,8 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration brief \
 
 Reopening returns each named Task to revalidation, so status owes it a fresh
 dispatch (an `implemented` Task gets no brief, and the spawn gate refuses it).
-Its Findings stay as prior Findings for the next Review Run, the abandoned
+Its Findings stay as prior Findings for the next Review Run (less the advisories
+deferred or dismissed over bytes that did not change), the abandoned
 run's review and suite authority is retired, and the Wave's other Tasks stay
 `implemented`. The fix subagent spawns from that brief and can Edit/Write; the
 orchestrator cannot. Never use `populate-task-graph --force`, which resets
@@ -230,9 +254,9 @@ attempt-2 rejection. On success it retires the old run and returns the
 replacement `spawn-batch`. Every reviewer slot the old run accepted carries into
 the replacement by reference (ADR-0089), so the batch is spec-check plus only
 the exhausted slots. A Task whose whole roster was accepted gets no request.
-A Task whose reviewed bytes, Review Generation, prior Findings or roster
-changed, or a run registered under the earlier reviewer protocol, is reissued
-in full. Execute that exact batch normally. The old transcripts remain as audit
+A Task whose reviewed bytes, Review Generation, prior Findings (including a
+disposition that changed which advisories are issued) or roster changed, or a
+run registered under the earlier reviewer protocol, is reissued in full. Execute that exact batch normally. The old transcripts remain as audit
 evidence. Never repair, copy, or delete exhausted transcripts by hand.
 
 ## Reopening a completed Wave after Review Packet integrity loss

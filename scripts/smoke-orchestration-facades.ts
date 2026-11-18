@@ -820,6 +820,48 @@ function assertInvalidAdvisoryDecisionsRefused(cwd: string, runsRoot: string, ru
   check(malformedDecision.stderr.includes("must be exactly"), "Wave Gate accepted malformed advisory disposition");
 }
 
+/** The `<task>:<finding-id>` of every advisory the suspension issued, read
+ *  from the published advisory artifacts (`{taskId, finding}` each). */
+function issuedAdvisoryNames(runDir: string, suspended: AwaitUser): readonly string[] {
+  return suspended.request.advisories.map(({ slot }) => {
+    const artifact = record(JSON.parse(readFileSync(join(runDir, slot.path), "utf8")) as unknown, `advisory artifact ${slot.path}`);
+    const finding = record(artifact.finding, `advisory artifact ${slot.path} finding`);
+    check(typeof artifact.taskId === "string" && typeof finding.id === "string",
+      `advisory artifact ${slot.path} names no Task and Finding`);
+    return `${artifact.taskId}:${finding.id}`;
+  });
+}
+
+/**
+ * Approval is refused, naming every advisory, until each has a disposition
+ * (ADR-0090); the refused approval records nothing, so the same request is
+ * still pending. Every advisory is then disposed through the real
+ * `disposition` operation, and repeating the request appends nothing.
+ */
+function disposeEveryAdvisory(cwd: string, runsRoot: string, runDir: string, suspended: AwaitUser): void {
+  const decide = ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", suspended.request.requestId];
+  const names = issuedAdvisoryNames(runDir, suspended);
+  const refused = runFailure(cwd, decide, JSON.stringify({ kind: "approve" }));
+  check(refused.stderr.includes(`approval refused: ${names.length} advisor`) &&
+    names.every((name) => refused.stderr.includes(name)), `Wave Gate approved undispositioned advisories: ${refused.stderr}`);
+  const pending = asAwaitUser(run(cwd, ["resume", "--runs-root", runsRoot, "--run", runDir]), "Wave Gate refused-approval replay");
+  check(pending.request.requestId === suspended.request.requestId, "a refused approval changed the pending advisory request");
+
+  const decisions = ["dismissed", "deferred", "fixed"] as const;
+  const stdin = JSON.stringify({ dispositions: names.map((finding, index) => ({
+    finding,
+    decision: decisions[index % decisions.length],
+    reason: "Scripted smoke decision over the fixture advisory.",
+    ...(decisions[index % decisions.length] === "deferred" ? { target: "Wave 2" } : {}),
+  })) });
+  const recorded = record(run(cwd, ["disposition"], stdin), "advisory disposition");
+  check(recorded.kind === "advisory-dispositions-recorded" && Array.isArray(recorded.recorded) &&
+    recorded.recorded.length === names.length, `disposition did not record every advisory: ${JSON.stringify(recorded)}`);
+  const repeated = record(run(cwd, ["disposition"], stdin), "repeated advisory disposition");
+  check(Array.isArray(repeated.recorded) && repeated.recorded.length === 0 &&
+    Array.isArray(repeated.unchanged) && repeated.unchanged.length === names.length, "a repeated disposition appended records");
+}
+
 function waveGateSmoke(): void {
   const { cwd, statePath } = registeredWaveRepository("wave");
 
@@ -846,6 +888,7 @@ function waveGateSmoke(): void {
   const resumedSuspension = asAwaitUser(run(cwd, ["resume", "--runs-root", runsRoot, "--run", runDir]), "Wave Gate suspended replay");
   check(resumedSuspension.request.requestId === suspended.request.requestId, "Wave Gate resume changed advisory decision authority");
   assertInvalidAdvisoryDecisionsRefused(cwd, runsRoot, runDir, suspended.request.requestId);
+  disposeEveryAdvisory(cwd, runsRoot, runDir, suspended);
   run(cwd, [
     "decide", "--runs-root", runsRoot, "--run", runDir, "--request", suspended.request.requestId,
   ], JSON.stringify({ kind: "approve" }));
@@ -855,7 +898,7 @@ function waveGateSmoke(): void {
   const finalState = record(JSON.parse(readFileSync(statePath, "utf8")) as unknown, "completed Wave state");
   const tasks = finalState.tasks;
   check(Array.isArray(tasks) && record(tasks[0], "completed task").status === "completed", "Wave Gate did not atomically complete the task");
-  process.stdout.write("  ✓ Wave Gate review → advisory suspension/resume → atomic completion\n");
+  process.stdout.write("  ✓ Wave Gate review → advisory suspension/resume → refused approval → dispositions → atomic completion\n");
 }
 
 process.stdout.write("Orchestration façade smoke test (fresh CLI process at every boundary)\n");

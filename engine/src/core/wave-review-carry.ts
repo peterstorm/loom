@@ -48,7 +48,7 @@ import type {
   WaveReviewCarry,
   WaveReviewCarryAudit,
 } from "./wave-gate-program";
-import { taskReviewScope, waveReviewStanding, waveTaskReviewRoster } from "./wave-review-authority";
+import { taskReviewScope, waveReviewPriorFindings, waveReviewStanding, waveTaskReviewRoster } from "./wave-review-authority";
 import { issuedRoles, waveReviewCarryOf } from "./wave-review-carry-plan";
 
 /** The reviewed workspace a carry is judged against: its canonical scope and content head. */
@@ -111,8 +111,16 @@ function assertNever(value: never): never {
   throw new Error(`unknown not-carried reason ${JSON.stringify(value)}`);
 }
 
-/** The terms carried evidence is judged by: the replacement's protocol, the Task's derived roster and its bytes. */
-export type CarryTerms = Readonly<{ protocol: ReviewerProtocolDescriptor; roster: readonly string[]; bytes: ReviewedBytes }>;
+/** The terms a carried acceptance is judged by: the replacement's protocol, the Task's derived roster and its bytes. */
+export type AcceptanceTerms = Readonly<{ protocol: ReviewerProtocolDescriptor; roster: readonly string[]; bytes: ReviewedBytes }>;
+
+/**
+ * The terms carried slots are judged by: an acceptance's terms, and the prior
+ * Finding ids a fresh issuance over those bytes would select
+ * (`waveReviewPriorFindings` on the `fresh` basis, ADR-0090). A run whose
+ * priors differ assessed another set than the replacement would issue.
+ */
+export type CarryTerms = AcceptanceTerms & Readonly<{ priorFindingIds: readonly string[] }>;
 
 const notCarried = (reason: NotCarriedReason): DomainResult<never, NotCarriedReason> => ({ ok: false, error: reason });
 
@@ -142,7 +150,7 @@ function carriableSlots(task: Task, run: CurrentReviewRun, terms: CarryTerms): D
   const drift = driftOf([
     ["protocol", canonicalStructuralEquals(run.reviewer_protocol, terms.protocol)],
     ["generation", run.generation === (task.review_generation ?? 0)],
-    ["prior-findings", canonicalStructuralEquals(run.prior_finding_ids, (task.findings ?? []).map(({ id }) => id))],
+    ["prior-findings", canonicalStructuralEquals(run.prior_finding_ids, terms.priorFindingIds)],
     ["roster", canonicalStructuralEquals(run.expected_agents, terms.roster)],
     ["scope", canonicalStructuralEquals(run.workspace_scope, terms.bytes.scope) && bytesCoverTask(task, terms.bytes)],
     ["head", run.workspace_head_sha === terms.bytes.headSha],
@@ -161,7 +169,7 @@ function carriableAcceptance(
   task: Task,
   acceptance: CarriedReviewAuthority,
   acceptedRoster: readonly string[],
-  terms: CarryTerms,
+  terms: AcceptanceTerms,
 ): DomainResult<true, NotCarriedReason> {
   const accepted = task.accepted_review_authority;
   if (task.review_run !== undefined || accepted?.reviewer_protocol === undefined ||
@@ -250,7 +258,12 @@ function taskCarry(
   if (!admitted.ok) return notCarried({ kind: "workspace-rejected", error: admitted.error });
   const review = waveTaskReviewRoster(graph, 2, task);
   if (review.kind !== "roster") return notCarried({ kind: "roster-not-derivable" });
-  const terms: CarryTerms = { protocol, roster: review.roster, bytes: { scope: admitted.value.scope, headSha: admitted.value.headSha } };
+  const terms: CarryTerms = {
+    protocol,
+    roster: review.roster,
+    bytes: { scope: admitted.value.scope, headSha: admitted.value.headSha },
+    priorFindingIds: waveReviewPriorFindings(graph, task, admitted.value.artifacts, "fresh").ids,
+  };
   const run = task.review_run;
   if (run !== undefined) {
     if (run.reviewer_protocol === undefined) return notCarried({ kind: "drift", fields: ["protocol"] });
@@ -307,6 +320,8 @@ export type CarriedRunBinding = Readonly<{
   packetId: string;
   headSha: string;
   bytes: ReviewedBytes;
+  /** The prior Finding ids a fresh issuance over `bytes` selects (`CarryTerms`). */
+  priorFindingIds: readonly string[];
   roster: NonEmpty<string>;
   /** The replacement batch's fresh slots, one per agent the carry does not cover. */
   issued: readonly IssuedReviewRunSlotAuthority[];
@@ -329,7 +344,9 @@ export function rebindCarriedReviewRun(
   const refuse = (message: string): DomainResult<never, string> => ({ ok: false, error: `Task ${task.id} ${message}` });
   const run = task.review_run;
   if (run?.reviewer_protocol === undefined) return refuse("has no current Review Run to carry");
-  const accepted = carriableSlots(task, run, { protocol: binding.protocol, roster: binding.roster, bytes: binding.bytes });
+  const accepted = carriableSlots(task, run, {
+    protocol: binding.protocol, roster: binding.roster, bytes: binding.bytes, priorFindingIds: binding.priorFindingIds,
+  });
   if (!accepted.ok) return refuse(`carried review evidence no longer judges it: ${describeNotCarried(accepted.error)}`);
   if (!canonicalStructuralEquals(accepted.value, carry.agents)) {
     return refuse("holds accepted slots other than the ones its restart carried");
@@ -379,7 +396,7 @@ export function rebindCarriedReviewRun(
 export function carriedAcceptanceProblem(
   task: Task,
   carry: Extract<WaveReviewCarry, { kind: "accepted-task" }>,
-  terms: CarryTerms,
+  terms: AcceptanceTerms,
 ): string | null {
   const carriable = carriableAcceptance(task, carry.acceptance, carry.roster, terms);
   return carriable.ok

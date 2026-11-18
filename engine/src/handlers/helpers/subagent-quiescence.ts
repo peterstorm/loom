@@ -22,7 +22,8 @@ export type QuiescentOperation =
   | "adding a Task"
   | "withdrawing a Task"
   | "engine-run test evidence adoption"
-  | "engine revision adoption";
+  | "engine revision adoption"
+  | "advisory disposition";
 
 /** What each operation tells the operator to wait for before retrying. */
 const SETTLE: Readonly<Record<QuiescentOperation, string>> = Object.freeze({
@@ -37,6 +38,7 @@ const SETTLE: Readonly<Record<QuiescentOperation, string>> = Object.freeze({
   "withdrawing a Task": "wait for it to settle and retry",
   "engine-run test evidence adoption": "wait for it to settle and retry",
   "engine revision adoption": "wait for it to settle and retry",
+  "advisory disposition": "wait for it to settle and retry",
 });
 
 /** The pre-lock refusal for `operation`, or null when no subagent is active. */

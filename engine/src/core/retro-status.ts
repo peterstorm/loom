@@ -41,6 +41,9 @@ export function renderWaveDigest(digest: WaveFriction): string {
     ["critical Finding", "critical Findings", digest.findings.critical],
     ["advisory Finding", "advisory Findings", digest.findings.advisory],
     ["refuted Finding", "refuted Findings", digest.findings.refuted],
+    ["advisory fixed", "advisories fixed", digest.advisoryDispositions.fixed],
+    ["advisory deferred", "advisories deferred", digest.advisoryDispositions.deferred],
+    ["advisory dismissed", "advisories dismissed", digest.advisoryDispositions.dismissed],
   ];
   const shown = counts.filter(([, , value]) => value > 0).map(([one, many, value]) => `${value} ${value === 1 ? one : many}`);
   return `Wave ${digest.wave} (${digest.progress}): ${shown.length === 0 ? "no friction recorded" : shown.join(", ")}`;

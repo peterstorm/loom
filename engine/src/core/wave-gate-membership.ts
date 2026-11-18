@@ -21,6 +21,7 @@ import { buildFindingBrief } from "./review-panel";
 import { parseWaveRetryDiagnosticSection } from "./reviewer-retry";
 import { settleSpecCheck } from "./spec-check";
 import { deriveWaveAdvisoryDecisionRequest } from "./wave-gate-preparation";
+import { advisoryDecisionTasks, undispositionedAdvisories } from "./advisory-disposition";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   taskReviewScope,
@@ -31,13 +32,32 @@ import {
 } from "./wave-review-authority";
 
 /**
+ * Why approving a Wave Gate's advisories is refused, or null (ADR-0090): an
+ * advisory the pending decision request issues has no standing disposition.
+ * It reads the same Tasks (`advisoryDecisionTasks`) and the same advisory
+ * derivation (`waveAdvisories`) as the request and the disposition
+ * operation, so it names exactly the advisories the request issued and the
+ * operation accepts.
+ */
+export function waveAdvisoryApprovalRefusal(graph: TaskGraph, registration: RegisteredWaveGateProgram): string | null {
+  const wave = registration.input.wave;
+  if (wave === null) return "approval refused: the Wave Gate registration names no Wave";
+  const undecided = undispositionedAdvisories(advisoryDecisionTasks(graph, wave), graph.advisory_dispositions);
+  return undecided.length === 0
+    ? null
+    : `approval refused: ${undecided.length} advisor${undecided.length === 1 ? "y has" : "ies have"} no disposition ` +
+      `(${undecided.join(", ")}); record each as fixed, deferred or dismissed with helper orchestration disposition, then approve`;
+}
+
+/**
  * Which dimension of a Wave Gate decision's authority failed to match, or `null`
  * when the decision is the exact pending one for this run.
  *
  * This is the guard that stops a decision meant for one Wave Gate run from being
  * applied to a stale or foreign one — a correctness rule, not I/O plumbing. Its
- * four dimensions (run, wave, authority digest, decision id) each have their
- * own refusal so every mismatch is independently reachable.
+ * dimensions (run, wave, authority digest, the registered Tasks against the
+ * Wave's `advisoryDecisionTasks`, decision id) each have their own refusal so
+ * every mismatch is independently reachable.
  *
  * Pure: the caller reads and parses the protected graph; this only judges it.
  */
@@ -53,10 +73,11 @@ export function waveGateDecisionMismatch(
       active.authorityDigest !== registration.authorityDigest) {
     return "protected active Wave Gate authority differs from this decision run";
   }
-  const pending = deriveWaveAdvisoryDecisionRequest(
-    runId,
-    graph.tasks.filter(({ id }) => registration.taskIds.includes(id)),
-  );
+  const tasks = advisoryDecisionTasks(graph, active.wave);
+  if (!canonicalStructuralEquals(tasks.map(({ id }) => id), registration.taskIds)) {
+    return "registered Wave Gate Tasks differ from the current Wave's Tasks";
+  }
+  const pending = deriveWaveAdvisoryDecisionRequest(runId, tasks);
   if (!pending.ok) {
     return `decision request ${decisionId} is not the exact pending advisory request: ${pending.error.message}`;
   }

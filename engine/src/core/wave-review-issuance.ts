@@ -32,6 +32,7 @@ import {
   prepareWaveReviewBatch,
   readWaveReviewContext,
   taskReviewScope,
+  waveReviewPriorFindings,
   waveRunRosterProblem,
   waveSpecCheckDocumentsMatch,
   waveTaskReviewRoster,
@@ -211,6 +212,7 @@ export function installWaveReviewRunsTransition(
         packetId: taskRun.packetId,
         headSha: taskRun.headSha,
         bytes: { scope: currentWorkspace.scope, headSha: currentWorkspace.headSha },
+        priorFindingIds: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts, "fresh").ids,
         roster: expectedAgents,
         issued: currentSlots,
       });
@@ -253,7 +255,7 @@ export function installWaveReviewRunsTransition(
         packet_id: taskRun.packetId,
         head_sha: taskRun.headSha,
         expected_agents: expectedAgents,
-        prior_finding_ids: (task.findings ?? []).map(({ id }) => id),
+        prior_finding_ids: waveReviewPriorFindings(locked, task, currentWorkspace.artifacts, "installed").ids,
         evidence: [],
         ...(registration.schemaVersion === 2
           ? { reviewer_protocol: registration.reviewerProtocol, slot_authority: currentSlots }
