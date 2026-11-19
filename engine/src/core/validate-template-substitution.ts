@@ -17,8 +17,12 @@ import { ACCEPTANCE_RUNNER_FILES_PLACEHOLDER } from "./verification-manifest";
  *  template uses {files} as a variable. {revision} is the stale-skeleton record
  *  field of the State File (`stale: null | {revision}`), which Task prose names
  *  as field notation (`flagged stale {revision}`); no /loom template uses it as
- *  a variable either. */
-const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}", "{revision}", ACCEPTANCE_RUNNER_FILES_PLACEHOLDER]);
+ *  a variable either. {builtAt} and {hot} are rendered-output literals a
+ *  consumer's plan and contract prose quote verbatim — a JSX interpolation
+ *  label (`Opdateret {builtAt}`) and a set literal (`the band set equals
+ *  {hot}`): the braces are the quoted output's own syntax, not a /loom
+ *  variable, and no /loom template substitutes either name. */
+const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}", "{revision}", "{builtAt}", "{hot}", ACCEPTANCE_RUNNER_FILES_PLACEHOLDER]);
 
 /**
  * The single source of truth for "unsubstituted template variable" detection:

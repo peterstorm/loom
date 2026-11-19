@@ -41,7 +41,7 @@ describe("validate-template-substitution — property tests", () => {
     fc.assert(
       fc.property(
         fc.stringMatching(/^[a-z][a-z0-9_]{3,15}$/).filter(
-          (s) => !["type", "id", "name", "system", "files", "revision"].includes(s),
+          (s) => !["type", "id", "name", "system", "files", "revision", "builtat", "hot"].includes(s),
         ),
         (varName) => {
           const prompt = `Do something with {${varName}}`;
@@ -171,6 +171,21 @@ describe("validate-template-substitution — edge cases", () => {
   it("{revision} → allow — the stale-skeleton record field named in Task prose, not a template variable", () => {
     expect(validateTemplate("each modified record left on disk and flagged stale {revision}; resolution problems")).toBe("allow");
     expect(validateTemplate("flagged stale {revision} for {task_id}")).toBe("block");
+  });
+
+  it("{builtAt} → allow — a quoted JSX interpolation label in plan and contract prose, not a template variable", () => {
+    // A consumer plan describing the desk's rendered label writes
+    // `Opdateret {builtAt}` verbatim: the braces are the quoted JSX output's
+    // own syntax. Population copies such prose into Task descriptions and
+    // contract statements, which engine-rendered briefs carry; no /loom
+    // template substitutes the name.
+    expect(validateTemplate("the header reads 'Opdateret {builtAt}' (FR-044)")).toBe("allow");
+    expect(validateTemplate("Opdateret {builtAt} for {task_id}")).toBe("block");
+  });
+
+  it("{hot} → allow — a quoted set literal in plan prose, not a template variable", () => {
+    expect(validateTemplate("minScore = 20 exactly when the active band set equals {hot}")).toBe("allow");
+    expect(validateTemplate("the band set equals {hot} here, then read {plan_file}")).toBe("block");
   });
 
   it("JSON objects in prompt → allow (a quote sits between { and the key, so no {word} match)", () => {
