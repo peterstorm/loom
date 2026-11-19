@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import {
+  FALSE_POSITIVES,
   findResidualPlaceholders,
   validateTemplateSubstitution,
 } from "../../../src/core/validate-template-substitution";
@@ -24,6 +25,15 @@ function validateTemplate(prompt: string): "allow" | "block" {
   return findResidualPlaceholders(prompt).length === 0 ? "allow" : "block";
 }
 
+/** Exempt names the generator grammar can actually produce — the collision
+ *  carve, derived from the detector's own set so a new whitelist entry is one
+ *  edit, not two. Case-variant coverage is retained by construction: an entry
+ *  whose bare name is not grammar-producible ({builtAt}) leaves its generated
+ *  lowercase near-misses in the property space, where they must block. */
+const exemptGeneratedNames = [...FALSE_POSITIVES]
+  .map((token) => token.slice(1, -1))
+  .filter((name) => /^[a-z][a-z0-9_]{3,15}$/.test(name));
+
 describe("validate-template-substitution — property tests", () => {
   it("shell ${var} patterns never trigger block", () => {
     fc.assert(
@@ -41,7 +51,7 @@ describe("validate-template-substitution — property tests", () => {
     fc.assert(
       fc.property(
         fc.stringMatching(/^[a-z][a-z0-9_]{3,15}$/).filter(
-          (s) => !["type", "id", "name", "system", "files", "revision", "builtat", "hot"].includes(s),
+          (s) => !exemptGeneratedNames.includes(s),
         ),
         (varName) => {
           const prompt = `Do something with {${varName}}`;
@@ -159,6 +169,29 @@ describe("validate-template-substitution — edge cases", () => {
     }
   });
 
+  it("no /loom template substitutes {builtAt} or {hot} — the whitelist's standing premise", () => {
+    // The exemptions hold only while no template carries either name. A future
+    // adoption must fail here, loudly, instead of letting the gate silently
+    // allow an unsubstituted variable — the exact half-specified prompt the
+    // guard exists to catch. The corpus is the commands the /loom prompts
+    // assemble from, plus the engine's own brief template source.
+    const templateFiles = [join(__dirname, "../../../../engine/src/core/implementation-brief.ts")];
+    const visit = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) visit(path);
+        else if (entry.name.endsWith(".md")) templateFiles.push(path);
+      }
+    };
+    visit(join(__dirname, "../../../../commands"));
+    expect(templateFiles.length).toBeGreaterThan(8);
+    for (const file of templateFiles) {
+      const bytes = readFileSync(file, "utf-8");
+      expect({ file, hasBuiltAt: bytes.includes("{builtAt}"), hasHot: bytes.includes("{hot}") })
+        .toEqual({ file, hasBuiltAt: false, hasHot: false });
+    }
+  });
+
   it("{files} → allow — the acceptance runner's own argument placeholder, not a template variable", () => {
     // A Spec Requirement describing the runner ("each file in place of `{files}`")
     // reaches every claimant's engine-rendered brief verbatim. The exemption is
@@ -174,16 +207,17 @@ describe("validate-template-substitution — edge cases", () => {
   });
 
   it("{builtAt} → allow — a quoted JSX interpolation label in plan and contract prose, not a template variable", () => {
-    // A consumer plan describing the desk's rendered label writes
-    // `Opdateret {builtAt}` verbatim: the braces are the quoted JSX output's
-    // own syntax. Population copies such prose into Task descriptions and
-    // contract statements, which engine-rendered briefs carry; no /loom
-    // template substitutes the name.
+    // Population copies such prose into Task descriptions and contract
+    // statements, which engine-rendered briefs carry.
     expect(validateTemplate("the header reads 'Opdateret {builtAt}' (FR-044)")).toBe("allow");
     expect(validateTemplate("Opdateret {builtAt} for {task_id}")).toBe("block");
+    // Exact token: the lowercase near-miss is not exempt and must block.
+    expect(validateTemplate("Use {builtat}")).toBe("block");
   });
 
   it("{hot} → allow — a quoted set literal in plan prose, not a template variable", () => {
+    // Population copies such prose into Task descriptions and contract
+    // statements, which engine-rendered briefs carry.
     expect(validateTemplate("minScore = 20 exactly when the active band set equals {hot}")).toBe("allow");
     expect(validateTemplate("the band set equals {hot} here, then read {plan_file}")).toBe("block");
   });
