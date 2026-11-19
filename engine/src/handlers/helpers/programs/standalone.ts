@@ -46,6 +46,7 @@ import { durableCaptureRejection, durablePublishedReceipt, durablePublicationDig
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
 import { failed, type FacadeDriveResult, type ProgramParse } from './program-result';
 import { renderReviewProgramSpawn } from './spawn-task';
+import { REVIEWER_RESULT_INSTRUCTION } from '../../../core/spawn-task-text';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
 import { type RegisteredStandaloneProgram } from './registration';
 import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
@@ -786,7 +787,7 @@ async function resumeAwaitingResults(
         const spawn = renderReviewProgramSpawn(
           handle,
           request.authority,
-          "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.",
+          REVIEWER_RESULT_INSTRUCTION,
           registration,
           { standalone: true },
         );

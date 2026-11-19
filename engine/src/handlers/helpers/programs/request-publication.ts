@@ -22,6 +22,7 @@ import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { parseRegisteredFacadeProgram, type FacadeRegistrationParse, type RegisteredReviewProgram } from './registration';
 import { publicationFile } from './durable-requests';
 import { renderReviewProgramSpawn, renderSpawnTask } from './spawn-task';
+import { REVIEWER_RESULT_INSTRUCTION } from '../../../core/spawn-task-text';
 import { reviewerEmissionEligible } from '../../../core/reviewer-emission-route';
 import type { FacadePublishedSpawnBatch } from './program-result';
 
@@ -40,9 +41,6 @@ const reviewProgramRoute = (program: RegisteredReviewProgram): PublicationRoute 
  *  label starts with it; no Wave Gate label does). */
 const legacyLabelRoute = (label: string): PublicationRoute =>
   label.startsWith("standalone") ? "standalone" : "wave-gate";
-
-const REVIEWER_RESULT_INSTRUCTION =
-  "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
 
 /** Private publication core: `emissionAuthority` is REQUIRED and typed
  *  `RegisteredReviewProgram | null` — `null` is the explicit archived

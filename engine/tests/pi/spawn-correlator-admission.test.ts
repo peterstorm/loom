@@ -12,10 +12,12 @@ import { issueEmissionBinding } from "../../src/core/emission-tool";
 import { issuedReviewerPayloadClaim } from "../../src/core/issued-emission-capability";
 import { DESKTOP_VLLM_ROUTE } from "../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
+import { REVIEWER_RESULT_INSTRUCTION } from "../../src/core/spawn-task-text";
 import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import type { AdmittedSpawnItem } from "../../src/core/spawn-admission";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
 import { createRunDirectory, openRegisteredRunDirectory } from "../../src/orchestration/run-directory-handle";
+import { renderSpawnTask } from "../../src/handlers/helpers/programs";
 import { classifyPiIssuedReviewRequest, qualifyPiIssuedReviewRequest, recordPiSpawnCorrelators } from "../../../pi/review-run-authority";
 import { piSpawnRosterId } from "../../../pi/tool-input";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
@@ -29,11 +31,24 @@ afterEach(() => {
 
 const RUN = "run.spawn-correlator";
 
+/** A minimal parsed registration, as the spawn-task render requires: the
+ *  extraction-only arm re-renders through `renderSpawnTask`, whose reviewer
+ *  bootstrap reads the run's program registration. */
+const WAVE_REGISTRATION = Object.freeze({
+  schemaVersion: 1 as const,
+  kind: "wave-gate" as const,
+  input: { wave: 1 },
+  taskIds: ["T1"],
+  authorityDigest: "b".repeat(64),
+});
+
 async function stagedRun(request: AgentRequestAuthority): Promise<string> {
   const runsRoot = mkdtempSync(join(tmpdir(), "loom-spawn-correlator-"));
   cleanups.push(() => rmSync(runsRoot, { recursive: true, force: true }));
   const created = createRunDirectory(runsRoot, RUN);
   if (!created.ok) throw new Error(created.error.message);
+  const registered = await created.value.registerProgram(WAVE_REGISTRATION);
+  if (!registered.ok) throw new Error(registered.error.message);
   const reserved = await created.value.reserveRequest(request);
   if (!reserved.ok) throw new Error(reserved.error.message);
   return runsRoot;
@@ -69,6 +84,9 @@ describe("recording the admission decision with a Pi spawn correlator", () => {
         admittedEmission: { kind: "enabled", route: { provider: DESKTOP_VLLM_ROUTE.provider, model: DESKTOP_VLLM_ROUTE.model } },
       },
     });
+    // The emission-enabled arm never re-renders: the child is dispatched with
+    // the exact task text admission authenticated.
+    expect(rawInput.task).toBe(task(request));
   });
 
   it("records a child admitted without the emission tool as not-enabled", async () => {
@@ -94,6 +112,12 @@ describe("recording the admission decision with a Pi spawn correlator", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     expect(opened.value.readHarnessCorrelator("pi", rosterId))
       .toMatchObject({ ok: true, value: { requestId: request.requestId, admittedEmission: { kind: "not-enabled" } } });
+    // The extraction-only arm re-renders: the caller-authored instruction is
+    // replaced by the issued fresh render (this task is not a verbatim
+    // extension, so the fallback arm dispatches it, with the fallback named on
+    // stderr).
+    expect(rawInput.task).toBe(renderSpawnTask(opened.value, request, REVIEWER_RESULT_INSTRUCTION, { standalone: false }));
+    expect(rawInput.task).not.toContain("Review the issued request");
   });
 });
 

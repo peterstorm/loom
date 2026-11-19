@@ -8,9 +8,11 @@ import { describe, expect, it } from "vitest";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import {
   archivedReviewerInstructionPaths,
+  canonicalSpawnTaskText,
   contextPacketReaderPath,
   renderSpawnTaskText,
   requiredSkillMarker,
+  REVIEWER_RESULT_INSTRUCTION,
   type SpawnTaskFacts,
 } from "../../src/core/spawn-task-text";
 import { STANDALONE_SUCCESSOR_ROSTER_RULE } from "../../src/core/standalone-lineage-contract";
@@ -132,5 +134,38 @@ describe("renderSpawnTaskText", () => {
       const quoted = `'${requestId.replaceAll("'", "'\\''")}'`;
       expect(text).toContain(`'--request' ${quoted} `);
     }), { numRuns: 100 });
+  });
+});
+
+describe("REVIEWER_RESULT_INSTRUCTION", () => {
+  it("is the exact packet-read final action publication and the Pi re-render share", () => {
+    expect(REVIEWER_RESULT_INSTRUCTION).toBe(
+      "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.",
+    );
+  });
+});
+
+describe("canonicalSpawnTaskText", () => {
+  const rendered = renderSpawnTaskText(facts({ instruction: REVIEWER_RESULT_INSTRUCTION }));
+
+  it("keeps the publication's Task binding: the issued task extends the fresh render", () => {
+    const issued = `${rendered}\nReview Task T1.`;
+    expect(canonicalSpawnTaskText(rendered, issued)).toEqual({ kind: "issued-kept", task: issued });
+  });
+
+  it("keeps the spec-check binding the same way", () => {
+    const issued = `${rendered}\nSpec-check Wave 1.`;
+    expect(canonicalSpawnTaskText(rendered, issued)).toEqual({ kind: "issued-kept", task: issued });
+  });
+
+  it("keeps the issued task when it adds nothing", () => {
+    expect(canonicalSpawnTaskText(rendered, rendered)).toEqual({ kind: "issued-kept", task: rendered });
+  });
+
+  it("falls back to the fresh render when the issued task diverges (attempt-2 retry text)", () => {
+    const retry = renderSpawnTaskText(facts({
+      instruction: "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot.",
+    }));
+    expect(canonicalSpawnTaskText(rendered, retry)).toEqual({ kind: "render-fallback", task: rendered });
   });
 });

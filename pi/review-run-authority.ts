@@ -36,6 +36,7 @@ import {
   publishedReviewerRequest,
   renderSpawnTask,
 } from "../engine/src/handlers/helpers/programs";
+import { canonicalSpawnTaskText, REVIEWER_RESULT_INSTRUCTION } from "../engine/src/core/spawn-task-text";
 import {
   readSessionRunBindings,
   type SessionRunBinding,
@@ -454,15 +455,33 @@ export async function recordPiSpawnCorrelators(
     // Emission admission already authenticated this exact task's issuance
     // markers and descriptor. Re-rendering through the durable fallback here
     // could erase a descriptor selected by an explicit transport-route adapter;
-    // extraction-only tasks retain the established canonical re-render.
-    canonicalTasks[index] = admission.emissionExpectation.kind === "emission-enabled"
-      ? item.task
-      : renderSpawnTask(
+    // extraction-only tasks retain the established canonical re-render —
+    // composed through `canonicalSpawnTaskText` so the publication suffix (the
+    // `Review Task T1.` binding line the capture matcher re-derives from the
+    // child's echoed task) survives the re-render instead of terminal-rejecting
+    // every attempt-1 capture. A fallback is named, never silent: the next
+    // render-fact drift between publication and admission surfaces here at
+    // dispatch, not later as a capture rejection.
+    if (admission.emissionExpectation.kind === "emission-enabled") {
+      canonicalTasks[index] = item.task;
+    } else {
+      const canonical = canonicalSpawnTaskText(
+        renderSpawnTask(
           opened.value,
           request,
-          "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required result.",
+          REVIEWER_RESULT_INSTRUCTION,
           { standalone: hasStandaloneReviewContext(item.task) },
+        ),
+        item.task,
+      );
+      if (canonical.kind === "render-fallback") {
+        process.stderr.write(
+          `loom(pi): extraction-only re-render fell back to the fresh render for ${request.role} ${request.requestId}` +
+            " — the issued task was not a verbatim extension of it\n",
         );
+      }
+      canonicalTasks[index] = canonical.task;
+    }
     consumed.add(request.requestId);
   }
   for (const [index, task] of canonicalTasks.entries()) replacePiSpawnTask(rawInput, index, task);
