@@ -1666,6 +1666,7 @@
     "engine/src/orchestration/session-run-bindings.ts::registerSessionRunBinding",
     "engine/src/parsers/parse-transcript.ts::parseFirstUserPrompt",
     "engine/src/state-file-wire.ts::migrateParsedTask",
+    "engine/src/state-file-wire.ts::parseTaskGraphHistoryFields",
     "engine/src/state-file-wire.ts::taskAttemptAuthorityError",
     "engine/src/state-file-wire.ts::taskBaselineError",
     "engine/src/state-file-wire.ts::taskFindingsError",
