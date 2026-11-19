@@ -57,6 +57,30 @@ export function requiredSkillMarker(requiredSkill: string | null): string {
   return requiredSkill === null ? "" : `LOOM_REQUIRED_SKILL: ${requiredSkill}\n`;
 }
 
+/**
+ * The wave/standalone reviewer final action: read the issued Context Packet and
+ * emit the reviewer result, nothing else. One constant for the engine's
+ * publication (request-publication.ts, standalone.ts) and Pi's extraction-only
+ * canonical re-render (pi/review-run-authority.ts), so the re-render cannot
+ * drift from the issued task wording again.
+ */
+export const REVIEWER_RESULT_INSTRUCTION =
+  "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
+
+/**
+ * The extraction-only canonical re-render must not erase what publication
+ * composes AFTER the rendered task: the `Review Task T1.` / `Spec-check Wave N.`
+ * binding line (wave-review-requests.ts) the capture matcher re-derives from the
+ * child's echoed task (pi/reserved-results.ts). When the issued task extends the
+ * fresh render verbatim, the extension IS the publication suffix and the issued
+ * task stays canonical; any other issued shape falls back to the fresh render —
+ * which the attempt-2 retry flow tolerates, because its reservation derives no
+ * Task binding from the retry task text.
+ */
+export function canonicalSpawnTaskText(rendered: string, issuedTask: string): string {
+  return issuedTask.startsWith(rendered) ? issuedTask : rendered;
+}
+
 /** One POSIX-shell single-quoted word. */
 const shellQuote = (text: string): string => "'" + text.replaceAll("'", "'\\''") + "'";
 

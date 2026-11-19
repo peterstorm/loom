@@ -36,6 +36,7 @@ import {
   publishedReviewerRequest,
   renderSpawnTask,
 } from "../engine/src/handlers/helpers/programs";
+import { canonicalSpawnTaskText, REVIEWER_RESULT_INSTRUCTION } from "../engine/src/core/spawn-task-text";
 import {
   readSessionRunBindings,
   type SessionRunBinding,
@@ -454,14 +455,21 @@ export async function recordPiSpawnCorrelators(
     // Emission admission already authenticated this exact task's issuance
     // markers and descriptor. Re-rendering through the durable fallback here
     // could erase a descriptor selected by an explicit transport-route adapter;
-    // extraction-only tasks retain the established canonical re-render.
+    // extraction-only tasks retain the established canonical re-render —
+    // composed through `canonicalSpawnTaskText` so the publication suffix (the
+    // `Review Task T1.` binding line the capture matcher re-derives from the
+    // child's echoed task) survives the re-render instead of terminal-rejecting
+    // every attempt-1 capture.
     canonicalTasks[index] = admission.emissionExpectation.kind === "emission-enabled"
       ? item.task
-      : renderSpawnTask(
-          opened.value,
-          request,
-          "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required result.",
-          { standalone: hasStandaloneReviewContext(item.task) },
+      : canonicalSpawnTaskText(
+          renderSpawnTask(
+            opened.value,
+            request,
+            REVIEWER_RESULT_INSTRUCTION,
+            { standalone: hasStandaloneReviewContext(item.task) },
+          ),
+          item.task,
         );
     consumed.add(request.requestId);
   }
