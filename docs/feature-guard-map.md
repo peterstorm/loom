@@ -65,7 +65,7 @@ Two persistence domains carry all authority:
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 122 docs incl. **94 ADRs** (index test-enforced) | — |
+| `docs/` | 123 docs incl. **94 ADRs** (index test-enforced) | — |
 
 ---
 
