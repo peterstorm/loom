@@ -59,7 +59,7 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 621 src files / ~175.7k lines TS; `engine/tests/` holds 944 TS files / ~265.6k lines (fixtures and helpers included), of which 829 test files are executed (805 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 621 src files / ~175.7k lines TS; `engine/tests/` holds 944 TS files / ~265.7k lines (fixtures and helpers included), of which 829 test files are executed (805 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
@@ -157,7 +157,7 @@ All five are fail-closed. Active only while a State File exists.
 |---|---|---|
 | `validate-phase-order` | Phase sequencing: refuses a phase agent whose prerequisite phase is incomplete; refuses decompose until the plan design review is accepted for the **plan's current bytes** (digest via the `ArtifactProbe.sha256` port) or skipped | Order is authority: a phase completed out of order forges every later artifact's premise |
 | `validate-task-execution` | Expands the implementation brief marker, checks Wave order + dependency order + path ownership, reclaims only policy-eligible reservations, writes skeletons, captures byte baselines, registers attempt + retry authority **atomically** | One hook owns the entire "may this Task spawn, and what exactly is it" decision |
-| `validate-template-substitution` | Refuses a prompt still holding an unsubstituted `{variable}` (underscore-grammar identifiers; a small `FALSE_POSITIVES` set: `{type} {id} {name} {system} {revision}` + the acceptance files placeholder) | An unsubstituted variable means the parent skipped protocol assembly — the child would act on a half-specified prompt |
+| `validate-template-substitution` | Refuses a prompt still holding an unsubstituted `{variable}` (underscore-grammar identifiers; a small `FALSE_POSITIVES` set: `{type} {id} {name} {system} {revision} {builtAt} {hot}` + the acceptance files placeholder — owned by the exported `FALSE_POSITIVES` constant in `engine/src/core/validate-template-substitution.ts`) | An unsubstituted variable means the parent skipped protocol assembly — the child would act on a half-specified prompt |
 | `validate-agent-model` | Model must match the Agent's LLM Profile | Model choice is policy, not improvisation; also blocks silently inheriting the (expensive) orchestrator model |
 | `validate-agent-skill` | Prompt must name the agent's required Skill | Skill preload is part of the agent's contract |
 
@@ -955,7 +955,7 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **829 executed test files / ~265.6k lines** — 805 under `engine/tests/` (944 TS files there
+- **829 executed test files / ~265.7k lines** — 805 under `engine/tests/` (944 TS files there
   including fixtures and helpers; core 303 test files, handlers 196, pi 50,
   linter 46, orchestration 37, utils 34, machine 30, acceptance 20, security 19, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
