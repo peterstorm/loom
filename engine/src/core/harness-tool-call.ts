@@ -234,17 +234,16 @@ export function persistedBashOutput(payload: ClaudeToolPayload): PersistedBashOu
 
 /**
  * The payload with its spilled stdout restored: `whole` replaces the head
- * only when it is the whole output the harness reported, exactly `bytes`
- * bytes of UTF-8 that begin with the head it kept. Anything else (a file
- * rewritten, truncated or swapped since the call) returns `null`, and the
- * payload keeps its head, which carries no receipt and so mints nothing.
+ * only when it is the whole output this payload's own spill reported, exactly
+ * `bytes` bytes of UTF-8 that begin with the head the harness kept. The spill
+ * is read from the payload itself, so a spill cannot be paired with another
+ * call's output. Anything else (no spill, or a file rewritten, truncated or
+ * swapped since the call) returns `null`, and the payload keeps its head,
+ * which carries no receipt and so mints nothing.
  */
-export function withPersistedBashOutput(
-  payload: ClaudeToolPayload,
-  spill: PersistedBashOutput,
-  whole: string,
-): ClaudeToolPayload | null {
-  if (new TextEncoder().encode(whole).length !== spill.bytes || !whole.startsWith(spill.head)) return null;
+export function withPersistedBashOutput(payload: ClaudeToolPayload, whole: string): ClaudeToolPayload | null {
+  const spill = persistedBashOutput(payload);
+  if (spill === null || Buffer.byteLength(whole, "utf8") !== spill.bytes || !whole.startsWith(spill.head)) return null;
   return { ...payload, tool_response: { ...recordOrEmpty(payload.tool_response), stdout: whole } };
 }
 

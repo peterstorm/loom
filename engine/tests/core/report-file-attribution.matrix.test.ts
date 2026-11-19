@@ -36,6 +36,8 @@ const DECLARED: readonly string[] = [
   "svc/src/test/java/com/acme/AuditTest.java",
   "svc/src/test/java/com/other/AuditTest.java",
   "svc/scripts/ReportTest.ts",
+  "svc/src/test/groovy/com/acme/SpockTest.groovy",
+  "svc/src/test/scala/com/acme/MunitTest.scala",
 ];
 
 type Row = Readonly<{ label: string; reported: string; expected: string | null; needsRoot?: true }>;
@@ -57,6 +59,9 @@ const ROWS: readonly Row[] = [
   { label: "a simple JVM class with two declared sources (ambiguous)", reported: "AuditTest", expected: null },
   { label: "a simple name whose only stem match is not a JVM source", reported: "ReportTest", expected: null },
   { label: "an undeclared simple JVM class", reported: "OtherTest", expected: null },
+  { label: "a simple JVM class of a Groovy source", reported: "SpockTest", expected: "svc/src/test/groovy/com/acme/SpockTest.groovy" },
+  { label: "a simple JVM class of a Scala source", reported: "MunitTest", expected: "svc/src/test/scala/com/acme/MunitTest.scala" },
+  { label: "a simple nested name with no outer class", reported: "$Nested", expected: null },
   { label: "an absolute path inside the repository", reported: `${ROOT}/pi/tests/core/ledger.test.ts`, expected: "pi/tests/core/ledger.test.ts", needsRoot: true },
   { label: "an absolute path outside the repository", reported: "/elsewhere/engine/tests/core/ledger.test.ts", expected: null },
   { label: "an absolute path in a sibling directory sharing the root's prefix", reported: `${ROOT}-copy/engine/tests/core/ledger.test.ts`, expected: null },
@@ -165,9 +170,9 @@ describe("I6 over a jqwik suite that Surefire reports by its simple class name",
   }
 
   it("shows red then green: the green's simple classname attributes to the declared test file", () => {
-    // The ledger shape of the alert-bridge Task T4 that settled green-missing:
-    // a compile-error red on the path, the implementation write, and a green
-    // whose only per-file identity is Surefire's jqwik classname.
+    // The ledger shape loom#242 reports: a compile-error red on the path, the
+    // implementation write, and a green whose only per-file identity is the
+    // simple classname Surefire writes for a jqwik class.
     const observation = judgeRedThenGreen(
       [
         run(TEST_FILE, 1, 1, 1, true),

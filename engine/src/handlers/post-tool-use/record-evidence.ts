@@ -103,35 +103,51 @@ export function parseRecordEvidenceInput(raw: unknown): RecordEvidenceInput | nu
  *  output is far below it; a larger file is left unread. */
 const MAX_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024;
 
-/** Reads a spilled Bash output's file: its text when the file holds exactly
- *  the bytes the harness reported, else null. */
-export type ReadPersistedOutput = (spill: PersistedBashOutput) => string | null;
+/** What reading a spilled Bash output's file found: its text when the file
+ *  holds exactly the bytes the harness reported, else why not. */
+export type PersistedOutputRead =
+  | Readonly<{ kind: "read"; text: string }>
+  | Readonly<{ kind: "over-cap" }>
+  | Readonly<{ kind: "size-mismatch"; actualBytes: number }>
+  | Readonly<{ kind: "unreadable"; error: string }>;
+
+export type ReadPersistedOutput = (spill: PersistedBashOutput) => PersistedOutputRead;
 
 export const readPersistedOutputFile: ReadPersistedOutput = (spill) => {
-  if (spill.bytes > MAX_PERSISTED_OUTPUT_BYTES) return null;
+  if (spill.bytes > MAX_PERSISTED_OUTPUT_BYTES) return { kind: "over-cap" };
   try {
-    if (statSync(spill.path).size !== spill.bytes) return null;
-    return readFileSync(spill.path, "utf8");
-  } catch {
-    return null;
+    const actualBytes = statSync(spill.path).size;
+    if (actualBytes !== spill.bytes) return { kind: "size-mismatch", actualBytes };
+    return { kind: "read", text: readFileSync(spill.path, "utf8") };
+  } catch (e) {
+    return { kind: "unreadable", error: e instanceof Error ? e.message : String(e) };
   }
 };
+
+/** Why a spill was not restored, as the stderr note names it. */
+const unrestoredCause = (read: PersistedOutputRead): string =>
+  match(read)
+    .with({ kind: "read" }, () => "the file does not begin with the output the harness kept")
+    .with({ kind: "over-cap" }, () => `it is over the ${MAX_PERSISTED_OUTPUT_BYTES}-byte read-back cap`)
+    .with({ kind: "size-mismatch" }, ({ actualBytes }) => `the file now holds ${actualBytes} bytes`)
+    .with({ kind: "unreadable" }, ({ error }) => `the file is unreadable: ${error}`)
+    .exhaustive();
 
 /**
  * The payload whose Bash output Claude Code spilled to a file, with the whole
  * output restored from it, so a receipt on the output's last line reaches the
  * minting rule (loom#241). A spill that cannot be restored keeps the head and
- * says so on stderr: the call then mints no engine-run TestRun, and the agent's
- * next run of the same files is the remedy.
+ * says why on stderr: the call then mints no engine-run TestRun, and the
+ * agent's next run of the same files is the remedy.
  */
 function restoreSpilledOutput(payload: ClaudeToolPayload, read: ReadPersistedOutput): ClaudeToolPayload {
   const spill = persistedBashOutput(payload);
   if (spill === null) return payload;
-  const whole = read(spill);
-  const restored = whole === null ? null : withPersistedBashOutput(payload, spill, whole);
+  const found = read(spill);
+  const restored = found.kind === "read" ? withPersistedBashOutput(payload, found.text) : null;
   if (restored !== null) return restored;
   process.stderr.write(
-    `record-evidence: Claude Code spilled this Bash output (${spill.bytes} bytes) to ${spill.path}, but it could not be read back whole; only its first ${spill.head.length} characters were recorded\n`,
+    `record-evidence: Claude Code spilled this Bash output (${spill.bytes} bytes) to ${spill.path}, but it could not be read back whole (${unrestoredCause(found)}); only its first ${spill.head.length} characters were recorded\n`,
   );
   return payload;
 }

@@ -2,20 +2,26 @@
  * loom#241 end to end through the real recorder: a `helper run-tests` call
  * whose output Claude Code spilled to a file still mints its engine-run
  * TestRun. The receipt is the last line of the whole output, past the
- * 30 000-character head the harness keeps in `tool_response.stdout`, so before
- * the recorder read the spilled file back, a long failing Maven run (the red
- * I6 needs) minted nothing and a test-first Task settled `red-missing`.
+ * 30 000-character head the harness keeps in `tool_response.stdout`, so
+ * without the read-back a long failing Maven run (the red I6 needs) mints
+ * nothing and a test-first Task settles `red-missing`. A spill the recorder
+ * cannot restore mints nothing and names the cause on stderr.
  */
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { runRecordEvidence, type ReadPersistedOutput } from "../../../src/handlers/post-tool-use/record-evidence";
+import {
+  readPersistedOutputFile,
+  runRecordEvidence,
+  type ReadPersistedOutput,
+} from "../../../src/handlers/post-tool-use/record-evidence";
 import { formatEngineTestRunReceipt } from "../../../src/core/engine-test-run";
 import { parseReportSummary } from "../../../src/core/structured-test-report";
 import { epochOf, eventsForEpoch } from "../../../src/machine";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { SPILL_HEAD_CHARACTERS, spilledBashResponse } from "../../fixtures/claude-spilled-payload";
 import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../../fixtures/machine-identities";
 import { inMemorySessionRegistry } from "../../machine/fake-session-registry";
 
@@ -30,7 +36,6 @@ afterAll(() => {
 const ENGINE_CLI = fileURLToPath(new URL("../../../src/cli.ts", import.meta.url));
 const TEST_FILE = "src/test/java/dk/acme/JobNameTest.java";
 const COMMAND = `bun '${ENGINE_CLI}' helper run-tests --files '${TEST_FILE}'`;
-const HEAD_CHARACTERS = 30_000;
 
 const session = sessionIdOf("spill-claude-session");
 const agent = agentIdOf("claude-impl-spill");
@@ -47,7 +52,7 @@ function wholeOutput(): string {
   return `--- runner stdout ---\n${"[ERROR] cannot find symbol: class JobName\n".repeat(1_000)}${receipt}\n`;
 }
 
-/** Deliver the spilled PostToolUse payload; returns the engine-run TestRuns the epoch holds. */
+/** Deliver one spilled PostToolUse payload; returns the engine-run TestRuns the epoch holds. */
 async function deliverSpilled(whole: string, spilledFile: string, read?: ReadPersistedOutput) {
   const registry = inMemorySessionRegistry();
   await registry.markActive(session, agent);
@@ -58,10 +63,7 @@ async function deliverSpilled(whole: string, spilledFile: string, read?: ReadPer
     hook_event_name: "PostToolUse",
     tool_name: "Bash",
     tool_input: { command: COMMAND },
-    tool_response: {
-      stdout: whole.slice(0, HEAD_CHARACTERS), stderr: "", interrupted: false, isImage: false, noOutputExpected: false,
-      persistedOutputPath: spilledFile, persistedOutputSize: new TextEncoder().encode(whole).length,
-    },
+    tool_response: spilledBashResponse(whole, spilledFile),
   };
   // An undefined reader takes the handler's default: the real file read.
   await runRecordEvidence(JSON.stringify(payload), registry, read);
@@ -69,10 +71,21 @@ async function deliverSpilled(whole: string, spilledFile: string, read?: ReadPer
     .filter((event) => event.kind === "TestRun" && event.origin.kind === "engine-run");
 }
 
+/** Run `body` with stderr captured; returns what was written to it. */
+async function capturingStderr(body: () => Promise<void>): Promise<string> {
+  const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    await body();
+    return stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+  } finally {
+    stderr.mockRestore();
+  }
+}
+
 describe("record-evidence restores Claude Code's spilled Bash output", () => {
   it("mints the engine-run TestRun whose receipt is only in the spilled file", async () => {
     const whole = wholeOutput();
-    expect(whole.length).toBeGreaterThan(HEAD_CHARACTERS);
+    expect(whole.length).toBeGreaterThan(SPILL_HEAD_CHARACTERS);
     const file = join(temp, "spilled.txt");
     writeFileSync(file, whole);
 
@@ -82,26 +95,36 @@ describe("record-evidence restores Claude Code's spilled Bash output", () => {
     expect(runs[0]).toMatchObject({ kind: "TestRun", exit: 1, command: COMMAND, origin: { kind: "engine-run", repositoryRoot: repo } });
   });
 
-  it("mints nothing, and says so, when the spilled file no longer holds the reported output", async () => {
+  it("mints nothing, and names the size, when the spilled file no longer holds the reported bytes", async () => {
     const whole = wholeOutput();
-    const file = join(temp, "spilled-changed.txt");
+    const file = join(temp, "spilled-grown.txt");
     writeFileSync(file, `${whole}one more line\n`);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
+    const note = await capturingStderr(async () => {
       expect(await deliverSpilled(whole, file)).toEqual([]);
-      expect(stderr.mock.calls.map(([chunk]) => String(chunk)).join("")).toContain("could not be read back whole");
-    } finally {
-      stderr.mockRestore();
-    }
+    });
+    expect(note).toContain("could not be read back whole (the file now holds");
   });
 
-  it("mints nothing when the spilled file is unreadable", async () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
+  it("mints nothing when a same-size file does not begin with the head the harness kept", async () => {
+    const whole = wholeOutput();
+    const file = join(temp, "spilled-swapped.txt");
+    writeFileSync(file, `X${whole.slice(1)}`);
+    const note = await capturingStderr(async () => {
+      expect(await deliverSpilled(whole, file)).toEqual([]);
+    });
+    expect(note).toContain("the file does not begin with the output the harness kept");
+  });
+
+  it("mints nothing, and names the error, when the spilled file is unreadable", async () => {
+    const note = await capturingStderr(async () => {
       expect(await deliverSpilled(wholeOutput(), join(temp, "missing.txt"))).toEqual([]);
-      expect(await deliverSpilled(wholeOutput(), join(temp, "spilled.txt"), () => null)).toEqual([]);
-    } finally {
-      stderr.mockRestore();
-    }
+    });
+    expect(note).toContain("the file is unreadable:");
+  });
+
+  it("refuses a spill over the read-back cap without touching the file", () => {
+    const tooLarge = 64 * 1024 * 1024 + 1;
+    expect(readPersistedOutputFile({ path: join(temp, "never-created.txt"), bytes: tooLarge, head: "" }))
+      .toEqual({ kind: "over-cap" });
   });
 });

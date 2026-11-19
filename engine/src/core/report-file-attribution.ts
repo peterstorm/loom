@@ -65,23 +65,26 @@ export function attributeReportedFile(
   return matches.length === 1 ? matches[0] : null;
 }
 
-/** A reported JVM class, outer class only, as a path: qualified
- *  (com/acme/FooTest) or simple (FooTest). */
-type ReportedJvmClass = Readonly<{ kind: "qualified" | "simple"; path: string }>;
+/** A reported JVM class, outer class only: qualified, as its package path
+ *  (com/acme/FooTest), or simple, as its bare name (FooTest). */
+type ReportedJvmClass =
+  | Readonly<{ kind: "qualified"; packagePath: string }>
+  | Readonly<{ kind: "simple"; name: string }>;
 
 /** The JVM class a reported identity names, or null for any other identity. */
 function reportedJvmClass(relative: string): ReportedJvmClass | null {
   if (relative.includes("/")) return null;
   const outer = relative.split("$")[0];
-  if (JVM_CLASS.test(relative)) return { kind: "qualified", path: outer.replace(/\./g, "/") };
-  return JVM_SIMPLE_CLASS.test(relative) && outer !== "" ? { kind: "simple", path: outer } : null;
+  if (JVM_CLASS.test(relative)) return { kind: "qualified", packagePath: outer.replace(/\./g, "/") };
+  return JVM_SIMPLE_CLASS.test(relative) && outer !== "" ? { kind: "simple", name: outer } : null;
 }
 
 /** Whether a declared path is the source file of a reported JVM class. A
  *  simple name matches only a JVM source file, so a bare word never credits a
  *  file of another language whose stem happens to equal it. */
 function isJvmClassSource(path: string, jvmClass: ReportedJvmClass): boolean {
-  if (jvmClass.kind === "simple" && !JVM_SOURCE.test(path)) return false;
   const withoutExtension = path.replace(/\.[^./]+$/, "");
-  return withoutExtension === jvmClass.path || withoutExtension.endsWith(`/${jvmClass.path}`);
+  const classPath = jvmClass.kind === "qualified" ? jvmClass.packagePath : jvmClass.name;
+  if (jvmClass.kind === "simple" && !JVM_SOURCE.test(path)) return false;
+  return withoutExtension === classPath || withoutExtension.endsWith(`/${classPath}`);
 }
