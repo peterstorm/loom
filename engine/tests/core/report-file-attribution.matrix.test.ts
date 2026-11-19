@@ -33,6 +33,11 @@ const DECLARED: readonly string[] = [
   "pi/tests/core/ledger.test.ts",
   "svc/src/test/java/com/acme/LedgerTest.java",
   "svc/src/test/kotlin/com/acme/BillingTest.kt",
+  "svc/src/test/java/com/acme/AuditTest.java",
+  "svc/src/test/java/com/other/AuditTest.java",
+  "svc/scripts/ReportTest.ts",
+  "svc/src/test/groovy/com/acme/SpockTest.groovy",
+  "svc/src/test/scala/com/acme/MunitTest.scala",
 ];
 
 type Row = Readonly<{ label: string; reported: string; expected: string | null; needsRoot?: true }>;
@@ -47,6 +52,16 @@ const ROWS: readonly Row[] = [
   { label: "a JVM class", reported: "com.acme.LedgerTest", expected: "svc/src/test/java/com/acme/LedgerTest.java" },
   { label: "a JVM nested class", reported: "com.acme.BillingTest$Nested", expected: "svc/src/test/kotlin/com/acme/BillingTest.kt" },
   { label: "an undeclared JVM class", reported: "com.acme.OtherTest", expected: null },
+  { label: "a qualified JVM class whose simple name is shared", reported: "com.other.AuditTest", expected: "svc/src/test/java/com/other/AuditTest.java" },
+  { label: "a simple JVM class (jqwik's Surefire classname)", reported: "LedgerTest", expected: "svc/src/test/java/com/acme/LedgerTest.java" },
+  { label: "a simple JVM class of a Kotlin source", reported: "BillingTest", expected: "svc/src/test/kotlin/com/acme/BillingTest.kt" },
+  { label: "a simple JVM nested class", reported: "BillingTest$Nested", expected: "svc/src/test/kotlin/com/acme/BillingTest.kt" },
+  { label: "a simple JVM class with two declared sources (ambiguous)", reported: "AuditTest", expected: null },
+  { label: "a simple name whose only stem match is not a JVM source", reported: "ReportTest", expected: null },
+  { label: "an undeclared simple JVM class", reported: "OtherTest", expected: null },
+  { label: "a simple JVM class of a Groovy source", reported: "SpockTest", expected: "svc/src/test/groovy/com/acme/SpockTest.groovy" },
+  { label: "a simple JVM class of a Scala source", reported: "MunitTest", expected: "svc/src/test/scala/com/acme/MunitTest.scala" },
+  { label: "a simple nested name with no outer class", reported: "$Nested", expected: null },
   { label: "an absolute path inside the repository", reported: `${ROOT}/pi/tests/core/ledger.test.ts`, expected: "pi/tests/core/ledger.test.ts", needsRoot: true },
   { label: "an absolute path outside the repository", reported: "/elsewhere/engine/tests/core/ledger.test.ts", expected: null },
   { label: "an absolute path in a sibling directory sharing the root's prefix", reported: `${ROOT}-copy/engine/tests/core/ledger.test.ts`, expected: null },
@@ -139,5 +154,35 @@ describe("INV-5: one reported-file to declared-file attribution", () => {
   it.each(ROWS)("affected-stop-check.ts shows the owner's declared path, else the reported file: $label", ({ reported }) => {
     expect(renderedFile(reported, ROOT)).toBe(attributeReportedFile(DECLARED, reported, ROOT) ?? reported);
     expect(renderedFile(reported, null)).toBe(attributeReportedFile(DECLARED, reported, null) ?? reported);
+  });
+});
+
+describe("I6 over a jqwik suite that Surefire reports by its simple class name", () => {
+  const TEST_FILE = "src/test/java/dk/acme/domain/PerBrandTest.java";
+  const IMPLEMENTATION_FILE = "src/main/java/dk/acme/domain/PerBrand.java";
+
+  function run(file: string, exit: number, executed: number, failed: number, collectionError: boolean): Evidence {
+    const report = parseReportSummary(executed, failed, exit === 0 ? "junit-xml" : "runner-crash", {
+      kind: "recorded", results: [{ file, executed, failed, skipped: 0, collectionError }],
+    });
+    if (report === null) throw new Error("fixture report must reconcile");
+    return { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "bun cli.ts helper run-tests", exit, report };
+  }
+
+  it("shows red then green: the green's simple classname attributes to the declared test file", () => {
+    // The ledger shape loom#242 reports: a compile-error red on the path, the
+    // implementation write, and a green whose only per-file identity is the
+    // simple classname Surefire writes for a jqwik class.
+    const observation = judgeRedThenGreen(
+      [
+        run(TEST_FILE, 1, 1, 1, true),
+        { kind: "FileWrite", path: IMPLEMENTATION_FILE, via: "tool" },
+        run("PerBrandTest", 0, 12, 0, false),
+      ],
+      { testFiles: [TEST_FILE], implementationFiles: [IMPLEMENTATION_FILE], createdImplementationFiles: [IMPLEMENTATION_FILE] },
+      ROOT,
+      false, AGENT_COMMAND_EVIDENCE,
+    );
+    expect(observation.kind).toBe("shown");
   });
 });

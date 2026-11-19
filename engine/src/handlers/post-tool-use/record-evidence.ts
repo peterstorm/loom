@@ -25,10 +25,17 @@
  * so a broken recorder surfaces downstream instead of silently passing.
  */
 
+import { readFileSync, statSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
-import { claudeToolCall, type ClaudeToolPayload } from "../../core/harness-tool-call";
+import {
+  claudeToolCall,
+  persistedBashOutput,
+  withPersistedBashOutput,
+  type ClaudeToolPayload,
+  type PersistedBashOutput,
+} from "../../core/harness-tool-call";
 import { isRecord } from "../../core/plain-record";
 import {
   attributeEvidence,
@@ -92,9 +99,63 @@ export function parseRecordEvidenceInput(raw: unknown): RecordEvidenceInput | nu
   };
 }
 
+/** The largest spilled Bash output the recorder reads back. A test run's
+ *  output is far below it; a larger file is left unread. */
+const MAX_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+/** What reading a spilled Bash output's file found: its text when the file
+ *  holds exactly the bytes the harness reported, else why not. */
+export type PersistedOutputRead =
+  | Readonly<{ kind: "read"; text: string }>
+  | Readonly<{ kind: "over-cap" }>
+  | Readonly<{ kind: "size-mismatch"; actualBytes: number }>
+  | Readonly<{ kind: "unreadable"; error: string }>;
+
+export type ReadPersistedOutput = (spill: PersistedBashOutput) => PersistedOutputRead;
+
+export const readPersistedOutputFile: ReadPersistedOutput = (spill) => {
+  if (spill.bytes > MAX_PERSISTED_OUTPUT_BYTES) return { kind: "over-cap" };
+  try {
+    const actualBytes = statSync(spill.path).size;
+    if (actualBytes !== spill.bytes) return { kind: "size-mismatch", actualBytes };
+    return { kind: "read", text: readFileSync(spill.path, "utf8") };
+  } catch (e) {
+    return { kind: "unreadable", error: e instanceof Error ? e.message : String(e) };
+  }
+};
+
+/** Why a spill was not restored, as the stderr note names it. */
+const unrestoredCause = (read: PersistedOutputRead): string =>
+  match(read)
+    .with({ kind: "read" }, () => "the file does not begin with the output the harness kept")
+    .with({ kind: "over-cap" }, () => `it is over the ${MAX_PERSISTED_OUTPUT_BYTES}-byte read-back cap`)
+    .with({ kind: "size-mismatch" }, ({ actualBytes }) => `the file now holds ${actualBytes} bytes`)
+    .with({ kind: "unreadable" }, ({ error }) => `the file is unreadable: ${error}`)
+    .exhaustive();
+
+/**
+ * The payload whose Bash output Claude Code spilled to a file, with the whole
+ * output restored from it, so a receipt on the output's last line reaches the
+ * minting rule (loom#241). A spill that cannot be restored keeps the head and
+ * says why on stderr: the call then mints no engine-run TestRun, and the
+ * agent's next run of the same files is the remedy.
+ */
+function restoreSpilledOutput(payload: ClaudeToolPayload, read: ReadPersistedOutput): ClaudeToolPayload {
+  const spill = persistedBashOutput(payload);
+  if (spill === null) return payload;
+  const found = read(spill);
+  const restored = found.kind === "read" ? withPersistedBashOutput(payload, found.text) : null;
+  if (restored !== null) return restored;
+  process.stderr.write(
+    `record-evidence: Claude Code spilled this Bash output (${spill.bytes} bytes) to ${spill.path}, but it could not be read back whole (${unrestoredCause(found)}); only its first ${spill.head.length} characters were recorded\n`,
+  );
+  return payload;
+}
+
 export const runRecordEvidence = async (
   stdin: string,
   registry: SessionRegistry = fsSessionRegistry,
+  readPersistedOutput: ReadPersistedOutput = readPersistedOutputFile,
 ) => {
   try {
     if (!stdin || stdin.trim() === "") return passthroughResult();
@@ -139,9 +200,10 @@ export const runRecordEvidence = async (
     // Known residual: writes with no static target in the command text — a
     // file authored by an interpreter (`python -c 'open(...)'`), `dd of=` —
     // mint nothing and can still stage an artifact.
+    const payload = restoreSpilledOutput({ ...input, tool_name: toolName, cwd: input.cwd ?? process.cwd() }, readPersistedOutput);
     recordToolEvidence(
       { kind: "record", ledger: sessionId, epoch: binding.epoch, stamps: sessionId },
-      claudeToolCall({ ...input, tool_name: toolName, cwd: input.cwd ?? process.cwd() }),
+      claudeToolCall(payload),
       { registry, nowMs: Date.now, isEngineCli: isEngineCliScript },
     );
 
