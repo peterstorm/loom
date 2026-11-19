@@ -121,11 +121,12 @@ describe("project lint rules: the TypeScript compiler API enters only through it
   const refusedLines = (file: string, content: string): readonly number[] =>
     boundaryRule(content, file, LOOM_BOUNDARIES, LOOM_BOUNDARY_OPTIONS).map(({ line }) => line);
 
-  it("G2 AD-6: the seams are exactly mutation-plan, import-graph and the skeleton ts-surface", () => {
+  it("G2 AD-6, ADR-0095: the seams are exactly mutation-plan, import-graph, the skeleton ts-surface and the linter's function spans", () => {
     expect([...TYPESCRIPT_COMPILER_API_SEAMS].sort()).toEqual([
       "engine/src/core/owner-verification/import-graph.ts",
       "engine/src/core/owner-verification/mutation-plan.ts",
       "engine/src/core/skeleton/ts-surface.ts",
+      "engine/src/linter/programmatic/script-function-spans.ts",
     ]);
   });
 

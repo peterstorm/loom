@@ -98,8 +98,9 @@ describe("no-duplicate-block", () => {
 
   it("declares its first-call setup, which is what makes the executor run it last (executor.test.ts pins the ordering)", () => {
     const declaring = createProgrammaticRules(authoritativeLintContext(EMPTY_CONFIG, null)).filter((rule) => rule.firstCallSetup === true);
-    // The only other rule that builds a project-wide index on its first call is the doc-reference resolver.
-    expect(declaring.map((rule) => rule.name)).toEqual([RULE_NAME, "no-dangling-doc-reference"]);
+    // The others: max-function-lines loads the TypeScript compiler on its first
+    // call (ADR-0095), and the doc-reference resolver builds a project-wide index.
+    expect(declaring.map((rule) => rule.name)).toEqual(["max-function-lines", RULE_NAME, "no-dangling-doc-reference"]);
   });
 });
 

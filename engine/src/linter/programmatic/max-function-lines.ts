@@ -4,19 +4,30 @@
  * Enforces a maximum function body length. AI agents frequently generate
  * 200+ line functions that should be decomposed.
  *
- * Uses bracket-depth tracking with string/template literal awareness.
- * Handles:
- * - function declarations
- * - arrow functions with block bodies
- * - method definitions
- * - class methods
+ * TypeScript and JavaScript are measured from the compiler's parse
+ * (`script-function-spans.ts`): every function declaration and expression,
+ * block-bodied arrow, method, constructor and accessor, wherever it stands —
+ * nested in another function, in an object literal, as an argument, behind a
+ * signature that spans several lines. A nested function is reported in its
+ * own right and also counts toward its parent. Java keeps the bracket-depth
+ * line scan.
+ *
+ * A body's length is the lines strictly between its opening and closing
+ * brace lines. Pre-existing functions are grandfathered per project in
+ * `maxFunctionLinesBaseline`, keyed `path::name` with multiplicity (an
+ * unnamed function is `path::<anonymous>`), like the other baselined rules.
  *
  * Excludes test files by default (describe blocks are naturally long).
  */
 
+import { match } from "ts-pattern";
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { matchesAnyExcludePattern, parseExcludePatternListOrThrow, type ExcludePattern } from "../exclude-pattern";
+import { baselineCounter, baselineKey, projectRelative, type Baseline, type BaselineKey } from "./baseline";
+import { scriptFunctionSpans, type FunctionName, type FunctionSpan } from "./script-function-spans";
+
+export const RULE_NAME = "max-function-lines";
 
 // --- Configuration ---
 
@@ -36,14 +47,15 @@ const DEFAULT_EXCLUDE_PATTERNS: readonly ExcludePattern[] = Object.freeze(
 
 /**
  * What one project's max-function-lines rule runs with. `projectRoot` is the
- * frame `excludePatterns` are matched in, and null says no project owns the
- * config: a directory pattern then excludes no absolute path (a relative path
- * is still read as project-relative). It has no default, so a caller cannot
- * leave the frame out by forgetting it.
+ * frame `excludePatterns` are matched in and `baseline` keys are written in,
+ * and null says no project owns the config: a directory pattern then excludes
+ * no absolute path (a relative path is still read as project-relative). It has
+ * no default, so a caller cannot leave the frame out by forgetting it.
  */
 export type MaxFunctionLinesOptions = Readonly<{
   maxLines: number;
   excludePatterns: readonly ExcludePattern[];
+  baseline: Baseline;
   projectRoot: string | null;
 }>;
 
@@ -51,20 +63,32 @@ export type MaxFunctionLinesOptions = Readonly<{
 export const DEFAULT_MAX_FUNCTION_LINES_OPTIONS: MaxFunctionLinesOptions = Object.freeze({
   maxLines: DEFAULT_MAX_LINES,
   excludePatterns: DEFAULT_EXCLUDE_PATTERNS,
+  baseline: Object.freeze([]),
   projectRoot: null,
 });
 
 // --- Function detection ---
 
-interface FunctionSpan {
-  readonly name: string;
-  readonly startLine: number;  // 1-indexed, line of function declaration
-  readonly endLine: number;    // 1-indexed, line of closing brace
-  readonly bodyLines: number;  // endLine - startLine - 1 (excluding braces)
+/** Every function in a file with its body length: from the compiler's parse
+ *  for TypeScript and JavaScript, by bracket depth for Java. */
+export function detectFunctions(content: string, filePath: string): readonly FunctionSpan[] {
+  return filePath.endsWith(".java") ? bracketDepthSpans(content) : scriptFunctionSpans(filePath, content);
 }
 
 /** Control-flow keywords that look like method calls but aren't functions */
 const CONTROL_FLOW_KEYWORDS = new Set(["if", "for", "while", "switch", "catch"]);
+
+const FUNCTION_DECLARATION = /^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)/;
+const ARROW_CONST = /^\s*(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[^=])\s*(?::\s*[^=]+)?\s*=>\s*\{/;
+const METHOD = /^\s*(?:async\s+)?(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+)*(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{/;
+
+/** The function a line starts, or null: a declaration, an arrow const, then a method that is not a control-flow keyword. */
+function startedFunction(line: string): string | null {
+  const declared = FUNCTION_DECLARATION.exec(line)?.[1] ?? ARROW_CONST.exec(line)?.[1];
+  if (declared !== undefined) return declared;
+  const method = METHOD.exec(line)?.[1];
+  return method === undefined || CONTROL_FLOW_KEYWORDS.has(method) ? null : method;
+}
 
 /**
  * Counts braces on a line, properly skipping string literals, template literals,
@@ -115,136 +139,97 @@ function countBraces(line: string): { open: number; close: number } {
 }
 
 /**
- * Detects function declarations and their line spans using bracket-depth tracking.
- * Returns all functions with their body line counts.
+ * The Java measurement: a line that starts a function opens a span, tracked by
+ * brace depth until it closes. A function nested in a tracked one is not seen.
  */
-export function detectFunctions(content: string): readonly FunctionSpan[] {
-  const lines = content.split("\n");
-  const functions: FunctionSpan[] = [];
-
-  let currentFunction: { name: string; startLine: number; braceDepth: number } | null = null;
+function bracketDepthSpans(content: string): readonly FunctionSpan[] {
+  const spans: FunctionSpan[] = [];
+  let current: { name: string; startLine: number; braceDepth: number } | null = null;
   let inBlockComment = false;
 
-  // Patterns that indicate a function start
-  const functionDeclRe = /^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)/;
-  const arrowFnRe = /^\s*(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[^=])\s*(?::\s*[^=]+)?\s*=>\s*\{/;
-  const methodRe = /^\s*(?:async\s+)?(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+)*(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{/;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const [index, line] of content.split("\n").entries()) {
     const trimmed = line.trim();
-
-    // Track block comments
     if (inBlockComment) {
-      if (trimmed.includes("*/")) {
-        inBlockComment = false;
-      }
+      inBlockComment = !trimmed.includes("*/");
       continue;
     }
     if (trimmed.startsWith("/*")) {
-      inBlockComment = true;
-      if (trimmed.includes("*/")) inBlockComment = false;
+      inBlockComment = !trimmed.includes("*/");
       continue;
     }
-
-    // Skip single-line comments
     if (trimmed.startsWith("//")) continue;
 
-    // Count braces (string-aware)
-    const { open: lineOpenBraces, close: lineCloseBraces } = countBraces(line);
-
-    // If we're tracking a function, update its brace depth
-    if (currentFunction) {
-      currentFunction.braceDepth += lineOpenBraces - lineCloseBraces;
-
-      if (currentFunction.braceDepth <= 0) {
-        // Function closed
-        const endLine = i + 1;
-        const bodyLines = endLine - currentFunction.startLine - 1;
-        functions.push({
-          name: currentFunction.name,
-          startLine: currentFunction.startLine,
-          endLine,
-          bodyLines,
-        });
-        currentFunction = null;
+    const { open, close } = countBraces(line);
+    if (current !== null) {
+      current.braceDepth += open - close;
+      if (current.braceDepth <= 0) {
+        const endLine = index + 1;
+        spans.push({ name: { kind: "named", name: current.name }, startLine: current.startLine, bodyLines: endLine - current.startLine - 1 });
+        current = null;
       }
       continue;
     }
 
-    // Try to detect a new function start
-    let funcName: string | null = null;
-
-    const declMatch = functionDeclRe.exec(line);
-    if (declMatch) {
-      funcName = declMatch[1];
-    } else {
-      const arrowMatch = arrowFnRe.exec(line);
-      if (arrowMatch) {
-        funcName = arrowMatch[1];
-      } else {
-        const methodMatch = methodRe.exec(line);
-        if (methodMatch) {
-          const name = methodMatch[1];
-          // Exclude control-flow keywords that look like method calls
-          if (!CONTROL_FLOW_KEYWORDS.has(name)) {
-            funcName = name;
-          }
-        }
-      }
-    }
-
-    if (funcName && lineOpenBraces > 0) {
-      const braceDepth = lineOpenBraces - lineCloseBraces;
-      if (braceDepth > 0) {
-        currentFunction = {
-          name: funcName,
-          startLine: i + 1,
-          braceDepth,
-        };
-      }
-      // If braces open and close on same line, it's a one-liner — skip
-    }
+    const name = startedFunction(line);
+    // Braces that open and close on the same line are a one-liner: skipped.
+    if (name !== null && open > 0 && open - close > 0) current = { name, startLine: index + 1, braceDepth: open - close };
   }
 
-  return functions;
+  return spans;
 }
 
 // --- Rule handler ---
 
+/** The functions of a file past the limit, or none when the file is excluded. */
+function longFunctions(content: string, filePath: string, options: MaxFunctionLinesOptions): readonly FunctionSpan[] {
+  // Test-suffix patterns, and directories named with a trailing slash — the
+  // same matcher every regex rule's exclusions use.
+  if (matchesAnyExcludePattern(filePath, options.excludePatterns, options.projectRoot)) return [];
+  return detectFunctions(content, filePath).filter((span) => span.bodyLines > options.maxLines);
+}
+
+/** What a baseline entry names: the function, never its line or length, so a grandfathered function may move. */
+const keyOf = (name: FunctionName): string =>
+  match(name)
+    .with({ kind: "named" }, (fn) => fn.name)
+    .with({ kind: "anonymous" }, () => "<anonymous>")
+    .exhaustive();
+
+const describe = ({ name, startLine }: FunctionSpan): string =>
+  match(name)
+    .with({ kind: "named" }, (fn) => `Function "${fn.name}"`)
+    .with({ kind: "anonymous" }, () => `Anonymous function at line ${startLine}`)
+    .exhaustive();
+
 /**
  * Programmatic rule handler for max-function-lines.
- * Reports violations for functions exceeding the line limit.
+ * Reports violations for functions exceeding the line limit that the
+ * project's baseline does not excuse.
  */
-export function handler(
+export function handler(content: string, filePath: string, options: MaxFunctionLinesOptions): Violation[] {
+  const relative = projectRelative(filePath, options.projectRoot);
+  const baseline = baselineCounter(options.baseline);
+  const lines = content.split("\n");
+  return longFunctions(content, filePath, options)
+    .filter((span) => !baseline.consume(baselineKey(relative, keyOf(span.name))))
+    .map((span) =>
+      makeViolation(
+        RULE_NAME,
+        filePath,
+        span.startLine,
+        lines[span.startLine - 1] ?? "",
+        `${describe(span)} is ${span.bodyLines} lines (max: ${options.maxLines}). Decompose into smaller functions with single responsibilities.`,
+      ),
+    );
+}
+
+/** The baseline keys of every function the rule would flag absent its
+ *  baseline — the input of the staleness pass and of `lint-project --write-baseline`. */
+export function detectedLongFunctionKeys(
   content: string,
   filePath: string,
-  { maxLines, excludePatterns, projectRoot }: MaxFunctionLinesOptions,
-): Violation[] {
-  // Skip excluded files: test-suffix patterns, and directories named with a
-  // trailing slash — the same matcher every regex rule's exclusions use.
-  if (matchesAnyExcludePattern(filePath, excludePatterns, projectRoot)) {
-    return [];
-  }
-
-  const functions = detectFunctions(content);
-  const violations: Violation[] = [];
-
-  for (const fn of functions) {
-    if (fn.bodyLines > maxLines) {
-      const lines = content.split("\n");
-      const text = lines[fn.startLine - 1] || "";
-      violations.push(
-        makeViolation(
-          "max-function-lines",
-          filePath,
-          fn.startLine,
-          text,
-          `Function "${fn.name}" is ${fn.bodyLines} lines (max: ${maxLines}). Decompose into smaller functions with single responsibilities.`
-        )
-      );
-    }
-  }
-
-  return violations;
+  options: MaxFunctionLinesOptions,
+): readonly BaselineKey[] {
+  const relative = projectRelative(filePath, options.projectRoot);
+  return longFunctions(content, filePath, options).map((span) => baselineKey(relative, keyOf(span.name)));
 }

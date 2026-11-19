@@ -15,6 +15,10 @@ parse-only contract, one seam list with three enforcement points, the exact-spec
 exemption and the `^5.9.0` runtime dependency. Read "the two seams" below as "the seams of
 `TYPESCRIPT_COMPILER_API_SEAMS`" and see ADR-0053 for the third.
 
+**Amended by ADR-0095 (2026-11-18): a fourth seam, in the linter.**
+`engine/src/linter/programmatic/script-function-spans.ts` measures function bodies for `max-function-lines`
+under the same parse-only contract, and requires the compiler on first use instead of importing it.
+
 ## Context
 G5b owner verification has two jobs that need TypeScript parsing:
 

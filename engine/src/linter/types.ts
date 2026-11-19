@@ -58,9 +58,10 @@ export interface ProgrammaticRule {
    *  and cheap enough for the per-edit budget, so it runs on every edit and
    *  again at the Wave Gate; a `full` rule runs only at the Wave Gate. */
   readonly tier: Tier;
-  /** Set on a rule whose first call in a process does one-off, project-wide
-   *  work that can outlast a per-file deadline (no-duplicate-block builds its
-   *  clone corpus). `executeRules` runs every such rule after all the others
+  /** Set on a rule whose first call in a process does one-off work that can
+   *  outlast a per-file deadline (no-duplicate-block builds its clone corpus,
+   *  max-function-lines loads the TypeScript compiler). `executeRules` runs
+   *  every such rule after all the others
    *  and never checks the deadline between them, so no rule is refused for
    *  time a setup spent — wherever the rule sits in the list it was given. */
   readonly firstCallSetup?: true;

@@ -56,7 +56,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0039](ADR-0039-the-second-copy-lens-is-an-engine-issued-packet-section.md) | The second-copy lens is an engine-issued packet section | Accepted (2026-10-23) | amended by ADR-0047 |
 | [ADR-0040](ADR-0040-brief-duties-and-status-projection.md) | Brief duties and status projection | Accepted (2026-10-23) | — |
 | [ADR-0041](ADR-0041-family-site-metric-one-pure-module-with-an-in-repo-baseline.md) | Family-site metric as one pure module with an in-repo baseline | Accepted (2026-10-23) | — |
-| [ADR-0042](ADR-0042-the-typescript-compiler-api-enters-through-two-pure-seams.md) | The TypeScript compiler API enters through two pure seams | Accepted (2026-10-23) | amended by ADR-0053 |
+| [ADR-0042](ADR-0042-the-typescript-compiler-api-enters-through-two-pure-seams.md) | The TypeScript compiler API enters through two pure seams | Accepted (2026-10-23) | amended by ADR-0053, ADR-0095 |
 | [ADR-0043](ADR-0043-the-pure-core-is-enforced-by-the-purity-linter.md) | The pure core is enforced by the purity linter, not a project regex rule | Accepted (2026-10-23) | — |
 | [ADR-0044](ADR-0044-the-acceptance-freeze-is-stamped-by-the-completion-commit.md) | The Acceptance Freeze is stamped by the completion commit, not at receipt installation | Accepted (2026-10-25) | — |
 | [ADR-0045](ADR-0045-an-implemented-task-is-reopened-through-one-engine-operation.md) | An implemented Task is reopened through one engine operation that reuses the Contract Revision transition | Accepted (2026-10-25) | — |
@@ -109,3 +109,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0092](ADR-0092-owner-verification-runs-at-the-stop-of-a-task-that-writes-the-family.md) | Owner Verification runs at the stop of a Task that writes the family | Accepted (2026-11-18) | — |
 | [ADR-0093](ADR-0093-a-reopen-names-what-the-finding-needs.md) | A reopen names what the Finding needs | Accepted (2026-11-18) | — |
 | [ADR-0094](ADR-0094-a-re-reviewed-tasks-roster-follows-what-changed.md) | A re-reviewed Task's roster follows what changed | Accepted (2026-11-18) | extends ADR-0091 |
+| [ADR-0095](ADR-0095-the-linter-measures-functions-through-a-lazy-compiler-seam.md) | The linter measures functions through a lazy compiler seam | Accepted (2026-11-18) | amends ADR-0042 |

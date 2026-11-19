@@ -165,6 +165,7 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
 | `impureModules` | `{ path, reason }[]` | `[]` | The shells inside the pure roots, each with the I/O it does |
 | `maxFunctionLines` | `number` | `50` | Max lines per function body for `max-function-lines` |
 | `excludeFromMaxLines` | `string[]` | Test file patterns | Files to exclude from line-length checking, in the same two forms as a regex rule's `excludePatterns`, parsed and matched the same way: a file suffix, or a directory ending in `/` matched against the path inside the project |
+| `maxFunctionLinesBaseline` | `string[]` | `[]` | Grandfathered `path::name` functions `max-function-lines` excuses, one entry per function (`path::<anonymous>` for an unnamed one) |
 | `switchTotalityModules` | non-empty `string[]` | every non-test TS file | Narrows `switch-totality` to these path prefixes. An empty list is refused — disable the rule by name instead |
 | `switchTotalityBaseline` | `string[]` | `[]` | Grandfathered `path::scrutinee` sites `switch-totality` excuses, one entry per site |
 | `maxDiscriminantBranches` | `number` | `3` | Branches on one tag at which `exhaustive-discriminant-branching` reads an if-chain as a switch |
@@ -198,13 +199,13 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
 
 ### Baselines
 
-`switch-totality`, `exhaustive-discriminant-branching`, `no-duplicate-block` and `no-wire-cast` apply without configuration, and `no-dangling-doc-reference` applies as soon as `docReferences` is written, so the sites that predate them in an existing codebase would block the next edit to each file. Record them once:
+`switch-totality`, `exhaustive-discriminant-branching`, `no-duplicate-block`, `no-wire-cast` and `max-function-lines` apply without configuration, and `no-dangling-doc-reference` applies as soon as `docReferences` is written, so the sites that predate them in an existing codebase would block the next edit to each file (or, for `max-function-lines`, the next Wave Gate that touches it). Record them once:
 
 ```bash
 bun <loom-plugin-dir>/scripts/lint-project.ts --write-baseline
 ```
 
-This writes the five `…Baseline` lists, keyed relative to the project root. A baselined site costs nothing until it is converted; a new site is held to the rule. A copy across two files has two entries, one per file, and an entry names the copied tokens, so editing one side of a baselined copy makes it a new copy that is reported again.
+This writes the six `…Baseline` lists, keyed relative to the project root. A baselined site costs nothing until it is converted; a new site is held to the rule. A copy across two files has two entries, one per file, and an entry names the copied tokens, so editing one side of a baselined copy makes it a new copy that is reported again. A long function's entry names the function, not its line or length: it stays excused when it moves or grows, and is stale once it is renamed or brought under the limit.
 
 The lists are debt and only shrink: the full tier fails on an entry no live site consumes. Re-running `--write-baseline` removes the entries of converted sites.
 
@@ -249,7 +250,7 @@ Each is a TypeScript handler, `(content, filePath) => Violation[]`, registered i
 | `no-duplicate-block` | immediate + full | TS, JS | No block of 100+ identical tokens over 8+ lines that another project file, or the same file, already holds |
 | `no-wire-cast` | immediate + full | TS | `JSON.parse` / `.json()` output is bound as `unknown` and parsed — never typed by `as T` or a `: T` annotation |
 | `no-dangling-doc-reference` | immediate + full | Markdown; comments in TS, JS, Java, Kotlin, Scala | Every backticked path, file, symbol, link, spec id and ADR id in a governed document resolves against the project |
-| `max-function-lines` | full | TS, JS, Java | Function bodies ≤ `maxFunctionLines` (default 50); test files excluded by default |
+| `max-function-lines` | full | TS, JS, Java | Function bodies ≤ `maxFunctionLines` (default 50), nested functions included; test files excluded by default |
 | `fugue-generated-integrity` | full | TS | Structural projection of Fugue-generated files matches the stamped SHA-256 |
 | `exhaustive-discriminant-branching` | full | TS | 3+ branches on one discriminant without a totality proof |
 | `no-nested-ternary` | full | TS | A ternary whose else-branch opens another ternary |
@@ -331,8 +332,19 @@ gets disabled — which is worse than not having it.
   multi-statement bodies — those are folds, and spelling a fold `reduce` is
   frequently *harder* to read. The bar is that a mechanical rewrite exists AND it
   deletes a mutable binding.
-- `max-function-lines` counts by bracket depth over `function` declarations,
-  block-bodied arrow functions and class methods.
+- `max-function-lines` measures TypeScript and JavaScript from the compiler's
+  parse (ADR-0095): every function declaration and expression, block-bodied
+  arrow, method, constructor and accessor, including functions nested in
+  another, object-literal members, callbacks passed as arguments and functions
+  whose signature spans several lines. A body's length is the lines strictly
+  between its opening and closing brace lines; a nested function is reported in
+  its own right and counts toward its parent. A function is named by its
+  declaration, else by the binding or property it is assigned to; a callback is
+  reported as an anonymous function at its line. A file with syntax errors is
+  measured as far as the parser recovers it. Java is still scanned by bracket
+  depth from lines that look like a declaration, which recognises constructors
+  and modifier-only methods but not a method with a return type
+  (`public void run() {`).
 
 #### `no-io-in-pure-modules`
 

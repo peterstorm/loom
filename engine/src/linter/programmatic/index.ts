@@ -17,7 +17,9 @@ import { handler as crossBoundaryHandler, DEFAULT_BOUNDARIES, type BoundaryOptio
 import { handler as ioInPureHandler, DEFAULT_PURITY_SCOPE, type PurityScope } from "./no-io-in-pure-modules";
 import {
   handler as maxFunctionLinesHandler,
+  detectedLongFunctionKeys,
   DEFAULT_MAX_FUNCTION_LINES_OPTIONS,
+  RULE_NAME as MAX_FUNCTION_LINES_RULE,
   type MaxFunctionLinesOptions,
 } from "./max-function-lines";
 import { handler as fugueGeneratedIntegrityHandler } from "./fugue-generated-integrity";
@@ -86,6 +88,10 @@ const TOTALITY_EXTENSIONS: readonly string[] = TYPESCRIPT_EXTENSIONS;
 /** The files no-wire-cast reads: an assertion and an annotation exist only in
  *  TypeScript. Owned once for the rule and its baseline owner. */
 const WIRE_CAST_EXTENSIONS: readonly string[] = TYPESCRIPT_EXTENSIONS;
+
+/** The files max-function-lines measures, owned once for the rule and its
+ *  baseline owner. */
+const MAX_FUNCTION_LINES_EXTENSIONS: readonly string[] = Object.freeze([...SCRIPT_EXTENSIONS, ".java"]);
 
 /** The boundary rule's options for one project. */
 export function boundaryOptions(config: ProgrammaticConfig, projectRoot: string | null): BoundaryOptions {
@@ -255,6 +261,7 @@ export function baselineOwners(context: ProjectLintContext<AuthoritativeCorpus>)
       site: "dangling doc reference",
       detect: (content: string, filePath: string) => detectedDocReferenceKeys(content, filePath, referenceOptions),
     },
+    maxFunctionLinesOwner(config, projectRoot),
   ]);
 }
 
@@ -292,25 +299,47 @@ function importBoundaryRules(config: ProgrammaticConfig, projectRoot: string | n
   ];
 }
 
-/** max-function-lines' options for one project. */
+/** max-function-lines' options for one project — shared by the live rule and
+ *  its staleness detector, like the totality rules' above. */
 function maxFunctionLinesOptions(config: ProgrammaticConfig, projectRoot: string | null): MaxFunctionLinesOptions {
   const defaults = DEFAULT_MAX_FUNCTION_LINES_OPTIONS;
   return Object.freeze({
     maxLines: config.maxFunctionLines ?? defaults.maxLines,
     excludePatterns: config.excludeFromMaxLines ?? defaults.excludePatterns,
+    baseline: config.maxFunctionLinesBaseline ?? defaults.baseline,
     projectRoot,
   });
 }
 
+/** max-function-lines' grandfathered list, detected with the live rule's options. */
+function maxFunctionLinesOwner(config: ProgrammaticConfig, projectRoot: string | null): BaselineOwner {
+  const options = maxFunctionLinesOptions(config, projectRoot);
+  return {
+    rule: MAX_FUNCTION_LINES_RULE,
+    configKey: "maxFunctionLinesBaseline",
+    extensions: MAX_FUNCTION_LINES_EXTENSIONS,
+    baseline: options.baseline,
+    site: "function past the length limit",
+    detect: (content: string, filePath: string) => detectedLongFunctionKeys(content, filePath, options),
+  };
+}
+
+/**
+ * The function-length rule. FULL tier only, so an edit never runs it. Its
+ * first call in a process loads the TypeScript compiler, which outlasts the
+ * per-file deadline; it declares that (`firstCallSetup`) and the executor runs
+ * it last.
+ */
 function maxFunctionLinesRule(config: ProgrammaticConfig, projectRoot: string | null): ProgrammaticRule {
   const options = maxFunctionLinesOptions(config, projectRoot);
   return {
     kind: "programmatic",
-    name: "max-function-lines",
+    name: MAX_FUNCTION_LINES_RULE,
     description: `Enforce maximum function body length (configured: ${options.maxLines} lines)`,
-    extensions: [...SCRIPT_EXTENSIONS, ".java"],
+    extensions: MAX_FUNCTION_LINES_EXTENSIONS,
     handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, options),
     tier: "full",
+    firstCallSetup: true,
     fixHint: "Decompose into smaller functions with single responsibilities",
     enabled: true,
     source: "default",
