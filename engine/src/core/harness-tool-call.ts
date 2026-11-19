@@ -209,6 +209,45 @@ function succeededBashOutcome(toolResponse: unknown, input: Readonly<Record<stri
   return successShape && !reinterpreted ? { kind: "exited", exit: 0, stdout } : { kind: "exit-unknown", stdout };
 }
 
+/**
+ * Claude Code's spill of a large Bash result. Over its inline budget it keeps
+ * only the head of the output in `tool_response.stdout` (30 000 characters,
+ * probed in Claude Code 2.1.x) and writes the whole output to the file
+ * `persistedOutputPath` names, `persistedOutputSize` bytes long. The tail,
+ * where `helper run-tests` prints its receipt as the last line, is then only
+ * in that file.
+ */
+export type PersistedBashOutput = Readonly<{ path: string; bytes: number; head: string }>;
+
+/** The spill a successful Claude Code Bash payload reports, or null when its
+ *  output is inline (or the payload is any other call). */
+export function persistedBashOutput(payload: ClaudeToolPayload): PersistedBashOutput | null {
+  if (payload.hook_event_name === "PostToolUseFailure" || toolOf(CLAUDE_TOOLS, payload.tool_name) !== "Bash") return null;
+  const response = payload.tool_response;
+  if (!isRecord(response)) return null;
+  const { persistedOutputPath: path, persistedOutputSize: bytes, stdout: head } = response;
+  return typeof path === "string" && path !== "" && typeof bytes === "number" && Number.isSafeInteger(bytes) &&
+    bytes > 0 && typeof head === "string"
+    ? { path, bytes, head }
+    : null;
+}
+
+/**
+ * The payload with its spilled stdout restored: `whole` replaces the head
+ * only when it is the whole output the harness reported, exactly `bytes`
+ * bytes of UTF-8 that begin with the head it kept. Anything else (a file
+ * rewritten, truncated or swapped since the call) returns `null`, and the
+ * payload keeps its head, which carries no receipt and so mints nothing.
+ */
+export function withPersistedBashOutput(
+  payload: ClaudeToolPayload,
+  spill: PersistedBashOutput,
+  whole: string,
+): ClaudeToolPayload | null {
+  if (new TextEncoder().encode(whole).length !== spill.bytes || !whole.startsWith(spill.head)) return null;
+  return { ...payload, tool_response: { ...recordOrEmpty(payload.tool_response), stdout: whole } };
+}
+
 /** A Claude Code Bash call's outcome, from the hook event that delivered it. */
 export function claudeBashOutcome(result: ClaudeToolResult): BashToolOutcome {
   return result.kind === "failed"

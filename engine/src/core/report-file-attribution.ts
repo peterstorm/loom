@@ -13,6 +13,8 @@
 import { normalizePlanPath } from "./plan-path-match";
 
 const JVM_CLASS = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/;
+const JVM_SIMPLE_CLASS = /^[A-Za-z_$][\w$]*$/;
+const JVM_SOURCE = /\.(?:java|kt|groovy|scala)$/;
 const ABSOLUTE = /^(?:\/|[A-Za-z]:\/)/;
 
 /**
@@ -38,9 +40,13 @@ export function repositoryRelative(reported: string, repositoryRoot: string | nu
  * exact path wins; otherwise a whole-segment suffix match (the runner's cwd
  * lies beneath the repository root) or a JVM class match (`com.acme.FooTest`,
  * or `com.acme.FooTest$Nested`, to `…/com/acme/FooTest.java|.kt`) attributes
- * it only when exactly one declared file matches. An ambiguous identity is
- * left unattributed, which fails closed rather than crediting the wrong file.
- * Matching is by whole path segments, never by suffix text.
+ * it only when exactly one declared file matches. A simple JVM class name
+ * (FooTest, or FooTest$Nested) is what Surefire writes for an engine whose
+ * class reporting name is not qualified (jqwik); it matches a declared JVM
+ * source file (.java, .kt, .groovy, .scala) named FooTest, under the same
+ * exactly-one rule. An ambiguous identity is left unattributed,
+ * which fails closed rather than crediting the wrong file. Matching is by
+ * whole path segments, never by suffix text.
  */
 export function attributeReportedFile(
   declared: readonly string[],
@@ -51,15 +57,31 @@ export function attributeReportedFile(
   if (relative === null) return null;
   const exact = declared.find((file) => normalizePlanPath(file) === relative);
   if (exact !== undefined) return exact;
-  const jvmClass = !relative.includes("/") && JVM_CLASS.test(relative)
-    ? relative.split("$")[0].replace(/\./g, "/")
-    : null;
+  const jvmClass = reportedJvmClass(relative);
   const matches = declared.filter((file) => {
     const path = normalizePlanPath(file);
-    if (path.endsWith(`/${relative}`)) return true;
-    if (jvmClass === null) return false;
-    const withoutExtension = path.replace(/\.[^./]+$/, "");
-    return withoutExtension === jvmClass || withoutExtension.endsWith(`/${jvmClass}`);
+    return path.endsWith(`/${relative}`) || (jvmClass !== null && isJvmClassSource(path, jvmClass));
   });
   return matches.length === 1 ? matches[0] : null;
+}
+
+/** A reported JVM class, outer class only, as a path: qualified
+ *  (com/acme/FooTest) or simple (FooTest). */
+type ReportedJvmClass = Readonly<{ kind: "qualified" | "simple"; path: string }>;
+
+/** The JVM class a reported identity names, or null for any other identity. */
+function reportedJvmClass(relative: string): ReportedJvmClass | null {
+  if (relative.includes("/")) return null;
+  const outer = relative.split("$")[0];
+  if (JVM_CLASS.test(relative)) return { kind: "qualified", path: outer.replace(/\./g, "/") };
+  return JVM_SIMPLE_CLASS.test(relative) && outer !== "" ? { kind: "simple", path: outer } : null;
+}
+
+/** Whether a declared path is the source file of a reported JVM class. A
+ *  simple name matches only a JVM source file, so a bare word never credits a
+ *  file of another language whose stem happens to equal it. */
+function isJvmClassSource(path: string, jvmClass: ReportedJvmClass): boolean {
+  if (jvmClass.kind === "simple" && !JVM_SOURCE.test(path)) return false;
+  const withoutExtension = path.replace(/\.[^./]+$/, "");
+  return withoutExtension === jvmClass.path || withoutExtension.endsWith(`/${jvmClass.path}`);
 }
