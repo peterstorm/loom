@@ -459,18 +459,29 @@ export async function recordPiSpawnCorrelators(
     // composed through `canonicalSpawnTaskText` so the publication suffix (the
     // `Review Task T1.` binding line the capture matcher re-derives from the
     // child's echoed task) survives the re-render instead of terminal-rejecting
-    // every attempt-1 capture.
-    canonicalTasks[index] = admission.emissionExpectation.kind === "emission-enabled"
-      ? item.task
-      : canonicalSpawnTaskText(
-          renderSpawnTask(
-            opened.value,
-            request,
-            REVIEWER_RESULT_INSTRUCTION,
-            { standalone: hasStandaloneReviewContext(item.task) },
-          ),
-          item.task,
+    // every attempt-1 capture. A fallback is named, never silent: the next
+    // render-fact drift between publication and admission surfaces here at
+    // dispatch, not later as a capture rejection.
+    if (admission.emissionExpectation.kind === "emission-enabled") {
+      canonicalTasks[index] = item.task;
+    } else {
+      const canonical = canonicalSpawnTaskText(
+        renderSpawnTask(
+          opened.value,
+          request,
+          REVIEWER_RESULT_INSTRUCTION,
+          { standalone: hasStandaloneReviewContext(item.task) },
+        ),
+        item.task,
+      );
+      if (canonical.kind === "render-fallback") {
+        process.stderr.write(
+          `loom(pi): extraction-only re-render fell back to the fresh render for ${request.role} ${request.requestId}` +
+            " — the issued task was not a verbatim extension of it\n",
         );
+      }
+      canonicalTasks[index] = canonical.task;
+    }
     consumed.add(request.requestId);
   }
   for (const [index, task] of canonicalTasks.entries()) replacePiSpawnTask(rawInput, index, task);

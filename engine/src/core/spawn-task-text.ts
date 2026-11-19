@@ -67,6 +67,13 @@ export function requiredSkillMarker(requiredSkill: string | null): string {
 export const REVIEWER_RESULT_INSTRUCTION =
   "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
 
+/** Which task text the extraction-only canonical re-render dispatched. The
+ *  closed union makes the two-outcome decision explicit and assertable at the
+ *  seam instead of a bare string whose fallback arm hides behind the caller. */
+export type CanonicalSpawnTask =
+  | Readonly<{ kind: "issued-kept"; task: string }>
+  | Readonly<{ kind: "render-fallback"; task: string }>;
+
 /**
  * The extraction-only canonical re-render must not erase what publication
  * composes AFTER the rendered task: the `Review Task T1.` / `Spec-check Wave N.`
@@ -75,10 +82,15 @@ export const REVIEWER_RESULT_INSTRUCTION =
  * fresh render verbatim, the extension IS the publication suffix and the issued
  * task stays canonical; any other issued shape falls back to the fresh render —
  * which the attempt-2 retry flow tolerates, because its reservation derives no
- * Task binding from the retry task text.
+ * Task binding from the retry task text. The caller names the fallback
+ * (`loom(pi):` stderr diagnostic in pi/review-run-authority.ts), so a render-fact
+ * drift between publication and Pi admission is visible at dispatch instead of
+ * surfacing later as the capture matcher's missing-or-mismatched rejection.
  */
-export function canonicalSpawnTaskText(rendered: string, issuedTask: string): string {
-  return issuedTask.startsWith(rendered) ? issuedTask : rendered;
+export function canonicalSpawnTaskText(rendered: string, issuedTask: string): CanonicalSpawnTask {
+  return issuedTask.startsWith(rendered)
+    ? Object.freeze({ kind: "issued-kept" as const, task: issuedTask })
+    : Object.freeze({ kind: "render-fallback" as const, task: rendered });
 }
 
 /** One POSIX-shell single-quoted word. */

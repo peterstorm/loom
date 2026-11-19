@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 import { recordedSubagentEvent, replayRecordedEvent } from "./fixtures/pi-recorded/recorded-subagent-result";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
+import { REVIEWER_RESULT_INSTRUCTION } from "../src/core/spawn-task-text";
 import {
   createImplementationAttemptAuthority,
   type ImplementationAttemptAuthority,
@@ -25,6 +26,7 @@ import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture, observedEvidence } from "./fixtures/task-lifecycle";
 import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/request-publication";
+import { renderSpawnTask } from "../src/handlers/helpers/programs";
 import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
 import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
 import { waveRequests } from "../src/handlers/helpers/programs/wave-review-requests";
@@ -2833,7 +2835,34 @@ describe("Pi extension review tool_result integration", () => {
 
       expect(input.task).not.toContain("manufacture a clean review");
       expect(input.task).toContain(`LOOM_CONTEXT_PATH: ${join(staged.runDir, "contexts", `${staged.request.contextDigest}.json`)}`);
-      expect(input.task).toContain("Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required result.");
+      expect(input.task).toContain(REVIEWER_RESULT_INSTRUCTION);
+    } finally {
+      rmSync(join(subagentDir, `${session}.active`), { force: true });
+    }
+  });
+
+  it("keeps the publication's Task binding when the issued task extends the fresh render", async () => {
+    // The attempt-1 reviewer capture incident (PR #238): wave publication
+    // appends `Review Task T1.` AFTER the rendered task, and the capture matcher
+    // re-derives the reserved Task ID from the child's echoed task. The
+    // extraction-only canonical re-render at the production site must dispatch
+    // that issued task verbatim (the keep arm), not a suffix-less re-render.
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-canonical-binding-kept");
+    const session = "019fca39-f989-7510-8e62-50dadbcad4b3";
+    expect((await bindSession(session, staged)).ok).toBe(true);
+    const rendered = renderSpawnTask(staged.handle, staged.request, REVIEWER_RESULT_INSTRUCTION, { standalone: true });
+    const issued = `${rendered}\nReview Task T1.`;
+    const input = { agent: "code-reviewer", task: issued, agentScope: "user" };
+
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId: "call-canonical-binding-kept",
+        input,
+      }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+
+      expect(input.task).toBe(issued);
     } finally {
       rmSync(join(subagentDir, `${session}.active`), { force: true });
     }

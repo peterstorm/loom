@@ -150,22 +150,22 @@ describe("canonicalSpawnTaskText", () => {
 
   it("keeps the publication's Task binding: the issued task extends the fresh render", () => {
     const issued = `${rendered}\nReview Task T1.`;
-    expect(canonicalSpawnTaskText(rendered, issued)).toBe(issued);
+    expect(canonicalSpawnTaskText(rendered, issued)).toEqual({ kind: "issued-kept", task: issued });
   });
 
   it("keeps the spec-check binding the same way", () => {
     const issued = `${rendered}\nSpec-check Wave 1.`;
-    expect(canonicalSpawnTaskText(rendered, issued)).toBe(issued);
+    expect(canonicalSpawnTaskText(rendered, issued)).toEqual({ kind: "issued-kept", task: issued });
   });
 
-  it("keeps the fresh render when the issued task adds nothing", () => {
-    expect(canonicalSpawnTaskText(rendered, rendered)).toBe(rendered);
+  it("keeps the issued task when it adds nothing", () => {
+    expect(canonicalSpawnTaskText(rendered, rendered)).toEqual({ kind: "issued-kept", task: rendered });
   });
 
   it("falls back to the fresh render when the issued task diverges (attempt-2 retry text)", () => {
     const retry = renderSpawnTaskText(facts({
       instruction: "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot.",
     }));
-    expect(canonicalSpawnTaskText(rendered, retry)).toBe(rendered);
+    expect(canonicalSpawnTaskText(rendered, retry)).toEqual({ kind: "render-fallback", task: rendered });
   });
 });
