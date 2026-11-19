@@ -28,6 +28,7 @@ Documentation for Loom 1.1. Runbooks live in `commands/` and `skills/`; these do
 |---|---|
 | [Architecture](architecture.md) | Layers, authority boundaries, persistence, and what the system does and does not guarantee |
 | [Feature & Guard Map](feature-guard-map.md) | The mechanism-level map: every feature, guardrail and determinism device with the failure mode it replaces, and the verified residuals |
+| [Engine internals](engine-internals.md) | The complete technical reference: every stage of a `/loom` run and the machinery underneath — identity, packets, capture, reviewer scheduling, attempts, settlement, the Wave Gate |
 | [Loom Agents](agents.md) | The inventory of Agent definitions |
 | [Hooks](../hooks/README.md) | The lifecycle events Claude Code binds, the engine handler behind each shim, and the failure polarity |
 | [Pi adapter](pi-adapter.md) | How the Pi adapter maps onto the engine; the checklist for adding shared behaviour |
