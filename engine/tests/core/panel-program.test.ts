@@ -2,11 +2,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  AWAIT_PANEL_RESULTS,
   PANEL_PROGRAM_MODEL_PROFILES,
-  describeDispatchReplayError,
   isParallelSpawnBatch,
-  nextDispatchProgramAction,
   reduceArchitectureProgram,
   reduceRefutationProgram,
   startArchitectureProgram,
@@ -1250,36 +1247,5 @@ describe("a registration diverging from the canonical roster is refused", () => 
     expect(submitted.ok).toBe(false);
     if (submitted.ok) return;
     expect(submitted.error.kind).toBe("unknown-request");
-  });
-});
-
-describe("nextDispatchProgramAction: the dispatch program's one journal replay", () => {
-  const architectureInput = { candidateLenses: ["type-driven-fp"], judgeCriteria: ["simplicity"] } as const;
-  const refutationInput = { criticalFindingIds: [findings[0].id], lenses: ["reproduction"] } as const;
-  const verifierSucceeded = { type: "spawn-outcome", requestId: "refutation:verifier:1", attempt: 1, outcome: "succeeded" } as const;
-
-  it("starts each panel's dispatch program at its first spawn batch", () => {
-    expect(nextDispatchProgramAction({ panel: "architecture", input: architectureInput, events: [] }))
-      .toMatchObject({ ok: true, value: { type: "spawn-batch", requests: [{ id: "architecture:candidate:1" }] } });
-    expect(nextDispatchProgramAction({ panel: "refutation", input: refutationInput, events: [] }))
-      .toMatchObject({ ok: true, value: { type: "spawn-batch", requests: [{ id: "refutation:verifier:1" }] } });
-  });
-
-  it("folds events in order and awaits results while a batch has unsettled requests", () => {
-    expect(nextDispatchProgramAction({ panel: "refutation", input: refutationInput, events: [verifierSucceeded] }))
-      .toMatchObject({ ok: true, value: { type: "engine-operation", operation: "refutation-tally" } });
-    const twoLenses = { ...refutationInput, lenses: ["reproduction", "intent"] } as const;
-    expect(nextDispatchProgramAction({ panel: "refutation", input: twoLenses, events: [verifierSucceeded] }))
-      .toEqual({ ok: true, value: AWAIT_PANEL_RESULTS });
-  });
-
-  it("refuses in the program's own typed vocabulary, which a caller can branch on", () => {
-    const started = nextDispatchProgramAction({ panel: "architecture", input: { candidateLenses: [], judgeCriteria: ["simplicity"] }, events: [] });
-    expect(started).toEqual({ ok: false, error: { kind: "start-refused", errors: ["candidate lenses must be non-empty"] } });
-    const duplicate = nextDispatchProgramAction({ panel: "refutation", input: refutationInput, events: [verifierSucceeded, verifierSucceeded] });
-    expect(duplicate).toEqual({ ok: false, error: { kind: "event-refused", error: { kind: "duplicate-outcome", requestId: "refutation:verifier:1" } } });
-    if (started.ok || duplicate.ok) throw new Error("unreachable");
-    expect(describeDispatchReplayError(started.error)).toBe("candidate lenses must be non-empty");
-    expect(describeDispatchReplayError(duplicate.error)).toBe(JSON.stringify({ kind: "duplicate-outcome", requestId: "refutation:verifier:1" }));
   });
 });

@@ -76,18 +76,18 @@ The engine automates bookkeeping and authority. It does not pretend code can rep
 
 `engine/src/handlers/helpers/orchestration.ts` exposes registered programs for:
 
-- architecture panel dispatch;
-- refutation panel dispatch;
 - standalone review;
 - Wave Gate;
 - remediation;
 - canonical status.
 
+The Wave Gate and standalone review run their refutation panel internally. The architecture panel keeps a stateless dispatch replay, `helper panel-program architecture`; the registered architecture and refutation panel drivers that once sat here were never driven by a runbook and were retired (ADR-0096).
+
 The parent receives only `spawn-batch`, `await-user`, `blocked`, or `done` at true external boundaries.
 
 ### Persistent typed programs
 
-Closed reducers now model Wave Gate, standalone review, refutation/architecture panels, and remediation. Events are persisted in the Run Directory journal (`orchestration/program-journal.ts`, ADR-0029); checkpoints are projections, not primary history. A semantic failure gets one retry, and attempt-2 rejection is a typed terminal state.
+Closed reducers now model Wave Gate, standalone review, both panels, and remediation. Events are persisted in the Run Directory journal (`orchestration/program-journal.ts`, ADR-0029); checkpoints are projections, not primary history. A semantic failure gets one retry, and attempt-2 rejection is a typed terminal state.
 
 ### Engine-issued request authority
 
@@ -140,7 +140,7 @@ See [ADR-0004](adr/ADR-0004-engine-owned-orchestration-automation.md) for the co
 | One-call standalone preparation | Registered standalone start |
 | Exact frozen scope/roster | Standalone authority and Context Packets |
 | No manual transcripts | Cross-harness capture runtime |
-| No caller panel event arrays | Registered panel driver and internal deterministic operations |
+| No caller panel event arrays | Refutation: the Wave Gate and standalone drivers run the persistent panel internally. Architecture: the parent keeps the journal and the stateless `helper panel-program architecture` replays it (ADR-0096) |
 | Slot/lens/criterion binding | Request authority + slot parsers |
 | Resume survives interruption | Append-only events, checkpoints, idempotent receipts |
 | Model included in request | Semantic profile + both harness bindings |

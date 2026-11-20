@@ -245,10 +245,8 @@ describe("quality-program helper boundaries", () => {
       // The shared ProgramParse failure constructor (`failed`): the plan design
       // acceptance and its evidence reader build the same refusals with it.
       "engine/src/handlers/helpers/accept-plan-design-review.ts -> program-result",
-      "engine/src/handlers/helpers/orchestration.ts -> legacy-panel",
       "engine/src/handlers/helpers/orchestration.ts -> remediation-events",
-      // The run-directory-only effect runner: the façade's transcript capture
-      // and the legacy panel driver share it, so neither restates it.
+      // The run-directory-only effect runner the façade's transcript capture uses.
       "engine/src/handlers/helpers/orchestration.ts -> run-directory-effects",
       "engine/src/handlers/helpers/orchestration.ts -> standalone-disposition",
       "engine/src/handlers/helpers/orchestration.ts -> standalone-source",

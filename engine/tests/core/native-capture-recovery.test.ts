@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
-import { bindCapture, captureKey, nativeCaptureObservation, parseFinalPayload, recoverNativeCaptureArtifact } from "../../src/core/harness-capture";
+import { bindCapture, captureKey, captureRejectionDedupKey, nativeCaptureObservation, parseFinalPayload, recoverNativeCaptureArtifact } from "../../src/core/harness-capture";
 import { value } from "../fixtures/parse-result";
 
 function observed(text: string, harness: "pi" | "claude", attempt: 1 | 2) {
@@ -70,5 +70,19 @@ describe("native write-ahead observation reconciliation (not replay authority)",
       const replacement = observed(`${text} `, harness, attempt);
       expect(recoverNativeCaptureArtifact({ ...replacement, observation: input.observation, capturedBytes: input.capturedBytes }).ok).toBe(false);
     }));
+  });
+});
+
+describe("capture rejection journal identity", () => {
+  it("keys one refused attempt by one journal identity, for both harnesses", () => {
+    const attemptOne = agentRequestAuthority("run.capture-refusal", { requestId: "request:reviewer:1", slotId: "slot-1", attempt: 1 });
+    const attemptTwo = agentRequestAuthority("run.capture-refusal", { requestId: "request:reviewer:1", slotId: "slot-1", attempt: 2 });
+    const first = captureRejectionDedupKey(attemptOne.requestId, attemptOne.attempt);
+    const replay = captureRejectionDedupKey(attemptOne.requestId, attemptOne.attempt);
+    const otherAttempt = captureRejectionDedupKey(attemptTwo.requestId, attemptTwo.attempt);
+
+    expect(replay).toBe(first);
+    expect(otherAttempt).not.toBe(first);
+    expect(first).toMatch(/^capture-rejected:[0-9a-f]{64}$/);
   });
 });

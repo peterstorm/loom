@@ -54,7 +54,7 @@ judges against criteria derived from the interview.
    - Cons: mandatory DAG execution per query and write-ahead machinery conflict
      with the stated simplicity axis
 
-**Computed ranking (authoritative, from `ranking.json`):**
+**Computed ranking (authoritative, from the run's ranking.json):**
 
 | Rank | Candidate | Total | simplicity / pure core / fit + effort |
 |---:|---|---:|---|

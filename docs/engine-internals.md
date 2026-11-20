@@ -102,7 +102,7 @@ Task status moves `pending` → `implemented` (attempt satisfies proof + the Tas
 
 ### 3.2 Immutable Run Directories
 
-Every registered program — Wave Gate, standalone review, disposition, remediation, architecture panel, security verification — writes its evidence into a **fresh, direct-child Run Directory** under a runs root (`mktemp -d`-style; `start` never creates the root, so a mistyped root cannot grow a second tree):
+Every registered program — Wave Gate, standalone review, disposition, remediation, security verification — writes its evidence into a **fresh, direct-child Run Directory** under a runs root (`mktemp -d`-style; `start` never creates the root, so a mistyped root cannot grow a second tree):
 
 ```text
 run.<id>/
@@ -121,7 +121,7 @@ run.<id>/
 
 `orchestration/run-directory-handle.ts` anchors every access: direct-child relation verified, unsafe identity/path shapes rejected, path components reopened **no-follow** (Linux `/proc/self/fd` descriptor-relative; macOS `O_NOFOLLOW_ANY`). Authority, request, context, section-blob, transcript, event and receipt slots are immutable/exclusive — a symlink swap, a duplicate publication or a mismatched run identity fails closed.
 
-**Program durability** (ADR-0029): durable history is an append-only journal of dedup-keyed events (`orchestration/program-journal.ts`); the checkpoint is only a projection beside it. Because an append is idempotent on its dedup key, a crash between publishing an artifact and journalling its event resumes by republishing the same bytes and journalling once. Registered panels replay `spawn-outcome`/`engine-outcome` events on resume (ADR-0030); refutation panels persist as a checkpoint whose event prefix must replay exactly to the recorded state and is re-proved on every read.
+**Program durability** (ADR-0029): durable history is an append-only journal of dedup-keyed events (`orchestration/program-journal.ts`); the checkpoint is only a projection beside it. Because an append is idempotent on its dedup key, a crash between publishing an artifact and journalling its event resumes by republishing the same bytes and journalling once. Refutation panels persist as a checkpoint whose event prefix must replay exactly to the recorded state and is re-proved on every read; the architecture panel is not a registered program (ADR-0096).
 
 **Effects and idempotency**: reducers emit typed effect intents; `orchestration/effect-runner.ts` executes them and records receipts. On resume, an already-receipted effect is *reconciled*, not run again. This separates "the domain authorizes this effect" from "the shell performed it". Each effect reaches only the adapter it needs (RunDirHandle for artifacts, StateManager for protected state, the Git adapter for index operations).
 
@@ -329,7 +329,7 @@ Mandatory when more than `CLARIFY_THRESHOLD` (3) unresolved markers remain, unle
 5. **Aggregate in code** — `core/panel-kernel.ts`/`panel-contract.ts` validate verdicts against exact slots (a slot's identity binds its lens/criterion; caller prose cannot swap it); verdicts must cover the exact candidate set; ranking by total, then ordered criterion scores, then lexical candidate filename.
 6. **Choose and finalize** — ranking is a recommendation; the user still chooses; `architecture-agent` may graft compatible strongest ideas and records `AD-1: Approach selection (panel)`.
 
-Panel evidence lives in a fresh run under `.claude/specs/<slug>/panel-runs/`; the panel is a *registered* program whose journal replays `spawn-outcome`/`engine-outcome` events on resume (ADR-0030).
+Panel evidence lives in a fresh run directory under `.claude/specs/<slug>/panel-runs/` (interview, manifest, candidates, verdicts, ranking). Dispatch order and retries come from the Panel Program: the parent appends each `spawn-outcome`/`engine-outcome` event to its journal and replays it through `helper panel-program architecture`, which returns the next action; `helper panel-contract` validates every artifact. The architecture panel is not a registered façade program (ADR-0096).
 
 ### 6.5 Phase 3.5 — plan alignment
 

@@ -46,7 +46,7 @@
  * Pure module: no I/O, no clock, no randomness; inside the project's
  * `pureModules` (all of engine/src/core/, .claude/linter/rules/config.json),
  * so machine-purity.test.ts audits its whole transitive closure. It must not import panel-program.ts, the panel verdict modules
- * (panel-verdict-source.ts, persistent-panel.ts) or legacy-panel-decisions.ts
+ * (panel-verdict-source.ts, persistent-panel.ts)
  * — ADR-0018's layering, gated by the same suite because both sides of that
  * edge are pure and the closure alone cannot see it. PR
  * #52's fail-closed extraction is consumed verbatim

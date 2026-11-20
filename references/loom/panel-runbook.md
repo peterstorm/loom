@@ -4,7 +4,7 @@ Read by the `/loom` orchestrator when `--panel` or `--panel=N` was passed, befor
 
 Panel mode changes only how the plan is produced: an interviewer, N designers and K judges run first, and one final `architecture-agent` writes the one plan. `current_phase` stays `architecture` throughout. Panel agents are admitted only in that phase and never advance it; the final `architecture-agent` advances to plan alignment, or to decompose when `--skip-plan-alignment` is set.
 
-Panel mode is driven by `helper panel-contract` plus `helper panel-program`. Do not also drive it through `helper orchestration start`.
+Panel mode is driven by `helper panel-contract` plus `helper panel-program architecture`. It is not a registered `helper orchestration` program (ADR-0096).
 
 ## Validate the flag
 

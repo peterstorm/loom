@@ -63,7 +63,7 @@ describe("routeConsumesStdin", () => {
       expect(routeConsumesStdin("helper", "orchestration", [operation]), operation).toBe(true);
     }
     for (const operation of ["status", "inspect", "brief", "abandon", "restart", "recover-orphan", "resume",
-      "correlate", "complete", "remediate", "attest"]) {
+      "correlate", "remediate", "attest"]) {
       expect(routeConsumesStdin("helper", "orchestration", [operation]), operation).toBe(false);
     }
     expect(routeConsumesStdin("helper", "orchestration", [])).toBe(false);

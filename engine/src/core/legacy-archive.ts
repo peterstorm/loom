@@ -15,7 +15,7 @@
  * migration has rewritten all such bytes. Each section names its own format
  * and callers below. Until those observable criteria hold, the rule is:
  *   - Canonical publication never originates here. Compatibility entry points,
- *     including the orchestration façade's legacy registration translation,
+ *     including the stateless panel-program helper's journal translation,
  *     may call the archive only after detecting an historical on-disk format.
  *   - No legacy reader may be extended to accept new shapes; a new on-disk
  *     form is a new canonical parser, not a new compatibility branch here.
@@ -52,7 +52,6 @@ import {
 } from "./standalone-review-model";
 import { mapNonEmpty, parseArtifactDigest, parseArtifactRef, parseOrchestrationRunId, parseRequestId, parseSlotId, type ArtifactDigest, type ArtifactRef, type DomainResult, type OrchestrationRunId } from "./orchestration-contract";
 import { findingsUnionError, parseStoredFindings } from "./findings";
-import { isCaptureRejectionAuditRecord } from "./harness-capture";
 import type { CompletedWaveGateRegistration, Finding, RefutedFinding, TaskGraph } from "../types";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -559,7 +558,6 @@ function parseLegacyPanelEvents(
 ): readonly (ArchitectureProgramEvent | RefutationProgramEvent)[] | string {
   const events: (ArchitectureProgramEvent | RefutationProgramEvent)[] = [];
   for (const [index, rawEvent] of rawEvents.entries()) {
-    if (isCaptureRejectionAuditRecord(rawEvent)) continue;
     const parsed = panel === "architecture"
       ? parseEvent("architecture", rawEvent, index)
       : parseEvent("refutation", rawEvent, index);
@@ -596,14 +594,6 @@ export type LegacyJournalTranslation =
  * The caller-owned document and its event prefix are never rewritten. A
  * schemaVersion of 1 is accepted for forward-written compatibility copies;
  * absence is the original on-disk spelling.
- *
- * Capture-rejection audit records are CARRIED PAST the reducer rather than
- * parsed as transitions: they are durable evidence of a refusal, not a machine
- * event, and no panel reducer has a rule for one. Refusing them here is what
- * permanently wedged a registered panel run after a single ordinary capture
- * rejection, because the journal file is immutable and every later `resume`
- * replayed the same refusal. Anything genuinely unknown still fails closed —
- * only the exact audit shape `core/harness-capture` owns is carried.
  */
 export function translateLegacyPanelJournal(
   panel: LegacyPanelKind,

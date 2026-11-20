@@ -6,7 +6,7 @@
  *   helper orchestration inspect --run <run-directory> --runs-root <root> [--json]
  *   helper orchestration abandon --run <run-directory> --runs-root <root>
  *                                --reason <text> [--superseded-by <run-directory>]
- *   helper orchestration start <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --run <run-directory>
+ *   helper orchestration start <standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --run <run-directory>
  *                              --runs-root <root> [--fresh-review] < program.json
  *   helper orchestration restart --run <exhausted-wave-run> --new-run <fresh-run-directory>
  *                                --runs-root <root>
@@ -20,8 +20,6 @@
  *   helper orchestration correlate --run <run-directory> --runs-root <root>
  *                                  --request <request-id> --harness <pi|claude>
  *                                  --native-id <harness-native-id> --agent <role>
- *   helper orchestration complete --run <run-directory> --runs-root <root>
- *                                 --operation <operation-id>
  *   helper orchestration decide --run <run-directory> --runs-root <root>
  *                               --request <decision-id>   (decision on stdin)
  *   helper orchestration disposition   ({"dispositions":[...]} on stdin)
@@ -176,13 +174,6 @@ import {
 } from "../../core/orchestration-contract";
 import { claudeAgentType, expectedSpawnModel } from "../../core/model-profiles";
 import { captureKey } from "../../core/harness-capture";
-import { translateLegacyPanelJournal } from "./panel-program";
-import {
-  parseRegisteredPanelProgram,
-  registeredPanelProgram,
-  type RegisteredPanelProgram,
-} from "../../core/legacy-panel-decisions";
-import { driveRegisteredPanel, resumeRegisteredPanel, submitRegisteredPanelAttempt } from "./programs/legacy-panel";
 import { runDirectoryEffectRunner } from "./programs/run-directory-effects";
 import {
   applyWaveFacadeSubmission,
@@ -296,7 +287,7 @@ function usage(): HookResult {
       "          optional exact policy: --disposition <absolute Run directory> --disposition-run <id> --disposition-digest <sha256>",
       "  abandon --runs-root <root> --run <run-directory> --reason <text> [--superseded-by <run-directory>]",
       "          (terminal marker; deletes nothing and refuses every operation that would advance the run)",
-      "  start   <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --runs-root <root> --run <run-directory> < program.json",
+      "  start   <standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --runs-root <root> --run <run-directory> < program.json",
       "          (wave-gate: carries each unchanged Task's accepted review from the abandoned or reopened run it succeeds;",
       "          --fresh-review carries nothing and reviews every Task in full)",
       "  restart --runs-root <root> --run <exhausted-wave-run> --new-run <fresh-run-directory>",
@@ -305,7 +296,6 @@ function usage(): HookResult {
       "  submit  --runs-root <root> --run <run-directory> --request <id> --slot <id> --attempt <1|2>",
       "          (idempotent: a repeat for a captured attempt keeps the stored bytes)",
       "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
-      "  complete --runs-root <root> --run <run-directory> --operation <id>",
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
       "          (a Wave Gate's approval is refused while any advisory it issued has no disposition)",
       "  disposition < {\"dispositions\":[{\"finding\":\"<task>:<finding-id>\",\"decision\":\"fixed|deferred|dismissed\",\"reason\":\"<why>\",\"target\":\"<Wave or Task>\"}]}",
@@ -1387,25 +1377,6 @@ async function startWaveGate(stdin: string, args: readonly string[], emission: E
   return driveCreatedRun(args, emission, (handle) => startWaveGateFacade(handle, prepared.value));
 }
 
-/** A legacy panel (`architecture` or `refutation`): the journal is translated
- *  and registered as the run's program before it is driven. */
-const startPanel = (panel: "architecture" | "refutation"): ProgramStart => async (stdin, args, emission) => {
-  const raw = parseProgramJson(stdin);
-  if (!raw.ok) return { kind: "error", message: raw.message };
-  const translated = translateLegacyPanelJournal(panel, raw.value);
-  if (!translated.ok) return { kind: "error", message: translated.error };
-  if (translated.value.events.length !== 0) {
-    return { kind: "error", message: "a fresh orchestration start cannot import pre-existing events" };
-  }
-  const registration = registeredPanelProgram(translated.value, raw.value);
-  return driveCreatedRun(args, emission, async (handle) => {
-    const registered = await handle.registerProgram(registration);
-    return registered.ok
-      ? driveRegisteredPanel(handle, registration)
-      : { ok: false as const, message: registered.error.message };
-  });
-};
-
 async function startStandaloneDisposition(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   if (Buffer.byteLength(stdin) > STANDALONE_LINEAGE_LIMITS.retainedBytes) return { kind: "error", message: "disposition input exceeds byte budget" };
   const input = parseStandaloneDispositionStartBytes(Buffer.from(stdin));
@@ -1435,8 +1406,6 @@ async function startSecurityVerification(stdin: string, args: readonly string[],
  *  names them: a new program is one row here, not an edit across a name list,
  *  an `Exclude` and an if-chain. */
 const START_PROGRAMS: ReadonlyMap<string, ProgramStart> = new Map<string, ProgramStart>([
-  ["architecture", startPanel("architecture")],
-  ["refutation", startPanel("refutation")],
   ["standalone-review", startStandaloneReview],
   ["wave-gate", startWaveGate],
   ["remediation", startRemediation],
@@ -1551,11 +1520,7 @@ async function resumeOperation(args: readonly string[], emission: Emission): Pro
       if (!driven.ok) return { kind: "error", message: driven.message };
       return emitRunAction(bound.value.handle, driven.action, emission);
     }
-    const registration = parseRegisteredPanelProgram(stored.value);
-    if (registration === null) return { kind: "error", message: "registered orchestration program is malformed" };
-    const driven = await resumeRegisteredPanel(bound.value.handle, registration);
-    if (!driven.ok) return { kind: "error", message: driven.message };
-    return emitRunAction(bound.value.handle, driven.action, emission);
+    return { kind: "error", message: "registered orchestration program is malformed" };
   }
 
   const issued = bound.value.handle.readIssuedRequests();
@@ -1595,13 +1560,12 @@ type SlotWriteOperation = "submit" | "correlate";
 
 /**
  * The run's program registration as a CLI slot write sees it: none at all, or
- * the stored record WITH its CLI-bindable facade parse. The pairing is the
- * type — a stored record without a parse, or a parse without a record, cannot
- * be written — and the parse can never be a security-verification program.
+ * the stored record's CLI-bindable facade parse, which can never be a
+ * security-verification program.
  */
 type SlotWriteRegistration =
   | Readonly<{ kind: "unregistered" }>
-  | Readonly<{ kind: "stored"; stored: unknown; facade: Exclude<CliBindableRegistrationParse, Readonly<{ kind: "native-capture-only" }>> }>;
+  | Readonly<{ kind: "stored"; facade: Exclude<CliBindableRegistrationParse, Readonly<{ kind: "native-capture-only" }>> }>;
 
 const UNREGISTERED: SlotWriteRegistration = Object.freeze({ kind: "unregistered" });
 
@@ -1655,7 +1619,7 @@ function bindReservedRequest(
   if (facade?.kind === "native-capture-only") return { ok: false, result: verifierSlotRefusal(operation) };
   const registration: SlotWriteRegistration = facade === null
     ? UNREGISTERED
-    : Object.freeze({ kind: "stored", stored: stored.value, facade });
+    : Object.freeze({ kind: "stored", facade });
   return { ok: true, value: { issued: issued.value, reserved, registration } };
 }
 
@@ -1665,7 +1629,6 @@ type SubmissionBinding = Readonly<{
   attempt: 1 | 2;
   reserved: AgentRequestAuthority;
   facadeRegistration: CliBindableFacadeProgram | null;
-  panelRegistration: RegisteredPanelProgram | null;
 }>;
 
 type SubmissionBindingResult =
@@ -1689,25 +1652,23 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
   if (reserved.slotId !== slotId || String(reserved.attempt) !== attempt) {
     return { ok: false, result: { kind: "error", message: `request ${requestId} is reserved for slot ${reserved.slotId} attempt ${reserved.attempt}, not ${slotId} attempt ${attempt}` } };
   }
-  const bindTo = (facadeRegistration: CliBindableFacadeProgram | null, panelRegistration: RegisteredPanelProgram | null): SubmissionBindingResult =>
-    ({ ok: true, value: { handle: bound.value.handle, requestId, attempt: Number(attempt) as 1 | 2, reserved, facadeRegistration, panelRegistration } });
+  const bindTo = (facadeRegistration: CliBindableFacadeProgram | null): SubmissionBindingResult =>
+    ({ ok: true, value: { handle: bound.value.handle, requestId, attempt: Number(attempt) as 1 | 2, reserved, facadeRegistration } });
   if (registration.kind === "unregistered") {
     const problem = unregisteredReviewerProblem(bound.value.handle, issued);
-    return problem === null ? bindTo(null, null) : { ok: false, result: { kind: "error", message: problem } };
+    return problem === null ? bindTo(null) : { ok: false, result: { kind: "error", message: problem } };
   }
-  const { facade, stored } = registration;
+  const { facade } = registration;
   if (facade.kind === "invalid") {
     return { ok: false, result: { kind: "error", message: `registered orchestration program is invalid: ${facade.message}` } };
   }
-  const facadeRegistration = facade.kind === "registered" ? facade.program : null;
-  if (facadeRegistration?.kind === "standalone-disposition") {
-    return { ok: false, result: { kind: "error", message: "no-agent standalone disposition publication does not accept submissions" } };
-  }
-  const panelRegistration = parseRegisteredPanelProgram(stored);
-  if (panelRegistration === null && facadeRegistration === null) {
+  if (facade.kind === "unclaimed") {
     return { ok: false, result: { kind: "error", message: "registered orchestration program is malformed" } };
   }
-  return bindTo(facadeRegistration, panelRegistration);
+  if (facade.program.kind === "standalone-disposition") {
+    return { ok: false, result: { kind: "error", message: "no-agent standalone disposition publication does not accept submissions" } };
+  }
+  return bindTo(facade.program);
 }
 
 type CapturedSubmission = Readonly<{ semanticRaw: string; artifact: unknown; alreadyCaptured: boolean }>;
@@ -1739,7 +1700,7 @@ async function captureSubmission(
 }
 
 async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedSubmission, emission: Emission): Promise<HookResult> {
-  const { facadeRegistration, handle, panelRegistration, requestId, reserved } = binding;
+  const { facadeRegistration, handle, requestId, reserved } = binding;
   if (facadeRegistration?.kind === "standalone-review") {
     const driven = await resumeStandaloneFacade(handle, facadeRegistration);
     return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
@@ -1750,11 +1711,6 @@ async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedS
       if (!applied.ok) return { kind: "error", message: applied.message };
     }
     const driven = await resumeWaveGateFacade(handle, facadeRegistration);
-    return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
-  }
-  if (panelRegistration !== null) {
-    // bindSubmission proved `reserved` is exactly this request id and attempt.
-    const driven = await submitRegisteredPanelAttempt(handle, panelRegistration, reserved, capture.semanticRaw);
     return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
   }
   return printed(emission.output, capture.alreadyCaptured
@@ -1842,35 +1798,6 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
     attempt: request.attempt,
   }, null, 2)}\n`);
   return { kind: "allow" };
-}
-
-async function completeOperation(args: readonly string[], emission: Emission): Promise<HookResult> {
-  const bound = bindLiveRun(args);
-  if (!isBound(bound)) return bound;
-  const operationId = argumentValue(args, "--operation");
-  if (operationId === null) {
-    return { kind: "error", message: "--operation is required" };
-  }
-  if (argumentValue(args, "--outcome") !== null || argumentValue(args, "--error") !== null) {
-    return { kind: "error", message: "deterministic engine operations do not accept caller-attested outcomes" };
-  }
-  const stored = bound.value.handle.readProgramRegistration();
-  if (!stored.ok) return { kind: "error", message: stored.error.message };
-  const registration = stored.value === null ? null : parseRegisteredPanelProgram(stored.value);
-  if (registration === null) return { kind: "error", message: "complete requires a registered panel program" };
-  // Compatibility adapter for historical callers. New façade runs execute
-  // deterministic operations inside start/resume/submit, so complete merely
-  // proves the named operation belongs to the closed vocabulary and returns
-  // the already-reconciled next external action.
-  const allowed = registration.kind === "architecture"
-    ? ["architecture-prepare-candidates", "architecture-prepare-judges", "architecture-aggregate"]
-    : ["refutation-prepare-verifiers", "refutation-tally"];
-  if (!allowed.includes(operationId)) {
-    return { kind: "error", message: `operation ${operationId} does not belong to ${registration.kind}` };
-  }
-  const next = await driveRegisteredPanel(bound.value.handle, registration);
-  if (!next.ok) return { kind: "error", message: next.message };
-  return emitRunAction(bound.value.handle, next.action, emission);
 }
 
 /**
@@ -2008,8 +1935,6 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return submitOperation(stdin, rest, emission());
       case "correlate":
         return correlateOperation(rest);
-      case "complete":
-        return completeOperation(rest, emission());
       case "decide":
         return decideOperation(stdin, rest, emission());
       case "disposition":

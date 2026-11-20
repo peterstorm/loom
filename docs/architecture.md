@@ -198,10 +198,7 @@ The registered programs are driven by `handlers/helpers/programs/`. The façade 
 
 Each program persists in its Run Directory (ADR-0029). Durable history is an append-only journal of dedup-keyed events (the record format and its parser in `orchestration/program-journal.ts`; `RunDirHandle` owns the append, read and checkpoint operations). A checkpoint is only a projection beside it.
 
-Panels persist in one of two forms:
-
-- **Registered panels**, including every architecture panel, append `spawn-outcome` and `engine-outcome` events and rebuild by replaying them on resume (ADR-0030).
-- **Refutation panels** inside a review persist as a checkpoint whose event prefix must replay exactly to its recorded state, and that state is re-proved on every read. The persistent panel program in `core/persistent-panel` is this panel's alone.
+A **Refutation Panel** inside a review persists as a checkpoint whose event prefix must replay exactly to its recorded state, and that state is re-proved on every read. The persistent panel program in `core/persistent-panel` is this panel's alone. The architecture panel is not a registered program: `/loom --panel` keeps its evidence as files in its panel run directory and replays its dispatch journal through the stateless `helper panel-program architecture` (ADR-0096).
 
 Because an append is idempotent on its dedup key, a crash between publishing an artifact and journalling its event resumes by republishing the same bytes and journalling the event once.
 

@@ -4,6 +4,9 @@
 Accepted (2026-10-18). Amends ADR-0004 ("Fugue used directly; no AuthoredDag sidecar", "What shipped") and
 ADR-0005 (which names `fugue-program-runtime` as the owner of durable persistence). Closes the residue of the
 issue #19 audit.
+Amended by [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md)
+(2026-11-20): the registered panel driver named below had no caller and is deleted. The architecture panel's
+journal is the one `helper panel-program architecture` replays; the crash-window test went with the driver.
 
 ## Context
 ADR-0004 adopted the type-driven candidate and chose to run Loom's domain programs through Fugue 0.4.0. It
@@ -28,7 +31,7 @@ The behaviour FR-021 asks for ("a panel session MUST persist its current state, 
 retry consumption, and terminal outcome across process and parent-session interruption") is nonetheless met,
 by a different route that grew up beside the plan:
 
-- **Registered panels** (`engine/src/handlers/helpers/programs/legacy-panel.ts`) append dedup-keyed `spawn-outcome` and `engine-outcome`
+- **Registered panels** (engine/src/handlers/helpers/programs/legacy-panel.ts) append dedup-keyed `spawn-outcome` and `engine-outcome`
   events to the Run Directory journal (`RunDirHandle.appendEvent`). Resume rebuilds the panel by replaying that
   journal.
 - **The standalone and wave refutation panels** accumulate their events in memory while the panel completes.
@@ -89,7 +92,7 @@ whose event prefix re-proves its state. Fugue is not part of the engine.**
   - the journal's `writeProgress` and the `progress.json` slot that only the Fugue job wrote;
   - the `@fuguejs/framework` dependency and its orchestration-boundary allowance.
 - **The crash windows FR-021 names are tested where they occur:**
-  - `legacy-panel-driver.test.ts`: a process dies after an engine operation publishes its artifacts and before
+  - legacy-panel-driver.test.ts: a process dies after an engine operation publishes its artifacts and before
     its success event is journalled. Resume republishes byte-identical artifacts and journals the success exactly
     once.
   - `panel-program.test.ts`: a crash between event append and checkpoint resumes from the journalled prefix.

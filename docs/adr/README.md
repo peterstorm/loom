@@ -32,7 +32,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0015](ADR-0015-one-frozen-schema-explicit-limits-on-its-guarantees.md) | One frozen schema; explicit limits on its guarantees | Accepted | — |
 | [ADR-0016](ADR-0016-all-three-producer-kinds-remain-in-scope.md) | All three producer kinds remain in scope | Accepted | — |
 | [ADR-0017](ADR-0017-issuance-aware-instructions-and-honest-degraded-routes.md) | Issuance-aware instructions and honest degraded routes | Accepted | — |
-| [ADR-0018](ADR-0018-one-observation-selection-decision-with-per-path-payload-construction.md) | One observation/selection decision with per-path payload construction | Accepted | — |
+| [ADR-0018](ADR-0018-one-observation-selection-decision-with-per-path-payload-construction.md) | One observation/selection decision with per-path payload construction | Accepted | amended by ADR-0096 |
 | [ADR-0019](ADR-0019-one-existing-request-slot-budget-no-same-spawn-correction-protocol.md) | One existing request-slot budget; no same-spawn correction protocol | Accepted | — |
 | [ADR-0020](ADR-0020-acceptance-and-a-real-vertical-slice-before-breadth.md) | Acceptance and a real vertical slice before breadth | Accepted | — |
 | [ADR-0021](ADR-0021-measure-useful-acceptance-not-only-syntactic-success.md) | Measure useful acceptance, not only syntactic success | Accepted | — |
@@ -43,8 +43,8 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0026](ADR-0026-i6-enters-proof-as-one-obligation-one-failure-variant-and-one-evidence-variant.md) | I6 enters proof as one obligation, one failure variant and one evidence variant | Accepted (2026-10-17) | — |
 | [ADR-0027](ADR-0027-pi-ledger-capture-through-one-shared-minting-rule.md) | Pi ledger capture through one shared minting rule | Accepted (2026-10-17) | — |
 | [ADR-0028](ADR-0028-one-stop-shell-runs-both-checks-sequence-lock-budget-and-counters.md) | One stop shell runs both checks: sequence, lock, budget and counters | Accepted (2026-10-17) | — |
-| [ADR-0029](ADR-0029-program-durability-is-the-run-directory-journal.md) | Program durability is the Run Directory journal; Fugue leaves the engine | Accepted (2026-10-18) | amends ADR-0004, ADR-0005 |
-| [ADR-0030](ADR-0030-the-architecture-panel-has-one-durable-form.md) | The architecture panel has one durable form: the registered driver's journal | Accepted (2026-10-18) | resolves ADR-0029 |
+| [ADR-0029](ADR-0029-program-durability-is-the-run-directory-journal.md) | Program durability is the Run Directory journal; Fugue leaves the engine | Accepted (2026-10-18) | amends ADR-0004, ADR-0005; amended by ADR-0096 |
+| [ADR-0030](ADR-0030-the-architecture-panel-has-one-durable-form.md) | The architecture panel has one durable form: the registered driver's journal | Accepted (2026-10-18) | resolves ADR-0029; premise superseded by ADR-0096 |
 | [ADR-0031](ADR-0031-owner-verification-is-an-engine-reserved-completion-suite-check.md) | Owner verification is an engine-reserved completion-suite check (approach B) | Accepted (2026-10-23) | — |
 | [ADR-0032](ADR-0032-owner-obligations-stamped-at-population-gate-fails-closed-on-drift.md) | Owner Obligations are stamped at population; the gate re-reads the plan and fails closed on drift | Accepted (2026-10-23) | — |
 | [ADR-0033](ADR-0033-exemption-grammar-one-field-two-new-problems.md) | Exemption grammar: one field, two new problems | Accepted (2026-10-23) | — |
@@ -110,3 +110,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0093](ADR-0093-a-reopen-names-what-the-finding-needs.md) | A reopen names what the Finding needs | Accepted (2026-11-18) | — |
 | [ADR-0094](ADR-0094-a-re-reviewed-tasks-roster-follows-what-changed.md) | A re-reviewed Task's roster follows what changed | Accepted (2026-11-18) | extends ADR-0091 |
 | [ADR-0095](ADR-0095-the-linter-measures-functions-through-a-lazy-compiler-seam.md) | The linter measures functions through a lazy compiler seam | Accepted (2026-11-18) | amends ADR-0042 |
+| [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md) | Each panel has one driver, and the manual review helpers retire | Accepted (2026-11-20) | partly supersedes ADR-0030; amends ADR-0018, ADR-0029 |

@@ -48,7 +48,6 @@ export const ORCHESTRATION_OPERATIONS = Object.freeze({
   resume: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   submit: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   correlate: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
-  complete: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   decide: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   disposition: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   abandon: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),

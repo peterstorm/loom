@@ -59,13 +59,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 622 src files / ~175.9k lines TS; `engine/tests/` holds 945 TS files / ~265.9k lines (fixtures and helpers included), of which 830 test files are executed (806 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 620 src files / ~174.3k lines TS; `engine/tests/` holds 941 TS files / ~264.5k lines (fixtures and helpers included), of which 826 test files are executed (802 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 124 docs incl. **95 ADRs** (index test-enforced) | — |
+| `docs/` | 125 docs incl. **96 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -566,9 +566,10 @@ security-hunter). Key mechanics:
   `codebase-conventionist`), judges score every candidate per criterion, engine
   aggregates, **the user chooses** — ranking is advice. One normal architecture plan
   comes out.
-- **Durability**: registered panels replay `spawn-outcome`/`engine-outcome` journal
-  events on resume (ADR-0030); refutation panels persist as a checkpoint whose event
-  prefix must replay exactly and is **re-proved on every read**.
+- **Durability**: the architecture panel's parent replays its `spawn-outcome`/
+  `engine-outcome` journal through `helper panel-program architecture` (ADR-0096);
+  refutation panels persist as a checkpoint whose event prefix must replay exactly
+  and is **re-proved on every read**.
 
 ### 4.9 The Wave Gate
 
@@ -955,8 +956,8 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **830 executed test files / ~265.9k lines** — 806 under `engine/tests/` (945 TS files there
-  including fixtures and helpers; core 303 test files, handlers 196, pi 50,
+- **826 executed test files / ~264.5k lines** — 806 under `engine/tests/` (945 TS files there
+  including fixtures and helpers; core 301 test files, handlers 194, pi 50,
   linter 47, orchestration 37, utils 34, machine 30, acceptance 20, security 19, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
@@ -965,7 +966,7 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (95 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (96 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, review panel, standalone review, orchestration
   facades, Pi resources, task-graph validation — real CLI processes, not mocks.
@@ -1287,7 +1288,6 @@ issued-emission-capability.ts — the emission capability contract ·
 judged-paths.ts — decompose-time rule: a judge never runs after its subject's Wave ·
 ledger-epoch-view.ts — one epoch's facts rendered for I6 ·
 legacy-archive.ts — read-only parsers for historical artifacts ·
-legacy-panel-decisions.ts — the legacy panel program's decisions: registration, verdict-source selection, submission settlement (AD-8/AD-9) ·
 lint-coverage-ignore.ts — the user's silenced-repository list ·
 lint-runtime-skew.ts — did the full-tier lint judge the current bytes ·
 loom-cli-command.ts — every command/path the engine prints that names itself ·
