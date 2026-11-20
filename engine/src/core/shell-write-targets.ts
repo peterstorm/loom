@@ -34,7 +34,7 @@ function readRedirectTarget(segment: string, start: number): Readonly<{ value: s
   // spelled with ANSI-C / a line continuation mints the SAME path the guard
   // sees (twin parity — one place owns the quote/escape/ANSI-C rules). Backtick
   // quotes here so `` >`cmd` `` does not split mid-substitution.
-  return normalizeShellSpan(segment, i, { mode: "redirect-word" });
+  return normalizeShellSpan(segment, i);
 }
 
 /**
