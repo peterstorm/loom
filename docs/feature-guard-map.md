@@ -59,13 +59,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 622 src files / ~175.9k lines TS; `engine/tests/` holds 945 TS files / ~265.9k lines (fixtures and helpers included), of which 830 test files are executed (806 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 622 src files / ~176.0k lines TS; `engine/tests/` holds 947 TS files / ~266.4k lines (fixtures and helpers included), of which 832 test files are executed (808 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 124 docs incl. **95 ADRs** (index test-enforced) | — |
+| `docs/` | 125 docs incl. **96 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -955,9 +955,9 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **830 executed test files / ~265.9k lines** — 806 under `engine/tests/` (945 TS files there
-  including fixtures and helpers; core 303 test files, handlers 196, pi 50,
-  linter 47, orchestration 37, utils 34, machine 30, acceptance 20, security 19, …)
+- **832 executed test files / ~266.4k lines** — 808 under `engine/tests/` (947 TS files there
+  including fixtures and helpers; core 304 test files, handlers 196, pi 50,
+  linter 47, orchestration 38, utils 34, machine 30, acceptance 20, security 19, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
@@ -965,7 +965,7 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (95 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (96 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, review panel, standalone review, orchestration
   facades, Pi resources, task-graph validation — real CLI processes, not mocks.
@@ -1338,7 +1338,7 @@ sibling-entry-point.ts — the one plan shape the plan model and the owner-verif
 spawn-admission.ts — the pure decision that accepts or blocks one Pi subagent spawn batch before any state mutation ·
 spawn-emission-gate.ts — the façade's emission gate: the verdict on a Pi parent's spawn batch ·
 spawn-request-authority.ts — an emitted spawn batch's request authorities, parsed once as the stored-request parser admits them ·
-spawn-task-text.ts — engine-issued spawn task text: authority markers, packet path, Skill marker, emission descriptor, delivery bootstrap ·
+spawn-task-text.ts — engine-issued spawn task text: authority markers, packet path, Skill marker, emission descriptor, delivery bootstrap; `parseIssuedTaskIdentity`, the one reader of the two authority markers for both harnesses (ADR-0099) ·
 spec-check.ts/spec-trace*.ts — requirement trace and its amendment/migration ·
 standalone-* (19 modules) — the standalone review program: kinds, scope, rosters, read coverage, attempt admission, transcripts, records, lineage, disposition, refutation, successor, checkpoint ·
 stop-check-*.ts — the stop-check planner and note surface ·
