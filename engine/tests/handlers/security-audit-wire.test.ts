@@ -38,8 +38,9 @@ describe("the wire", () => {
     ["the reviewer-payload label the hunter used to borrow", { schemaVersion: 2, kind: "standalone-review", units: [aUnitResult()] },
       ['kind: expected "security-hunter-result", got "standalone-review"', "schemaVersion: expected 1"]],
     ["a bare object with no envelope", {}, ["kind: expected \"security-hunter-result\"", "units: required"]],
-    ["an unknown top-level key", { ...HUNTER_ENVELOPE, units: [aUnitResult()], verdicts: [] }, ["$.verdicts: unknown field"]],
-    ["units that are not an array", { ...HUNTER_ENVELOPE, units: { coverageId: "x" } }, ["units: required"]],
+    ["an unknown top-level key", { ...HUNTER_ENVELOPE, units: [aUnitResult()], verdicts: [] }, ["verdicts: unknown field"]],
+    ["units that are not an array", { ...HUNTER_ENVELOPE, units: { coverageId: "x" } },
+      ["units: expected an array of unit results (empty when only filing findings)"]],
     ["a payload that is not an object", [aUnitResult()], ["$: expected a security-hunter-result object"]],
   ])("refuses %s, naming the envelope it expects, and writes nothing", async (_case, payload, expected) => {
     const run = await startRun(aRun());
@@ -104,7 +105,7 @@ describe("start payload", () => {
 
   it.each([
     ["no units", { signals: {} }, "units: start input requires a `units` array"],
-    ["an unknown top-level key", { units: [seedFor(0)], scopes: { kind: "tree" } }, "$.scopes: unknown field"],
+    ["an unknown top-level key", { units: [seedFor(0)], scopes: { kind: "tree" } }, "scopes: unknown field"],
     ["an unknown scope kind", { units: [seedFor(0)], scope: { kind: "branch" } }, "scope.kind: expected tree or diff"],
     ["a scope that is not an object", { units: [seedFor(0)], scope: "diff" }, "scope: expected an object"],
     ["an unknown scope key", { units: [seedFor(0)], scope: { kind: "diff", base: "x" } }, "scope.base: unknown field"],

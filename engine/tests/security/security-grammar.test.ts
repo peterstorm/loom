@@ -58,7 +58,7 @@ describe("fingerprint grammar (INV-S3d)", () => {
       expect(ballot.ok, `ballot ${JSON.stringify(fingerprint)}`).toBe(false);
       expect(settle(fingerprint), `ledger ${JSON.stringify(fingerprint)}`).toMatchObject({
         ok: false,
-        error: { kind: "settlement-invalid", violations: expect.arrayContaining([{ path: "$[0].result_fingerprints", message: "invalid fingerprint" }]) },
+        error: { kind: "settlement-invalid", violations: expect.arrayContaining([{ path: "$[0].result_fingerprints[0]", message: "expected a stable source-derived fingerprint" }]) },
       });
     }
   });
