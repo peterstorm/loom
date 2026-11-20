@@ -103,6 +103,15 @@ describe("guard-state-file — edge cases", () => {
     );
   });
 
+  it("a helper invocation is read in shell words, and a word holding whitespace never vouches", () => {
+    // One shell word spanning the whole invocation runs a command NAMED that text.
+    expect(guardDecision(`x'/bun cli.ts helper mark-tests-passed '; echo f > active_task_graph.json`)).toBe("block");
+    // A spaced word is a different reading of the line from a whitespace split: no trust.
+    expect(guardDecision(`bun '/a b/cli.ts' helper mark-tests-passed > active_task_graph.json`)).toBe("block");
+    expect(guardDecision(`bun \${X:-a b}/cli.ts helper mark-tests-passed > active_task_graph.json`)).toBe("block");
+    expect(guardDecision(`'bun' "cli.ts" 'helper' "mark-tests-passed" > active_task_graph.json`)).toBe("allow");
+  });
+
   it("a helper name in a comment does NOT bypass the guard", () => {
     expect(guardDecision('echo x >> active_task_graph.json # cleanup-state')).toBe("block");
     expect(guardDecision('# set-phase\necho x >> active_task_graph.json')).toBe("block");

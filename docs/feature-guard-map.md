@@ -277,7 +277,7 @@ the evidence ledger build on — the guard *sees* and the ledger *mints* the sam
 
 | Module | Owns | Divergence it killed |
 |---|---|---|
-| `shell-quoting.ts` | THE one quote-aware scan | backtick-as-opener drift (round 15–18 class) |
+| `shell-quoting.ts` | THE one quote lexer (`lexShellQuotes`) and its unquoted projection (`scanUnquoted`): the segment splitter, env-prefix strip, fused-redirect split, redirect scans and the evidence word reader all walk it | backtick-as-opener drift (round 15–18 class); six later hand-copied loops |
 | `shell-substitution.ts` | THE one substitution traversal (`scanSubstitutions`: quote state `'"/null`, `'` inside `"…"` literal, `$(…)`/backticks live in double quotes) | the round-20 double-quoted-apostrophe regression, round-21's incomplete fix |
 | `shell-normalize.ts` | THE one word normalizer: quote stripping, backslash escapes, line continuation, ANSI-C decode (NUL truncates), `$"…"`, parameter expansion — including the **default** forms (`${x:-w}` yields `w`) and the **alternate** forms (`${x:+w}`/`${x+w}`: empty on unset, `w` on set — the round-24 fail-open) | guard vs evidence scanner disagreeing about what a word *is* |
 | `shell-ansi-c.ts` | shared `$'…'` decode | `\x2e`-spelled paths seen by one scanner and not the other |

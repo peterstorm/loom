@@ -7,7 +7,7 @@
 
 import { normalizeShellSpan } from "./shell-normalize";
 import { classifyFdDupWord, splitCommandSegments, stripComment, stripEnvPrefix } from "./shell-command";
-import { isShellQuoteChar, type ShellQuoteChar } from "./shell-quoting";
+import { CONTINUE, halt, lexShellQuotes, scanUnquoted, skip } from "./shell-quoting";
 
 /**
  * Read one redirect target starting at `start` (just past the `>`s):
@@ -40,83 +40,35 @@ function readRedirectTarget(segment: string, start: number, out: string[]): numb
 
 /** Collect `>`/`>>`/`&>`/`&>>`/`n>`/`n>>` targets in one segment — quote-aware. */
 function collectRedirectTargets(segment: string, out: string[]): void {
-  let quote: ShellQuoteChar | null = null;
-  let i = 0;
-  while (i < segment.length) {
-    const c = segment[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        i += 2;
-        continue;
-      }
-      if (c === quote) quote = null;
-      i++;
-      continue;
-    }
-    if (c === "\\") {
-      i += 2;
-      continue;
-    }
-    if (isShellQuoteChar(c)) {
-      quote = c;
-      i++;
-      continue;
-    }
+  scanUnquoted<never>(segment, 0, (c, i) => {
     if (c === "&" && segment[i + 1] === ">") {
-      i += segment[i + 2] === ">" ? 3 : 2;
-      i = readRedirectTarget(segment, i, out);
-      continue;
+      return skip(readRedirectTarget(segment, i + (segment[i + 2] === ">" ? 3 : 2), out));
     }
-    if (c === ">") {
-      i += segment[i + 1] === ">" ? 2 : 1;
-      i = readRedirectTarget(segment, i, out);
-      continue;
-    }
-    i++;
-  }
+    if (c === ">") return skip(readRedirectTarget(segment, i + (segment[i + 1] === ">" ? 2 : 1), out));
+    return CONTINUE;
+  });
 }
 
-/** Quote-aware unquoted words of a segment, stopping at the first unquoted
- *  redirect character (`>`, `<`, `&`) — those belong to the redirect scan. */
+/** Quote-aware words of a segment with their quotes and escapes removed,
+ *  stopping at the first unquoted redirect character (`>`, `<`, `&`) —
+ *  those belong to the redirect scan. */
 function wordsBeforeRedirect(segment: string): string[] {
   const words: string[] = [];
   let current = "";
-  let quote: ShellQuoteChar | null = null;
-  for (let i = 0; i < segment.length; i++) {
-    const c = segment[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        current += segment[i + 1] ?? "";
-        i++;
-        continue;
-      }
-      if (c === quote) {
-        quote = null;
-        continue;
-      }
-      current += c;
-      continue;
-    }
-    if (c === "\\") {
-      current += segment[i + 1] ?? "";
-      i++;
-      continue;
-    }
-    if (isShellQuoteChar(c)) {
-      quote = c;
-      continue;
-    }
-    if (/[><&]/.test(c)) break;
-    if (/\s/.test(c)) {
-      if (current !== "") {
-        words.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += c;
-  }
-  if (current !== "") words.push(current);
+  const flush = (): void => {
+    if (current !== "") words.push(current);
+    current = "";
+  };
+  // Quote characters only delimit regions; an escape contributes the character it escapes.
+  lexShellQuotes<true>(segment, 0, (token) => {
+    if (token.kind === "escape") current += token.escaped;
+    if (token.kind !== "text") return CONTINUE;
+    if (token.quote === null && /[><&]/.test(token.char)) return halt(true);
+    if (token.quote === null && /\s/.test(token.char)) flush();
+    else current += token.char;
+    return CONTINUE;
+  });
+  flush();
   return words;
 }
 

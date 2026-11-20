@@ -1,4 +1,4 @@
-import { CONTINUE, halt, isShellQuoteChar, openQuoteAfter, scanUnquoted, type ShellQuoteChar } from "./shell-quoting";
+import { CONTINUE, halt, openQuoteAfter, scanUnquoted, skip } from "./shell-quoting";
 
 /** Shell separator between two simple-command segments. */
 export type SegmentOp = "&&" | "||" | ";" | "|" | "&";
@@ -15,47 +15,19 @@ export type CommandSegment = Readonly<{
  */
 export function splitCommandSegmentsWithOps(command: string): readonly CommandSegment[] {
   const segments: CommandSegment[] = [];
-  let current = "";
+  let start = 0;
   let pendingOp: SegmentOp | null = null;
-  let quote: ShellQuoteChar | null = null;
-  const push = (op: SegmentOp): void => {
-    segments.push({ text: current, opBefore: pendingOp });
-    current = "";
-    pendingOp = op;
-  };
-
-  for (let index = 0; index < command.length; index++) {
-    const char = command[index];
-    if (quote !== null) {
-      if (quote !== "'" && char === "\\") {
-        current += char + (command[index + 1] ?? "");
-        index++;
-        continue;
-      }
-      if (char === quote) quote = null;
-      current += char;
-      continue;
-    }
-    if (char === "\\") {
-      current += char + (command[index + 1] ?? "");
-      index++;
-      continue;
-    }
-    if (isShellQuoteChar(char)) {
-      quote = char;
-      current += char;
-      continue;
-    }
+  scanUnquoted<never>(command, 0, (_char, index) => {
     const operator = shellOperatorAt(command, index);
-    if (operator !== null) {
-      if (operator.separator !== null) push(operator.separator);
-      else current += command.slice(index, index + operator.width);
-      index += operator.width - 1;
-      continue;
+    if (operator === null) return CONTINUE;
+    if (operator.separator !== null) {
+      segments.push({ text: command.slice(start, index), opBefore: pendingOp });
+      pendingOp = operator.separator;
+      start = index + operator.width;
     }
-    current += char;
-  }
-  segments.push({ text: current, opBefore: pendingOp });
+    return skip(index + operator.width);
+  });
+  segments.push({ text: command.slice(start), opBefore: pendingOp });
   return segments;
 }
 
@@ -129,33 +101,9 @@ export function stripEnvPrefix(segment: string): string {
   for (;;) {
     const assignment = rest.match(/^[A-Za-z_][A-Za-z0-9_]*=/);
     if (!assignment) return rest;
-    let index = assignment[0].length;
-    let quote: ShellQuoteChar | null = null;
-    while (index < rest.length) {
-      const char = rest[index];
-      if (quote !== null) {
-        if (quote !== "'" && char === "\\") {
-          index += 2;
-          continue;
-        }
-        if (char === quote) quote = null;
-        index++;
-        continue;
-      }
-      if (char === "\\") {
-        index += 2;
-        continue;
-      }
-      if (isShellQuoteChar(char)) {
-        quote = char;
-        index++;
-        continue;
-      }
-      if (/\s/.test(char)) break;
-      index++;
-    }
-    rest = rest.slice(index).trimStart();
-    if (rest === "") return "";
+    const valueEnd = scanUnquoted<number>(rest, assignment[0].length, (char, index) =>
+      /\s/.test(char) ? halt(index) : CONTINUE) ?? rest.length;
+    rest = rest.slice(valueEnd).trimStart();
   }
 }
 

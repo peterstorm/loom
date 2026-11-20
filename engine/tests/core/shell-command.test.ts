@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import fc from "fast-check";
+import { shellText } from "../fixtures/shell-text-arbitrary";
 import {
   splitCommandSegments,
   splitCommandSegmentsWithOps,
@@ -246,5 +248,44 @@ describe("shellOperatorAt", () => {
 
   it("keeps a binding operator's characters in the segment it belongs to", () => {
     expect(splitCommandSegments("cat a &>log; b 2>&1")).toEqual(["cat a &>log", " b 2>&1"]);
+  });
+});
+
+describe("the splitter and env-prefix strip read the one quote lexer", () => {
+  it("segments and the separators between them rebuild the command exactly", () => {
+    fc.assert(fc.property(shellText, (command) => {
+      const segments = splitCommandSegmentsWithOps(command);
+      let at = 0;
+      segments.forEach(({ text, opBefore }, k) => {
+        if (k > 0) {
+          const operator = shellOperatorAt(command, at);
+          expect(operator?.separator).toBe(opBefore);
+          at += operator!.width;
+        } else {
+          expect(opBefore).toBeNull();
+        }
+        expect(command.startsWith(text, at)).toBe(true);
+        at += text.length;
+      });
+      expect(at).toBe(command.length);
+    }), { numRuns: 3000 });
+  });
+
+  it("a segment holds no separator of its own: re-splitting it yields itself", () => {
+    fc.assert(fc.property(shellText, (command) => {
+      for (const { text } of splitCommandSegmentsWithOps(command)) {
+        expect(splitCommandSegments(text)).toEqual([text]);
+      }
+    }), { numRuns: 3000 });
+  });
+
+  it("stripEnvPrefix returns an idempotent suffix that starts with no assignment", () => {
+    fc.assert(fc.property(fc.tuple(fc.constantFrom("", "A=", "A=1 ", "B='x y' ", "C=a\\ b "), shellText), ([prefix, rest]) => {
+      const segment = prefix + rest;
+      const stripped = stripEnvPrefix(segment);
+      expect(segment.endsWith(stripped)).toBe(true);
+      expect(stripped).not.toMatch(/^[A-Za-z_][A-Za-z0-9_]*=/);
+      expect(stripEnvPrefix(stripped)).toBe(stripped);
+    }), { numRuns: 3000 });
   });
 });

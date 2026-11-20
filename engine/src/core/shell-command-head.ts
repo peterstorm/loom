@@ -574,36 +574,16 @@ export function commandWords(text: string): readonly string[] {
   return words;
 }
 
-/** Redirect operators, longest-first, for fused-redirect splitting. The
- *  `&>`-on-`&` form is checked separately (it can only start at the `&`). */
-const REDIRECT_OPS = ["<<<", "<<-", "<<", ">>", "<>", ">&", ">", "<"] as const;
-
 /** First UNQUOTED redirect operator inside a raw word, split off from its
  *  prefix: `bash<<'EOF'` → head `bash` + rest `<<'EOF'`; `2>/dev/null` →
- *  head `2` + rest `>/dev/null`; `2>&1` → head `2` + rest `>&1`. A quoted
- *  operator (`'a<<b'`) is literal word text and never splits. Returns null
- *  when the word contains no unquoted redirect. */
+ *  head `2` + rest `>/dev/null`; `2>&1` → head `2` + rest `>&1`. Every
+ *  redirect operator starts at an unquoted `<` or `>`, or is `&>`/`&>>`. A
+ *  quoted operator (`'a<<b'`) is literal word text and never splits. Returns
+ *  null when the word contains no unquoted redirect. */
 export function splitFusedRedirect(word: string): { readonly head: string; readonly rest: string } | null {
-  let quote: '"' | "'" | "`" | null = null;
-  for (let i = 0; i < word.length; i++) {
-    const c = word[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") { i++; continue; }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "\\") { i++; continue; }
-    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
-    if (c === "&" && word[i + 1] === ">") {
-      return { head: word.slice(0, i), rest: word.slice(i) }; // `&>`, `&>>`
-    }
-    for (const op of REDIRECT_OPS) {
-      if (word.startsWith(op, i)) {
-        return { head: word.slice(0, i), rest: word.slice(i) };
-      }
-    }
-  }
-  return null;
+  const at = scanUnquoted<number>(word, 0, (c, i) =>
+    c === "<" || c === ">" || (c === "&" && word[i + 1] === ">") ? halt(i) : CONTINUE);
+  return at === null ? null : { head: word.slice(0, at), rest: word.slice(at) };
 }
 
 /** A word that is ONLY a redirect operator; its target/delimiter is the next word. */
