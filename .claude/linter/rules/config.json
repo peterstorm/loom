@@ -292,7 +292,37 @@
           "allow": [
             "zod/v4"
           ],
-          "reason": "run-metadata.json is an external document the program reads; parsed with one strict zod schema (ADR-0066)"
+          "reason": "the security-audit wire kit: run-metadata.json and the shared field schemas every security volume parses with (ADR-0066)"
+        },
+        "engine/src/core/security-findings.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "security-findings.json is parsed by one strict zod schema; the finding types are derived from it"
+        },
+        "engine/src/core/security-coverage.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the coverage ledger, seeds, unit results and critic result are parsed by strict zod schemas; CoverageUnit is derived from them"
+        },
+        "engine/src/core/security-adjudication.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "verdicts.json ballots and their bindings are parsed by one strict zod schema; the ballot types are derived from it"
+        },
+        "engine/src/core/security-verification.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the verifier's result envelope is parsed by one strict zod schema built on the vote schema"
+        },
+        "engine/src/core/security-audit-start.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the start payload is parsed by one strict zod schema"
         },
         "engine/src/core/owner-verification/import-graph.ts": {
           "allow": [
@@ -1556,9 +1586,6 @@
     "engine/src/core/requirement-coverage.ts::parseStoredUnavailableReason",
     "engine/src/core/review-output.ts::parsePriorAssessments",
     "engine/src/core/review-panel.ts::parseBriefFindingEntry",
-    "engine/src/core/security-coverage.ts::<anonymous>",
-    "engine/src/core/security-coverage.ts::parseCoverageSeeds",
-    "engine/src/core/security-coverage.ts::validateStateInvariants",
     "engine/src/core/shell-normalize.ts::normalizeShellSpanInternal",
     "engine/src/core/spec-check.ts::reconcileSpecCheck",
     "engine/src/core/spec-trace-amendment.ts::amendSpecTrace",
