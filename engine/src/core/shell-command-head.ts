@@ -7,9 +7,9 @@
  *    standalone tokens so compound syntax never hides a head.
  *  - resolvedInterpreter — the wrapper unwrap (`sudo`, `env`, `timeout`, …)
  *    to the command a wrapper actually launches.
- *  - hasReadOnlyHead / hasOutputRedirect — the two halves of "this segment
- *    cannot write a file": a head from READ_ONLY_STATE_COMMANDS and no output
- *    redirect except the exact stderr discard.
+ *  - hasReadOnlyHead — one half of "this segment cannot write a file": a
+ *    head from READ_ONLY_STATE_COMMANDS (the other half, no output redirect
+ *    except an fd dup or the exact stderr discard, is core/shell-redirects).
  *  - pipeChains / placedPipeChains — segments grouped into pipe-chains, the
  *    trust unit a guard judges together (placed: with the separators around
  *    each segment, which say whether and where it runs).
@@ -26,7 +26,6 @@ import { isReadOnlyGitInvocation } from "./read-only-git";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
 import { collapseVariants, hasRuntimePart, staticSpelling } from "./shell-match-views";
 import {
-  classifyFdDupWord,
   splitCommandSegmentsWithOps,
   stripComment,
   stripEnvPrefix,
@@ -253,45 +252,6 @@ export function bindingNames(segment: string): readonly string[] | null {
   return null;
 }
 
-/** Characters that end an unquoted redirect target word. */
-const TARGET_END = /[\s;&|<>()]/;
-
-/**
- * The word every output redirect of the segment writes to, as written
- * (quotes kept): `> out`, `>> out`, `>| out`, `&> out`, `2>out`. Null when an
- * output redirect has no target a guard can name: a read-write open (`<>`), a
- * `>&word` whose word is not a whole fd (it writes the file `word`), or a
- * process substitution. An fd dup (`2>&1`, `>&-`) and the exact
- * `2>/dev/null` discard write no file and are not listed.
- */
-export function outputRedirectTargets(segment: string): readonly string[] | null {
-  const inspected = withoutSafeStderrDiscard(segment);
-  const targets: string[] = [];
-  const named = scanUnquoted<false>(inspected, 0, (c, i) => {
-    if (c !== ">") return CONTINUE;
-    if (inspected[i - 1] === "<") return halt(false);
-    let cursor = i + 1;
-    if (inspected[cursor] === "&") {
-      const dup = classifyFdDupWord(inspected, cursor + 1);
-      return dup.isFdDup ? skip(dup.end) : halt(false);
-    }
-    if (inspected[cursor] === ">" || inspected[cursor] === "|") cursor += 1;
-    while (inspected[cursor] === " " || inspected[cursor] === "\t") cursor += 1;
-    if (inspected[cursor] === "(" || cursor >= inspected.length) return halt(false);
-    const word = targetWord(inspected, cursor);
-    if (word === "") return halt(false);
-    targets.push(word);
-    return skip(cursor + word.length);
-  });
-  return named === false ? null : targets;
-}
-
-/** The redirect target word at `start`: up to the first unquoted space, separator or redirect. */
-function targetWord(text: string, start: number): string {
-  const end = scanUnquoted<number>(text, start, (c, i) => (TARGET_END.test(c) ? halt(i) : CONTINUE)) ?? text.length;
-  return text.slice(start, end);
-}
-
 /**
  * Is the segment, once its compound syntax is removed, only redirects — the
  * `done > out` or `} < in` that closes a compound command?
@@ -304,66 +264,6 @@ export function isRedirectsOnly(text: string): boolean {
     if (!FUSED_REDIRECT.test(w)) return false;
   }
   return true;
-}
-
-/**
- * Remove the one output redirect that cannot mutate guarded authority:
- * discarding stderr to the literal `/dev/null`. This is intentionally narrow
- * (`2>` only, no append/clobber variants, expansions, or lookalike paths).
- * Read-only probes routinely use this form for optional guarded directories;
- * treating it as a state write made `ls .loom 2>/dev/null` impossible.
- */
-function withoutSafeStderrDiscard(segment: string): string {
-  const ranges: Array<Readonly<{ start: number; end: number }>> = [];
-  const isBoundary = (char: string | undefined): boolean =>
-    char === undefined || /\s/.test(char) || ";&|(){}".includes(char);
-  scanUnquoted<never>(segment, 0, (char, index) => {
-    if (char !== "2" || !isBoundary(segment[index - 1]) || segment[index + 1] !== ">") {
-      return CONTINUE;
-    }
-    let cursor = index + 2;
-    if (segment[cursor] === ">" || segment[cursor] === "&" || segment[cursor] === "|") {
-      return CONTINUE;
-    }
-    while (segment[cursor] === " " || segment[cursor] === "\t") cursor += 1;
-    const target = "/dev/null";
-    if (!segment.startsWith(target, cursor) || !isBoundary(segment[cursor + target.length])) {
-      return CONTINUE;
-    }
-    const end = cursor + target.length;
-    ranges.push(Object.freeze({ start: index, end }));
-    return skip(end);
-  });
-  if (ranges.length === 0) return segment;
-  let result = "";
-  let cursor = 0;
-  for (const range of ranges) {
-    result += segment.slice(cursor, range.start) + " ";
-    cursor = range.end;
-  }
-  return result + segment.slice(cursor);
-}
-
-/**
- * Quote-aware output-redirect detection after removing exact safe stderr
- * discards. Every remaining unquoted `>` counts as a write channel UNLESS it
- * is an fd dup — `>&` followed by a word that is ENTIRELY digits or exactly
- * `-` (`2>&1`, `>&2`, `>&-`), classified by the shared
- * classifyFdDupWord. A `>&` whose word merely starts with a digit but
- * continues into a path (`>&2/../file` — the round-16 bypass) or is any other
- * word (`>&file`, the round-15 bypass) redirects to a file and counts as a
- * write. Quoted `>` characters remain ordinary argument text.
- */
-export function hasOutputRedirect(segment: string): boolean {
-  const inspected = withoutSafeStderrDiscard(segment);
-  return scanUnquoted<true>(inspected, 0, (c, i) => {
-    if (c !== ">") return CONTINUE;
-    if (inspected[i + 1] !== "&") return halt(true);
-    const dup = classifyFdDupWord(inspected, i + 2);
-    return dup.isFdDup
-      ? skip(dup.end) // digits/`-`: nothing special inside the dup word
-      : halt(true); // `>&word` writes the FILE `word`
-  }) ?? false;
 }
 
 /**

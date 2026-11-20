@@ -61,11 +61,12 @@
  * line fails closed.
  *
  * ── Walker map ──────────────────────────────────────────────────────────────
- * The shell grammar this guard judges through lives in three pure modules
- * shared with every other Bash guard (the subagent authority guard included):
+ * The shell grammar this guard judges through lives in pure modules shared
+ * with every other Bash guard (the subagent authority guard included):
  * core/shell-command-head (simple commands, wrappers, read-only heads,
- * redirects, pipe-chains), core/shell-heredoc (heredoc bodies) and
- * core/shell-match-views (matching views and glob intersection). This module
+ * pipe-chains), core/shell-redirects (output redirects), core/shell-heredoc
+ * (heredoc bodies) and core/shell-match-views (matching views and glob
+ * intersection). This module
  * keeps only the state-file POLICY: what is guarded, which helpers vouch, and
  * the decision. The names below are those modules' walkers.
  *
@@ -79,10 +80,14 @@
  *  - lexShellQuotes / scanUnquoted (core/shell-quoting) — THE quote lexer
  *    (`"` `'` `` ` `` regions, `\` escapes except in single quotes). Every
  *    command-level scan walks it: the segment splitter, stripComment,
- *    stripEnvPrefix, shellWords / commandWords, splitFusedRedirect, the
- *    redirect scans, segmentInvokesHelper (through shellWords) and the
- *    evidence scanner's word and redirect readers. A new command-level scan
- *    supplies a visitor; it never writes a quote loop.
+ *    stripEnvPrefix, shellWords / commandWords, splitFusedRedirect,
+ *    redirectsOf, segmentInvokesHelper (through shellWords) and the evidence
+ *    scanner's word reader. A new command-level scan supplies a visitor; it
+ *    never writes a quote loop.
+ *  - redirectsOf (core/shell-redirects) — THE output-redirect scan, a typed
+ *    union per redirect. hasOutputRedirect, outputRedirectTargets and the
+ *    evidence scanner's redirect targets are projections of it, so the guard
+ *    and the ledger cannot disagree on which redirects a segment has.
  *  - scanSubstitutions (core/shell-substitution) — the ONE shared substitution
  *    traversal (quote state `'"' | "'" | null`; a `'` inside `"…"` is literal;
  *    `$(…)`/backticks stay LIVE inside double quotes; `<(…)`/`>(…)` is live
@@ -121,10 +126,8 @@ import { stripComment, stripEnvPrefix } from "./shell-command";
 import {
   bindingNames,
   commandNamesRebound,
-  hasOutputRedirect,
   hasReadOnlyHead,
   isRedirectsOnly,
-  outputRedirectTargets,
   pipeChains,
   SHELL_STATE_NAMES,
   shellWords,
@@ -132,6 +135,7 @@ import {
   withoutReservedWords,
 } from "./shell-command-head";
 import { MAX_SUBSTITUTION_DEPTH, splitHeredocs } from "./shell-heredoc";
+import { hasOutputRedirect, outputRedirectTargets } from "./shell-redirects";
 import {
   knownWordOutput,
   leadingDotPolicyOf,

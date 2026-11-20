@@ -281,10 +281,11 @@ the evidence ledger build on — the guard *sees* and the ledger *mints* the sam
 | `shell-substitution.ts` | THE one substitution traversal (`scanSubstitutions`: quote state `'"/null`, `'` inside `"…"` literal, `$(…)`/backticks live in double quotes) | the round-20 double-quoted-apostrophe regression, round-21's incomplete fix |
 | `shell-normalize.ts` | THE one word normalizer: quote stripping, backslash escapes, line continuation, ANSI-C decode (NUL truncates), `$"…"`, parameter expansion — including the **default** forms (`${x:-w}` yields `w`) and the **alternate** forms (`${x:+w}`/`${x+w}`: empty on unset, `w` on set — the round-24 fail-open) | guard vs evidence scanner disagreeing about what a word *is* |
 | `shell-ansi-c.ts` | shared `$'…'` decode | `\x2e`-spelled paths seen by one scanner and not the other |
-| `shell-command.ts` / `shell-command-head.ts` | segment splitting, tokenizer (`( ) { }` standalone so compound syntax never hides a head), wrapper unwrap (`sudo env timeout …`), the read-only-head / has-output-redirect halves | truncated-body analysis |
+| `shell-command.ts` / `shell-command-head.ts` | segment splitting (an `&` or `\|` binds to a redirect only after a `>` the lexer read unquoted: `>&`, `>\|`), tokenizer (`( ) { }` standalone so compound syntax never hides a head), wrapper unwrap (`sudo env timeout …`), the read-only head | truncated-body analysis; `echo \>& rm <state>` read as one `echo` |
+| `shell-redirects.ts` | THE one output-redirect scan (`redirectsOf`: file-write, fd-dup, stderr-discard, and the targets a guard cannot name — file-dup, read-write, process-substitution, missing-target); `hasOutputRedirect`, `outputRedirectTargets` and the evidence reader's redirect targets are its projections | `>\|` named to the guard, minted as nothing |
 | `shell-heredoc.ts` | opener-line groups (compound-tracking), body data-vs-executed judgment | the heredoc inline-program gap |
 | `shell-match-views.ts` | reveal-monotonic matching views + glob intersection vs a directory | guards missing brace/class/parameter spellings of a path |
-| `shell-write-targets.ts` | the ledger-side reader: redirects, `tee`, `mv`/`git mv`/`cp` destinations (device streams never targets) | evidence missing writes the guard would see |
+| `shell-write-targets.ts` | the ledger-side reader: redirect targets (read from `redirectsOf`, valued by the normalizer), `tee`, `mv`/`git mv`/`cp` destinations (device streams never targets) | evidence missing writes the guard would see |
 
 `tests/core/guard-state-file-walkers.test.ts` pins the walker contracts so any future
 drift is caught by an independent reference expectation. **Why it works:** the guard's

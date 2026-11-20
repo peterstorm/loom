@@ -176,6 +176,10 @@ describe("helper invocation forms", () => {
     ["in backticks", (rest) => `echo \`loom helper ${rest}\``],
     ["executed heredoc", (rest) => `bash <<'EOF'\nloom helper ${rest}\nEOF`],
     ["subshell", (rest) => `( loom helper ${rest} )`],
+    // A clobber redirect is one operator (`>|`), never a pipe into `helper …`.
+    ["a clobber redirect before the helper word", (rest) => `loom >|/tmp/o helper ${rest}`],
+    // An escaped `\>` is a word, so the `&` after it runs the next command.
+    ["after an escaped > and a background &", (rest) => `echo \\>& loom helper ${rest}`],
     ["quoted helper and operation", () => `loom 'helper' "security-audit" 'submit' --out ${R}`],
     ["split quoting", () => `loom helper secu"rity-audit" sub'mit' --out ${R}`],
   ];

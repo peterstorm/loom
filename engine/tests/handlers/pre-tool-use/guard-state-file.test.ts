@@ -403,6 +403,23 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("cat active_task_graph.json 2>&1")).toBe("allow");
   });
 
+  it("an escaped `\\>` binds nothing: the `&` after it runs the next command (escaped-operator bypass)", () => {
+    // The splitter read `>&` off the raw text, so `\>&` bound the `&` as an fd
+    // dup and `echo \>& rm <state>` was ONE read-only `echo` segment.
+    expect(guardDecision("echo \\>& rm .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo \\>| rm .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo '>'& rm .claude/state/active_task_graph.json")).toBe("block");
+  });
+
+  it("`>|` is one clobbering redirect, judged like `>`", () => {
+    expect(guardDecision("echo forged >| active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo forged 2>| .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision(`bun cli.ts helper set-phase execute >| ${SUBAGENT_DIR}/s.evidence.jsonl`)).toBe("block");
+    expect(guardDecision("cat active_task_graph.json >| /tmp/copy.json")).toBe(
+      guardDecision("cat active_task_graph.json > /tmp/copy.json"),
+    );
+  });
+
   it("`cd` is NOT allowlisted — cwd relocation launders relative writes (round-16 bypass)", () => {
     // `cd <guarded-dir>` re-scopes path resolution: the follow-on writer
     // names no guarded literal (relative names after the cwd moved), so its
