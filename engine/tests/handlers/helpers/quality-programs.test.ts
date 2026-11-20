@@ -363,30 +363,6 @@ describe("quality-program helper boundaries", () => {
     expect(prompt).not.toContain(selected.expected_criticals[0]!.claim);
   });
 
-  it("event-sources the exact refutation batch and waits for all slots before tally", () => {
-    const input = {
-      input: {
-        criticalFindingIds: ["T1:code-reviewer-1"],
-        lenses: ["reproduction", "intent", "blast-radius"],
-      },
-      events: [],
-    };
-    const first = JSON.parse(cli(["helper", "panel-program", "refutation"], JSON.stringify(input)));
-    expect(first.action.type).toBe("spawn-batch");
-    expect(first.action.requests.map((request: { modelProfile: string }) => request.modelProfile))
-      .toEqual(["refutation", "refutation", "refutation"]);
-
-    input.events.push({
-      type: "spawn-outcome",
-      requestId: "refutation:verifier:1",
-      attempt: 1,
-      outcome: "succeeded",
-    } as never);
-    const partial = JSON.parse(cli(["helper", "panel-program", "refutation"], JSON.stringify(input)));
-    expect(partial.action).toBeNull();
-    expect(partial.state.stage).toBe("verifiers");
-  });
-
   it("event-sources the architecture candidate batch and waits for every slot", () => {
     const input = {
       input: {
@@ -895,27 +871,5 @@ describe("quality-program helper boundaries", () => {
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain("must not traverse a symlink");
     expect(existsSync(join(outside, "packet.json"))).toBe(false);
-  });
-
-  it("rejects an unknown refutation lens at the CLI boundary", () => {
-    const run = spawnSync("bun", [CLI, "helper", "panel-program", "refutation"], {
-      cwd: disposableDirectory(),
-      env: admittedEnv(),
-      input: JSON.stringify({ input: { criticalFindingIds: ["T1:F1"], lenses: ["invented"] }, events: [] }),
-      encoding: "utf-8",
-    });
-    expect(run.status).not.toBe(0);
-    expect(run.stderr).toContain("unknown refutation lens");
-  });
-
-  it("rejects a task-local finding id before constructing a refutation program", () => {
-    const run = spawnSync("bun", [CLI, "helper", "panel-program", "refutation"], {
-      cwd: disposableDirectory(),
-      env: admittedEnv(),
-      input: JSON.stringify({ input: { criticalFindingIds: ["code-reviewer-1"], lenses: ["intent"] }, events: [] }),
-      encoding: "utf-8",
-    });
-    expect(run.status).not.toBe(0);
-    expect(run.stderr).toContain("wave-scoped task-id:finding-id");
   });
 });

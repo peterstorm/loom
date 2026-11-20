@@ -22,8 +22,6 @@ afterEach(() => temporaryDirectories.splice(0).forEach((path) => rmSync(path, { 
 
 const smokeFiles = [
   ["scripts/smoke-panel-mode.sh", "panel"],
-  ["scripts/smoke-review-panel.sh", "review"],
-  ["scripts/smoke-standalone-review.sh", "standalone"],
   ["scripts/smoke-orchestration-facades.ts", "orchestration"],
   ["scripts/smoke-pi-resources.sh", "pi"],
   ["artifacts/tests/test-validate-task-graph.sh", "graph"],

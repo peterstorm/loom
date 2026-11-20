@@ -2,8 +2,8 @@
 
 ## Status
 Accepted (2026-11-20). Partly supersedes ADR-0030: its premise that `/loom --panel` runs the registered
-driver. Amends ADR-0029 (the registered panel bullet and its crash-window test) and ADR-0018 (the legacy
-panel verdict path).
+driver. Amends ADR-0029 (the registered panel bullet, its crash-window test, and the threshold rule's
+mention of the review-panel tally) and ADR-0018 (the legacy panel verdict path).
 
 ## Context
 Panels had more than one driver each. Only one driver per panel had a caller.
@@ -26,7 +26,20 @@ live, and read the registered driver's tests as proof. The deletion test it appl
 pointed the wrong way.
 
 **The Refutation Panel** runs inside the Wave Gate and standalone review on the persistent program
-(`core/persistent-panel`). The registered `start refutation` was a second, unused entry to it.
+(`core/persistent-panel`). Three more drivers existed beside it:
+
+- The registered `start refutation`, a second, unused entry to the same program.
+- The manual helper `helper review-panel brief|manifest|verdict|tally`. It ran a panel over a
+  reviews/panel-runs directory in its own v1 formats (`brief.json`, `manifest.json`, `outcomes.json`) and
+  wrote the TaskGraph directly. No command, skill, reference, agent, hook or Pi file calls it; its own source
+  required that the skill prose name none of its operations. Its callers were two smoke scripts and its
+  tests. The eleven run directories it left in this repository's .claude/reviews/panel-runs (untracked) all date from
+  2026-08-10, before the persistent program existed.
+- `helper panel-program refutation`, the refutation half of the stateless dispatch reducer. Nothing
+  replays a refutation journal: the persistent program records its own.
+
+The architecture journal's reader lived in `core/legacy-archive` as a "legacy panel journal" translator,
+although the runbook writes that format today.
 
 ## Options Considered
 
@@ -55,9 +68,18 @@ program inside the Wave Gate and standalone review.**
   - the panel verdict source record and its replay (`foldVerdictSubmission` stays and serves the persistent
     program);
   - the journal-replay half of `core/panel-program` that only the registered driver called
-    (`helper panel-program` replays its own way).
+    (`helper panel-program` replays its own way);
+  - the manual `helper review-panel` route, its v1 brief, manifest and outcomes formats, the run policy
+    only it applied, and the `review-panel` and `standalone-review` smoke scripts that drove it;
+  - the refutation half of `core/panel-program` and the `refutation` mode of `helper panel-program`.
+- **What moves:** the architecture journal reader leaves `core/legacy-archive` for `core/panel-program`,
+  beside the reducer it feeds. It is the live format, not a historical one. Its wire spelling
+  (`format: "legacy-panel-program"`, `schemaVersion: 1`) and its error messages are unchanged, so every
+  journal on disk still reads.
 - **What stays:** the stateless architecture dispatch program, `helper panel-program architecture`, the panel
-  contract, the kernel, ranking, and the persistent Refutation Panel. They are unchanged.
+  contract, the kernel, ranking, and the persistent Refutation Panel. The pieces of `core/review-panel` the
+  persistent program uses stay: the lens catalogue, the critical finding projection, the verdict parser and
+  the refutation threshold.
 
 ## Consequences
 
@@ -69,3 +91,5 @@ program inside the Wave Gate and standalone review.**
 **Negative:**
 - A registered architecture or refutation run started by hand, outside every runbook, is no longer
   resumable. `resume` reports the registration as malformed.
+- `helper review-panel` and `helper panel-program refutation` now fail with a usage error. A v1
+  reviews/panel-runs directory is inert history: nothing reads it, and nothing rewrites it.

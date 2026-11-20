@@ -1936,7 +1936,7 @@ export function applyFindingOutcomes(
     // Throw rather than skip, for the reason `requireEntry` throws: the brief
     // is built from `task.findings` and the load boundary proves lockstep, so a
     // miss here is a broken invariant, not a degraded input. Skipping it wrote
-    // no audit record while `serializeOutcomes` and the operator line both
+    // no audit record while the serialized tally and the operator line both
     // still reported the finding as refuted — and dropping the last critical
     // that way promotes `blocked → passed` with nothing to show for it. The
     // reachable window is a `store-review-findings` override landing between

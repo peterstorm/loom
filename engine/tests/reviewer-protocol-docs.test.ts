@@ -89,11 +89,6 @@ describe("current reviewer runbooks preserve protocol and decision boundaries", 
     }
   });
 
-  it.each(["scripts/smoke-review-panel.sh", "scripts/smoke-standalone-review.sh"])("%s labels retained historical/manual coverage", (path) => {
-    expect(prose(path).toLowerCase()).toContain("historical/manual");
-    expect(prose(path)).toContain("smoke-orchestration-facades.ts");
-  });
-
   it("records the selected audited dependency and rejects retrospective provenance", () => {
     const text = prose("docs/adr/ADR-0009-versioned-reviewer-protocol.md");
     expect(text).toContain("json-bigint@1.0.0");

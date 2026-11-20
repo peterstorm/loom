@@ -181,65 +181,6 @@ describe("standalone review helper and refutation adapter", () => {
     }).ok).toBe(false);
   });
 
-  it("runs end to end without creating or mutating orchestration state", () => {
-    initialize();
-    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
-    expect(run.status, run.stderr).toBe(0);
-    const aggregate = JSON.parse(run.stdout);
-    expect(aggregate.findings).toHaveLength(2);
-
-    run = cli("review-panel", ["brief", "--runs-root", runsRoot, "--run-dir", runDir, "--standalone", join(runDir, "aggregate.json")]);
-    expect(run.status, run.stderr).toBe(0);
-    const brief = JSON.parse(run.stdout);
-    expect(brief.source_kind).toBe("standalone");
-    expect(brief.findings).toHaveLength(1);
-
-    run = cli("review-panel", ["manifest", "--runs-root", runsRoot, "--run-dir", runDir]);
-    expect(run.status, run.stderr).toBe(0);
-    const manifest = JSON.parse(run.stdout);
-    const findingId = manifest.findings[0].id;
-
-    for (const [index, lens] of manifest.lenses.entries()) {
-      const raw = JSON.stringify({
-        criterion: lens,
-        verdicts: [{
-          finding_id: findingId,
-          verdict: index < 2 ? "refuted" : "upheld",
-          reasoning: index < 2 ? `refuted through ${lens}` : "claim still appears plausible",
-        }],
-      });
-      run = cli("review-panel", ["verdict", "--lens", lens, "--runs-root", runsRoot, "--manifest", join(runDir, "manifest.json")], raw);
-      expect(run.status, run.stderr).toBe(0);
-      writeFileSync(join(tmp, runDir, `verdicts/verdict-${index + 1}.json`), run.stdout);
-    }
-
-    run = cli("review-panel", ["tally", "--runs-root", runsRoot, "--manifest", join(runDir, "manifest.json")]);
-    expect(run.status, run.stderr).toBe(0);
-    expect(JSON.parse(readFileSync(join(tmp, runDir, "outcomes.json"), "utf-8")).refuted).toBe(1);
-    expect(() => readFileSync(join(tmp, ".claude/state/active_task_graph.json"), "utf-8")).toThrow();
-
-    const resultPath = join(tmp, runDir, "result.json");
-    const outcomesPath = join(tmp, runDir, "outcomes.json");
-    const result = JSON.parse(readFileSync(resultPath, "utf-8"));
-    expect(result.surviving_critical_findings).toEqual([]);
-    expect(result.refuted_critical_findings).toHaveLength(1);
-    expect(result.advisory_findings).toHaveLength(1);
-
-    const published = {
-      result: readFileSync(resultPath, "utf-8"),
-      outcomes: readFileSync(outcomesPath, "utf-8"),
-    };
-    run = cli("review-panel", ["tally", "--runs-root", runsRoot, "--manifest", join(runDir, "manifest.json")]);
-    expect(run.status).toBe(1);
-    expect(run.stderr).toContain("already been tallied");
-    expect(readFileSync(resultPath, "utf-8")).toBe(published.result);
-    expect(readFileSync(outcomesPath, "utf-8")).toBe(published.outcomes);
-
-    run = cli("standalone-review", ["finalize", "--runs-root", runsRoot, "--run-dir", runDir]);
-    expect(run.status).toBe(1);
-    expect(run.stderr).toContain("already been finalized");
-  });
-
   it.each([
     ["duplicate", ["code-reviewer", "code-reviewer"], "must be distinct"],
     ["non-review", ["code-reviewer", "code-implementer-agent"], "non-Machine-Summary reviewer"],
@@ -290,36 +231,6 @@ describe("standalone review helper and refutation adapter", () => {
     const run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("does not match the frozen scope and expected agents");
-  });
-
-  it("tallies a brace-bearing claim and publishes the original reviewer text", () => {
-    initialize();
-    writeFileSync(
-      join(tmp, runDir, "reviewers/1-code-reviewer.md"),
-      reviewOutput.replaceAll("impossible failure", "the {config} value is unchecked"),
-    );
-    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
-    expect(run.status, run.stderr).toBe(0);
-    run = cli("review-panel", ["brief", "--runs-root", runsRoot, "--run-dir", runDir, "--standalone", join(runDir, "aggregate.json")]);
-    expect(run.status, run.stderr).toBe(0);
-    expect(run.stdout).toContain("the config value is unchecked");
-    expect(run.stdout).not.toContain("{config}");
-    run = cli("review-panel", ["manifest", "--runs-root", runsRoot, "--run-dir", runDir]);
-    expect(run.status, run.stderr).toBe(0);
-    const manifest = JSON.parse(run.stdout);
-    for (const [index, lens] of manifest.lenses.entries()) {
-      const raw = JSON.stringify({
-        criterion: lens,
-        verdicts: [{ finding_id: manifest.findings[0].id, verdict: "upheld", reasoning: "reachable" }],
-      });
-      run = cli("review-panel", ["verdict", "--lens", lens, "--runs-root", runsRoot, "--manifest", join(runDir, "manifest.json")], raw);
-      expect(run.status, run.stderr).toBe(0);
-      writeFileSync(join(tmp, runDir, `verdicts/verdict-${index + 1}.json`), run.stdout);
-    }
-    run = cli("review-panel", ["tally", "--runs-root", runsRoot, "--manifest", join(runDir, "manifest.json")]);
-    expect(run.status, run.stderr).toBe(0);
-    const result = JSON.parse(readFileSync(join(tmp, runDir, "result.json"), "utf-8"));
-    expect(result.surviving_critical_findings[0].claim).toBe("the {config} value is unchecked");
   });
 
   it("requires the observed reviewer set, immutable slots, and physical files to match", () => {
@@ -469,20 +380,6 @@ describe("standalone review helper and refutation adapter", () => {
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("cannot read review session");
     expect(() => readFileSync(join(tmp, runDir, "result.json"), "utf-8")).toThrow();
-  });
-
-  it("rejects a standalone panel brief when aggregate.json drifts from the transcripts", () => {
-    initialize();
-    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
-    expect(run.status, run.stderr).toBe(0);
-    const aggregatePath = join(tmp, runDir, "aggregate.json");
-    const aggregate = JSON.parse(readFileSync(aggregatePath, "utf-8"));
-    aggregate.findings[0].claim = "forged replacement claim";
-    writeFileSync(aggregatePath, JSON.stringify(aggregate));
-
-    run = cli("review-panel", ["brief", "--runs-root", runsRoot, "--run-dir", runDir, "--standalone", join(runDir, "aggregate.json")]);
-    expect(run.status).toBe(1);
-    expect(run.stderr).toContain("does not match the aggregate rederived");
   });
 
   it("cannot turn a hand-authored outcomes file into a finalized critical review", () => {

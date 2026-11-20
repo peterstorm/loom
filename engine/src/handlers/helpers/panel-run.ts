@@ -15,7 +15,6 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -24,19 +23,17 @@ import type { ParseResult, RunLayout } from "../../core/panel-kernel";
 import { fail, ok } from "../../core/panel-kernel";
 import {
   type AnchoredDirectory,
-  anchoredChildPath,
   closeAnchoredDirectory,
   ensureRelativeDirectoryNoFollow,
-  listDirectoryNamesNoFollow,
   openDirectoryNoFollow,
 } from "../../utils/no-follow-fs";
 
-// `RunLayout` and the two layouts are pure data and live in the kernel, beside
+// `RunLayout` and the architecture layout are pure data and live in the kernel, beside
 // the manifest parsers that give them meaning — those parsers used to hardcode
 // `"interview.md"` / `"candidates"` while this module declared them as
 // constants, with nothing comparing the two. Re-exported so the shell's own
 // callers need not know where the definition moved.
-export { ARCHITECTURE_LAYOUT, REVIEW_LAYOUT } from "../../core/panel-kernel";
+export { ARCHITECTURE_LAYOUT } from "../../core/panel-kernel";
 export type { RunLayout } from "../../core/panel-kernel";
 
 export { argumentValue } from "./cli-args";
@@ -352,7 +349,6 @@ export function prepareWriteTargets(
  * surface.
  */
 export {
-  anchoredChildPath,
   closeAnchoredDirectory,
   openDirectoryNoFollow,
   publishStagedRunFile,
@@ -361,78 +357,6 @@ export {
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
 } from "../../utils/no-follow-fs";
-
-/**
- * Delete the artifacts in an item directory that the caller is not about to
- * write, and report what went.
- *
- * Only the engine-authored side needs this, and only because a re-brief is a
- * legitimate operation: after a finding is refuted or overridden, the next
- * brief names fewer findings, and the file for the departed one stayed behind.
- * The surplus was then caught two steps later by `runArtifactErrors` — with the
- * diagnostic "the panel that produced them was larger than the manifest
- * declares", which describes the opposite of what happened and sends the
- * operator looking for a resized panel that does not exist.
- *
- * Refuses rather than deletes anything that is not a plain file it recognizes:
- * this runs `rm` inside a directory derived from an argument, so a symlink or a
- * nested directory is a reason to stop, not something to clean up. Unknown
- * plain files ARE removed — a stale `finding-code-reviewer-9.json` is exactly
- * the surplus this exists to clear.
- */
-export function pruneSurplusItems(
-  runDir: string,
-  itemDir: string,
-  expected: readonly string[],
-): ParseResult<readonly string[]> {
-  const resolvedRunDir = realRunDir(runDir);
-  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
-  const directory = join(resolvedRunDir.value, itemDir);
-  const keep = new Set(expected);
-  let anchored: AnchoredDirectory | null = null;
-  let entries: readonly string[];
-  try {
-    anchored = openDirectoryNoFollow(directory);
-    entries = listDirectoryNamesNoFollow(anchored);
-  } catch (error) {
-    if (anchored !== null) closeAnchoredDirectory(anchored);
-    // A run directory that has never held items is the normal first-brief case.
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return ok([]);
-    return fail([
-      `cannot list ${directory}: ${error instanceof Error ? error.message : String(error)}`,
-    ]);
-  }
-
-  const removed: string[] = [];
-  const errors: string[] = [];
-  try {
-    for (const entry of entries) {
-      if (keep.has(entry)) continue;
-      const path = join(directory, entry);
-      const anchoredPath = anchoredChildPath(anchored, entry);
-      try {
-        const stat = lstatSync(anchoredPath);
-        if (stat.isSymbolicLink()) {
-          errors.push(`stale run artifact must not be a symbolic link: ${path}`);
-          continue;
-        }
-        if (!stat.isFile()) {
-          errors.push(`stale run artifact must be a regular file: ${path}`);
-          continue;
-        }
-        unlinkSync(anchoredPath);
-        removed.push(entry);
-      } catch (error) {
-        errors.push(
-          `cannot clear stale run artifact ${path}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  } finally {
-    closeAnchoredDirectory(anchored);
-  }
-  return errors.length > 0 ? fail(errors) : ok(removed);
-}
 
 /** Canonical per-criterion verdict path. Positional by index, but the content
  *  is re-validated against `criteria[index]` when read, so a verdict written to
@@ -458,9 +382,8 @@ export function realRunDir(runDir: string): ParseResult<string> {
  *
  * A surplus `verdict-4.json` is not junk to ignore — it is positive evidence
  * that the panel which actually RAN was larger than the criteria set now
- * claims. That is exactly the shape a shrunken panel leaves behind (see the
- * panel-size note in helpers/review-panel.ts), and ignoring it is what let a
- * 5-lens run be adjudicated as a 3-lens one with a lower absolute refutation
+ * claims. That is exactly the shape a shrunken panel leaves behind, and
+ * ignoring it is what let a 5-lens run be adjudicated as a 3-lens one with a lower absolute refutation
  * bar. Reported, never silently skipped.
  */
 function surplusVerdictErrors(verdictsDir: string, expected: number): string[] {

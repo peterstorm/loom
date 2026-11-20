@@ -59,10 +59,10 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 620 src files / ~174.3k lines TS; `engine/tests/` holds 941 TS files / ~264.5k lines (fixtures and helpers included), of which 826 test files are executed (802 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 619 src files / ~172.5k lines TS; `engine/tests/` holds 939 TS files / ~262.5k lines (fixtures and helpers included), of which 824 test files are executed (800 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
-| `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
+| `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
 | `docs/` | 125 docs incl. **96 ADRs** (index test-enforced) | — |
@@ -956,8 +956,8 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **826 executed test files / ~264.5k lines** — 806 under `engine/tests/` (945 TS files there
-  including fixtures and helpers; core 301 test files, handlers 194, pi 50,
+- **824 executed test files / ~262.5k lines** — 806 under `engine/tests/` (945 TS files there
+  including fixtures and helpers; core 301 test files, handlers 192, pi 50,
   linter 47, orchestration 37, utils 34, machine 30, acceptance 20, security 19, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).

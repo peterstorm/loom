@@ -4,7 +4,7 @@ import { parsedAuthority } from "../../src/handlers/helpers/programs/registratio
 import type { IssuedStandaloneReviewerProtocol, ReviewerProtocolAuthorityResolver } from "../../src/core/review-output";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { buildStandaloneFindingBrief, parseFindingBriefJson, serializeFindingBrief, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
+import { buildStandaloneFindingBrief, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import {
   acceptedAgentResult,
   createAtomicInitialPublicationClaimPort,
@@ -321,27 +321,10 @@ describe("standalone review aggregate", () => {
 });
 
 describe("standalone brief source invariant", () => {
-  it("constructs only canonical standalone subjects and round-trips its output", () => {
+  it("constructs only canonical standalone subjects", () => {
     const brief = buildStandaloneFindingBrief(required().aggregate);
     expect(brief.taskIds).toEqual([STANDALONE_REVIEW_SUBJECT]);
     expect(brief.findings.every((finding) => finding.taskId === STANDALONE_REVIEW_SUBJECT)).toBe(true);
-    expect(parseFindingBriefJson(JSON.parse(serializeFindingBrief(brief)))).toEqual({ ok: true, value: brief });
-  });
-
-  it("rejects a standalone source flag on a non-standalone subject", () => {
-    const parsed = parseFindingBriefJson({
-      wave: 9,
-      source_kind: "standalone",
-      severity: "critical",
-      task_ids: ["T1"],
-      findings: [{
-        id: "T1:code-reviewer-1", task_id: "T1", agent: "code-reviewer",
-        severity: "critical", file: null, line: null, claim: "blocker",
-      }],
-    });
-    expect(parsed.ok).toBe(false);
-    expect(!parsed.ok && parsed.errors.join("\n")).toContain("standalone brief.wave must be 1");
-    expect(!parsed.ok && parsed.errors.join("\n")).toContain("standalone brief.task_ids must be exactly");
   });
 });
 

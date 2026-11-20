@@ -72,15 +72,13 @@ describe("REVIEW_PANEL_AGENTS invariants", () => {
   });
 });
 
-describe("review-panel helper route", () => {
-  it("is registered so the CLI can dispatch to it", () => {
-    expect(KNOWN_HANDLERS["helper"]!.has("review-panel")).toBe(true);
+describe("the retired review-panel helper (ADR-0096)", () => {
+  it("has no route: the Refutation Panel runs only inside the Wave Gate and standalone review", () => {
+    expect(KNOWN_HANDLERS["helper"]!.has("review-panel")).toBe(false);
   });
 
-  it("is NOT a whitelisted state-file helper — it never names a guarded path", () => {
-    // tally writes state through StateManager, but its command line references
-    // only the run directory, so it stays out of guard-state-file's scope. It
-    // must not be allowlisted: that would let any Bash line mentioning both
+  it("is not a whitelisted state-file helper", () => {
+    // An allowlisted name would let any Bash line mentioning both
     // "review-panel" and the state path through the guard.
     expect(WHITELISTED_HELPERS).not.toContain("review-panel");
   });

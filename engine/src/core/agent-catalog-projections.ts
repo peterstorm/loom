@@ -341,7 +341,7 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
  *  every other reviewer, but deliberately NOT in REVIEW_SUB_AGENTS and NOT in
  *  REVIEW_AGENTS.
  *
- *  A verifier emits pure JSON that the `review-panel` helper validates; it has
+ *  A verifier emits pure JSON that the persistent refutation panel validates; it has
  *  no findings of its own to store. In REVIEW_SUB_AGENTS its transcript would
  *  route through store-reviewer-findings, which would find no CRITICAL_COUNT
  *  and mark the task `evidence_capture_failed` — a passing wave blocked by the

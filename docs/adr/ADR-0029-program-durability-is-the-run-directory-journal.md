@@ -7,6 +7,8 @@ issue #19 audit.
 Amended by [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md)
 (2026-11-20): the registered panel driver named below had no caller and is deleted. The architecture panel's
 journal is the one `helper panel-program architecture` replays; the crash-window test went with the driver.
+The review-panel tally named under the threshold rule retired with the manual review-panel helper; the
+rule itself is unchanged.
 
 ## Context
 ADR-0004 adopted the type-driven candidate and chose to run Loom's domain programs through Fugue 0.4.0. It

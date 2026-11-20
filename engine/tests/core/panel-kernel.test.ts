@@ -1,8 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { join } from "node:path";
 import {
-  ARCHITECTURE_LAYOUT,
-  REVIEW_LAYOUT,
   coverageErrors,
   ok,
   parseCriteriaSet,
@@ -32,6 +30,8 @@ import { waveFindingIdFixture } from "../fixtures/wave-finding-id";
  */
 
 const RUN_DIR = "/runs/run.1";
+/** A layout of the brief/findings shape; the kernel is layout-agnostic. */
+const ITEM_LAYOUT = Object.freeze({ panel: "items", contextMd: "brief.md", contextJson: "brief.json", itemDir: "findings", verdictDir: "verdicts" });
 
 describe("parseRunManifest — the shared item-set authority", () => {
   const spec = {
@@ -47,17 +47,17 @@ describe("parseRunManifest — the shared item-set authority", () => {
 
   const wellFormed = {
     run_id: "run.1",
-    brief_file: join(RUN_DIR, REVIEW_LAYOUT.contextMd),
-    brief_json: join(RUN_DIR, REVIEW_LAYOUT.contextJson),
+    brief_file: join(RUN_DIR, ITEM_LAYOUT.contextMd),
+    brief_json: join(RUN_DIR, ITEM_LAYOUT.contextJson),
     findings: ["a", "b"].map((id) => ({
       id,
       filename: `finding-${id}.json`,
-      path: join(RUN_DIR, REVIEW_LAYOUT.itemDir, `finding-${id}.json`),
+      path: join(RUN_DIR, ITEM_LAYOUT.itemDir, `finding-${id}.json`),
     })),
   };
 
   it("accepts the exact ordered set", () => {
-    const result = parseRunManifest(wellFormed, RUN_DIR, REVIEW_LAYOUT, spec);
+    const result = parseRunManifest(wellFormed, RUN_DIR, ITEM_LAYOUT, spec);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.entries.map((e) => e.id)).toEqual(["a", "b"]);
   });
@@ -66,7 +66,7 @@ describe("parseRunManifest — the shared item-set authority", () => {
     const result = parseRunManifest(
       { ...wellFormed, findings: ["a string, not an entry", wellFormed.findings[1]] },
       RUN_DIR,
-      REVIEW_LAYOUT,
+      ITEM_LAYOUT,
       spec,
     );
     expect(result.ok).toBe(false);
@@ -82,20 +82,11 @@ describe("parseRunManifest — the shared item-set authority", () => {
     const result = parseRunManifest(
       { ...wellFormed, run_id: "wrong", brief_file: "/elsewhere/brief.md" },
       RUN_DIR,
-      REVIEW_LAYOUT,
+      ITEM_LAYOUT,
       spec,
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it("keeps the two panels' layouts apart at the type level", () => {
-    // RunLayout<Panel> is a phantom tag: the two layouts are structurally
-    // identical, so nothing but the tag stops a review run being validated
-    // against the architecture layout.
-    expect(ARCHITECTURE_LAYOUT.panel).toBe("architecture");
-    expect(REVIEW_LAYOUT.panel).toBe("review");
-    expect(ARCHITECTURE_LAYOUT.contextMd).not.toBe(REVIEW_LAYOUT.contextMd);
   });
 });
 
