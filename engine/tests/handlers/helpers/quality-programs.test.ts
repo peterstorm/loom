@@ -19,6 +19,7 @@ import { LOCAL_PI_MODEL_ARGUMENT } from "../../fixtures/local-pi-binding";
 import { afterEach, describe, expect, it } from "vitest";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../../src/runtime-compatibility";
 import { readReviewPacketPostimage } from "../../../src/handlers/helpers/review-packet";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const ENGINE = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const ROOT = resolve(ENGINE, "..");
@@ -92,6 +93,7 @@ function writeReviewPacketTaskGraph(
 ): void {
   writeFileSync(statePath, JSON.stringify({
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

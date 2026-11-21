@@ -165,13 +165,12 @@ describe("modern implementation attempt registration", () => {
       expect(task.reserved_at).toBe(authority.reservedAt);
       expect(task.implementation_retry_protocol).toBe(2);
       expect(task.implementation_retry_history_start).toBe(0);
-      expect(task.legacy_execution_reservation).toBeUndefined();
       expect(task.attempt_artifact_baseline).toBeDefined();
       expect(task.attempt_repository_baseline).toBeDefined();
     }
   });
 
-  it("binds a fresh attempt to a retained repository baseline and retires a legacy unresolved-path carry", async () => {
+  it("binds a fresh attempt to a retained repository baseline", async () => {
     const repo = repository();
     writeFileSync(join(repo.root, "foreign.ts"), "foreign write from failed attempt\n");
     const task = taskFixture({
@@ -184,13 +183,7 @@ describe("modern implementation attempt registration", () => {
       file_list: ["src/a.ts"],
       repository_baseline: [],
     });
-    // State File bytes written before the carry was retired still read: the
-    // parser validates the legacy field and drops it, so the next write omits it.
-    const legacy = graph([task]);
-    writeFileSync(repo.statePath, JSON.stringify({
-      ...legacy,
-      tasks: legacy.tasks.map((entry) => ({ ...entry, unresolved_repository_paths: ["foreign.ts"] })),
-    }, null, 2));
+    writeFileSync(repo.statePath, JSON.stringify(graph([task]), null, 2));
 
     const result = await registerTaskExecutionBatch([spawn("T1")]);
 
@@ -199,7 +192,6 @@ describe("modern implementation attempt registration", () => {
     const stored = JSON.parse(readFileSync(repo.statePath, "utf8")) as TaskGraph;
     expect(stored.tasks[0]?.repository_baseline).toEqual([]);
     expect(stored.tasks[0]?.attempt_repository_baseline).toEqual([]);
-    expect(stored.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
   });
 
   it("re-arms a retry on a fresh repository boundary so foreign and sibling movement between attempts cannot block or attribute it", async () => {

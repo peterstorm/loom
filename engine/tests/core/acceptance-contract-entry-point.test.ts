@@ -7,6 +7,7 @@ import validateTaskGraph from "../../src/handlers/helpers/validate-task-graph";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
 import type { PlanContract } from "../../src/types";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const ACCEPTANCE = "engine/tests/acceptance/payload.acceptance.test.ts";
 const TYPES = "engine/src/core/payload-contract.ts";
@@ -188,7 +189,7 @@ describe("validate-task-graph reaches the entry-point rule from a plan on disk",
     const planFile = join(dir, "plan.md");
     writeFileSync(planFile, PLAN);
     const graph = JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [], plan_title: "t", spec_file: "spec.md", plan_file: planFile,
+      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [], plan_title: "t", spec_file: "spec.md", plan_file: planFile,
       tasks: [
         graphTask("T1", 1, [TYPES, ACCEPTANCE], [], []),
         graphTask("T2", 2, ["engine/src/core/payload.ts"], ["AS-003"], ["T1"]),

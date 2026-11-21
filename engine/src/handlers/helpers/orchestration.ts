@@ -145,7 +145,7 @@ import {
   type LoomStatusDocument,
   type StatusDeps,
 } from "../../core/loom-status";
-import { inspectFilePresence, loadPlanModelsSource } from "./complete-wave-gate";
+import { inspectFilePresence, loadPlanModelsSource } from "./wave-gate-observers";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import {
   observeCurrentWaveCompletionResult,

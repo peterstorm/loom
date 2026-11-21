@@ -15,6 +15,7 @@ import { activeWaveGateFixture, completedWaveGateFixture, taskFixture } from "..
 import { WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
 import { guardDecision } from "../../fixtures/guard-decision";
 import { KNOWN_HANDLERS, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const parsedSpec = parseSpec(AMENDMENT_SPEC);
 if (!parsedSpec.ok) throw new Error("fixture spec must parse");
@@ -52,6 +53,7 @@ function fixture(overrides: Partial<TaskGraph> = {}): Fixture {
   writeFileSync(statePath, JSON.stringify({
     spec_trace_version: 2,
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: specFile,

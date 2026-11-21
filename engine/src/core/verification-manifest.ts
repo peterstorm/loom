@@ -801,10 +801,10 @@ export function defaultVerificationManifest(): I6EraVerificationManifest {
 }
 
 /**
- * The engine default exactly as frozen before the test-file classification
- * existed: same bytes, same digest. Only read-time fallbacks for a TaskGraph
- * that carries no `verification_manifest` use it, because that graph's
- * receipts were stamped with this digest.
+ * The pre-I6 engine default: the default manifest exactly as frozen before
+ * the test-file classification existed, same bytes and same digest
+ * (ADR-0025). A pre-I6 TaskGraph carries this manifest frozen in its own
+ * State File; since ADR-0098 no read path substitutes it for a missing one.
  */
 export function legacyDefaultVerificationManifest(): FrozenVerificationManifest {
   return LEGACY_ENGINE_DEFAULT_MANIFEST;

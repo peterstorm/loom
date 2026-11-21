@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { parseTaskGraph } from "../src/state-manager";
 import { REVIEWER_PROTOCOL_V2 } from "../src/core/reviewer-contract";
+import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
 
 const PACKET = "a".repeat(64);
 const HEAD = "b".repeat(40);
@@ -25,6 +26,7 @@ const validTask = {
 
 const graph = (tasks: readonly unknown[]) => ({
   current_phase: "execute",
+  verification_manifest: legacyDefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,

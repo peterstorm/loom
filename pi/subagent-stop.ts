@@ -82,7 +82,7 @@ import {
 } from "./reserved-slot";
 import {
   piImplementationLedger,
-  retireCompletedOrMissingImplementation,
+  retireCompletedImplementation,
   type PiResultOutcome,
 } from "./subagent-settlement";
 import {
@@ -508,7 +508,7 @@ async function finalizeReservedImplementations(
           );
           continue;
         }
-        const retired = retireCompletedOrMissingImplementation(state, item.taskId, item.authority);
+        const retired = retireCompletedImplementation(state, item.taskId, item.authority);
         if (retired.retired) {
           state = retired.state;
           logs.push(`retired completed/missing implementation reservation for ${item.taskId}`);
@@ -938,7 +938,6 @@ async function processPiResult(
         agentType,
         result,
         reservedSlot: reservedItem,
-        parentPrompt,
         ledger,
       }));
     }

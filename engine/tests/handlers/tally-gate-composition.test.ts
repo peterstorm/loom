@@ -24,6 +24,7 @@ import {
 } from "../../src/core/review-panel";
 import { checkCriticalFindings } from "../../src/core/wave-gate-checks";
 import type { Task } from "../../src/types";
+import { satisfiedProof } from "../fixtures/task-lifecycle";
 
 const LENSES: readonly ReviewLens[] = ["reproduction", "intent", "blast-radius"];
 const THRESHOLD = defaultRefutationThreshold(LENSES.length);
@@ -35,7 +36,7 @@ function task(id: string, criticals: readonly string[]): Task {
     agent: "code-implementer-agent",
     wave: 1,
     status: "implemented",
-    legacy_missing_proof: true,
+    proof: satisfiedProof([]),
     depends_on: [],
     review_status: "pending",
   };
@@ -198,7 +199,7 @@ describe("the panel's verdict is the gate's verdict", () => {
     // wave from blocked to passing.
     const sentinel: Task = {
       id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-      status: "implemented", legacy_missing_proof: true, depends_on: [], review_status: "blocked",
+      status: "implemented", proof: satisfiedProof([]), depends_on: [], review_status: "blocked",
       critical_findings: ["none"],
     };
     expect(checkCriticalFindings([sentinel]).passed).toBe(false);

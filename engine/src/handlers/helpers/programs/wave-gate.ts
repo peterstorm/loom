@@ -15,7 +15,7 @@ import { reanchorVerifiedClaims } from '../../../core/verified-claim-hashes';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
 import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
-import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
+import { inspectFilePresence, loadPlanModelsSource } from '../wave-gate-observers';
 import { runFullTierWaveLint } from '../lint-wave-gate';
 import { ensureWaveCompletionSuite, observeWaveCompletionWorkspace } from '../wave-completion-suite';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
@@ -52,12 +52,9 @@ const waveGateDeps = Object.freeze({
   reviewedWorkspace: observeReviewedWorkspace,
 });
 
-/** A legacy graph has no suite receipt, so it observes neither the workspace
- *  nor the frozen paths a receipt would stamp from. */
+/** The gate deps plus the current workspace and frozen paths the suite receipt is judged against. */
 function currentWaveGateDeps(graph: TaskGraph, authorityStartPath: string) {
-  return graph.verification_manifest === undefined
-    ? waveGateDeps
-    : Object.freeze({ ...waveGateDeps, ...observeWaveCompletionWorkspace(graph, authorityStartPath) });
+  return Object.freeze({ ...waveGateDeps, ...observeWaveCompletionWorkspace(graph, authorityStartPath) });
 }
 
 /** Canonical structural equality to a typed witness proves the raw value carries the witness's type. */
@@ -179,20 +176,18 @@ async function resumeWaveGateAfter(
     const startReadiness = deriveWaveStartReadiness(graph, graph.tasks.filter((task) => task.wave === registration.input.wave));
     if (startReadiness.kind === "not-ready") return waveBlocked(handle, startReadiness.failures.join("; "));
 
-    if (graph.verification_manifest !== undefined) {
-      const ensured = await ensureWaveCompletionSuite({ handle, manager, graph, registration });
-      if (!ensured.ok) {
-        return {
-          ok: true,
-          action: {
-            kind: "blocked",
-            runId: handle.runId,
-            diagnostic: ensured.error.diagnostic,
-          },
-        };
-      }
-      if (ensured.value.disposition === "installed") return rederiveNext();
+    const ensured = await ensureWaveCompletionSuite({ handle, manager, graph, registration });
+    if (!ensured.ok) {
+      return {
+        ok: true,
+        action: {
+          kind: "blocked",
+          runId: handle.runId,
+          diagnostic: ensured.error.diagnostic,
+        },
+      };
     }
+    if (ensured.value.disposition === "installed") return rederiveNext();
 
     const issued = handle.readIssuedRequests();
     const captured = handle.readCapturedAttempts();

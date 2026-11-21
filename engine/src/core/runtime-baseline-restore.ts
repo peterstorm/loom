@@ -61,7 +61,6 @@ export type InFlightAttemptBaseline =
 export type RuntimeBaselineTask = Readonly<{
   id: string;
   active_implementation_attempt?: unknown;
-  legacy_execution_reservation?: true;
   attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
 }>;
 
@@ -69,13 +68,13 @@ export type RuntimeBaselineTask = Readonly<{
  * The attempt baseline fact one task contributes, or `null` when it has no
  * in-flight attempt (a task under review, say) and so no spawn to prove clean.
  * A stored baseline is recorded whatever the task's attempt shape; an active
- * or legacy-reserved attempt WITHOUT one is unrecorded.
+ * attempt WITHOUT one is unrecorded.
  */
 export function inFlightAttemptBaseline(task: RuntimeBaselineTask): InFlightAttemptBaseline | null {
   if (task.attempt_repository_baseline !== undefined) {
     return Object.freeze({ kind: "recorded", repositoryBaseline: task.attempt_repository_baseline });
   }
-  return task.active_implementation_attempt !== undefined || task.legacy_execution_reservation === true
+  return task.active_implementation_attempt !== undefined
     ? Object.freeze({ kind: "unrecorded", taskId: task.id })
     : null;
 }

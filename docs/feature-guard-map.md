@@ -59,13 +59,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 622 src files / ~175.9k lines TS; `engine/tests/` holds 945 TS files / ~265.9k lines (fixtures and helpers included), of which 830 test files are executed (806 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
-| `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
+| `engine/` | The engine: 621 src files / ~174.5k lines TS; `engine/tests/` holds 945 TS files / ~263.7k lines (fixtures and helpers included), of which 829 test files are executed (805 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 124 docs incl. **95 ADRs** (index test-enforced) | — |
+| `docs/` | 125 docs incl. **96 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -955,8 +955,8 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **830 executed test files / ~265.9k lines** — 806 under `engine/tests/` (945 TS files there
-  including fixtures and helpers; core 303 test files, handlers 196, pi 50,
+- **829 executed test files / ~263.7k lines** — 805 under `engine/tests/` (945 TS files there
+  including fixtures and helpers; core 303 test files, handlers 195, pi 50,
   linter 47, orchestration 37, utils 34, machine 30, acceptance 20, security 19, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
@@ -965,7 +965,7 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (95 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (96 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, review panel, standalone review, orchestration
   facades, Pi resources, task-graph validation — real CLI processes, not mocks.
@@ -1090,10 +1090,9 @@ only by omission from the table. Structural honesty, not a strength guarantee.
 A tool call with no `agent_id` in a session with multiple active subagents is neither
 recorded nor gated (sole-active stands down). Pi children run **without the live
 phase gate** — Pi cannot name a tool call's caller — so their gating is via write
-grants and evidence grants only. Legacy graphs may attribute via
-`inferSoleExecutingTask`, but such a guess settles only through untrusted legacy
-resolution and can never complete a Task (completion requires engine-minted attempt
-authority).
+grants and evidence grants only. An implementation result without engine-minted
+attempt authority settles nothing: every executing Task carries an attempt
+(ADR-0098), so no Task is ever guessed from the executing set.
 
 Narrowed since the first scan: a trusted failing run whose every failing file belongs
 to another in-flight Task of the same Wave is now attributed to that owner instead of
@@ -1438,7 +1437,7 @@ file-absence, runtime-baseline-restore.
 **handlers/helpers/** — the façades: orchestration (status/brief/inspect/start/resume/
 restart/… plus the audited mutations add-task, withdraw-task, add-dependency,
 rescope-task, adopt-engine-revision, adopt-engine-run-tests), programs/ (37
-per-program drivers), security-audit, populate-task-graph, complete-wave-gate,
+per-program drivers), security-audit, populate-task-graph, wave-gate-observers,
 complete-orchestration, accept-plan-design-review, mutation-check,
 store-*-findings, validate-task-graph, write-verification-manifest, run-tests,
 amend-spec, suggest-affected-runner, retro-facts, record-retro,

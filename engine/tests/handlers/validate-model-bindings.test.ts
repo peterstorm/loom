@@ -17,6 +17,7 @@ import { artifactDigestOfBytes, sha256Hex } from "../../src/core/digest";
 import { parsePlanExportBindings, parsePlanModels, type PlanInvariant, type PlanModels } from "../../src/core/parse-plan-models";
 import type { ContractProblem, InvariantOwnership, OwnershipProblem } from "../../src/types";
 import { invariantId } from "../fixtures/owner-obligation";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 function errorsOf(r: { ok: true } | { ok: false; errors: readonly string[] }): readonly string[] {
   return r.ok ? [] : r.errors;
@@ -701,6 +702,7 @@ describe("validate-task-graph handler integration (plan file on disk)", () => {
   function graphJson(planFile: unknown, fileList: string[]): string {
     return JSON.stringify({
       current_phase: "execute",
+      verification_manifest: legacyDefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       plan_title: "t",
@@ -813,6 +815,7 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",
+      verification_manifest: legacyDefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,
@@ -889,6 +892,7 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",
+      verification_manifest: legacyDefaultVerificationManifest(),
       phase_artifacts: { architecture: realPlan },
       skipped_phases: [],
       spec_file: null,
@@ -908,7 +912,7 @@ describe("validateFull path-field type checks", () => {
   it("rejects non-string spec_file and plan_title", async () => {
     const { validateFull } = await import("../../src/handlers/helpers/validate-task-graph");
     const base = {
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       plan_title: "t", plan_file: "p.md", spec_file: "s.md",
       tasks: [{ id: "T1", description: "x", agent: "code-implementer-agent", wave: 1, depends_on: [] }],
     };

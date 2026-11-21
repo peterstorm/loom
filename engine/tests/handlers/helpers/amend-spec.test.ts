@@ -16,6 +16,7 @@ import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { guardDecision } from "../../fixtures/guard-decision";
 import { specDefining } from "../../fixtures/spec-index-fixture";
 import { taskFixture } from "../../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const BEFORE = specDefining(["FR-001"], ["AS-001"]);
 const AFTER = BEFORE.replace("FR-001: System MUST satisfy FR-001", "FR-001: System MUST satisfy FR-001 within budget");
@@ -46,6 +47,7 @@ function fixture(proposed: string): Readonly<{ statePath: string; specFile: stri
   writeFileSync(statePath, JSON.stringify({
     spec_trace_version: 2,
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: specFile,

@@ -1142,9 +1142,8 @@ export function parseImplementationAttemptHistory(
 export type SettleableImplementationTask = Readonly<{
   id: string;
   status: "pending" | "implemented" | "completed" | "failed";
-  proof?: TaskProof;
+  proof: TaskProof;
   revalidation_required?: true;
-  legacy_missing_proof?: true;
   active_implementation_attempt?: ImplementationAttemptAuthority;
   implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }>;
@@ -1210,17 +1209,12 @@ function taskErrors(task: SettleableImplementationTask, supplied: Implementation
   const id = parseTaskId(task.id);
   if (!id.ok) errors.push(...id.error.errors);
   else if (id.value !== supplied.taskId) errors.push("Task id does not match supplied implementation authority");
-  if (task.legacy_missing_proof === true) errors.push("legacy-missing-proof Task cannot receive modern positive authority");
-  if (task.status === "pending" && task.proof === undefined) errors.push("pending Task must carry parser-derived Proof");
-  if (task.status === "failed" && task.proof?.state !== "failed") errors.push("failed Task must carry failed Proof");
-  if ((task.status === "implemented" || task.status === "completed") && task.proof?.state !== "satisfied" &&
-      task.legacy_missing_proof !== true) {
+  if (task.status === "failed" && task.proof.state !== "failed") errors.push("failed Task must carry failed Proof");
+  if ((task.status === "implemented" || task.status === "completed") && task.proof.state !== "satisfied") {
     errors.push("implementation-bearing modern Task must carry satisfied Proof");
   }
-  if (task.proof !== undefined) {
-    const proof = parseTaskProof(task.proof);
-    if (!proof.ok) errors.push(...proof.errors);
-  }
+  const proof = parseTaskProof(task.proof);
+  if (!proof.ok) errors.push(...proof.errors);
   return errors;
 }
 
@@ -1461,12 +1455,8 @@ export function settleImplementationAttempt(
   if (observation.value.kind !== "implementation-observed") {
     return completionError({ kind: "invalid-task", errors: ["observed evidence is unavailable without an infrastructure failure"] });
   }
-  const authoredProof = task.proof;
-  if (authoredProof === undefined) {
-    return completionError({ kind: "invalid-task", errors: ["settleable Task has no authored Proof"] });
-  }
   const proof = evaluateProofObligations(
-    authoredProof.obligations,
+    task.proof.obligations,
     observation.value.evidence,
     observation.value.proofEvaluationPolicy,
   );

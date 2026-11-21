@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import type { TaskGraph, Task, TaskStatus } from "../../../src/types";
 import { taskFixture, type TaskFixtureInput } from "../../fixtures/task-lifecycle";
 import { buildContextOutput, statusIcon } from "../../../src/handlers/session-start/resume-after-clear";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -30,6 +31,7 @@ function makeTask(overrides: Partial<TaskFixtureInput> = {}): Task {
 function makeGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: ".claude/specs/test/spec.md",
@@ -279,7 +281,7 @@ describe("buildContextOutput (pure)", () => {
   }
   function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
     return {
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       spec_file: ".claude/specs/x/spec.md", plan_file: ".claude/plans/x.md",
       tasks: [task()], wave_gates: {}, ...overrides,
     };

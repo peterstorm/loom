@@ -18,6 +18,7 @@ import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types
 import { contract, frozenPaths, surface } from "../fixtures/contract-status-fixtures";
 import { findingId } from "../fixtures/finding-id";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const SURFACE = surface("payload");
 const finding = (id: string, severity: "advisory" | "critical", file: string | null) =>
@@ -102,7 +103,7 @@ describe("status at the contract Wave's advisory pause", () => {
       review_status: "passed", findings: [advisory], critical_findings: [], advisory_findings: [advisory.claim],
     };
     const parsed = parseTaskGraph({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: "plan.md",
+      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: "plan.md",
       spec_check: {
         wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],

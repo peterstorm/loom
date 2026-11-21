@@ -94,8 +94,8 @@ export type EnsureWaveCompletionSuiteResult =
   | Readonly<{
       ok: true;
       value: Readonly<{
-        kind: "legacy" | "accepted";
-        disposition: "not-required" | "reused" | "installed";
+        kind: "accepted";
+        disposition: "reused" | "installed";
         currentWaveWorkspace: WaveWorkspaceObservation;
       }>;
     }>
@@ -837,8 +837,8 @@ export async function ensureWaveCompletionSuite(
   const { handle, manager, registration } = input;
   let graph = input.graph;
   if (graph.verification_manifest === undefined) {
-    const currentWaveWorkspace = observeCurrentWaveWorkspace(graph, handle.runDirectory);
-    return freeze({ ok: true, value: freeze({ kind: "legacy", disposition: "not-required", currentWaveWorkspace }) });
+    const current = observeCurrentWaveWorkspace(graph, handle.runDirectory);
+    return blocked(current, ["authority"], [], "the TaskGraph carries no frozen verification_manifest to run a completion suite by");
   }
 
   const repository = completionRepositoryAuthority(handle, manager);

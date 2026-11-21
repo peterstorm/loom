@@ -1,19 +1,16 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import updateTaskStatus, { isMachineBound } from "../../src/handlers/subagent-stop/update-task-status";
+import updateTaskStatus, { isMachineBound, runUpdateTaskStatus } from "../../src/handlers/subagent-stop/update-task-status";
 import { resolveTestEvidence } from "../../src/core/implementation-evidence";
 import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completion";
 import { extractTestEvidence, type TestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
-import { captureDeclaredArtifactBaseline } from "../../src/utils/declared-artifact-snapshot";
-import { derivePendingTaskProof } from "../../src/core/proof-obligations";
-import { StateManager } from "../../src/state-manager";
+import { parseTaskGraph } from "../../src/state-file-wire";
+import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
+import { ARMED_ARTIFACT, armedClaudeImplementation, writesTranscript } from "../fixtures/claude-implementation-attempt";
 
 describe("update-task-status — malformed stdin guard (directly-registered route)", () => {
   it("returns a contextual error naming that status/evidence was NOT updated, not a bare throw", async () => {
@@ -647,292 +644,123 @@ describe("update-task-status — transcript path resolution", () => {
     for (const undo of cleanup.splice(0)) undo();
   });
 
-  /**
-   * A session with a task graph, a bound state pointer, and — when asked — a
-   * transcript planted exactly where the harness writes one.
-   */
-  async function makeSession(opts: {
-    plantTranscript: boolean;
-    modifiedPath?: string;
-    transcriptTaskId?: string;
-    failedReview?: boolean;
-    executingTasks?: readonly string[];
-    proof?: TaskGraph["tasks"][number]["proof"];
-  }): Promise<{
-    session: string;
-    agentId: string;
-    read: () => TaskGraph;
-  }> {
-    const { SUBAGENT_DIR } = await import("../../src/config");
-    const { projectSlug } = await import("../../src/utils/agent-transcript-path");
-    const stamp = `${process.pid}${Date.now()}${Math.random().toString(36).slice(2)}`;
-    const session = `uts-${stamp}`;
-    const agentId = `a${stamp}`;
+  /** Regression waived, new tests waived: the declared-artifact obligation alone decides. */
+  const ARTIFACT_ONLY = {
+    regression: { kind: "waived" as const, reason: "documentation-only" as const },
+    newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+  };
 
-    const tmpRoot = join(tmpdir(), `uts-${stamp}`);
-    mkdirSync(tmpRoot, { recursive: true });
-    // macOS tmpdir() sits behind /var → /private/var; the anchored primitives
-    // resolve the base once, so the fixture root must be canonical too.
-    const tmpDir = realpathSync.native(tmpRoot);
-    const configDir = join(tmpDir, "config");
-    mkdirSync(configDir, { recursive: true });
-    const statePath = opts.modifiedPath
-      ? join(tmpDir, ".claude", "state", "active_task_graph.json")
-      : join(tmpDir, "graph.json");
-    // The State File and modified artifact must belong to the SAME project;
-    // ambient CLAUDE_PROJECT_DIR is not settlement authority. Keep this
-    // no-op Write scenario in an isolated repository instead of pointing a
-    // temp State File at this checkout's source bytes.
-    const projectDir = opts.modifiedPath ? tmpDir : join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    if (opts.modifiedPath) {
-      mkdirSync(join(tmpDir, ".claude", "state"), { recursive: true });
-      mkdirSync(join(tmpDir, "engine", "src"), { recursive: true });
-      writeFileSync(join(tmpDir, "engine", "src", "types.ts"), readFileSync(opts.modifiedPath));
-      execFileSync("git", ["init", "-q"], { cwd: tmpDir });
-      execFileSync("git", ["add", "engine/src/types.ts"], { cwd: tmpDir });
-      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "-qm", "baseline"], { cwd: tmpDir });
-    }
-    const artifactBaseline = opts.modifiedPath
-      ? captureDeclaredArtifactBaseline(tmpDir, ["engine/src/types.ts"])
-      : undefined;
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute",
-      phase_artifacts: {},
-      skipped_phases: [],
-      spec_file: null,
-      plan_file: null,
-      current_wave: 1,
-      executing_tasks: opts.executingTasks ?? [],
-      tasks: [
-        {
-          id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [],
-          ...(opts.proof === undefined ? {} : { proof: opts.proof }),
-          ...(opts.failedReview ? {
-            review_status: "evidence_capture_failed",
-            review_error: "review transcript missing evidence",
-            review_evidence_failures: ["code-reviewer"],
-          } : {}),
-          ...(opts.modifiedPath ? {
-            file_list: ["engine/src/types.ts"],
-            artifact_baseline: artifactBaseline,
-          } : {}),
-        },
-        ...((opts.executingTasks ?? []).includes("T2") ? [{
-          id: "T2", description: "concurrent task", agent: "code-implementer-agent",
-          status: "pending", wave: 1, depends_on: [],
-        }] : []),
-      ],
-      wave_gates: {},
-    }));
-
-    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
-    writeFileSync(pointer, statePath);
-
-    if (opts.plantTranscript) {
-      const dir = join(configDir, "projects", projectSlug(projectDir), session, "subagents");
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(
-        join(dir, `agent-${agentId}.jsonl`),
-        JSON.stringify({
-          type: "assistant",
-          message: { content: [
-            { type: "text", text: `**Task ID:** ${opts.transcriptTaskId ?? "T1"}\n\nImplemented the thing.` },
-            ...(opts.modifiedPath
-              ? [{ type: "tool_use", name: "Write", input: { file_path: join(tmpDir, "engine", "src", "types.ts") } }]
-              : []),
-          ] },
-        }) + "\n",
-      );
-    }
-
-    const prevConfig = process.env.CLAUDE_CONFIG_DIR;
-    const prevProject = process.env.CLAUDE_PROJECT_DIR;
-    process.env.CLAUDE_CONFIG_DIR = configDir;
-    process.env.CLAUDE_PROJECT_DIR = projectDir;
-
-    cleanup.push(() => {
-      if (prevConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-      else process.env.CLAUDE_CONFIG_DIR = prevConfig;
-      if (prevProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
-      else process.env.CLAUDE_PROJECT_DIR = prevProject;
-      rmSync(tmpDir, { recursive: true, force: true });
-      rmSync(pointer, { force: true });
-    });
-
-    return { session, agentId, read: (): TaskGraph => JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph };
+  /** An exact attempt for T1 whose transcript the test plants or withholds. */
+  async function armed(label: string, seed?: (graph: TaskGraph) => TaskGraph) {
+    const attempt = await armedClaudeImplementation({ label, verificationPolicy: ARTIFACT_ONLY, ...(seed ? { seed } : {}) });
+    cleanup.push(attempt.dispose);
+    const read = (): TaskGraph => {
+      const raw: unknown = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
+      const parsed = parseTaskGraph(raw);
+      if (!parsed.ok) throw new Error(parsed.error);
+      return parsed.value;
+    };
+    return { ...attempt, read };
   }
 
-  it("resolves the task from the DERIVED transcript when the payload names none", async () => {
-    const s = await makeSession({ plantTranscript: true, executingTasks: ["T1"] });
-
-    const result = await updateTaskStatus(JSON.stringify({
-      session_id: s.session,
-      agent_id: s.agentId,
-      agent_type: "code-implementer-agent",
-      // No agent_transcript_path — exactly what the harness sends.
-    }), []);
-
-    expect(result.kind).toBe("passthrough");
-    const task = s.read().tasks.find((t) => t.id === "T1");
-    expect(task?.status, "untrusted transcript evidence must not claim implementation").toBe("pending");
-    expect(task?.proof?.state).toBe("failed");
+  /** The stop stdin the harness sends: no agent_transcript_path. */
+  const derivedStop = (attempt: Readonly<{ sessionId: string; agentId: string }>) => JSON.stringify({
+    session_id: attempt.sessionId, agent_id: attempt.agentId, agent_type: "code-implementer-agent",
   });
 
-  it("fails loudly when the transcript names a task outside the graph", async () => {
-    const s = await makeSession({ plantTranscript: true, transcriptTaskId: "T999" });
+  it("resolves the attempt's transcript from the DERIVED location when the payload names none", async () => {
+    const attempt = await armed("derived");
+    const { projectSlug } = await import("../../src/utils/agent-transcript-path");
+    const configDir = join(attempt.root, ".claude", "config");
+    const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    cleanup.push(() => {
+      if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfig;
+    });
+    const dir = join(configDir, "projects", projectSlug(attempt.root), attempt.sessionId, "subagents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `agent-${attempt.agentId}.jsonl`), writesTranscript("Implemented the thing.", [ARMED_ARTIFACT]));
+    writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
 
-    const result = await updateTaskStatus(JSON.stringify({
-      session_id: s.session,
-      agent_id: s.agentId,
-      agent_type: "code-implementer-agent",
-    }), []);
+    // No agent_transcript_path — exactly what the harness sends.
+    const result = await runUpdateTaskStatus(derivedStop(attempt), [], { kind: "snapshot", events: [] }, attempt.observation);
 
-    expect(result.kind).toBe("error");
-    if (result.kind === "error") {
-      expect(result.message).toContain("unknown task T999");
-      expect(result.message).toContain("known tasks: T1");
-      expect(result.message).toContain("evidence was NOT stored");
-    }
-    expect(s.read().tasks[0]?.status).toBe("pending");
-  });
+    expect(result.kind, JSON.stringify(result)).toBe("passthrough");
+    const task = attempt.read().tasks.find((t) => t.id === "T1");
+    expect(task?.status).toBe("implemented");
+    expect(task?.files_modified).toEqual([ARMED_ARTIFACT]);
+  }, 30_000);
 
   it("canonicalizes transcript paths but does not treat an attempted no-op Write as artifact proof", async () => {
-    const s = await makeSession({
-      plantTranscript: true,
-      modifiedPath: join(dirname(fileURLToPath(import.meta.url)), "../../src/types.ts"),
-      failedReview: true,
-      executingTasks: ["T1"],
-    });
+    const attempt = await armed("no-op-write");
+    // An absolute path to the artifact whose bytes the Agent never changed.
+    writeFileSync(attempt.transcript, writesTranscript("Implemented the thing.", [join(attempt.root, ARMED_ARTIFACT)]));
 
-    const result = await updateTaskStatus(JSON.stringify({
-      session_id: s.session,
-      agent_id: s.agentId,
-      agent_type: "code-implementer-agent",
-    }), []);
+    const result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: [] }, attempt.observation);
 
-    expect(result.kind).toBe("passthrough");
-    const task = s.read().tasks.find((candidate) => candidate.id === "T1");
-    expect(task?.files_modified).toEqual(["engine/src/types.ts"]);
-    expect(task?.review_status).toBe("pending");
-    expect(task?.review_error).toBeUndefined();
-    expect(task?.review_evidence_failures).toBeUndefined();
+    expect(result.kind, JSON.stringify(result)).toBe("passthrough");
+    const task = attempt.read().tasks.find((candidate) => candidate.id === "T1");
+    // The absolute path canonicalizes inside the repository (an unsafe path
+    // would settle an infrastructure receipt), and the byte observation, not
+    // the claimed Write, decides what changed: nothing.
+    expect(task?.status).toBe("pending");
+    expect(task?.files_modified).toEqual([]);
     expect(task?.proof?.obligations).toContainEqual({
       kind: "declared-artifact-changed",
-      artifact: "engine/src/types.ts",
+      artifact: ARMED_ARTIFACT,
     });
     expect(task?.proof?.results).toContainEqual(expect.objectContaining({
       state: "failed",
-      failure: { kind: "declared-artifact-not-changed", artifact: "engine/src/types.ts" },
+      failure: { kind: "declared-artifact-not-changed", artifact: ARMED_ARTIFACT },
     }));
-  });
+  }, 30_000);
 
-  it("quarantines the sole proof-bearing executing Task when its resolved transcript becomes unreadable", async () => {
-    const proof = derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] });
-    const s = await makeSession({ plantTranscript: false, executingTasks: ["T1"], proof });
-    expect(s.read().tasks[0]?.proof).toEqual(proof);
-    const unreadableTranscript = canonicalTempDir("loom-unreadable-transcript-");
-    try {
-      const result = await updateTaskStatus(JSON.stringify({
-        session_id: s.session,
-        agent_id: s.agentId,
-        agent_type: "code-implementer-agent",
-        agent_transcript_path: unreadableTranscript,
-      }), []);
+  it("settles a non-consuming infrastructure receipt when the attempt's transcript is unreadable", async () => {
+    const attempt = await armed("unreadable");
+    // A directory where the transcript should be: reading it fails.
+    mkdirSync(attempt.transcript, { recursive: true });
 
-      expect(result).toMatchObject({
-        kind: "error",
-        message: expect.stringContaining("cannot read transcript"),
-      });
-      if (result.kind === "error") expect(result.message).toContain("quarantined T1");
-      expect(s.read().executing_tasks).toEqual([]);
-      expect(s.read().tasks[0]).toMatchObject({ status: "pending", revalidation_required: true });
-    } finally {
-      rmSync(unreadableTranscript, { recursive: true, force: true });
-    }
-  });
+    const result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: [] }, attempt.observation);
 
-  it("uses locked execution authority when an unreadable transcript races with a sibling reservation", async () => {
-    const initial = await makeSession({ plantTranscript: false, executingTasks: ["T1"] });
-    const unreadableTranscript = canonicalTempDir("loom-racing-transcript-");
-    let persisted = initial.read();
-    const lockedState: TaskGraph = { ...persisted, executing_tasks: ["T1", "T2"] };
-    const manager = {
-      load: vi.fn(() => persisted),
-      update: vi.fn(async (fn: (state: TaskGraph) => TaskGraph) => {
-        persisted = fn(lockedState);
-      }),
-      updateAndReturn: vi.fn(async <T>(
-        fn: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
-      ): Promise<T> => {
-        const transition = fn(lockedState);
-        persisted = transition.state;
-        return transition.value;
-      }),
-    } as unknown as StateManager;
-    const managerSpy = vi.spyOn(StateManager, "fromSession").mockReturnValue(manager);
-    try {
-      const result = await updateTaskStatus(JSON.stringify({
-        session_id: initial.session,
-        agent_id: initial.agentId,
-        agent_type: "code-implementer-agent",
-        agent_transcript_path: unreadableTranscript,
-      }), []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("Claude transcript unreadable"),
+    });
+    if (result.kind === "error") expect(result.message).toContain("T1 received an exact non-consuming infrastructure Oracle receipt");
+    const graph = attempt.read();
+    expect(graph.executing_tasks).toEqual([]);
+    expect(graph.tasks[0]).toMatchObject({ status: "pending", revalidation_required: true });
+  }, 30_000);
 
-      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("ambiguous") });
-      expect(manager.updateAndReturn).toHaveBeenCalledOnce();
-      expect(persisted.executing_tasks).toEqual(["T1", "T2"]);
-      expect(persisted.tasks[0]?.revalidation_required).toBeUndefined();
-    } finally {
-      managerSpy.mockRestore();
-      rmSync(unreadableTranscript, { recursive: true, force: true });
-    }
-  });
-
-  it("preserves ambiguous execution authority when an unreadable transcript binds no Task", async () => {
-    const s = await makeSession({ plantTranscript: false, executingTasks: ["T1", "T2"] });
-    const unreadableTranscript = canonicalTempDir("loom-ambiguous-transcript-");
-    try {
-      const result = await updateTaskStatus(JSON.stringify({
-        session_id: s.session,
-        agent_id: s.agentId,
-        agent_type: "code-implementer-agent",
-        agent_transcript_path: unreadableTranscript,
-      }), []);
-
-      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("ambiguous") });
-      expect(s.read().executing_tasks).toEqual(["T1", "T2"]);
-      expect(s.read().tasks[0]?.revalidation_required).toBeUndefined();
-    } finally {
-      rmSync(unreadableTranscript, { recursive: true, force: true });
-    }
-  });
-
-  it("errors out loud when nothing was recorded and there is no execution authority", async () => {
-    const s = await makeSession({ plantTranscript: false });
+  it("names the no-op when a stop carries no attempt authority and nothing is executing", async () => {
+    const statePath = join(canonicalTempDir("loom-uts-idle-"), "graph.json");
+    cleanup.push(() => rmSync(dirname(statePath), { recursive: true, force: true }));
+    writeFileSync(statePath, JSON.stringify(graphFixture([
+      taskFixture({ id: "T1", description: "a task", agent: "code-implementer-agent", wave: 1, depends_on: [] }),
+    ])));
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const session = `uts-idle-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    cleanup.push(() => rmSync(pointer, { force: true }));
+    const before = readFileSync(statePath);
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     let text = "";
     try {
       const result = await updateTaskStatus(JSON.stringify({
-        session_id: s.session,
-        agent_id: s.agentId,
-        agent_type: "code-implementer-agent",
+        session_id: session, agent_id: "a-1", agent_type: "code-implementer-agent",
       }), []);
-      expect(result).toMatchObject({
-        kind: "error",
-        message: expect.stringContaining("attribution unavailable"),
-      });
+      expect(result.kind).toBe("passthrough");
       text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     } finally {
       stderrSpy.mockRestore();
     }
 
     expect(text, "a no-op this consequential must never be silent").toContain("code-implementer-agent");
-    expect(text).toContain("task status was NOT recorded");
-    expect(text).toContain("no transcript found");
-    expect(text).toContain("executing_tasks is empty");
-    expect(s.read().tasks.find((t) => t.id === "T1")?.status).toBe("pending");
+    expect(text).toContain("stopped without implementation attempt authority and no Task is executing; nothing was settled");
+    expect(readFileSync(statePath).equals(before)).toBe(true);
   });
 });

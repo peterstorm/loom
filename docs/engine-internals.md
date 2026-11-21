@@ -86,6 +86,8 @@ It holds the phase, phase artifacts, skipped phases, the plan/spec bindings, Tas
 | `spec_file`, `plan_file` | `null` (`spec_file` set at once with `--skip-specify`) | Recorded when the phase artifact appears |
 | `tasks`, `wave_gates` | `[]`, `{}` | Installed by `populate-task-graph` |
 
+**Legacy shapes are refused at load** (ADR-0098). `parseTaskGraph` refuses, with one operator message naming the shape, a State File only a retired engine writes: an executing Task without `active_implementation_attempt`, an `implemented` or `completed` Task without a frozen `proof`, an `execute`-phase graph without `verification_manifest`, a Task carrying a field replaced long ago, and a `wave_gate_history` entry archived without a Wave completion suite. The way forward is to finish the run on the engine that wrote it, or to re-populate from the spec and plan.
+
 Task status moves `pending` → `implemented` (attempt satisfies proof + the Task-local suite) → `completed` (its Wave Gate passed). A Task stays `pending` through infrastructure blocks, a failed attempt 1 (one retry), and a failed attempt 2 (terminal escalation; there is no attempt 3).
 
 **Protection is layered** ([Operations §Protected state rules](operations.md#protected-state-rules)):
@@ -402,7 +404,7 @@ Bash-side, always armed during a run: `guard-state-file`, `guard-subagent-author
 
 A Claude Code agent that ended with a delivered `SubagentHandback` is never blocked (the harness would not keep it working; the dispatcher turns the block into a note and settles). Fail-open notes are written to `<LOOM_SUBAGENT_DIR>/<session>.<agent>.stop-check-note.json` and surfaced to the orchestrating session by the `surface-stop-check-notes` PostToolUse hook (renamed before read, so never delivered twice).
 
-**6.8.5 Completion of a Task — the settlement.** A Task reaches `implemented` only when **proof obligations are satisfied** and the **Implementation Completion Oracle accepts an exact Task Completion Suite for the engine-issued attempt** (`update-task-status` at SubagentStop). Completion prose, a guessed Task id, and an unreserved harness result are cleanup evidence only.
+**6.8.5 Completion of a Task — the settlement.** A Task reaches `implemented` only when **proof obligations are satisfied** and the **Implementation Completion Oracle accepts an exact Task Completion Suite for the engine-issued attempt** (`update-task-status` at SubagentStop). Completion prose settles nothing, and neither does a harness result without engine-issued attempt authority: no Task is guessed (ADR-0098).
 
 Proof obligations, per the Task's `verification_policy` (independent `regression` and `new_tests` arms, each `required` or `waived` with a typed reason — e.g. `existing-tests-sufficient`, `documentation-only`; neither waives declared-artifact proof or review):
 

@@ -218,8 +218,7 @@ export type ImplementationBriefError =
   | Readonly<{ kind: "predecessor-output-unavailable"; message: string }>
   | Readonly<{ kind: "residual-placeholders"; message: string }>
   | Readonly<{ kind: "task-id-binding"; message: string }>
-  | Readonly<{ kind: "test-file-classification-unavailable"; message: string }>
-  | Readonly<{ kind: "red-then-green-proof-unfrozen"; message: string }>;
+  | Readonly<{ kind: "test-file-classification-unavailable"; message: string }>;
 
 const refused = (kind: ImplementationBriefError["kind"], message: string): DomainResult<never, ImplementationBriefError> =>
   canonicalRecord({ ok: false as const, error: canonicalRecord({ kind, message }) });
@@ -899,7 +898,7 @@ function createdFilesRed(created: readonly string[]): string {
 
 /** Why a brief cannot state I6: the duty's own named disagreement. */
 type RedThenGreenSectionRefusal = Readonly<{
-  kind: Extract<ImplementationBriefError["kind"], "test-file-classification-unavailable" | "red-then-green-proof-unfrozen">;
+  kind: Extract<ImplementationBriefError["kind"], "test-file-classification-unavailable">;
   message: string;
 }>;
 
@@ -922,8 +921,6 @@ function redThenGreenSection(
       return { ok: true, value: null };
     case "classification-unfrozen":
       return { ok: false, error: { kind: "test-file-classification-unavailable", message: `${duty.reason}, so the brief cannot name its test files` } };
-    case "proof-unfrozen":
-      return { ok: false, error: { kind: "red-then-green-proof-unfrozen", message: duty.reason } };
     case "owed":
       break;
     default: {

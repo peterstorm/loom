@@ -5,6 +5,7 @@ import {
   buildTaskLocalByteObservation,
   describeSettlement,
   INFRASTRUCTURE_REASON_LIMIT,
+  isWaveComplete,
   NAMED_SCOPE_VIOLATION_PATHS,
   NO_ENGINE_SKELETONS,
   normalizeImplementationEvidence,
@@ -29,6 +30,7 @@ import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdic
 import { authorizeImplementationSpawn, deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import type { Task, TaskGraph } from "../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../src/types";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const digest = (value: string) => value.repeat(64).slice(0, 64);
 const baseline = (path: string, value: string | null) => [{
@@ -102,6 +104,7 @@ function pendingTask(
 function graph(task: Task): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -961,5 +964,40 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       observedBytes(attempt),
     ));
     expect(result.transition.kind).toBe("implemented");
+  });
+});
+
+describe("isWaveComplete — the wave-completion predicate shared by engine and pi (round-16)", () => {
+  const waveTask = (id: string, wave: number, status: "pending" | "failed" | "implemented" | "completed"): Task =>
+    taskFixture({ id, description: "impl", agent: "code-implementer-agent", wave, status, depends_on: [] });
+  const waveGraph = (tasks: readonly Task[]): TaskGraph => ({
+    current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    current_wave: 1,
+    tasks: [...tasks],
+    wave_gates: {},
+  });
+
+  it("complete when every wave task is implemented or completed", () => {
+    const state = waveGraph([
+      waveTask("T1", 1, "implemented"),
+      waveTask("T2", 1, "completed"),
+      waveTask("T3", 2, "pending"), // other wave: ignored
+    ]);
+    expect(isWaveComplete(state, 1)).toBe(true);
+  });
+
+  it("incomplete while any wave task is pending or failed", () => {
+    for (const status of ["pending", "failed"] as const) {
+      expect(isWaveComplete(waveGraph([waveTask("T1", 1, "implemented"), waveTask("T2", 1, status)]), 1)).toBe(false);
+    }
+  });
+
+  it("a wave with no tasks counts as complete (long-standing inlined semantics, now pinned)", () => {
+    expect(isWaveComplete(waveGraph([waveTask("T1", 1, "pending")]), 7)).toBe(true);
   });
 });

@@ -610,13 +610,6 @@ describe("an unreadable ledger is an infrastructure failure, never a semantic re
 
 // --- One answer to "does this Task owe I6" ---
 
-/** The Task with no frozen Proof: what a hand-edited or partially migrated
- *  State File can still carry on a pending Task. */
-const withoutProof = (task: Task): Task => {
-  const { proof: _frozen, ...rest } = task;
-  return rest as Task;
-};
-
 const withTask = (graph: TaskGraph, task: Task): TaskGraph =>
   ({ ...graph, tasks: graph.tasks.map((candidate) => candidate.id === task.id ? task : candidate) });
 
@@ -643,41 +636,6 @@ describe("redThenGreenDuty: the frozen Proof decides, and every disagreement is 
       reason: "T1 owes red-then-green but its TaskGraph freezes no test-file classification",
     });
   });
-
-  it("names a Task with no frozen Proof in an I6-era TaskGraph instead of reading it as not owed", () => {
-    const graph = i6Graph();
-    expect(redThenGreenDuty(withoutProof(taskOf(graph, "T1")), graph.verification_manifest)).toEqual({
-      kind: "proof-unfrozen",
-      reason: "T1 carries no frozen Proof, but its TaskGraph's I6 era owes red-then-green for a Task that requires new tests",
-    });
-  });
-
-  it("reads a proof-less Task as not owed when its era or its waiver owes no I6", () => {
-    const preFeature = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], preFeatureManifest());
-    expect(redThenGreenDuty(withoutProof(taskOf(preFeature, "T1")), preFeature.verification_manifest)).toEqual({ kind: "not-owed" });
-    const claimant = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL], "claimant")], i6RunnerManifest());
-    expect(redThenGreenDuty(withoutProof(taskOf(claimant, "T1")), claimant.verification_manifest)).toEqual({ kind: "not-owed" });
-  });
-
-  it.each(TRANSPORTS)("refuses on %s to settle a proof-less Task an I6-era TaskGraph obligates, under any ledger", (transport) => {
-    const graph = i6Graph();
-    const proofless = withTask(graph, withoutProof(taskOf(graph, "T1")));
-    for (const ledger of [
-      harnessLedgers([write(LEDGER_TEST), red(), write(LEDGER_IMPL), green()])[LEDGER_KEY[transport]],
-      { kind: "unreadable", reason: "ledger file is corrupt" } as const,
-    ]) {
-      const settled = settle(proofless, "T1", ledger, { transport });
-      expect(settled).not.toHaveProperty("infrastructureReason");
-      expect(settled.application).toMatchObject({
-        kind: "error",
-        error: { kind: "invalid-task", errors: [expect.stringMatching(/T1 carries no frozen Proof, but its TaskGraph's I6 era owes red-then-green/)] },
-      });
-      // A refusal changes nothing: the reservation stands and no receipt is written.
-      const task = taskOf(settled.application.state, "T1");
-      expect(task.active_implementation_attempt).toBeDefined();
-      expect(task.implementation_attempt_history).toBeUndefined();
-    }
-  });
 });
 
 // --- Stored-evidence reconcile (INV-6 sibling) ---
@@ -696,7 +654,7 @@ describe("reconcileTaskFromStoredEvidence carries a satisfied I6 result forward 
 
   it("FR-012: keeps the earlier satisfied red-then-green evidence when another obligation is repaired", () => {
     const { graph, task } = failedOnNewTests();
-    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, false, graph.verification_manifest, CONFORMANCE_NOT_OWED);
+    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, graph.verification_manifest, CONFORMANCE_NOT_OWED);
     expect(reconciled.proof?.state).toBe("satisfied");
     expect(reconciled.proof?.state === "satisfied" ? reconciled.proof.evidence : []).toContainEqual({
       kind: "red-then-green",
@@ -710,7 +668,7 @@ describe("reconcileTaskFromStoredEvidence carries a satisfied I6 result forward 
     const settled = settle(i6Graph(), "T1", harnessLedgers([write(LEDGER_IMPL), green()]).claude);
     if (settled.application.kind !== "applied") throw new Error("fixture settlement must apply");
     const graph = settled.application.state;
-    const reconciled = reconcileTaskFromStoredEvidence(taskOf(graph, "T1"), changed, written, false, graph.verification_manifest, CONFORMANCE_NOT_OWED);
+    const reconciled = reconcileTaskFromStoredEvidence(taskOf(graph, "T1"), changed, written, graph.verification_manifest, CONFORMANCE_NOT_OWED);
     expect(reconciled.proof).toMatchObject({
       state: "failed",
       failures: expect.arrayContaining([{ kind: "red-then-green-unproven", gap: { kind: "ledger-unavailable" } }]),
@@ -721,23 +679,16 @@ describe("reconcileTaskFromStoredEvidence carries a satisfied I6 result forward 
     const graph = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], preFeatureManifest());
     const task: Task = { ...taskOf(graph, "T1"), test_result: { verdict: "trusted-pass" } } as Task;
     for (const manifest of [graph.verification_manifest, undefined]) {
-      const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, false, manifest, CONFORMANCE_NOT_OWED);
+      const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, manifest, CONFORMANCE_NOT_OWED);
       expect(reconciled.proof?.obligations.map(({ kind }) => kind)).not.toContain("red-then-green");
     }
   });
 
   it("keeps a frozen red-then-green obligation even when handed a manifest with no classification, so I6 is never silently dropped", () => {
     const { task } = failedOnNewTests();
-    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, false, undefined, CONFORMANCE_NOT_OWED);
+    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, undefined, CONFORMANCE_NOT_OWED);
     expect(reconciled.proof?.obligations.map(({ kind }) => kind)).toContain("red-then-green");
     expect(reconciled.proof?.state).toBe("satisfied");
-  });
-
-  it("refuses a proof-less Task an I6-era TaskGraph obligates instead of failing it as ledger-unavailable", () => {
-    const graph = i6Graph();
-    const proofless = { ...withoutProof(taskOf(graph, "T1")), test_result: { verdict: "trusted-pass" } } as Task;
-    expect(() => reconcileTaskFromStoredEvidence(proofless, changed, written, false, graph.verification_manifest, CONFORMANCE_NOT_OWED))
-      .toThrow(/T1 carries no frozen Proof, but its TaskGraph's I6 era owes red-then-green/);
   });
 });
 
@@ -832,16 +783,6 @@ describe("the implementation brief states I6 up front and names the repair on re
     const graph = i6Graph();
     const rendered = renderImplementationBrief(briefInput(graph, taskOf(graph, "T1"), { verificationManifest: undefined }));
     expect(rendered).toMatchObject({ ok: false, error: { kind: "test-file-classification-unavailable" } });
-  });
-
-  it("refuses the brief of a proof-less Task an I6-era TaskGraph obligates, naming the missing frozen Proof", () => {
-    const graph = i6Graph();
-    const owing = taskOf(graph, "T1");
-    const rendered = renderImplementationBrief({ ...briefInput(graph, owing), task: withoutProof(owing) });
-    expect(rendered).toMatchObject({
-      ok: false,
-      error: { kind: "red-then-green-proof-unfrozen", message: expect.stringMatching(/T1 carries no frozen Proof/) },
-    });
   });
 
   it("step 2 exempts the baseline git restore from the first implementation write, as the minting rule does", () => {

@@ -47,6 +47,8 @@ import { deriveAgentTranscriptPath } from "../../src/utils/agent-transcript-path
 import { parseTaskGraph } from "../../src/state-manager";
 import type { Task } from "../../src/types";
 import { fixFull, validateFull } from "../../src/handlers/helpers/validate-task-graph";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 
 // ---------------------------------------------------------------------------
 // C3 — the repair the load boundary recommends has to actually work
@@ -124,18 +126,16 @@ describe("deduplicateFindingIds restores the postcondition it exists for", () =>
         (ordinals) => {
           const graph = {
             current_phase: "execute",
+            verification_manifest: legacyDefaultVerificationManifest(),
             phase_artifacts: {},
             plan_title: "t",
             plan_file: ".claude/plans/p.md",
             spec_file: ".claude/specs/s/spec.md",
             tasks: [{
-              id: "T1",
-              description: "d",
-              agent: "code-implementer-agent",
-              wave: 1,
-              status: "implemented",
-              depends_on: [],
-              new_tests_required: false,
+              ...taskFixture({
+                id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
+                status: "implemented", depends_on: [], new_tests_required: false,
+              }),
               findings: ordinals.map((n, i) => one("code-reviewer", n, `claim ${i}`)),
             }],
           };
@@ -158,7 +158,7 @@ describe("applyFindingOutcomes derives the views rather than subtracting from th
   const claims = (severity: "critical" | "advisory", texts: readonly string[]): Task => {
     const base: Task = {
       id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-      status: "implemented", legacy_missing_proof: true, depends_on: [], review_status: "pending",
+      status: "implemented", proof: satisfiedProof([]), depends_on: [], review_status: "pending",
     };
     return mergeFindings(
       base,
@@ -232,7 +232,7 @@ describe("applyFindingOutcomes derives the views rather than subtracting from th
           const start = mergeFindings(
             {
               id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-              status: "implemented", legacy_missing_proof: true, depends_on: [], review_status: "pending",
+              status: "implemented", proof: satisfiedProof([]), depends_on: [], review_status: "pending",
             },
             {
               drafts: specs.map((s) => ({
@@ -287,10 +287,11 @@ describe("view-only claims that cannot be given identity are reported, not vanis
   it("--fix emits an operator note naming the dropped claim and its consequence", () => {
     const repaired = fixFull({
       current_phase: "execute",
+      verification_manifest: legacyDefaultVerificationManifest(),
       phase_artifacts: {},
       tasks: [{
         id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", depends_on: [], new_tests_required: false,
+        status: "implemented", proof: satisfiedProof([]), depends_on: [], new_tests_required: false,
         critical_findings: ["none"],
       }],
     });
@@ -478,6 +479,7 @@ describe("chooseSource keeps claim identity and marker severity in lockstep", ()
 describe("the load boundary proves wave_gates and spec_check, not just tasks", () => {
   const graph = (extra: Record<string, unknown>) => ({
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     tasks: [],
     ...extra,

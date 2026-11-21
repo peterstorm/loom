@@ -14,6 +14,7 @@ import type { EngineRevision, EngineRevisionPin } from "../../../src/types";
 import { engineRevisionOf } from "../../../src/core/engine-revision-pin";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const OTHER = engineRevisionOf(`sha256:${"0".repeat(64)}`);
 const RUNNING = engineRevisionOf(runningEngineIdentity().revision);
@@ -35,7 +36,7 @@ function installState(pin?: EngineRevisionPin): string {
   const statePath = join(root, ".claude", "state", "active_task_graph.json");
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   writeFileSync(statePath, JSON.stringify({
-    current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
+    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
     executing_tasks: [], wave_gates: {}, tasks: [],
     ...(pin === undefined ? {} : { engine_revision: pin }),
   }));

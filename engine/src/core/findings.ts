@@ -1898,7 +1898,7 @@ function localFindingId(briefId: string, taskId: string): string {
  * is never promoted — nothing was adjudicated there.
  *
  * (`store-review-findings` — the manual operator override — and
- * `complete-wave-gate`'s advancement also write `passed`. Neither adjudicates a
+ * the Wave Gate completion's advancement also write `passed`. Neither adjudicates a
  * finding; they replace the review record and close out a verified wave.)
  */
 export function applyFindingOutcomes(

@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { parseTaskGraph } from "../src/state-manager";
 import { derivePendingTaskProof, type TaskProof } from "../src/core/proof-obligations";
 import type { VerificationPolicy } from "../src/core/verification-policy";
+import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
 
 const ATTESTED_POLICY: VerificationPolicy = Object.freeze({
   regression: Object.freeze({ kind: "required" as const }),
@@ -39,6 +40,7 @@ const attestationProof = (artifacts: readonly string[] = ["src/a.ts"], policy = 
 
 const graphWith = (task: Record<string, unknown>): unknown => ({
   current_phase: "execute",
+  verification_manifest: legacyDefaultVerificationManifest(),
   current_wave: 1,
   phase_artifacts: {},
   skipped_phases: [],
@@ -139,14 +141,14 @@ describe("attestation Task load lockstep", () => {
     });
   });
 
-  it("refuses attestation mode with a legacy execution reservation", () => {
+  it("refuses attestation mode with a legacy execution reservation as a retired State File (ADR-0098)", () => {
     const parsed = parseTaskGraph(graphWith({
       ...attestationTask(),
       legacy_execution_reservation: true,
     }));
     expect(parsed).toMatchObject({
       ok: false,
-      error: expect.stringContaining("attestation mode requires a modern implementation dispatch"),
+      error: expect.stringContaining('legacy State File refused (ADR-0098): Task "T1" carrying legacy_execution_reservation'),
     });
   });
 

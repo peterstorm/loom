@@ -157,12 +157,11 @@ type RedThenGreenJudgment =
  * carries and the Task's first artifact baseline (which names the files it
  * creates, FR-007a), handed ready to the pure judge. Only an `owed` Task
  * consults the ledger; the epoch it judges is the one this attempt's transport observed
- * (I6 is judged per attempt epoch). A `proof-unfrozen` duty never reaches
- * here: settlement refuses it before observing anything.
+ * (I6 is judged per attempt epoch).
  */
 function judgeAttemptRedThenGreen(
   task: Task,
-  duty: Exclude<RedThenGreenDuty, { kind: "proof-unfrozen" }>,
+  duty: RedThenGreenDuty,
   facts: ExactImplementationTransportFacts,
   repositoryRoot: string,
   testEvidence: TaskGraph["test_evidence"],
@@ -188,23 +187,11 @@ function judgeAttemptRedThenGreen(
   }
 }
 
-/** A settlement the Oracle cannot run at all: state unchanged, no receipt,
- *  the reservation left standing for the operator. */
-function refused(state: TaskGraph, reason: string): ExactImplementationSettlement {
-  return Object.freeze({
-    application: Object.freeze({
-      kind: "error",
-      state,
-      error: Object.freeze({ kind: "invalid-task", errors: Object.freeze<[string]>([reason]) }),
-    }),
-  });
-}
-
 /** One live attempt, proven current and owed a settlement: what every observation below reads. */
 type SettlementContext = Readonly<{
   state: TaskGraph;
   task: Task;
-  duty: Exclude<RedThenGreenDuty, { kind: "proof-unfrozen" }>;
+  duty: RedThenGreenDuty;
   facts: ExactImplementationTransportFacts;
   ports: ExactImplementationSettlementPorts;
 }>;
@@ -436,11 +423,8 @@ export function settleExactImplementation(
   if (task?.active_implementation_attempt?.authorityDigest !== facts.authority.authorityDigest) {
     return unavailable(state, facts, `late ${facts.transport} result delivery`);
   }
-  // One answer to "does this Task owe I6" (the frozen Proof, INV-6). A Task
-  // with no frozen Proof that its era obligates is refused by name here,
-  // never settled as if it owed nothing.
+  // One answer to "does this Task owe I6" (the frozen Proof, INV-6).
   const duty = redThenGreenDuty(task, state.verification_manifest);
-  if (duty.kind === "proof-unfrozen") return refused(state, duty.reason);
   const context: SettlementContext = { state, task, duty, facts, ports };
   return isDistillTask(task) ? settleDistillAttempt(context, distillSnapshots) : observeAndSettle(context).settlement;
 }

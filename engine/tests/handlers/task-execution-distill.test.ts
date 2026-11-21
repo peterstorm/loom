@@ -496,7 +496,6 @@ describe("the Pi result transport", () => {
       agentType: DISTILL_AGENT,
       result: { agent: DISTILL_AGENT, task: "Task ID: T3", exitCode: 0, messages: messagesOf(repo) },
       reservedSlot: slot({ agentType: DISTILL_AGENT, taskId: "T3", implementationAuthority: authority }),
-      parentPrompt: "",
       ledger: { kind: "read", events: [] },
     });
     return { repo, authority, outcome };
@@ -535,7 +534,7 @@ describe("Proof reconcile and a Distill Task", () => {
   it("returns a Distill Task unchanged whatever evidence it is handed", () => {
     const undispatched = distillTask();
     const reconciled = reconcileTaskFromStoredEvidence(
-      undispatched, [...SCOPE], parseNewTestEvidence(true, "2 new test methods"), true, undefined, CONFORMANCE_NOT_OWED,
+      undispatched, [...SCOPE], parseNewTestEvidence(true, "2 new test methods"), undefined, CONFORMANCE_NOT_OWED,
     );
     expect(reconciled).toBe(undispatched);
   });

@@ -18,6 +18,7 @@ import { attributeFindings, parseStoredFindings, parseStoredRefutations, parseSt
 import { fixFull } from "../../src/handlers/helpers/validate-task-graph";
 import { updateTaskFindings } from "../../src/handlers/helpers/store-review-findings";
 import { findingId } from "../fixtures/finding-id";
+import { satisfiedProof } from "../fixtures/task-lifecycle";
 
 function currentDraft(claim = "  preserved\n  claim "): CurrentDraftFinding {
   return { protocolVersion: 2, ...reviewerDraftV2Schema.parse({ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], file: "src/x.ts", claim }) };
@@ -110,7 +111,7 @@ function readyTask(): Task {
     agent: "code-implementer-agent",
     wave: 1,
     status: "implemented",
-    legacy_missing_proof: true,
+    proof: satisfiedProof([]),
     depends_on: [],
     review_status: "pending",
     review_generation: 1,

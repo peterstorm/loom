@@ -1,29 +1,16 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { describe, it, expect, vi } from "vitest";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { describe, it, expect } from "vitest";
 import { RUN_RETRO_SKIPPED } from "../fixtures/retro-record";
 import fc from "fast-check";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import completeWaveGateHandler, {
-  createCompleteWaveGateHandler,
-  generateWaveGateSummary,
-  notificationCauseMessage,
-  parseWaveArg,
-  persistWaveGateSummaryFallback,
-  postWaveGateSummary,
-  snapshotGateDeps,
-  updateGitHubIssue,
-  type GateDeps,
-  type GitHubIssuePort,
-  type GateIO,
-} from "../../src/handlers/helpers/complete-wave-gate";
-// The gate checks, the decision functions, and the status renderers live in
-// `core/wave-gate-checks` and `core/loom-status` and are imported from them
-// directly. They used to arrive through a `complete-wave-gate` facade that
-// re-exported them unchanged; production never routed through that facade
-// (`orchestration` already imported the core originals), so the second path
-// was pinned by these tests alone. Deleting it removes the divergence its own
-// parity case was written to detect, so that case went with it.
+import { parseWaveArg } from "../../src/handlers/helpers/wave-args";
+import {
+  archivedCompletionSuite,
+  acceptedWaveCompletionSuite,
+  completedWaveGateEntry,
+  COMPLETION_SUITE_WORKSPACE,
+} from "../fixtures/accepted-wave-completion-suite";
 import {
   applyGateDecision,
   checkCriticalFindings,
@@ -54,7 +41,6 @@ import {
 import {
   derivePendingTaskProof,
   evaluateTaskProof,
-  redThenGreenEra,
 } from "../../src/core/proof-obligations";
 import {
   createImplementationAttemptAuthority,
@@ -62,13 +48,14 @@ import {
 } from "../../src/core/implementation-completion";
 import {
   observedEvidence,
+  completedWaveGateFixture,
   satisfiedProof as eraSatisfiedProof,
   taskFixture,
   trustedPassEvidence,
   type TaskFixtureInput,
 } from "../fixtures/task-lifecycle";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
-import { defaultVerificationManifest } from "../../src/core/verification-manifest";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import { waveGateAuthorityDigest } from "../../src/core/wave-review-authority";
 import {
@@ -104,8 +91,6 @@ import {
   type EffectReceipt,
 } from "../../src/core/orchestration-contract";
 import {
-  deriveLegacyWaveGateCompatibilityAuthority,
-  findLegacyWaveGateCompletionReplay,
   findRegisteredWaveGateCompletionReplay,
   parseActiveWaveGateRegistration,
   parseTaskGraph,
@@ -114,11 +99,7 @@ import {
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
 
-const satisfiedProof = evaluateTaskProof(
-  { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] },
-  trustedPassEvidence([]),
-);
-if (satisfiedProof.state !== "satisfied") throw new Error("test fixture proof must be satisfied");
+const satisfiedProof = eraSatisfiedProof([]);
 
 const MODEL_FREE_PLAN_MODELS = Object.freeze({
   lifecycles: Object.freeze([]),
@@ -149,120 +130,6 @@ const taskState = (overrides: Partial<TaskFixtureInput> = {}): Task => taskFixtu
   ...overrides,
 });
 
-describe("wave-gate durable summary fallback", () => {
-  it("writes the documented fallback path", () => {
-    const root = canonicalTempDir("loom-wave-summary-");
-    try {
-      const path = persistWaveGateSummaryFallback(3, "wave summary\n", root);
-      expect(path).toBe(join(root, ".claude", "reviews", "wave-3-review.md"));
-      expect(readFileSync(path, "utf-8")).toBe("wave summary\n");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects a symlinked fallback leaf without modifying its target", () => {
-    const root = canonicalTempDir("loom-wave-summary-root-");
-    const outside = canonicalTempDir("loom-wave-summary-outside-");
-    const sentinel = join(outside, "sentinel.md");
-    writeFileSync(sentinel, "do not overwrite\n");
-    mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
-    symlinkSync(sentinel, join(root, ".claude", "reviews", "wave-4-review.md"));
-    try {
-      expect(() => persistWaveGateSummaryFallback(4, "escaped\n", root))
-        .toThrow("must not traverse a symlink");
-      expect(readFileSync(sentinel, "utf-8")).toBe("do not overwrite\n");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-      rmSync(outside, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("GitHub issue notification port", () => {
-  const state = (repository = "owner/repo; echo unsafe"): TaskGraph => ({
-    current_phase: "execute",
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    github_issue: 42,
-    github_repo: repository,
-    tasks: [baseTask],
-    wave_gates: {},
-  });
-
-  it("updates checkboxes and forwards repository identity as one typed value", () => {
-    const calls: unknown[][] = [];
-    const port: GitHubIssuePort = {
-      readBody: (issue, repository) => {
-        calls.push(["read", issue, repository]);
-        return "- [ ] T1: implement\n";
-      },
-      editBody: (issue, body, repository) => { calls.push(["edit", issue, body, repository]); },
-      postComment: () => {},
-    };
-    updateGitHubIssue(state(), ["T1"], port);
-    expect(calls).toEqual([
-      ["read", 42, "owner/repo; echo unsafe"],
-      ["edit", 42, "- [x] T1: implement\n", "owner/repo; echo unsafe"],
-    ]);
-  });
-
-  it("makes checkbox-update failure actionable for the exact affected Tasks", () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const failure: GitHubIssuePort = {
-      readBody: () => { throw new Error("offline"); },
-      editBody: () => {},
-      postComment: () => {},
-    };
-    try {
-      updateGitHubIssue(state(), ["T1", "T2"], failure);
-      const warning = stderr.mock.calls.map(([text]) => String(text)).join("");
-      expect(warning).toContain("issue #42 checkboxes for Tasks T1, T2");
-      expect(warning).toContain("Protected Wave state may already be advanced");
-      expect(warning).toContain('gh issue edit 42 --repo "owner/repo; echo unsafe"');
-    } finally {
-      stderr.mockRestore();
-    }
-  });
-
-  it("normalizes Error, primitive, and hostile unknown notification causes", () => {
-    expect(notificationCauseMessage(new Error("offline"))).toBe("offline");
-    expect(notificationCauseMessage("socket closed")).toBe("socket closed");
-    expect(notificationCauseMessage(undefined)).toBe("[no notification failure cause provided]");
-    expect(notificationCauseMessage(null)).toBe("[no notification failure cause provided]");
-    expect(notificationCauseMessage({ toString: () => { throw new Error("hostile"); } }))
-      .toBe("[uninspectable thrown notification cause]");
-  });
-
-  it("posts through a fake and writes the durable fallback when the port fails", () => {
-    const comments: unknown[][] = [];
-    const success: GitHubIssuePort = {
-      readBody: () => "",
-      editBody: () => {},
-      postComment: (issue, body, repository) => { comments.push([issue, body, repository]); },
-    };
-    postWaveGateSummary(state("owner/repo"), 1, success);
-    expect(comments).toHaveLength(1);
-    expect(comments[0]).toEqual([42, expect.stringContaining("Wave 1"), "owner/repo"]);
-
-    const root = canonicalTempDir("loom-wave-summary-port-");
-    const failure: GitHubIssuePort = {
-      readBody: () => "",
-      editBody: () => {},
-      postComment: () => { throw new Error("offline"); },
-    };
-    try {
-      postWaveGateSummary(state(), 1, failure, root);
-      expect(readFileSync(join(root, ".claude", "reviews", "wave-1-review.md"), "utf-8"))
-        .toContain("Wave 1");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
-
 describe("checkImplementationProof (pure)", () => {
   it("requires both an implementation-bearing status and satisfied proof", () => {
     const failedProof = evaluateTaskProof(
@@ -273,7 +140,6 @@ describe("checkImplementationProof (pure)", () => {
     for (const task of [
       taskState({ status: "pending" }),
       taskState({ status: "pending", proof: failedProof }),
-      taskState({ status: "implemented", proof: undefined }),
     ]) {
       const result = checkImplementationProof([task]);
       expect(result.passed).toBe(false);
@@ -346,53 +212,6 @@ describe("checkNewTests (pure)", () => {
     const result = checkNewTests([task]);
     expect(result.passed).toBe(false);
   });
-
-  it("rejects positive legacy wire state without non-empty evidence and migrates valid pairs into the ADT", () => {
-    const { new_test_observation: _observation, ...withoutObservation } = baseTask;
-    const raw = {
-      current_phase: "execute",
-      current_wave: 1,
-      phase_artifacts: {},
-      skipped_phases: [],
-      spec_file: null,
-      plan_file: null,
-      wave_gates: {},
-      tasks: [{
-        ...withoutObservation,
-        new_tests_written: true,
-        new_test_evidence: "",
-      }],
-    };
-    expect(parseTaskGraph(raw)).toMatchObject({
-      ok: false,
-      error: expect.stringContaining("requires non-empty new_test_evidence"),
-    });
-
-    const parsed = parseTaskGraph({
-      ...raw,
-      tasks: [{
-        ...withoutObservation,
-        new_tests_written: true,
-        new_test_evidence: "one focused regression",
-      }],
-    });
-    expect(parsed).toMatchObject({
-      ok: true,
-      value: {
-        tasks: [{
-          new_test_observation: {
-            kind: "written",
-            written: true,
-            evidence: "one focused regression",
-          },
-        }],
-      },
-    });
-    if (parsed.ok) {
-      expect("new_tests_written" in parsed.value.tasks[0]!).toBe(false);
-      expect(checkNewTests(parsed.value.tasks).passed).toBe(true);
-    }
-  });
 });
 
 describe("checkReviews (pure)", () => {
@@ -464,7 +283,7 @@ describe("checkSpecAlignment (pure)", () => {
     criticalFindings: overrides.criticalFindings ?? [],
   });
   const mkState = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
-    current_phase: "execute",
+    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -586,135 +405,22 @@ describe("computeNextWave (pure)", () => {
   });
 });
 
-describe("generateWaveGateSummary (pure)", () => {
-  const mkTask = (id: string, overrides: Partial<TaskFixtureInput> = {}): Task => taskState({
-    id,
-    description: `Task ${id}`,
-    test_evidence: "5 tests passed",
-    ...overrides,
-  });
-
-  it("generates summary with spec check and tasks", () => {
-    const tasks = [
-      mkTask("T1", { critical_findings: [], advisory_findings: ["Refactor suggestion"] }),
-      mkTask("T2", { critical_findings: [], advisory_findings: [] }),
-    ];
-
-    const specCheck = capturedSpecCheck({
-      wave: 1,
-      runAt: "2024-01-01",
-      criticalFindings: [],
-      mediumFindings: ["Minor drift in validation"],
-    });
-
-    const summary = generateWaveGateSummary(1, tasks, specCheck);
-
-    expect(summary).toContain("## Wave 1 — Gate Passed");
-    expect(summary).toContain("### Spec Alignment: PASSED (0 critical)");
-    expect(summary).toContain("- MEDIUM: Minor drift in validation");
-    expect(summary).toContain("### Code Review");
-    expect(summary).toContain("#### T1: Task T1");
-    expect(summary).toContain("**Status:** passed — 0 critical, 1 advisory");
-    expect(summary).toContain("<details>");
-    expect(summary).toContain("<summary>1 advisories</summary>");
-    expect(summary).toContain("- Refactor suggestion");
-    expect(summary).toContain("### Tests");
-    expect(summary).toContain("- T1: 5 tests passed");
-  });
-
-  it("generates summary without spec check", () => {
-    const tasks = [mkTask("T1")];
-    const summary = generateWaveGateSummary(1, tasks);
-
-    expect(summary).toContain("## Wave 1 — Gate Passed");
-    expect(summary).not.toContain("### Spec Alignment");
-    expect(summary).toContain("### Code Review");
-    expect(summary).toContain("### Tests");
-  });
-
-  it("handles tasks with no advisories", () => {
-    const tasks = [mkTask("T1", { advisory_findings: [] })];
-    const summary = generateWaveGateSummary(1, tasks);
-
-    expect(summary).not.toContain("<details>");
-    expect(summary).toContain("**Status:** passed — 0 critical, 0 advisory");
-  });
-
-  it("handles tasks with no test evidence", () => {
-    const tasks = [mkTask("T1", { test_evidence: undefined })];
-    const summary = generateWaveGateSummary(1, tasks);
-
-    expect(summary).toContain("- T1: no evidence");
-  });
-
-  it("truncates long task descriptions", () => {
-    const longDesc = "A".repeat(100);
-    const tasks = [mkTask("T1", { description: longDesc })];
-    const summary = generateWaveGateSummary(1, tasks);
-
-    expect(summary).toContain("#### T1: " + "A".repeat(60));
-    expect(summary).not.toContain("A".repeat(61));
-  });
-
-  it("includes multiple advisories in details", () => {
-    const tasks = [
-      mkTask("T1", {
-        advisory_findings: ["Advisory 1", "Advisory 2", "Advisory 3"],
-      }),
-    ];
-    const summary = generateWaveGateSummary(1, tasks);
-
-    expect(summary).toContain("<summary>3 advisories</summary>");
-    expect(summary).toContain("- Advisory 1");
-    expect(summary).toContain("- Advisory 2");
-    expect(summary).toContain("- Advisory 3");
-  });
-
-  it("preserves advisory findings in summary even when empty criticals", () => {
-    const tasks = [
-      mkTask("T1", {
-        critical_findings: [],
-        advisory_findings: ["Keep this advisory"],
-      }),
-    ];
-    const summary = generateWaveGateSummary(1, tasks);
-
-    expect(summary).toContain("Keep this advisory");
-  });
-
-  it("audits every refuted finding with every refuting lens and reason", () => {
-    const tasks = [mkTask("T1", {
-      critical_findings: [],
-      refuted_findings: [{
-        finding: {
-          id: findingId("code-reviewer-1"),
-          agent: "code-reviewer",
-          severity: "critical",
-          file: "src/x.ts",
-          line: 7,
-          claim: "reported blocker",
-        },
-        refutations: [
-          { lens: "reproduction", reason: "the guard makes the path unreachable" },
-          { lens: "intent", reason: "the fallback is documented architecture" },
-        ],
-      }],
-    })];
-
-    const summary = generateWaveGateSummary(1, tasks);
-    expect(summary).toContain("<summary>1 refuted critical findings</summary>");
-    expect(summary).toContain("- code-reviewer-1: reported blocker");
-    expect(summary).toContain("  - reproduction: the guard makes the path unreachable");
-    expect(summary).toContain("  - intent: the fallback is documented architecture");
-  });
-});
-
-describe("evaluateWaveGate + applyGateDecision — fs resolved once before the lock, checks on locked state", () => {
+describe("evaluateWaveGate + applyGateDecision — checks run on the locked state", () => {
   const specCheck = (wave: number): CapturedSpecCheck =>
     capturedSpecCheck({ wave, runAt: "", criticalFindings: [] });
 
+  const activeGate: NonNullable<TaskGraph["active_wave_gate"]> = {
+    schemaVersion: 1,
+    kind: "active-wave-gate",
+    runId: value(parseOrchestrationRunId("evaluate-wave-run")),
+    wave: 1,
+    authorityDigest: value(parseArtifactDigest("e".repeat(64))),
+    revision: 0,
+    terminalOutcome: null,
+  };
+
   const mkGraph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
-    current_phase: "execute",
+    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -723,21 +429,14 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     spec_check: specCheck(1),
     tasks: [baseTask, { ...baseTask, id: "T2", wave: 2 }],
     wave_gates: { "1": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: false } },
-    active_wave_gate: {
-      schemaVersion: 1,
-      kind: "active-wave-gate",
-      runId: value(parseOrchestrationRunId("evaluate-wave-run")),
-      wave: 1,
-      authorityDigest: value(parseArtifactDigest("e".repeat(64))),
-      revision: 0,
-      terminalOutcome: null,
-    },
+    active_wave_gate: activeGate,
+    active_wave_completion_suite: acceptedWaveCompletionSuite(activeGate),
     ...overrides,
   });
 
   const countingDeps = () => {
     const calls = { loadPlanModels: 0, fileExists: 0 };
-    const deps: GateDeps = {
+    const deps: CoreGateDeps = {
       loadPlanModels: () => {
         calls.loadPlanModels++;
         return { kind: "loaded", models: MODEL_FREE_PLAN_MODELS };
@@ -746,119 +445,16 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
         calls.fileExists++;
         return { ok: true, exists: true };
       },
+      currentWaveWorkspace: COMPLETION_SUITE_WORKSPACE,
     };
     return { deps, calls };
   };
 
-  it("snapshotGateDeps resolves the fs seams exactly once — evaluation and (re)application repeat no I/O", () => {
-    const calls = { loadPlanModels: 0, fileExists: 0 };
-    const io: GateIO = {
-      loadPlanModels: () => {
-        calls.loadPlanModels++;
-        return {
-          kind: "loaded",
-          models: {
-            lifecycles: [{ id: "LC-1", title: "Order", machineFile: "src/order-machine.ts" }],
-            pipeline: null,
-            invariants: [],
-            contracts: [],
-            strays: [],
-          },
-        };
-      },
-      filePresence: () => {
-        calls.fileExists++;
-        return { ok: true, exists: true };
-      },
-    };
-    const state = mkGraph({
-      plan_file: "plan.md",
-      tasks: [{ ...baseTask, file_list: ["src/order-machine.ts"] }],
-    });
-
-    // All fs inputs resolve at snapshot time, BEFORE the state lock…
-    const deps = snapshotGateDeps(state, io);
-    expect(calls).toEqual({ loadPlanModels: 1, fileExists: 1 });
-
-    // …so evaluating (even repeatedly, as a retried update callback would)
-    // and applying never touch the seams again.
-    const decision = evaluateWaveGate(state, null, deps);
-    const again = evaluateWaveGate(state, null, deps);
-    const once = applyGateDecision(state, decision);
-    const twice = applyGateDecision(state, decision);
-    expect(calls).toEqual({ loadPlanModels: 1, fileExists: 1 });
-    expect(decision.verdict.kind).toBe("pass");
-    expect(again).toEqual(decision);
-    expect(twice).toEqual(once);
-  });
-
-  it("snapshotGateDeps fails closed for paths outside the snapshot", () => {
-    const deps = snapshotGateDeps(mkGraph(), {
-      loadPlanModels: () => ({ kind: "none" }),
-      filePresence: () => ({ ok: true, exists: true }),
-    });
-    expect(deps.filePresence("/never/resolved.ts")).toEqual({
-      ok: false,
-      error: "lifecycle artifact /never/resolved.ts was not snapshotted",
-    });
-  });
-
-  it("snapshotGateDeps stats suffix-matched task file_list variants too (plan/task path divergence)", () => {
-    // Plan declares src/machines/x.machine.json; the task file_list carries
-    // engine/src/machines/x.machine.json and the artifact exists ONLY there.
-    const statted: string[] = [];
-    const state = mkGraph({
-      plan_file: "plan.md",
-      tasks: [{ ...baseTask, file_list: ["engine/src/machines/x.machine.json"] }],
-    });
-    const deps = snapshotGateDeps(state, {
-      loadPlanModels: () => ({
-        kind: "loaded",
-        models: {
-          lifecycles: [{ id: "LC-1", title: "X", machineFile: "src/machines/x.machine.json" }],
-          pipeline: null,
-          invariants: [],
-          contracts: [],
-          strays: [],
-        },
-      }),
-      filePresence: (p) => {
-        statted.push(p);
-        return { ok: true, exists: p === "engine/src/machines/x.machine.json" };
-      },
-    });
-    expect(statted).toContain("src/machines/x.machine.json");
-    expect(statted).toContain("engine/src/machines/x.machine.json");
-
-    // …and the full evaluation counts the variant as the artifact: the gate passes.
-    const decision = evaluateWaveGate(state, null, deps);
-    expect(decision.verdict.kind).toBe("pass");
-  });
-
-  it("snapshotGateDeps.loadPlanModels fails CLOSED when asked for a different plan than it snapshotted", () => {
-    const deps = snapshotGateDeps(mkGraph({ plan_file: "plan.md" }), {
-      loadPlanModels: () => ({ kind: "none" }),
-      filePresence: () => ({ ok: true, exists: true }),
-    });
-    // The snapshotted path is served…
-    expect(deps.loadPlanModels("plan.md")).toEqual({ kind: "none" });
-    // …any other path is a drift, never silently answered from the snapshot.
-    const drifted = deps.loadPlanModels("other-plan.md");
-    expect(drifted.kind).toBe("unreadable");
-    if (drifted.kind === "unreadable") {
-      expect(drifted.path).toBe("other-plan.md");
-      expect(drifted.error).toContain("drift");
-      expect(drifted.error).toContain("plan.md");
-    }
-  });
-
-  it("a task-state change AFTER the deps snapshot is honored by evaluation (SubagentStop lands before the lock)", () => {
-    // Deps are snapshotted from the pre-lock read of a PASSING state…
+  it("a task-state change AFTER a passing pre-lock read is honored by evaluation (SubagentStop lands before the lock)", () => {
+    // The pre-lock read of the graph passes…
     const preRead = mkGraph();
-    const deps = snapshotGateDeps(preRead, {
-      loadPlanModels: () => ({ kind: "none" }),
-      filePresence: () => ({ ok: true, exists: true }),
-    });
+    const deps = countingDeps().deps;
+    expect(evaluateWaveGate(preRead, null, deps).verdict.kind).toBe("pass");
 
     // …then a SubagentStop lands before the locked update: T1 now carries a
     // trusted failure. Evaluation runs on the LOCKED state, so the gate
@@ -1029,6 +625,11 @@ function lifecycleCompletionReadiness() {
   return value(deriveWaveReadiness({
     ...graph,
     active_wave_gate: { ...registration, runId: lifecycleRunId },
+    active_wave_completion_suite: archivedCompletionSuite({
+      runId: lifecycleRunId,
+      wave: registration.wave,
+      authorityDigest: registration.authorityDigest,
+    }),
   }, statusDeps));
 }
 
@@ -1265,6 +866,7 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
 const statusDeps: CoreGateDeps = {
   loadPlanModels: () => ({ kind: "loaded", models: MODEL_FREE_PLAN_MODELS }),
   filePresence: () => ({ ok: true, exists: true }),
+  currentWaveWorkspace: COMPLETION_SUITE_WORKSPACE,
 };
 
 function registeredGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
@@ -1287,6 +889,7 @@ function registeredGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
     },
     tasks: [baseTask],
     wave_gates: {},
+    verification_manifest: legacyDefaultVerificationManifest(),
     active_wave_gate: {
       schemaVersion: 1,
       kind: "active-wave-gate",
@@ -1296,6 +899,11 @@ function registeredGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
       revision: 0,
       terminalOutcome: null,
     },
+    active_wave_completion_suite: archivedCompletionSuite({
+      runId: "status-wave-run",
+      wave: 1,
+      authorityDigest: "b".repeat(64),
+    }),
   });
   if (!parsed.ok) throw new Error(parsed.error);
   return { ...parsed.value, ...overrides };
@@ -1435,7 +1043,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("malformed authority keeps every category present but unavailable and returns only blocked", () => {
     const malformed = parseTaskGraph({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       tasks: [], wave_gates: {}, active_wave_gate: { schemaVersion: 99 },
     });
     expect(malformed.ok).toBe(false);
@@ -1456,21 +1064,11 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("makes every status category unavailable for contradictory active authority", () => {
     const base = registeredGraph();
-    const terminalHistoryEntry = {
-      schemaVersion: 1 as const,
-      kind: "completed-wave-gate" as const,
-      runId: value(parseOrchestrationRunId("contradictory-history-run")),
+    const terminalHistoryEntry = completedWaveGateFixture({
+      runId: "contradictory-history-run",
       wave: 1,
-      authorityDigest: value(parseArtifactDigest("f".repeat(64))),
-      revision: 1,
-      completionReceipt: {
-        kind: "protected-wave-state-committed" as const,
-        effectId: value(parseEffectId("contradictory-history-effect")),
-        runId: value(parseOrchestrationRunId("contradictory-history-run")),
-        committedRevision: 1,
-        stateDigest: value(parseArtifactDigest("e".repeat(64))),
-      },
-    };
+      authorityDigest: "f".repeat(64),
+    });
     const withoutRegistration = (graph: TaskGraph): TaskGraph => {
       const { active_wave_gate: _removed, ...rest } = graph;
       return rest;
@@ -2097,21 +1695,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       ...withoutActive,
       tasks: [...tasks],
       wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
-      wave_gate_history: [{
-        schemaVersion: 1,
-        kind: "completed-wave-gate",
-        runId,
-        wave: 1,
-        authorityDigest: value(parseArtifactDigest("f".repeat(64))),
-        revision: 1,
-        completionReceipt: {
-          kind: "protected-wave-state-committed",
-          effectId: value(parseEffectId("final-status-effect")),
-          runId,
-          committedRevision: 1,
-          stateDigest: value(parseArtifactDigest("e".repeat(64))),
-        },
-      }],
+      wave_gate_history: [completedWaveGateFixture({ runId, wave: 1, authorityDigest: "f".repeat(64) })],
     });
 
     const finished = deriveLoomStatusFromParsedGraph(
@@ -2139,8 +1723,6 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("preserves committed done-action construction failure as unavailable", () => {
     const base = registeredGraph();
-    const runId = value(parseOrchestrationRunId("completed-status-run"));
-    const effectId = value(parseEffectId("completed-status-effect"));
     const { active_wave_gate: _active, ...withoutActive } = base;
     const malformed: TaskGraph = {
       ...withoutActive,
@@ -2149,19 +1731,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
       },
       wave_gate_history: [{
-        schemaVersion: 1,
-        kind: "completed-wave-gate",
+        ...completedWaveGateFixture({ runId: "completed-status-run", wave: 1, authorityDigest: "f".repeat(64) }),
         runId: "not a run id" as never,
-        wave: 1,
-        authorityDigest: value(parseArtifactDigest("f".repeat(64))),
-        revision: 1,
-        completionReceipt: {
-          kind: "protected-wave-state-committed",
-          effectId,
-          runId,
-          committedRevision: 1,
-          stateDigest: value(parseArtifactDigest("e".repeat(64))),
-        },
       }],
     };
 
@@ -2502,23 +2073,9 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("rejects nonterminal active authority that contradicts Phase, current Wave, or terminal history and blocks status", () => {
-    const terminalHistory = {
-      schemaVersion: 1,
-      kind: "completed-wave-gate",
-      runId: "completed-wave-run",
-      wave: 1,
-      authorityDigest: "d".repeat(64),
-      revision: 1,
-      completionReceipt: {
-        kind: "protected-wave-state-committed",
-        effectId: "completed-wave-effect",
-        runId: "completed-wave-run",
-        committedRevision: 1,
-        stateDigest: "e".repeat(64),
-      },
-    };
+    const terminalHistory = completedWaveGateEntry({ runId: "completed-wave-run", wave: 1 });
     const raw = {
-      current_phase: "execute",
+      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -2561,39 +2118,12 @@ describe("protected active Wave Gate registration", () => {
     }
   });
 
-  it("explicitly migrates legacy authority and never invents a default registration", async () => {
-    const root = canonicalTempDir("loom-legacy-wave-");
-    const path = join(root, "active_task_graph.json");
-    writeFileSync(path, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, tasks: [baseTask], wave_gates: {},
-    }));
-    const manager = new StateManager(path);
-    try {
-      expect(evaluateWaveGate(manager.load(), null, statusDeps).verdict.kind).toBe("fail");
-      const migrated = await manager.migrateLegacyWaveGateRegistration({
-        schemaVersion: 1,
-        kind: "legacy-wave-gate-compatibility",
-        runId: "explicit-legacy-run",
-        wave: 1,
-        authorityDigest: "d".repeat(64),
-      });
-      expect(manager.load().active_wave_gate).toEqual(migrated);
-      await expect(manager.migrateLegacyWaveGateRegistration({
-        schemaVersion: 1, kind: "legacy-wave-gate-compatibility", runId: "other", wave: 1,
-        authorityDigest: "e".repeat(64),
-      })).rejects.toThrow("only when active");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
   it("registers atomically, replays idempotently, and refuses a competing active run", async () => {
     const root = canonicalTempDir("loom-active-wave-");
     const path = join(root, "active_task_graph.json");
     const taskIds = ["T1"];
     const initial: TaskGraph = {
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, tasks: [baseTask], wave_gates: {},
     };
     const exactRegistration = {
@@ -2667,7 +2197,9 @@ describe("protected active Wave Gate registration", () => {
       })],
     })));
     const manager = new StateManager(path);
-    const io: GateIO = {
+    // Live deps: every evaluation stats the workspace afresh, as the Wave Gate program's do.
+    const live: CoreGateDeps = {
+      ...statusDeps,
       loadPlanModels: () => ({
         kind: "loaded",
         models: {
@@ -2681,12 +2213,10 @@ describe("protected active Wave Gate registration", () => {
       filePresence: (candidate) => ({ ok: true, exists: existsSync(join(root, candidate)) }),
     };
     try {
-      const stale = snapshotGateDeps(manager.load(), io);
-      expect(evaluateWaveGate(manager.load(), null, stale).verdict.kind).toBe("pass");
+      expect(evaluateWaveGate(manager.load(), null, live).verdict.kind).toBe("pass");
       rmSync(artifact);
       let lockedFailure = "";
       await expect(manager.commitActiveWaveGateCompletion((locked) => {
-        const live = snapshotGateDeps(locked, io);
         const liveDecision = evaluateWaveGate(locked, null, live);
         lockedFailure = liveDecision.verdict.kind === "fail" ? liveDecision.verdict.reason : "";
         const readiness = deriveWaveReadiness(locked, live);
@@ -2754,7 +2284,7 @@ describe("protected active Wave Gate registration", () => {
     }
   });
 
-  it("atomically archives terminal receipt with Task/Wave advancement and allows compatibility to start the next Wave", async () => {
+  it("atomically archives terminal receipt and accepted suite with Task/Wave advancement", async () => {
     const root = canonicalTempDir("loom-complete-wave-");
     const path = join(root, "active_task_graph.json");
     const initial = registeredGraph({
@@ -2774,256 +2304,11 @@ describe("protected active Wave Gate registration", () => {
       expect(stored.tasks.find(({ id }) => id === "T1")?.status).toBe("completed");
       expect(stored.wave_gate_history).toEqual([committed.completedRegistration]);
       expect(stored.wave_gate_history?.[0]?.completionReceipt).toEqual(committed.receipt);
-
-      const nextAuthority = value(deriveLegacyWaveGateCompatibilityAuthority(stored, null));
-      expect(nextAuthority.wave).toBe(2);
-      const next = await manager.migrateLegacyWaveGateRegistration(nextAuthority);
-      expect(manager.load().active_wave_gate).toEqual(next);
-      expect(next).toMatchObject({ runId: nextAuthority.runId, wave: 2, terminalOutcome: null });
+      expect(stored.wave_gate_history?.[0]?.completionSuite).toEqual(initial.active_wave_completion_suite);
+      expect(stored.active_wave_completion_suite).toBeUndefined();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 });
 
-describe("final-Wave compatibility completion replay", () => {
-  function legacyFinalGraph(): TaskGraph {
-    const registered = registeredGraph({
-      wave_gates: {
-        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
-      },
-    });
-    const { active_wave_gate: _active, ...legacy } = registered;
-    return legacy;
-  }
-
-  async function withHandlerState<T>(
-    run: (path: string) => Promise<T>,
-    initial: TaskGraph = legacyFinalGraph(),
-  ): Promise<T> {
-    const root = canonicalTempDir("loom-final-wave-replay-");
-    const path = join(root, "active_task_graph.json");
-    const planFile = join(root, "plan.md");
-    const previous = process.env.LOOM_STATE_PATH;
-    writeFileSync(planFile, "# Model-free plan\n");
-    writeFileSync(path, JSON.stringify({ ...initial, plan_file: planFile }, null, 2));
-    process.env.LOOM_STATE_PATH = path;
-    try {
-      return await run(path);
-    } finally {
-      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
-      else process.env.LOOM_STATE_PATH = previous;
-      rmSync(root, { recursive: true, force: true });
-    }
-  }
-
-  it("refuses modern suite authority without mutating state and directs registered resume or start", async () => {
-    // A post-feature manifest makes the graph I6-era, so its Task's satisfied
-    // proof carries red-then-green too, or the strict load check refuses it (INV-6).
-    const modern = (graph: TaskGraph): TaskGraph => {
-      const manifest = defaultVerificationManifest();
-      const proof = eraSatisfiedProof([], redThenGreenEra(manifest));
-      return { ...graph, verification_manifest: manifest, tasks: graph.tasks.map((task) => ({ ...task, proof }) as Task) };
-    };
-    const modernCases = [
-      {
-        graph: modern(legacyFinalGraph()),
-        diagnostic: "start a fresh registered `/wave-gate` run",
-      },
-      {
-        graph: modern(registeredGraph()),
-        diagnostic: "helper orchestration resume",
-      },
-    ];
-    for (const { graph, diagnostic } of modernCases) {
-      await withHandlerState(async (path) => {
-        const before = readFileSync(path, "utf-8");
-        const result = await completeWaveGateHandler("", []);
-        expect(result).toMatchObject({ kind: "error" });
-        if (result.kind !== "error") return;
-        expect(result.message).toContain("refused modern TaskGraph completion");
-        expect(result.message).toContain("direct helper is legacy-only");
-        expect(result.message).toContain("currentWaveWorkspace");
-        expect(result.message).toContain("Store any operator-approved corrected review/spec findings first");
-        expect(result.message).toContain(diagnostic);
-        expect(readFileSync(path, "utf-8")).toBe(before);
-      }, graph);
-    }
-  });
-
-  it("returns the exact completed outcome on repeated final-Wave calls with zero state mutation", async () => {
-    await withHandlerState(async (path) => {
-      expect(await completeWaveGateHandler("", [])).toEqual({ kind: "passthrough" });
-      const completedBytes = readFileSync(path, "utf-8");
-      const completed = new StateManager(path).load();
-      const committedStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: completed }, statusDeps);
-      expect(committedStatus.next.action).toMatchObject({
-        kind: "done",
-        runId: completed.wave_gate_history?.[0]?.runId,
-      });
-      // The final Wave with every Task completed: status names the run's
-      // retrospective it still owes, and its message points on to the
-      // retirement (ADR-0083).
-      expect(committedStatus.next.reasons).toEqual([
-        expect.objectContaining({ kind: "run-complete" }),
-        expect.objectContaining({
-          kind: "retro-required",
-          message: expect.stringContaining("helper complete-orchestration"),
-        }),
-      ]);
-      const authority = value(deriveLegacyWaveGateCompatibilityAuthority(completed, null));
-      const replay = value(findLegacyWaveGateCompletionReplay(completed, authority));
-      expect(replay).toEqual(completed.wave_gate_history?.[0]);
-
-      for (let replayIndex = 0; replayIndex < 3; replayIndex++) {
-        expect(await completeWaveGateHandler("", [])).toEqual({ kind: "passthrough" });
-        expect(readFileSync(path, "utf-8")).toBe(completedBytes);
-      }
-      expect(new StateManager(path).load().active_wave_gate).toBeUndefined();
-      await expect(new StateManager(path).migrateLegacyWaveGateRegistration(authority))
-        .rejects.toThrow("already completed");
-    });
-  });
-
-  it("reports both legacy migration and terminal replay-read failures", async () => {
-    await withHandlerState(async (path) => {
-      const manager = new (class extends StateManager {
-        private readCount = 0;
-
-        override load(): ReturnType<StateManager["load"]> {
-          this.readCount++;
-          if (this.readCount > 1) throw new Error("simulated legacy replay read failure");
-          return super.load();
-        }
-
-        override async migrateLegacyWaveGateRegistration(_raw: unknown): Promise<never> {
-          throw new Error("simulated legacy migration failure");
-        }
-      })(path);
-      const handlerWithReplayReadFailure = createCompleteWaveGateHandler(() => manager);
-
-      const result = await handlerWithReplayReadFailure("", []);
-
-      expect(result).toMatchObject({ kind: "error" });
-      if (result.kind !== "error") return;
-      expect(result.message).toContain("simulated legacy migration failure");
-      expect(result.message).toContain("terminal replay read also failed");
-      expect(result.message).toContain("simulated legacy replay read failure");
-    });
-  });
-
-  it("coalesces concurrent final-Wave compatibility completion onto one terminal history entry", async () => {
-    await withHandlerState(async (path) => {
-      const results = await Promise.all([
-        completeWaveGateHandler("", []),
-        completeWaveGateHandler("", []),
-        completeWaveGateHandler("", []),
-      ]);
-      expect(results).toEqual([
-        { kind: "passthrough" },
-        { kind: "passthrough" },
-        { kind: "passthrough" },
-      ]);
-      const completed = new StateManager(path).load();
-      expect(completed.active_wave_gate).toBeUndefined();
-      expect(completed.wave_gate_history).toHaveLength(1);
-      expect(completed.tasks[0]?.status).toBe("completed");
-    });
-  });
-
-  it("reconciles concurrent completion of the same explicit active registration to its committed receipt", async () => {
-    await withHandlerState(async (path) => {
-      const before = new StateManager(path).load().active_wave_gate!;
-      const results = await Promise.all([
-        completeWaveGateHandler("", []),
-        completeWaveGateHandler("", []),
-        completeWaveGateHandler("", []),
-      ]);
-      expect(results).toEqual([
-        { kind: "passthrough" },
-        { kind: "passthrough" },
-        { kind: "passthrough" },
-      ]);
-      const completed = new StateManager(path).load();
-      expect(completed.active_wave_gate).toBeUndefined();
-      expect(completed.wave_gate_history).toHaveLength(1);
-      const terminal = completed.wave_gate_history![0]!;
-      expect(terminal).toMatchObject({
-        runId: before.runId,
-        wave: before.wave,
-        authorityDigest: before.authorityDigest,
-        revision: before.revision + 1,
-      });
-      expect(value(findRegisteredWaveGateCompletionReplay(completed, before)))
-        .toEqual(terminal);
-    }, registeredGraph());
-  });
-
-  it("does not commit when the locked gate decision is blocked", async () => {
-    const blockedGraph = registeredGraph({ tasks: [{ ...baseTask, review_status: "pending" }] });
-    await withHandlerState(async (path) => {
-      const manager = new StateManager(path);
-      const result = await createCompleteWaveGateHandler(() => manager)("", []);
-
-      expect(result).toMatchObject({ kind: "error" });
-      if (result.kind !== "error") return;
-      expect(result.message).toContain("Not all tasks have been reviewed");
-      expect(new StateManager(path).load().wave_gate_history).toBeUndefined();
-    }, blockedGraph);
-  });
-
-  it("fails conflicting or older terminal history instead of treating it as replay", async () => {
-    const graph = legacyFinalGraph();
-    const authority = value(deriveLegacyWaveGateCompatibilityAuthority(graph, null));
-    const conflict = registeredGraph({
-      active_wave_gate: undefined,
-      tasks: [taskState({ status: "completed" })],
-      wave_gates: {
-        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
-      },
-      wave_gate_history: [{
-        schemaVersion: 1,
-        kind: "completed-wave-gate",
-        runId: value(parseOrchestrationRunId("conflicting-final-run")),
-        wave: 1,
-        authorityDigest: value(parseArtifactDigest("f".repeat(64))),
-        revision: 1,
-        completionReceipt: {
-          kind: "protected-wave-state-committed",
-          effectId: value(parseEffectId("conflicting-final-effect")),
-          runId: value(parseOrchestrationRunId("conflicting-final-run")),
-          committedRevision: 1,
-          stateDigest: value(parseArtifactDigest("e".repeat(64))),
-        },
-      }],
-    });
-    expect(findLegacyWaveGateCompletionReplay(conflict, authority)).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("conflicts") },
-    });
-    await withHandlerState(async (path) => {
-      const before = readFileSync(path, "utf-8");
-      expect(await completeWaveGateHandler("", [])).toMatchObject({
-        kind: "error",
-        message: expect.stringContaining("conflicting compatibility completion replay"),
-      });
-      expect(readFileSync(path, "utf-8")).toBe(before);
-    }, conflict);
-
-    const older = { ...conflict, current_wave: 1, wave_gate_history: [{ ...conflict.wave_gate_history![0]!, wave: 2 }] };
-    expect(findLegacyWaveGateCompletionReplay(older, authority)).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("older than completed terminal Wave 2") },
-    });
-
-    const root = canonicalTempDir("loom-older-wave-migration-");
-    const path = join(root, "active_task_graph.json");
-    writeFileSync(path, JSON.stringify(older));
-    try {
-      await expect(new StateManager(path).migrateLegacyWaveGateRegistration(authority))
-        .rejects.toThrow("older than completed terminal Wave 2");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});

@@ -24,7 +24,6 @@ const SEAM = "engine/src/utils/git-execution-policy.ts";
  *  directly is never `git`. */
 const SPAWN_AUTHORITY_ALLOWLIST: Readonly<Record<string, string>> = Object.freeze({
   [SEAM]: "the one policy-bound Git spawn",
-  "engine/src/handlers/helpers/complete-wave-gate.ts": "runs the operator's authenticated `gh` CLI for issue bodies and comments",
   "engine/src/orchestration/completion-check-runner.ts":
     "runs the operator's verification-manifest project command (any executable, no shell); its Git probes use the seam",
   "pi/interactive-subagent.ts": "spawns the Pi RPC subagent child process",

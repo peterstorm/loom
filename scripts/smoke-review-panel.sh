@@ -89,11 +89,17 @@ F2="T1:silent-failure-hunter-1"
 # Two criticals and one advisory on one implemented, blocked wave-1 task. The
 # first critical sits on an auth path, which is the signal that pulls the
 # `security` lens into the panel.
+# An execute-phase State File carries its frozen manifest, and an implemented
+# Task its satisfied Proof: the loader refuses either missing (ADR-0098).
+MANIFEST_JSON="$(bun -e "import { legacyDefaultVerificationManifest } from '$LOOM_DIR/engine/src/core/verification-manifest.ts'; process.stdout.write(JSON.stringify(legacyDefaultVerificationManifest()))")"
+PROOF_JSON="$(bun -e "import { satisfiedProof } from '$LOOM_DIR/engine/tests/fixtures/task-lifecycle.ts'; process.stdout.write(JSON.stringify(satisfiedProof([])))")"
+
 write_state() {
   if [ -f "$STATE" ]; then chmod u+w "$STATE"; fi
   cat > "$STATE" <<JSON
 {
   "current_phase": "execute",
+  "verification_manifest": $MANIFEST_JSON,
   "phase_artifacts": { "architecture": "$PLAN_FILE" },
   "skipped_phases": ["brainstorm", "specify", "clarify"],
   "spec_dir": "$SPEC_DIR",
@@ -108,6 +114,7 @@ write_state() {
       "agent": "code-implementer-agent",
       "wave": 1,
       "status": "implemented",
+      "proof": $PROOF_JSON,
       "depends_on": [],
       "review_status": "blocked",
       "findings": [

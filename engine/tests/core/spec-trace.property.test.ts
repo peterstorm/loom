@@ -6,6 +6,7 @@ import type { TaskGraph } from "../../src/types";
 import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
 import { parseTaskGraph } from "../../src/state-manager";
 import { pendingTaskProof } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const anchorArbitrary = fc.integer({ min: 1, max: 1000 }).map((n) => `FR-${n}`);
 
@@ -59,6 +60,7 @@ describe("Requirement trace properties", () => {
         const graph = {
           spec_trace_version: 2,
           current_phase: "execute",
+          verification_manifest: legacyDefaultVerificationManifest(),
           phase_artifacts: {},
           skipped_phases: [],
           plan_title: "trace",
@@ -96,6 +98,7 @@ describe("Requirement trace properties", () => {
     fc.assert(fc.property(anchorArbitrary, fc.nat({ max: 1000 }), (anchor, generation) => {
       const graph: TaskGraph = {
         current_phase: "execute",
+        verification_manifest: legacyDefaultVerificationManifest(),
         current_wave: 1,
         phase_artifacts: {},
         skipped_phases: [],

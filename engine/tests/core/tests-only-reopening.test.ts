@@ -87,6 +87,7 @@ import {
   siblingTaskFixture,
   trustedPassEvidence,
 } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const IMPL = "src/order.ts";
 const TEST = "src/order.test.ts";
@@ -254,7 +255,7 @@ describe("reopenImplementedTasks --needs tests", () => {
     regression: { kind: "waived", reason: "documentation-only" }, new_tests: { kind: "required" },
   };
   const legacyGraph = (tasks: readonly Task[]): TaskGraph => protectedGraphFixture({
-    spec_trace_version: 2, current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+    spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, current_wave: 1, executing_tasks: [], tasks, wave_gates: { "1": newWaveGate() },
   });
   const legacyImplemented = (id: string): Task =>
@@ -699,7 +700,7 @@ describe("operations beside a tests-only Task", () => {
   it("is left to its attempt by reconcile, however satisfied its stored evidence looks", () => {
     const t1: Task = { ...byId(committed(graph()), "T1"), test_result: { verdict: "trusted-pass" }, files_modified: [TEST] };
     const reconciled = reconcileTaskFromStoredEvidence(
-      t1, [TEST], parseNewTestEvidence(true, "1 new test"), false, i6RunnerManifest(), CONFORMANCE_NOT_OWED,
+      t1, [TEST], parseNewTestEvidence(true, "1 new test"), i6RunnerManifest(), CONFORMANCE_NOT_OWED,
     );
     expect(reconciled).toBe(t1);
   });
