@@ -17,11 +17,8 @@ import {
 import { fixFull } from "../../src/handlers/helpers/validate-task-graph";
 import {
   reduceArchitectureProgram,
-  reduceRefutationProgram,
   type ArchitectureProgramEvent,
   type ArchitectureProgramState,
-  type RefutationProgramEvent,
-  type RefutationProgramState,
 } from "../../src/core/panel-program";
 
 const cleanup: string[] = [];
@@ -369,13 +366,13 @@ describe("--fix clears an in-flight review run whose finding set it changed", ()
 /**
  * Panel reducers reject every UNDECLARED (state, event) pair.
  *
- * The other lifecycle machines carry this exhaustive property; the two panel
- * reducers need the same guard so a stage that silently accepted an event meant for
+ * The other lifecycle machines carry this exhaustive property; the panel
+ * reducer needs the same guard so a stage that silently accepted an event meant for
  * another stage — the classic way a state machine loses its guarantees — had
  * nothing to catch it. Rejection here means a typed refusal, never a throw and
  * never a silent no-op that returns the same state.
  */
-describe("panel reducers reject undeclared state × event pairs", () => {
+describe("the panel reducer rejects undeclared state × event pairs", () => {
   const EVENT_TYPES = ["spawn-outcome", "engine-outcome", "user-decision"] as const;
   type EventType = (typeof EVENT_TYPES)[number];
 
@@ -388,14 +385,6 @@ describe("panel reducers reject undeclared state × event pairs", () => {
     "judges": "spawn-outcome",
     "aggregate": "engine-outcome",
     "finalize": "spawn-outcome",
-    "complete": null,
-    "blocked": null,
-  };
-  const refutationStages: Readonly<Record<string, EventType | null>> = {
-    "prepare-verifiers": "engine-outcome",
-    "verifiers": "spawn-outcome",
-    "tally": "engine-outcome",
-    "skipped": null,
     "complete": null,
     "blocked": null,
   };
@@ -431,22 +420,7 @@ describe("panel reducers reject undeclared state × event pairs", () => {
     ), { numRuns: 300 });
   });
 
-  it("refutation: every stage refuses every event type it does not declare", () => {
-    fc.assert(fc.property(
-      fc.constantFrom(...Object.keys(refutationStages)),
-      fc.constantFrom(...EVENT_TYPES),
-      (stage, type) => {
-        fc.pre(refutationStages[stage] !== type);
-        const state = { stage, completedRequestIds: [], completedOperationIds: [] } as unknown as RefutationProgramState;
-        const result = reduceRefutationProgram(state, eventOf(type) as RefutationProgramEvent);
-        expect(result.ok, `${stage} accepted a ${type}`).toBe(false);
-        if (result.ok) return;
-        expect(result.error).toMatchObject({ kind: "unexpected-event", panel: "refutation", stage });
-      },
-    ), { numRuns: 300 });
-  });
-
-  it("every terminal stage refuses every event, in both panels", () => {
+  it("every terminal stage refuses every event", () => {
     for (const type of EVENT_TYPES) {
       for (const stage of ["complete", "blocked"]) {
         const architecture = reduceArchitectureProgram(
@@ -454,13 +428,6 @@ describe("panel reducers reject undeclared state × event pairs", () => {
           eventOf(type) as ArchitectureProgramEvent,
         );
         expect(architecture.ok, `architecture ${stage} accepted ${type}`).toBe(false);
-      }
-      for (const stage of ["skipped", "complete", "blocked"]) {
-        const refutation = reduceRefutationProgram(
-          { stage, completedRequestIds: [], completedOperationIds: [] } as unknown as RefutationProgramState,
-          eventOf(type) as RefutationProgramEvent,
-        );
-        expect(refutation.ok, `refutation ${stage} accepted ${type}`).toBe(false);
       }
     }
   });

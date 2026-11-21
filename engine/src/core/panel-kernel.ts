@@ -56,14 +56,13 @@ export { isRecord };
  * used to hardcode `"interview.md"` / `"candidates"` while the shell declared
  * them as constants, with nothing comparing the two.
  *
- * `Panel` is a phantom tag, not decoration. `RunLayout<"architecture">` and
- * `RunLayout<"review">` are structurally identical, so without it the compiler
- * happily accepts `ARCHITECTURE_LAYOUT` where a review layout belongs and the
- * only thing separating the two panels is that both callers remember to pin a
- * module-scope constant.
+ * `Panel` is a phantom tag naming the panel a layout belongs to. Only the
+ * architecture layout remains: the file-based review panel layout retired with
+ * its helper (ADR-0096), and the Refutation Panel keeps its evidence in the
+ * Run Directory instead.
  */
 export interface RunLayout<Panel extends string = string> {
-  /** Which panel this layout belongs to — the tag that keeps the two apart. */
+  /** Which panel this layout belongs to. */
   readonly panel: Panel;
   /** Human-readable context the panel was built from. */
   readonly contextMd: string;
@@ -84,23 +83,14 @@ export const ARCHITECTURE_LAYOUT: RunLayout<"architecture"> = Object.freeze({
   verdictDir: "verdicts",
 });
 
-/** The wave gate's refutation panel: a findings brief and the finding set. */
-export const REVIEW_LAYOUT: RunLayout<"review"> = Object.freeze({
-  panel: "review",
-  contextMd: "brief.md",
-  contextJson: "brief.json",
-  itemDir: "findings",
-  verdictDir: "verdicts",
-});
-
 // ---------------------------------------------------------------------------
-// The run manifest — the item-set authority, shared by both panels
+// The run manifest — the item-set authority
 // ---------------------------------------------------------------------------
 
 /**
  * One item the manifest names, bound to a run-scoped path.
  *
- * `Id` is the caller's own id type (`PanelLens`, `WaveFindingId`), threaded
+ * `Id` is the caller's own id type (`PanelLens`), threaded
  * through so the membership check below PROVES it. The entry id used to come
  * back as a bare string, and both consumers re-asserted their type with an `as`
  * cast justified by a "safe by construction" comment — a fact the compiler
@@ -240,12 +230,10 @@ export interface OrderedSetLabels {
  * The four rules that make one array EXACTLY another: unique, no member absent,
  * same length, same order.
  *
- * Extracted because `parseRunManifest` implemented them for its item array and
- * `parseReviewManifest` hand-rolled the same four for its `lenses` array twenty
- * lines from the call that could not carry them — `RunManifestSpec` had no slot
- * for a second validated id array. Two copies of one rule set is precisely what
- * `parseRunManifest`'s own note records as having ALREADY produced a silent
- * divergence between the two panels.
+ * Extracted when a second manifest parser hand-rolled the same four for a
+ * lens array (that parser retired with the review-panel helper, ADR-0096). Two
+ * copies of one rule set is precisely what `parseRunManifest`'s own note
+ * records as having ALREADY produced a silent divergence between two panels.
  */
 export function exactOrderedSetErrors<Id extends string>(
   actual: readonly Id[],

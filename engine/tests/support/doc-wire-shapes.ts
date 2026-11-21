@@ -17,9 +17,8 @@ import { join } from "node:path";
 import { parseDispositionInput } from "../../src/core/advisory-disposition-record";
 import { prepareDefectFamilyAccounting } from "../../src/core/defect-family-accounting";
 import { parseImplementationBriefRequest } from "../../src/core/implementation-brief";
-import { translateLegacyPanelJournal } from "../../src/core/legacy-archive";
 import { CODEBASE_FIT_CRITERION, PANEL_LENSES, PRIMARY_AXES, candidateFilename, parseJudgeVerdict } from "../../src/core/panel-contract";
-import { reduceArchitectureProgram, startArchitectureDispatchProgram } from "../../src/core/panel-program";
+import { parseArchitecturePanelJournal, reduceArchitectureProgram, startArchitectureDispatchProgram } from "../../src/core/panel-program";
 import { REVIEW_LENSES, parseRefutationVerdict, parseWaveFindingId } from "../../src/core/review-panel";
 import { parseSecurityAuditStart } from "../../src/core/security-audit-start";
 import { canonicalCoverageId, isWireRecord } from "../../src/core/security-audit-contract";
@@ -174,9 +173,8 @@ export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
       judgeCriteria: sequence(...PRIMARY_AXES),
     },
     parse: (raw) => {
-      const journal = translateLegacyPanelJournal("architecture", raw);
+      const journal = parseArchitecturePanelJournal(raw);
       if (!journal.ok) return settle(journal);
-      if (journal.value.panel !== "architecture") return refused("the journal did not translate as an architecture panel");
       const started = startArchitectureDispatchProgram(journal.value.input);
       if (!started.ok) return settle(started);
       // The helper replays the journal's events over the started program; so does this.

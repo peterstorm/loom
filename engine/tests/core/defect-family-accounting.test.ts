@@ -52,7 +52,7 @@ import {
   startStandaloneReviewMachine,
   type AuthoritativeStandaloneReviewResult,
 } from "../../src/core/standalone-review";
-import { capturedReviewerResultFromText } from "../../src/core/standalone-reviewer-capture";
+import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
 import { prepareStandaloneReview } from "../../src/core/standalone-review-preparation";
 import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review-records";
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from "../../src/core/standalone-refutation-completion";
@@ -332,7 +332,7 @@ function sourceWithEveryFindingClass(): AuthoritativeStandaloneReviewResult {
     byteLength: bytes.byteLength,
   });
   if (!artifact.ok) throw new Error(artifact.error.message);
-  const captured = capturedReviewerResultFromText(artifact.value, transcript);
+  const captured = capturedReviewerResultFromBytes(artifact.value, Buffer.from(transcript, "utf-8"));
   if (!captured.ok) throw new Error(captured.error.message);
   const accepted = acceptedAgentResult(issued, captured.value);
   if (!accepted.ok) throw new Error(accepted.error.message);

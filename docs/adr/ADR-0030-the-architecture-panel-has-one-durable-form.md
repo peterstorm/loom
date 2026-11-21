@@ -3,6 +3,10 @@
 ## Status
 Accepted (2026-10-18). Resolves the question ADR-0029 left open in its Consequences ("the persistent
 architecture panel's own program ... needs its own design session").
+Partly superseded by [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md)
+(2026-11-20): its first premise was wrong. `/loom --panel` follows `references/loom/panel-runbook.md`, which
+replays the stateless dispatch program through `helper panel-program architecture`; the registered driver never
+had a caller and is deleted. "The persistent panel program is the refutation panel's alone" stands.
 
 ## Context
 The August 2026 plan (`.claude/plans/2026-08-09-orchestration-automation.md`, Task 2) put both panels behind
@@ -10,8 +14,8 @@ persistent, authority-bound programs. Those programs were separate architecture 
 `core/persistent-panel`, with the older journal-based panel code as a "legacy journal compatibility adapter".
 Both landed in #17 (2026-08-21). Production then grew up on the adapter:
 
-- `/loom --panel` runs the registered driver in `engine/src/handlers/helpers/programs/legacy-panel.ts` over the
-  dispatch program in `core/panel-program` and the decisions in `core/legacy-panel-decisions`. That driver
+- `/loom --panel` runs the registered driver in engine/src/handlers/helpers/programs/legacy-panel.ts over the
+  dispatch program in `core/panel-program` and the decisions in core/legacy-panel-decisions. That driver
   includes the interactive interview and finalization steps.
 - The persistent refutation program was adopted by standalone review and the wave gate. They embed its
   checkpoint and re-prove it inside their own.
@@ -25,10 +29,10 @@ Reading both paths showed that the registered driver already carries each guaran
 written to supply:
 
 - **Judge criterion binding:** each judge slot's criterion is minted through the closed interview vocabulary
-  (`legacy-panel-decisions.ts`).
+  (legacy-panel-decisions.ts).
 - **Ranking:** both paths call the same `aggregateVerdicts`.
 - **Crash durability (FR-021):** the registered driver resumes by replaying its dedup-keyed Run Directory
-  journal. `legacy-panel-driver.test.ts` exercises the crash window.
+  journal. legacy-panel-driver.test.ts exercises the crash window.
 
 ## Options Considered
 

@@ -3,6 +3,10 @@
 ## Status
 Accepted
 
+Amended by [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md)
+(2026-11-20): the legacy attempt resolution and replayPanelVerdictSourceSelection are deleted with the
+registered panel driver they served. The persistent submissions are the one panel verdict path.
+
 ## Context
 Grammar-constrained decoding (plan `.claude/plans/2026-09-16-grammar-constrained-decoding.md`) adds a second way for a structured-payload producer to deliver its payload: a per-kind emission tool call, alongside the existing final-message extraction (PR #52's `parseFinalPayload`). There are three producer kinds: `reviewer-payload` v2/v3, `judge-verdict` v1 and `refutation-verdict` v1. They enter the engine on two different ingestion paths. The reviewer path builds canonical `FinalPayload` bytes in the harness capture runtime and then passes them through authoritative reviewer protocol admission. The verdict paths hand `rawJson` to the panel submission seam, which parses it under the issuance's criterion, lens and roster bindings. On every path, one issued request attempt now has two candidate sources, and something has to choose between them.
 
@@ -79,17 +83,17 @@ Two functions share this decision and differ only in how they build output:
 - **Reviewer:** `engine/src/orchestration/harness-capture-runtime.ts` calls `selectCanonicalPayload(authority.binding, observeEmissionCalls(observation.frames), observation.candidates)` and folds the six arms exhaustively.
   - Accepted sources go through the existing `bindAndPersistCapture`, which performs reviewer protocol admission. Provenance (`source`, `toolCallId`, `producerKind`, `emissionSchemaVersion`, `schemaDigest`, retained `emissionRefusal`) is taken from the selection result.
   - Rejections map to `ambiguous-emission-call`, `emission-and-extraction-refused`, or the refusal code.
-- **Verdict:** `engine/src/core/panel-verdict-source.ts` composes the kernel directly, for both panel paths (the persistent submissions and the legacy attempt resolution in `engine/src/core/legacy-panel-decisions.ts`):
+- **Verdict:** `engine/src/core/panel-verdict-source.ts` composes the kernel directly, for both panel paths (the persistent submissions and the legacy attempt resolution in engine/src/core/legacy-panel-decisions.ts):
   - `foldPanelVerdictEmission` is the one live fold, `selectVerdictSource` over the issued binding and observation.
-  - `replayPanelVerdictSourceSelection` re-certifies a recorded emission claim through `issueEmissionBinding`, refuses a record whose schema digest does not certify the minted one, and re-folds the single accepted call.
-  - *Amended 2026-10-07 (deepen pass).* The kernel used to reach the panel layer through an injected `PanelVerdictEmissionPort` whose only production adapter lived in `legacy-panel-decisions.ts`, with structural mirror types of the kernel's binding, call, observation and selection, because the emission modules were outside the purity closure and the panel modules are declared pure. Once `emission-tool.ts`, `harness-capture.ts`, `emission-ingestion.ts`, `legacy-archive.ts` and `legacy-panel-decisions.ts` were enrolled in DEFAULT_PURE_MODULES (their transitive closure audited by `engine/tests/linter/programmatic/machine-purity.test.ts`), the port protected no purity and had one adapter — the core tests carried a hand-written twin of it. The port, its adapter, the twin and the mirror types were removed; the panel layer imports the kernel downward, and the kernel still never imports the panel layer.
+  - replayPanelVerdictSourceSelection re-certifies a recorded emission claim through `issueEmissionBinding`, refuses a record whose schema digest does not certify the minted one, and re-folds the single accepted call.
+  - *Amended 2026-10-07 (deepen pass).* The kernel used to reach the panel layer through an injected `PanelVerdictEmissionPort` whose only production adapter lived in legacy-panel-decisions.ts, with structural mirror types of the kernel's binding, call, observation and selection, because the emission modules were outside the purity closure and the panel modules are declared pure. Once `emission-tool.ts`, `harness-capture.ts`, `emission-ingestion.ts`, `legacy-archive.ts` and legacy-panel-decisions.ts were enrolled in DEFAULT_PURE_MODULES (their transitive closure audited by `engine/tests/linter/programmatic/machine-purity.test.ts`), the port protected no purity and had one adapter — the core tests carried a hand-written twin of it. The port, its adapter, the twin and the mirror types were removed; the panel layer imports the kernel downward, and the kernel still never imports the panel layer.
 - The panel parsers keep their criterion, lens and roster bindings and their complete candidate/finding coverage. A selection chooses which bytes are parsed, never what those bytes must bind to.
 - No `FinalPayload` or serialized verdict bypasses these joins.
 
 **Layering.**
 - `emission-ingestion.ts` is pure: no I/O, no clock, no randomness.
 - It imports only `emission-tool.ts` (binding types, `admitIssuedEmissionArguments`), `emission-observation.ts` (observation vocabulary), `harness-capture.ts` (`finalPayloadOf`, `parseFinalPayload`), and `orchestration-contract/identity` (`DomainResult`, `canonicalRecord`, `parseRequestId`).
-- It must not import `panel-program.ts`, the panel verdict modules (`panel-verdict-source.ts`, `persistent-panel.ts`), `legacy-panel-decisions.ts` or any I/O adapter. `machine-purity.test.ts` gates both halves: the emission modules' direct imports exclude the panel layer, and their transitive closure stays inside the declared pure modules.
+- It must not import `panel-program.ts`, the panel verdict modules (`panel-verdict-source.ts`, `persistent-panel.ts`), legacy-panel-decisions.ts or any I/O adapter. `machine-purity.test.ts` gates both halves: the emission modules' direct imports exclude the panel layer, and their transitive closure stays inside the declared pure modules.
 - Shared schema definitions stay below the program layer, so no registry-to-program import cycle exists.
 - Results use the existing `DomainResult` and `canonicalRecord` immutable-record conventions. No branded wrappers were added for values that carry no invariant.
 

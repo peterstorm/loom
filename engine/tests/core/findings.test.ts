@@ -732,7 +732,7 @@ describe("applyFindingOutcomes refuses to adjudicate what it cannot find", () =>
     mergeFindings(taskFixture({ review_status: "pending" }), makeParsed(["a blocker"]), "code-reviewer");
 
   it("throws on an outcome naming a finding the task no longer holds", () => {
-    // Silently skipping it wrote no audit record while serializeOutcomes and
+    // Silently skipping it wrote no audit record while the serialized tally and
     // the operator line both still reported the finding as refuted — and
     // dropping the wave's last critical that way promotes blocked → passed.
     // Reachable when a store-review-findings override lands between brief and

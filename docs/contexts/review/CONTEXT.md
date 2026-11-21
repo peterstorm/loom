@@ -55,7 +55,7 @@ The executable event-sourced dispatch policy for an architecture panel or Refuta
 _Avoid_: Runbook sequence, workflow DSL, panel prompt
 
 **Orchestration Façade**:
-The single parent-facing engine interface for status and for every registered program (architecture panel, Refutation Panel, Standalone Review Run, Wave Gate, remediation). At its boundary it returns only a spawn batch, await-user, blocked or done.
+The single parent-facing engine interface for status and for every registered program (Standalone Review Run, standalone disposition, Wave Gate, remediation, security verification); the Refutation Panel runs inside the first and the third. The architecture panel is not a registered program: its parent replays the Panel Program through `helper panel-program architecture`. At its boundary it returns only a spawn batch, await-user, blocked or done.
 _Avoid_: Helper collection, workflow script, shell runbook
 
 **Effect Receipt**:
@@ -122,7 +122,7 @@ _Avoid_: Proven closed, Resolved Finding, semantic proof
 - A Wave **Task** has exactly one **Wave Review Roster** or is exempt; a **Review Run** keeps the roster it was installed with
 - A **Review Run** slot is issued by its own Wave Gate run or is **Carried Review Evidence** from exactly one earlier run along its unbroken chain of carrying restarts, never both
 - A **Review Packet** reviews the **Git-Visible Leaves** of its scope and has one **Reviewed Workspace Observation**
-- A panel has exactly one **Panel Program**; the **Orchestration Façade** issues each of its requests with one Context Packet
+- A panel has exactly one **Panel Program** and one driver; the **Orchestration Façade** issues each Refutation Panel request with one Context Packet
 - An **Effect Receipt** belongs to exactly one authorized side effect
 - A **Finding** has exactly one **Finding Origin** across every successor review
 - A successor Standalone Review Run has exactly one **Standalone Successor Binding**

@@ -285,8 +285,6 @@ describe("the smoke scripts this file's own header cites are actually run", () =
     const smoke = pkg.scripts["test:smoke"]!;
     for (const script of [
       "smoke-panel-mode.sh",
-      "smoke-review-panel.sh",
-      "smoke-standalone-review.sh",
       "smoke-orchestration-facades.ts",
       "smoke-pi-resources.sh",
     ]) {

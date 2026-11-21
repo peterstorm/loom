@@ -208,12 +208,6 @@
           ],
           "reason": "digest-only hashing of review packet bytes"
         },
-        "engine/src/core/review-panel.ts": {
-          "allow": [
-            "node:path"
-          ],
-          "reason": "pure path math over panel artifact paths"
-        },
         "engine/src/core/rules-gate.ts": {
           "allow": [
             "node:path"
@@ -666,7 +660,6 @@
     "engine/src/core/orchestration-contract/effects.ts::envelope.value.kind",
     "engine/src/core/orchestration-contract/roster.ts::entry.kind",
     "engine/src/core/panel-program.ts::state.stage",
-    "engine/src/core/panel-program.ts::state.stage",
     "engine/src/core/panel-verdict-source.ts::accepted.kind",
     "engine/src/core/persistent-panel.ts::envelope.type",
     "engine/src/core/persistent-panel.ts::event.type",
@@ -792,7 +785,6 @@
     "engine/tests/core/skeleton-ts-surface.test.ts::engine/tests/acceptance/skeleton-generation.acceptance.test.ts@8dc397c3",
     "engine/tests/core/spawn-graph-observation.test.ts::engine/tests/handlers/task-execution-attempt-registration.test.ts@2dc8f735",
     "engine/tests/core/standalone-review-checkpoint-refutation-restore.test.ts::engine/tests/core/reviewer-protocol-history.test.ts@512494ce",
-    "engine/tests/core/standalone-review.test.ts::engine/tests/core/standalone-review.test.ts@0a371cc2",
     "engine/tests/core/standalone-review.test.ts::engine/tests/core/standalone-review.test.ts@7fecca10",
     "engine/tests/core/standalone-review.test.ts::engine/tests/fixtures/standalone-remediation-authority.ts@0e7ffbc0",
     "engine/tests/core/stop-check-planner-parity.matrix.test.ts::engine/tests/handlers/stop-checks.test.ts@90dd0cd5",
@@ -1321,7 +1313,6 @@
     "engine/src/core/pi-agent-directory.ts::getAgentDir",
     "engine/src/core/report-file-attribution.ts::com.acme.FooTest",
     "engine/src/core/report-file-attribution.ts::com.acme.FooTest$Nested",
-    "engine/src/core/review-panel.ts::verdicts/",
     "engine/src/core/route-reachability.ts::provider/model",
     "engine/src/core/run-inspection.ts::events/",
     "engine/src/core/run-inspection.ts::programs/remediation.ts",
@@ -1377,7 +1368,6 @@
     "engine/src/handlers/helpers/orchestration.ts::events/",
     "engine/src/handlers/helpers/panel-run.ts::candidate-performance-first.md",
     "engine/src/handlers/helpers/panel-run.ts::candidates/",
-    "engine/src/handlers/helpers/panel-run.ts::finding-code-reviewer-9.json",
     "engine/src/handlers/helpers/security-audit.ts::verification-runs/",
     "engine/src/handlers/helpers/security-audit.ts::verification-runs/",
     "engine/src/handlers/helpers/security-verification-proofs.ts::verification-runs/",
@@ -1489,9 +1479,6 @@
     "engine/src/core/implementation-retry.ts::parseImplementationAttemptContext",
     "engine/src/core/implementation-retry.ts::projectLineage",
     "engine/src/core/implementation-window.ts::classifyImplementationWindow",
-    "engine/src/core/legacy-archive.ts::parseAdjudicatedStandaloneReview",
-    "engine/src/core/legacy-archive.ts::translateLegacyPanelJournal",
-    "engine/src/core/legacy-panel-decisions.ts::executeDeterministicPanelOperation",
     "engine/src/core/model-calibration.ts::scoreCalibration",
     "engine/src/core/orchestration-contract/actions.ts::parseBlockedDiagnostic",
     "engine/src/core/orchestration-contract/bytes.ts::readDenseDataArray",
@@ -1513,7 +1500,6 @@
     "engine/src/core/panel-kernel.ts::parseRunManifest",
     "engine/src/core/panel-kernel.ts::parseVerdictEnvelope",
     "engine/src/core/panel-program.ts::reduceArchitectureProgram",
-    "engine/src/core/panel-program.ts::reduceRefutationProgram",
     "engine/src/core/parse-plan-models.ts::collectStrays",
     "engine/src/core/parse-spec.ts::parseEntries",
     "engine/src/core/proof-obligations.ts::evaluateOne",
@@ -1532,7 +1518,6 @@
     "engine/src/core/remediation-machine.ts::verifyTemporaryIndex",
     "engine/src/core/requirement-coverage.ts::parseStoredUnavailableReason",
     "engine/src/core/review-output.ts::parsePriorAssessments",
-    "engine/src/core/review-panel.ts::parseBriefFindingEntry",
     "engine/src/core/security-coverage.ts::<anonymous>",
     "engine/src/core/security-coverage.ts::parseCoverageSeeds",
     "engine/src/core/security-coverage.ts::validateStateInvariants",
@@ -1571,7 +1556,6 @@
     "engine/src/handlers/helpers/model-calibration.ts::handler",
     "engine/src/handlers/helpers/model-profiles.ts::handler",
     "engine/src/handlers/helpers/panel-contract.ts::handler",
-    "engine/src/handlers/helpers/programs/legacy-panel.ts::materializePanelRequest",
     "engine/src/handlers/helpers/programs/remediation-events.ts::replayRemediationCheckObservedEvent",
     "engine/src/handlers/helpers/programs/remediation.ts::checkObservations",
     "engine/src/handlers/helpers/programs/remediation.ts::driveRemediationFacade",
@@ -1603,8 +1587,6 @@
     "engine/src/handlers/helpers/reopen-completed-wave.ts::reopenCompletedWave",
     "engine/src/handlers/helpers/repair-task-graph.ts::handler",
     "engine/src/handlers/helpers/review-packet.ts::handler",
-    "engine/src/handlers/helpers/review-panel.ts::handler",
-    "engine/src/handlers/helpers/review-panel.ts::operationBrief",
     "engine/src/handlers/helpers/store-review-findings.ts::handler",
     "engine/src/handlers/helpers/store-review-findings.ts::updateTaskFindings",
     "engine/src/handlers/helpers/store-spec-check.ts::runStoreSpecCheck",
