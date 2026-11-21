@@ -8,9 +8,9 @@
  * under the TaskGraph lock lives in `state-manager.ts`, which re-exports this
  * module's public surface so the import surface is unchanged.
  *
- * Parse, don't validate: every union-typed field is PROVEN in the union before
- * any cast, so a drifted or hand-edited value fails loudly at the load boundary
- * instead of exploding later inside typed gate logic.
+ * Parse, don't validate: every union-typed field is PROVEN in the union and
+ * installed as its parsed value, so a drifted or hand-edited value fails loudly
+ * at the load boundary instead of exploding later inside typed gate logic.
  */
 
 import { isAbsolute, join, resolve } from "node:path";
@@ -75,7 +75,9 @@ import {
   parseOrchestrationRunId,
   parseSlotId,
   canonicalStructuralEquals,
+  isNonEmpty,
   nonEmpty,
+  nonEmptyOf,
   type NonEmpty,
   type OrchestrationRunId,
 } from "./core/orchestration-contract";
@@ -109,8 +111,8 @@ import {
   type SpecIndexObservation,
 } from "./core/requirement-coverage";
 import { parseStoredSpecCheck } from "./core/spec-check";
-import { parseProofBoundaryObservation, type ProofBoundaryObservation } from "./core/proof-boundary-observation";
-import { parsePlanDesignReview, type RecordedPlanDesignReview } from "./core/plan-design-review";
+import { parseProofBoundaryObservation } from "./core/proof-boundary-observation";
+import { parsePlanDesignReview } from "./core/plan-design-review";
 import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wave-gate-model";
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
@@ -118,7 +120,7 @@ import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
 import { dependencyAddedEdit, parsePlanEditReason, taskAddedEdit, taskRescopedEdit, taskWithdrawnEdit } from "./core/wave-plan-edit";
 import { retroRecordEntry, retroScopeKnown } from "./core/retro-record";
-import { parseAdvisoryDispositions, type AdvisoryDisposition } from "./core/advisory-disposition";
+import { parseAdvisoryDispositions } from "./core/advisory-disposition";
 import { dependencyCycles } from "./core/task-dependencies";
 import {
   amendmentHistoryError,
@@ -165,7 +167,7 @@ import {
   type FrozenVerificationManifest,
 } from "./core/verification-manifest";
 import { parseWaveReviewerProtocolDescriptor } from "./core/reviewer-contract";
-import { parseTestEvidenceField, type EngineRunTestEvidence } from "./core/test-evidence-authority";
+import { parseTestEvidenceField } from "./core/test-evidence-authority";
 import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
 import { isRecord } from "./core/plain-record";
@@ -199,7 +201,7 @@ import type {
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
  *
- * The cast in `parseTaskGraph` asserts `Record<string, WaveGate>` and used to
+ * The TaskGraph asserts `Record<string, WaveGate>`, and the load used to
  * prove nothing beyond "the container is an object". Four booleans read by gate
  * logic as booleans: `validate-task-execution` blocks on `!gate.reviews_complete`,
  * so `{ reviews_complete: "no" }` loaded clean and read as TRUTHY — the
@@ -209,41 +211,35 @@ import type {
  * outright — no writer produces it, and a drifted graph carrying it would
  * otherwise mint a failure message nothing in the engine ever wrote.
  */
-function waveGateError(v: unknown, wave: string): string | null {
-  if (!isRecord(v)) {
-    return `wave_gates["${wave}"] must be an object`;
-  }
-  const gate = v as Record<string, unknown>;
-  const booleanFields = ["impl_complete", "reviews_complete", "blocked"] as const;
+function parseWaveGate(raw: unknown, wave: string): ParseResult<WaveGate> {
+  const label = `wave_gates["${wave}"]`;
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   // Diagnose malformed fields before absent siblings so a partially supplied
   // record points at the value the writer actually got wrong.
-  for (const field of booleanFields) {
-    if (field in gate && typeof gate[field] !== "boolean") {
-      return `wave_gates["${wave}"]: ${field} must be a boolean, got ${JSON.stringify(gate[field])}`;
-    }
+  const malformed = WAVE_GATE_FLAGS.find((field) => field in raw && typeof raw[field] !== "boolean");
+  if (malformed !== undefined) return parseErr(`${label}: ${malformed} must be a boolean, got ${JSON.stringify(raw[malformed])}`);
+  const { impl_complete: implComplete, reviews_complete: reviewsComplete, blocked, tests_passed: testsPassed } = raw;
+  if ("tests_passed" in raw && testsPassed !== null && typeof testsPassed !== "boolean") {
+    return parseErr(`${label}: tests_passed must be a boolean or null, got ${JSON.stringify(testsPassed)}`);
   }
-  if (
-    "tests_passed" in gate &&
-    gate.tests_passed !== null && typeof gate.tests_passed !== "boolean"
-  ) {
-    return (
-      `wave_gates["${wave}"]: tests_passed must be a boolean or null, ` +
-      `got ${JSON.stringify(gate.tests_passed)}`
-    );
-  }
-  if ("tests_passed" in gate && gate.tests_passed === false) {
-    return (
-      `wave_gates["${wave}"]: tests_passed: false is not a representable gate state ` +
+  if ("tests_passed" in raw && testsPassed === false) {
+    return parseErr(
+      `${label}: tests_passed: false is not a representable gate state ` +
       `(no writer produces it; failing runs are judged by test_result evidence) — ` +
-      `set null (not yet judged) or true (passed)`
+      `set null (not yet judged) or true (passed)`,
     );
   }
-  for (const field of booleanFields) {
-    if (!(field in gate)) return `wave_gates["${wave}"]: missing required field ${field}`;
-  }
-  if (!("tests_passed" in gate)) return `wave_gates["${wave}"]: missing required field tests_passed`;
-  return null;
+  // Every present flag is a boolean and a present tests_passed is true or
+  // null, so what is not one now is absent.
+  if (typeof implComplete !== "boolean") return parseErr(`${label}: missing required field impl_complete`);
+  if (typeof reviewsComplete !== "boolean") return parseErr(`${label}: missing required field reviews_complete`);
+  if (typeof blocked !== "boolean") return parseErr(`${label}: missing required field blocked`);
+  if (testsPassed !== true && testsPassed !== null) return parseErr(`${label}: missing required field tests_passed`);
+  return parseOk({ ...raw, impl_complete: implComplete, tests_passed: testsPassed, reviews_complete: reviewsComplete, blocked });
 }
+
+/** A Wave Gate's boolean flags, in the order a malformed one is diagnosed. */
+const WAVE_GATE_FLAGS = ["impl_complete", "reviews_complete", "blocked"] as const;
 
 /**
  * Prove the spec-check record, routed through the smart constructor that exists
@@ -294,22 +290,16 @@ function parseSpecCheckField(v: unknown):
  *      spec-check reports `critical_count > 0`.
  */
 function blockedGateCauseError(
-  waveGates: Record<string, unknown>,
+  waveGates: Readonly<Record<string, WaveGate>>,
   tasks: readonly ParsedTask[],
   specCheck: SpecCheck | undefined,
 ): string | null {
-  const causeTasks = tasks.map((task) => ({
-    wave: typeof task.wave === "number" ? task.wave : Number.NaN,
-    critical_findings: Array.isArray(task.critical_findings)
-      ? (task.critical_findings as readonly string[])
-      : undefined,
-  }));
   for (const [wave, gate] of Object.entries(waveGates)) {
-    if ((gate as Record<string, unknown>).blocked !== true) continue;
+    if (!gate.blocked) continue;
     // The SAME predicate the writers use to set and clear the flag
     // (`core/wave-gate-model`), so the boundary can never disagree with them
     // about what counts as a cause.
-    if (waveHasBlockCause(causeTasks, specCheck, Number(wave))) continue;
+    if (waveHasBlockCause(tasks, specCheck, Number(wave))) continue;
     return (
       `wave_gates["${wave}"]: blocked: true has no cause — no task in wave ${wave} carries ` +
       `critical review findings and spec_check does not report a critical finding for it. ` +
@@ -342,6 +332,40 @@ function exactFieldsError(
   const missingFields = required.filter((field) => !(field in record));
   return missingFields.length > 0 ? `${label} is missing field(s): ${missingFields.join(", ")}` : null;
 }
+
+/**
+ * An optional append-only log under its wire name `field`: absent, or an
+ * array whose every entry parses under its `field[index]` label and whose
+ * entries then hold together (`collectionError`). An entry parser is handed
+ * the entries before it, for a rule that refuses at the first entry
+ * repeating an earlier one. The first refusal wins.
+ */
+function parseOptionalLog<T>(
+  raw: unknown,
+  field: string,
+  parseEntry: (entry: unknown, label: string, earlier: readonly T[]) => ParseResult<T>,
+  collectionError: (entries: readonly T[]) => string | null = () => null,
+): ParseResult<readonly T[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr(`${field} must be an array when present`);
+  const entries: T[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const parsed = parseEntry(entry, `${field}[${index}]`, entries);
+    if (!parsed.ok) return parsed;
+    entries.push(parsed.value);
+  }
+  const error = collectionError(entries);
+  return error === null ? parseOk(Object.freeze(entries)) : parseErr(error);
+}
+
+/** A refusal its parser words without a location, prefixed with the `label` it occurred under. */
+function labelled<T>(label: string, parsed: ParseResult<T>): ParseResult<T> {
+  return parsed.ok ? parsed : parseErr(`${label}: ${parsed.error}`);
+}
+
+/** Why two entries share an identity, as `message`, or null when every identity is distinct. */
+const repeatedIdentity = (identities: readonly string[], message: string): string | null =>
+  new Set(identities).size === identities.length ? null : message;
 
 const WAVE_REVIEW_EPOCH_FIELDS = ["runId", "wave", "batchEpoch"] as const;
 const WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS = ["specCheckDocuments", "specCheckSlotAuthority", "settledSpecCheckFloor"] as const;
@@ -740,19 +764,12 @@ function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<OrphanedWave
 }
 
 function parseOrphanedWaveGateHistory(raw: unknown): ParseResult<readonly OrphanedWaveGateRetirement[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("orphaned_wave_gate_history must be an array when present");
-  const history: OrphanedWaveGateRetirement[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    const parsed = parseOrphanedWaveGateRetirement(raw[index]);
-    if (!parsed.ok) return parseErr(`orphaned_wave_gate_history[${index}]: ${parsed.error}`);
-    history.push(parsed.value);
-  }
-  const retiredRunIds = history.map(({ runId }) => runId);
-  if (new Set(retiredRunIds).size !== retiredRunIds.length) {
-    return parseErr("orphaned_wave_gate_history contains duplicate retired run identities");
-  }
-  return parseOk(Object.freeze(history));
+  return parseOptionalLog(
+    raw,
+    "orphaned_wave_gate_history",
+    (entry, label) => labelled(label, parseOrphanedWaveGateRetirement(entry)),
+    (history) => repeatedIdentity(history.map(({ runId }) => runId), "orphaned_wave_gate_history contains duplicate retired run identities"),
+  );
 }
 
 const RETIRED_WAVE_REVIEW_RUN_FIELDS = ["schemaVersion", "kind", "runId", "wave", "authorityDigest", "retirement"] as const;
@@ -785,18 +802,10 @@ function parseRetiredWaveReviewRun(raw: unknown, label: string): ParseResult<Ret
 
 /** Parse the append-only Successor Carry provenance; a run is retired once. */
 function parseRetiredWaveReviewRuns(raw: unknown): ParseResult<readonly RetiredWaveReviewRun[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("retired_wave_review_runs must be an array when present");
-  const runs: RetiredWaveReviewRun[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseRetiredWaveReviewRun(entry, `retired_wave_review_runs[${index}]`);
-    if (!parsed.ok) return parsed;
-    runs.push(parsed.value);
-  }
-  const repeated = repeatedRetiredRun(runs);
-  return repeated === null
-    ? parseOk(Object.freeze(runs))
-    : parseErr(`retired_wave_review_runs retires run ${repeated.runId} twice`);
+  return parseOptionalLog(raw, "retired_wave_review_runs", parseRetiredWaveReviewRun, (runs) => {
+    const repeated = repeatedRetiredRun(runs);
+    return repeated === null ? null : `retired_wave_review_runs retires run ${repeated.runId} twice`;
+  });
 }
 
 const SPEC_TRACE_WAVE_GATE_RETIREMENT_FIELDS = [
@@ -882,24 +891,19 @@ function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<SpecTraceWa
 function parseSpecTraceWaveGateRetirements(
   raw: unknown,
 ): ParseResult<readonly SpecTraceWaveGateRetirement[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("spec_trace_wave_gate_retirements must be an array when present");
-  const retirements: SpecTraceWaveGateRetirement[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    const parsed = parseSpecTraceWaveGateRetirement(raw[index]);
-    if (!parsed.ok) return parseErr(`spec_trace_wave_gate_retirements[${index}]: ${parsed.error}`);
-    retirements.push(parsed.value);
-  }
-  const runIds = retirements.map(({ runId }) => runId);
-  if (new Set(runIds).size !== runIds.length) {
-    return parseErr("spec_trace_wave_gate_retirements contains duplicate retired run identities");
-  }
-  const authorityIdentities = retirements.map((entry) =>
-    `${entry.wave}:${entry.authorityDigest}:${entry.revision}:${entry.runsRoot}`);
-  if (new Set(authorityIdentities).size !== authorityIdentities.length) {
-    return parseErr("spec_trace_wave_gate_retirements contains colliding protected authority identities");
-  }
-  return parseOk(Object.freeze(retirements));
+  return parseOptionalLog(
+    raw,
+    "spec_trace_wave_gate_retirements",
+    (entry, label) => labelled(label, parseSpecTraceWaveGateRetirement(entry)),
+    (retirements) =>
+      repeatedIdentity(
+        retirements.map(({ runId }) => runId),
+        "spec_trace_wave_gate_retirements contains duplicate retired run identities",
+      ) ?? repeatedIdentity(
+        retirements.map((entry) => `${entry.wave}:${entry.authorityDigest}:${entry.revision}:${entry.runsRoot}`),
+        "spec_trace_wave_gate_retirements contains colliding protected authority identities",
+      ),
+  );
 }
 
 const SPEC_TRACE_AMENDMENT_FIELDS = [
@@ -1066,27 +1070,11 @@ function parseSpecAmendment(raw: unknown, label: string, tasks: readonly ParsedT
 }
 
 function parseSpecAmendments(raw: unknown, tasks: readonly ParsedTask[]): ParseResult<readonly SpecAmendment[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("spec_amendments must be an array when present");
-  const amendments: SpecAmendment[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseSpecAmendment(entry, `spec_amendments[${index}]`, tasks);
-    if (!parsed.ok) return parsed;
-    amendments.push(parsed.value);
-  }
-  return parseOk(Object.freeze(amendments));
+  return parseOptionalLog(raw, "spec_amendments", (entry, label) => parseSpecAmendment(entry, label, tasks));
 }
 
 function parseSpecTraceAmendments(raw: unknown): ParseResult<readonly SpecTraceAmendment[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("spec_trace_amendments must be an array when present");
-  const amendments: SpecTraceAmendment[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseSpecTraceAmendment(entry);
-    if (!parsed.ok) return parseErr(`spec_trace_amendments[${index}]: ${parsed.error}`);
-    amendments.push(parsed.value);
-  }
-  return parseOk(Object.freeze(amendments));
+  return parseOptionalLog(raw, "spec_trace_amendments", (entry, label) => labelled(label, parseSpecTraceAmendment(entry)));
 }
 
 const TASK_REOPENING_AUDIT_FIELDS = [
@@ -1209,18 +1197,15 @@ function parseTaskReopeningHistory(
   raw: unknown,
   tasks: readonly ParsedTask[],
 ): ParseResult<readonly TaskReopeningAudit[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("task_reopening_history must be an array when present");
-  const audits: TaskReopeningAudit[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseTaskReopeningAudit(entry, `task_reopening_history[${index}]`, tasks);
-    if (!parsed.ok) return parsed;
-    audits.push(parsed.value);
-  }
-  const runs = audits.flatMap(({ abandonedRunId }) => abandonedRunId === null ? [] : [abandonedRunId]);
-  return new Set(runs).size === runs.length
-    ? parseOk(Object.freeze(audits))
-    : parseErr("task_reopening_history names one abandoned Wave Gate run in two audits");
+  return parseOptionalLog(
+    raw,
+    "task_reopening_history",
+    (entry, label) => parseTaskReopeningAudit(entry, label, tasks),
+    (audits) => repeatedIdentity(
+      audits.flatMap(({ abandonedRunId }) => abandonedRunId === null ? [] : [abandonedRunId]),
+      "task_reopening_history names one abandoned Wave Gate run in two audits",
+    ),
+  );
 }
 
 const TASK_RESCOPED_EDIT_FIELDS = [
@@ -1404,17 +1389,13 @@ function parseWavePlanEdits(
   raw: unknown,
   tasks: readonly ParsedTask[],
 ): ParseResult<readonly WavePlanEdit[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("wave_plan_edits must be an array when present");
-  const roster: PlanEditRoster = { tasks, withdrawn: withdrawnTaskIdsOf(raw) };
-  const edits: WavePlanEdit[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseWavePlanEdit(entry, `wave_plan_edits[${index}]`, roster);
-    if (!parsed.ok) return parsed;
-    edits.push(parsed.value);
-  }
-  const historyError = wavePlanHistoryError(edits, tasks);
-  return historyError === null ? parseOk(Object.freeze(edits)) : parseErr(historyError);
+  const roster: PlanEditRoster = { tasks, withdrawn: withdrawnTaskIdsOf(Array.isArray(raw) ? raw : []) };
+  return parseOptionalLog(
+    raw,
+    "wave_plan_edits",
+    (entry, label) => parseWavePlanEdit(entry, label, roster),
+    (edits) => wavePlanHistoryError(edits, tasks),
+  );
 }
 
 /** A retro scope's exact wire shape: `{kind:"run"}` or `{kind:"wave",wave}`, else null. */
@@ -1427,41 +1408,35 @@ function parseRetroScope(scope: Record<string, unknown>): RetroScope | null {
 
 /** `retro_records`, each built by the one constructor (`core/retro-record.ts`). */
 function parseRetroRecords(raw: unknown, tasks: readonly ParsedTask[]): ParseResult<readonly RetroRecord[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("retro_records must be an array when present");
-  const records: RetroRecord[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const label = `retro_records[${index}]`;
-    if (!isRecord(entry)) return parseErr(`${label} must be an object`);
-    const record = entry as Record<string, unknown>;
-    if (record.schemaVersion !== 1) return parseErr(`${label} has invalid schema or kind`);
-    const scope = record.scope;
-    if (!isRecord(scope)) return parseErr(`${label}.scope must be an object`);
-    const scopeRecord = scope as Record<string, unknown>;
-    if (record.kind === "retro-skipped") {
-      const fieldsError = exactFieldsError(record, ["schemaVersion", "kind", "scope", "reason"], [], label);
-      if (fieldsError !== null) return parseErr(fieldsError);
-      if (scopeRecord.kind !== "run" || Object.keys(scopeRecord).length !== 1) return parseErr(`${label}: a skip covers the whole run`);
-      if (typeof record.reason !== "string") return parseErr(`${label}.reason must be a string`);
-      const built = retroRecordEntry({ kind: "retro-skipped", reason: record.reason });
-      if (!built.ok) return parseErr(`${label} ${built.error}`);
-      records.push(built.value);
-      continue;
-    }
-    if (record.kind !== "retro-recorded") return parseErr(`${label} has invalid schema or kind`);
-    const fieldsError = exactFieldsError(record, ["schemaVersion", "kind", "scope", "path", "digest"], [], label);
+  const waves = tasks.map(({ wave }) => wave);
+  return parseOptionalLog(raw, "retro_records", (entry, label) => parseRetroRecord(entry, label, waves));
+}
+
+/** One retro record: a skip of the whole run, or a recorded retro of a run or of a Wave the TaskGraph holds. */
+function parseRetroRecord(raw: unknown, label: string, waves: readonly number[]): ParseResult<RetroRecord> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  if (raw.schemaVersion !== 1) return parseErr(`${label} has invalid schema or kind`);
+  const scope = raw.scope;
+  if (!isRecord(scope)) return parseErr(`${label}.scope must be an object`);
+  if (raw.kind === "retro-skipped") {
+    const fieldsError = exactFieldsError(raw, ["schemaVersion", "kind", "scope", "reason"], [], label);
     if (fieldsError !== null) return parseErr(fieldsError);
-    const parsedScope = parseRetroScope(scopeRecord);
-    if (parsedScope === null) return parseErr(`${label}.scope must be {kind:"run"} or {kind:"wave",wave}`);
-    if (typeof record.path !== "string" || typeof record.digest !== "string") return parseErr(`${label}.path and .digest must be strings`);
-    const built = retroRecordEntry({ kind: "retro-recorded", scope: parsedScope, path: record.path, digest: record.digest });
-    if (!built.ok) return parseErr(`${label} ${built.error}`);
-    if (!retroScopeKnown(built.value.scope, tasks.flatMap(({ wave }) => (typeof wave === "number" ? [wave] : [])))) {
-      return parseErr(`${label}.scope names a Wave the TaskGraph does not hold`);
-    }
-    records.push(built.value);
+    if (scope.kind !== "run" || Object.keys(scope).length !== 1) return parseErr(`${label}: a skip covers the whole run`);
+    if (typeof raw.reason !== "string") return parseErr(`${label}.reason must be a string`);
+    const built = retroRecordEntry({ kind: "retro-skipped", reason: raw.reason });
+    return built.ok ? parseOk(built.value) : parseErr(`${label} ${built.error}`);
   }
-  return parseOk(Object.freeze(records));
+  if (raw.kind !== "retro-recorded") return parseErr(`${label} has invalid schema or kind`);
+  const fieldsError = exactFieldsError(raw, ["schemaVersion", "kind", "scope", "path", "digest"], [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const parsedScope = parseRetroScope(scope);
+  if (parsedScope === null) return parseErr(`${label}.scope must be {kind:"run"} or {kind:"wave",wave}`);
+  if (typeof raw.path !== "string" || typeof raw.digest !== "string") return parseErr(`${label}.path and .digest must be strings`);
+  const built = retroRecordEntry({ kind: "retro-recorded", scope: parsedScope, path: raw.path, digest: raw.digest });
+  if (!built.ok) return parseErr(`${label} ${built.error}`);
+  return retroScopeKnown(built.value.scope, waves)
+    ? parseOk(built.value)
+    : parseErr(`${label}.scope names a Wave the TaskGraph does not hold`);
 }
 
 const FORWARD_FIX_AUDIT_FIELDS = [
@@ -1551,21 +1526,15 @@ function parseForwardFixHistory(
   raw: unknown,
   tasks: readonly ParsedTask[],
 ): ParseResult<readonly ForwardFixAudit[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("forward_fix_history must be an array when present");
-  const audits: ForwardFixAudit[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const label = `forward_fix_history[${index}]`;
+  return parseOptionalLog(raw, "forward_fix_history", (entry, label, earlier: readonly ForwardFixAudit[]) => {
     const parsed = parseForwardFixAuditShape(entry, label);
     if (!parsed.ok) return parsed;
     const rosterError = forwardFixRosterError(parsed.value, label, tasks);
     if (rosterError !== null) return parseErr(rosterError);
-    if (audits.some(({ fixTaskId }) => fixTaskId === parsed.value.fixTaskId)) {
-      return parseErr(`forward_fix_history names fix Task ${parsed.value.fixTaskId} in two audits`);
-    }
-    audits.push(parsed.value);
-  }
-  return parseOk(Object.freeze(audits));
+    return earlier.some(({ fixTaskId }) => fixTaskId === parsed.value.fixTaskId)
+      ? parseErr(`forward_fix_history names fix Task ${parsed.value.fixTaskId} in two audits`)
+      : parsed;
+  });
 }
 
 const FORWARD_FIX_WITHDRAWAL_FIELDS = ["schemaVersion", "kind", "audit", "reason"] as const;
@@ -1581,28 +1550,22 @@ function parseForwardFixWithdrawals(
   raw: unknown,
   tasks: readonly ParsedTask[],
 ): ParseResult<readonly ForwardFixWithdrawal[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("forward_fix_withdrawals must be an array when present");
-  const withdrawals: ForwardFixWithdrawal[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const label = `forward_fix_withdrawals[${index}]`;
+  return parseOptionalLog(raw, "forward_fix_withdrawals", (entry, label, earlier: readonly ForwardFixWithdrawal[]) => {
     if (!isRecord(entry)) return parseErr(`${label} must be an object`);
-    const record = entry as Record<string, unknown>;
-    const fieldsError = exactFieldsError(record, FORWARD_FIX_WITHDRAWAL_FIELDS, [], label);
+    const fieldsError = exactFieldsError(entry, FORWARD_FIX_WITHDRAWAL_FIELDS, [], label);
     if (fieldsError !== null) return parseErr(fieldsError);
-    if (record.schemaVersion !== 1 || record.kind !== "forward-fix-withdrawn") return parseErr(`${label} has invalid schema or kind`);
-    const audit = parseForwardFixAuditShape(record.audit, `${label}.audit`);
+    if (entry.schemaVersion !== 1 || entry.kind !== "forward-fix-withdrawn") return parseErr(`${label} has invalid schema or kind`);
+    const audit = parseForwardFixAuditShape(entry.audit, `${label}.audit`);
     if (!audit.ok) return audit;
     const { fixTaskId } = audit.value;
     if (tasks.some((task) => task.id === fixTaskId)) return parseErr(`${label}: withdrawn fix Task ${fixTaskId} is still on the roster`);
-    if (withdrawals.some((withdrawal) => withdrawal.audit.fixTaskId === fixTaskId)) {
+    if (earlier.some((withdrawal) => withdrawal.audit.fixTaskId === fixTaskId)) {
       return parseErr(`forward_fix_withdrawals withdraws fix Task ${fixTaskId} twice`);
     }
-    const reason = parseBoundedReason(record.reason, label);
+    const reason = parseBoundedReason(entry.reason, label);
     if (!reason.ok) return reason;
-    withdrawals.push(Object.freeze({ schemaVersion: 1, kind: "forward-fix-withdrawn", audit: audit.value, reason: reason.value }));
-  }
-  return parseOk(Object.freeze(withdrawals));
+    return parseOk(Object.freeze({ schemaVersion: 1 as const, kind: "forward-fix-withdrawn" as const, audit: audit.value, reason: reason.value }));
+  });
 }
 
 /** An audit's operator reason under `label`: a trimmed non-blank string of at most the reopening bound. */
@@ -2775,37 +2738,61 @@ function parseSpecAnchorHashes(raw: unknown, index: number): ParseResult<Readonl
   return parseOk(Object.freeze(Object.fromEntries(hashes)));
 }
 
-/** The persisted lifecycle fields shared by the loader and operator validator. */
+/** The persisted lifecycle fields' every refusal, shared by the loader and operator validator. */
 export function taskGraphLifecycleErrors(obj: Record<string, unknown>): readonly string[] {
-  const errors: string[] = [];
-  if (!("current_phase" in obj)) errors.push("missing current_phase");
-  else if (!(PHASE_ORDER as readonly unknown[]).includes(obj.current_phase)) {
-    errors.push(`current_phase ${JSON.stringify(obj.current_phase)} is not one of ${PHASE_ORDER.join(", ")}`);
-  }
-  if (!("phase_artifacts" in obj)) errors.push("missing phase_artifacts");
-  else if (!isRecord(obj.phase_artifacts)) {
-    errors.push("phase_artifacts must be an object");
-  } else {
-    for (const [phase, artifact] of Object.entries(obj.phase_artifacts)) {
-      if (!(PHASE_ORDER as readonly string[]).includes(phase)) {
-        errors.push(`phase_artifacts contains unknown phase ${JSON.stringify(phase)}`);
-      } else if (typeof artifact !== "string") {
-        errors.push(`phase_artifacts.${phase} must be a string, got ${JSON.stringify(artifact)}`);
-      }
-    }
-  }
-  const skippedPhases = obj.skipped_phases ?? [];
-  if (!Array.isArray(skippedPhases)
-    || skippedPhases.some((phase) => !(PHASE_ORDER as readonly unknown[]).includes(phase))) {
-    errors.push(`skipped_phases must be an array containing only: ${PHASE_ORDER.join(", ")}`);
-  }
-  return errors;
+  const phase = parseCurrentPhase(obj);
+  const artifacts = parsePhaseArtifacts(obj);
+  const skipped = parseSkippedPhases(obj);
+  return [...(phase.ok ? [] : [phase.error]), ...(artifacts.ok ? [] : artifacts.errors), ...(skipped.ok ? [] : [skipped.error])];
 }
 
-type ParsedWaveGateRegistrations = Readonly<{
-  activeWaveGate: ActiveWaveGateRegistration | undefined;
-  waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
-}>;
+/** The lifecycle fields, or the first of `taskGraphLifecycleErrors`. */
+function parseTaskGraphLifecycle(obj: Readonly<Record<string, unknown>>): ParseResult<TaskGraphLifecycle> {
+  const phase = parseCurrentPhase(obj);
+  if (!phase.ok) return phase;
+  const artifacts = parsePhaseArtifacts(obj);
+  if (!artifacts.ok) return parseErr(artifacts.errors[0]);
+  const skipped = parseSkippedPhases(obj);
+  if (!skipped.ok) return skipped;
+  return parseOk({ current_phase: phase.value, phase_artifacts: artifacts.value, skipped_phases: skipped.value });
+}
+
+type TaskGraphLifecycle = Pick<TaskGraph, "current_phase" | "phase_artifacts" | "skipped_phases">;
+
+const isPhase = (raw: unknown): raw is Phase => (PHASE_ORDER as readonly unknown[]).includes(raw);
+
+function parseCurrentPhase(obj: Readonly<Record<string, unknown>>): ParseResult<Phase> {
+  if (!("current_phase" in obj)) return parseErr("missing current_phase");
+  const phase = obj.current_phase;
+  return isPhase(phase) ? parseOk(phase) : parseErr(`current_phase ${JSON.stringify(phase)} is not one of ${PHASE_ORDER.join(", ")}`);
+}
+
+/** `phase_artifacts`: the artifact path per known phase, or every entry's refusal. */
+function parsePhaseArtifacts(obj: Readonly<Record<string, unknown>>):
+  | Readonly<{ ok: true; value: TaskGraph["phase_artifacts"] }>
+  | Readonly<{ ok: false; errors: NonEmpty<string> }> {
+  if (!("phase_artifacts" in obj)) return { ok: false, errors: nonEmptyOf("missing phase_artifacts") };
+  if (!isRecord(obj.phase_artifacts)) return { ok: false, errors: nonEmptyOf("phase_artifacts must be an object") };
+  const errors: string[] = [];
+  const artifacts: (readonly [Phase, string])[] = [];
+  for (const [phase, artifact] of Object.entries(obj.phase_artifacts)) {
+    if (!isPhase(phase)) errors.push(`phase_artifacts contains unknown phase ${JSON.stringify(phase)}`);
+    else if (typeof artifact !== "string") errors.push(`phase_artifacts.${phase} must be a string, got ${JSON.stringify(artifact)}`);
+    else artifacts.push([phase, artifact]);
+  }
+  return isNonEmpty(errors) ? { ok: false, errors } : { ok: true, value: Object.freeze(Object.fromEntries(artifacts)) };
+}
+
+/** `skipped_phases`: absent (none), or known phases. */
+function parseSkippedPhases(obj: Readonly<Record<string, unknown>>): ParseResult<readonly Phase[]> {
+  const skipped = obj.skipped_phases ?? [];
+  return Array.isArray(skipped) && skipped.every(isPhase)
+    ? parseOk(Object.freeze([...skipped]))
+    : parseErr(`skipped_phases must be an array containing only: ${PHASE_ORDER.join(", ")}`);
+}
+
+/** The Wave Gate registrations' wire fields. */
+type ParsedWaveGateRegistrations = Pick<TaskGraph, "active_wave_gate" | "wave_gate_history">;
 
 /**
  * Parse the active and terminal Wave Gate registrations together.
@@ -2819,89 +2806,88 @@ type ParsedWaveGateRegistrations = Readonly<{
 function parseWaveGateRegistrations(
   obj: Record<string, unknown>,
 ): ParseResult<ParsedWaveGateRegistrations> {
-  let activeWaveGate: ActiveWaveGateRegistration | undefined;
-  if (obj.active_wave_gate !== undefined) {
-    const parsedRegistration = parseActiveWaveGateRegistration(obj.active_wave_gate);
-    if (!parsedRegistration.ok) return parseErr(parsedRegistration.error);
-    activeWaveGate = parsedRegistration.value;
-  }
+  const active = obj.active_wave_gate === undefined ? parseOk(undefined) : parseActiveWaveGateRegistration(obj.active_wave_gate);
+  if (!active.ok) return active;
+  const activeWaveGate = active.value;
+  const history = parseOptionalLog(
+    obj.wave_gate_history,
+    "wave_gate_history",
+    (entry, label) => labelled(label, parseCompletedWaveGateRegistration(entry)),
+    (completed) => waveGateHistoryError(completed, activeWaveGate),
+  );
+  if (!history.ok) return history;
+  const conflict = activeWaveGate?.terminalOutcome === null
+    ? nonterminalActiveGateConflict(obj, activeWaveGate, history.value)
+    : null;
+  return conflict === null
+    ? parseOk({
+        ...present("active_wave_gate", activeWaveGate),
+        ...present("wave_gate_history", history.value),
+      })
+    : parseErr(conflict);
+}
 
-  let waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
-  if (obj.wave_gate_history !== undefined) {
-    const parsedHistory = parseWaveGateHistory(obj.wave_gate_history, activeWaveGate);
-    if (!parsedHistory.ok) return parseErr(parsedHistory.error);
-    waveGateHistory = parsedHistory.value;
-  }
-
-  if (activeWaveGate?.terminalOutcome === null) {
-    const conflict = nonterminalActiveGateConflict(obj, activeWaveGate, waveGateHistory);
-    if (conflict !== null) return parseErr(conflict);
-  }
-  return parseOk({ activeWaveGate, waveGateHistory });
+/** Why the terminal registrations repeat a run or a Wave, or hold the active run, or null. */
+function waveGateHistoryError(
+  completed: readonly CompletedWaveGateRegistration[],
+  activeWaveGate: ActiveWaveGateRegistration | undefined,
+): string | null {
+  const runIds = completed.map(({ runId }) => runId);
+  const repeated = repeatedIdentity(runIds, "wave_gate_history contains duplicate run identities") ??
+    repeatedIdentity(completed.map(({ wave }) => String(wave)), "wave_gate_history contains duplicate completed Waves");
+  if (repeated !== null) return repeated;
+  return activeWaveGate !== undefined && runIds.includes(activeWaveGate.runId)
+    ? `active_wave_gate run ${activeWaveGate.runId} is already terminal in wave_gate_history`
+    : null;
 }
 
 function parseWaveReopeningHistory(raw: unknown): ParseResult<readonly WaveReopeningAudit[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("wave_reopening_history must be an array when present");
-  const audits: WaveReopeningAudit[] = [];
-  for (const [index, rawAudit] of raw.entries()) {
-    if (!isRecord(rawAudit)) return parseErr(`wave_reopening_history[${index}] must be an object`);
-    const audit = rawAudit as Record<string, unknown>;
-    const fields = exactFieldsError(audit, ["schemaVersion", "kind", "proofMode", "runId", "wave", "authorityDigest", "completionReceipt", "reopenedTaskIds"], [SWEPT_DISTILL_TASK_IDS_FIELD], `wave_reopening_history[${index}]`);
-    if (fields !== null || audit.schemaVersion !== 1 || audit.kind !== "completed-wave-reopened-for-review-integrity" ||
-        (audit.proofMode !== "modern-exact-workspace-drift" && audit.proofMode !== "legacy-workspace-authority-unverifiable")) {
-      return parseErr(fields ?? `wave_reopening_history[${index}] has invalid schema, kind, or proof mode`);
-    }
-    const runId = parseOrchestrationRunId(audit.runId);
-    const authorityDigest = parseArtifactDigest(audit.authorityDigest);
-    const reopened = parseDistinctTaskIds(audit.reopenedTaskIds, `wave_reopening_history[${index}].reopenedTaskIds`);
-    if (!runId.ok || !authorityDigest.ok || typeof audit.wave !== "number" || !Number.isSafeInteger(audit.wave) || audit.wave < 1 ||
-        !reopened.ok ||
-        typeof audit.completionReceipt !== "object" || audit.completionReceipt === null) {
-      return parseErr(`wave_reopening_history[${index}] has invalid authority, receipt, or reopened Task ids`);
-    }
-    const receipt = audit.completionReceipt as Record<string, unknown>;
-    const effectId = parseEffectId(receipt.effectId);
-    const receiptRunId = parseOrchestrationRunId(receipt.runId);
-    const stateDigest = parseArtifactDigest(receipt.stateDigest);
-    const committedRevision = receipt.committedRevision;
-    if (!effectId.ok || !receiptRunId.ok || !stateDigest.ok || receipt.kind !== "protected-wave-state-committed" ||
-        receiptRunId.value !== runId.value || typeof committedRevision !== "number" ||
-        !Number.isSafeInteger(committedRevision) || committedRevision < 1) {
-      return parseErr(`wave_reopening_history[${index}] has an invalid completion receipt`);
-    }
-    // The audited Tasks may have left the roster since, so no roster check here.
-    const reopenedIds = parseReopenedTaskIds(
-      audit[SWEPT_DISTILL_TASK_IDS_FIELD], `wave_reopening_history[${index}]`, reopened.value, null);
-    if (!reopenedIds.ok) return reopenedIds;
-    audits.push(Object.freeze({ schemaVersion: 1, kind: "completed-wave-reopened-for-review-integrity", proofMode: audit.proofMode,
-      runId: runId.value, wave: audit.wave, authorityDigest: authorityDigest.value,
-      completionReceipt: Object.freeze({ kind: "protected-wave-state-committed" as const, effectId: effectId.value, runId: runId.value, committedRevision, stateDigest: stateDigest.value }),
-      ...reopenedIds.value }));
-  }
-  const identities = audits.map((audit) => `${audit.runId}:${audit.authorityDigest}`);
-  return new Set(identities).size === identities.length ? parseOk(Object.freeze(audits)) : parseErr("wave_reopening_history contains duplicate authority audits");
+  return parseOptionalLog(raw, "wave_reopening_history", parseWaveReopeningAudit, (audits) => repeatedIdentity(
+    audits.map((audit) => `${audit.runId}:${audit.authorityDigest}`),
+    "wave_reopening_history contains duplicate authority audits",
+  ));
 }
 
-function parseWaveGateHistory(
-  raw: unknown,
-  activeWaveGate: ActiveWaveGateRegistration | undefined,
-): ParseResult<readonly CompletedWaveGateRegistration[]> {
-  if (!Array.isArray(raw)) return parseErr("wave_gate_history must be an array when present");
-  const parsedHistory: CompletedWaveGateRegistration[] = [];
-  for (let index = 0; index < raw.length; index++) {
-    const parsed = parseCompletedWaveGateRegistration(raw[index]);
-    if (!parsed.ok) return parseErr(`wave_gate_history[${index}]: ${parsed.error}`);
-    parsedHistory.push(parsed.value);
+/** One completed Wave's review-integrity reopening: its run authority, completion receipt and reopened Tasks. */
+function parseWaveReopeningAudit(raw: unknown, label: string): ParseResult<WaveReopeningAudit> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const fields = exactFieldsError(raw, ["schemaVersion", "kind", "proofMode", "runId", "wave", "authorityDigest", "completionReceipt", "reopenedTaskIds"], [SWEPT_DISTILL_TASK_IDS_FIELD], label);
+  const { proofMode, wave } = raw;
+  if (fields !== null || raw.schemaVersion !== 1 || raw.kind !== "completed-wave-reopened-for-review-integrity" ||
+      (proofMode !== "modern-exact-workspace-drift" && proofMode !== "legacy-workspace-authority-unverifiable")) {
+    return parseErr(fields ?? `${label} has invalid schema, kind, or proof mode`);
   }
-  const runIds = parsedHistory.map(({ runId }) => runId);
-  if (new Set(runIds).size !== runIds.length) return parseErr("wave_gate_history contains duplicate run identities");
-  const waves = parsedHistory.map(({ wave }) => wave);
-  if (new Set(waves).size !== waves.length) return parseErr("wave_gate_history contains duplicate completed Waves");
-  if (activeWaveGate !== undefined && runIds.includes(activeWaveGate.runId)) {
-    return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already terminal in wave_gate_history`);
+  const runId = parseOrchestrationRunId(raw.runId);
+  const authorityDigest = parseArtifactDigest(raw.authorityDigest);
+  const reopened = parseDistinctTaskIds(raw.reopenedTaskIds, `${label}.reopenedTaskIds`);
+  if (!runId.ok || !authorityDigest.ok || typeof wave !== "number" || !Number.isSafeInteger(wave) || wave < 1 ||
+      !reopened.ok ||
+      typeof raw.completionReceipt !== "object" || raw.completionReceipt === null) {
+    return parseErr(`${label} has invalid authority, receipt, or reopened Task ids`);
   }
-  return parseOk(Object.freeze(parsedHistory));
+  const receipt = parseReopenedWaveReceipt(raw.completionReceipt, runId.value);
+  if (receipt === null) return parseErr(`${label} has an invalid completion receipt`);
+  // The audited Tasks may have left the roster since, so no roster check here.
+  const reopenedIds = parseReopenedTaskIds(raw[SWEPT_DISTILL_TASK_IDS_FIELD], label, reopened.value, null);
+  if (!reopenedIds.ok) return reopenedIds;
+  return parseOk(Object.freeze({ schemaVersion: 1 as const, kind: "completed-wave-reopened-for-review-integrity" as const, proofMode,
+    runId: runId.value, wave, authorityDigest: authorityDigest.value, completionReceipt: receipt, ...reopenedIds.value }));
+}
+
+/** The protected-state commit receipt a reopened Wave completed under, in its run; null when it is not one. */
+function parseReopenedWaveReceipt(raw: unknown, runId: OrchestrationRunId): WaveReopeningAudit["completionReceipt"] | null {
+  // A non-record (an array) reads as a receipt with no fields, and so refuses.
+  const receipt: Readonly<Record<string, unknown>> = isRecord(raw) ? raw : {};
+  const effectId = parseEffectId(receipt.effectId);
+  const receiptRunId = parseOrchestrationRunId(receipt.runId);
+  const stateDigest = parseArtifactDigest(receipt.stateDigest);
+  const committedRevision = receipt.committedRevision;
+  if (!effectId.ok || !receiptRunId.ok || !stateDigest.ok || receipt.kind !== "protected-wave-state-committed" ||
+      receiptRunId.value !== runId || typeof committedRevision !== "number" ||
+      !Number.isSafeInteger(committedRevision) || committedRevision < 1) {
+    return null;
+  }
+  return Object.freeze({ kind: "protected-wave-state-committed" as const, effectId: effectId.value, runId, committedRevision, stateDigest: stateDigest.value });
 }
 
 /** An in-flight gate must agree with the protected phase, wave, and history. */
@@ -2970,31 +2956,59 @@ function parseExecutingTaskIds(raw: unknown): ParseResult<readonly TaskId[] | un
   return parseOk(Object.freeze(parsed));
 }
 
-function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null {
-  for (const field of ["spec_dir", "spec_file", "plan_file"] as const) {
-    if (obj[field] !== undefined && obj[field] !== null && typeof obj[field] !== "string") {
-      return `${field} must be a string or null when present, got ${JSON.stringify(obj[field])}`;
-    }
+/** The document paths and the scalar fields, each optional; the two document paths default to null. */
+type TaskGraphScalars = Pick<TaskGraph,
+  "spec_file" | "plan_file" | "spec_dir" | "plan_title" | "github_repo" | "updated_at" | "github_issue" | "current_wave">;
+
+function parseTaskGraphScalars(obj: Readonly<Record<string, unknown>>): ParseResult<TaskGraphScalars> {
+  const specDir = optionalNullableString(obj, "spec_dir");
+  if (!specDir.ok) return specDir;
+  const specFile = optionalNullableString(obj, "spec_file");
+  if (!specFile.ok) return specFile;
+  const planFile = optionalNullableString(obj, "plan_file");
+  if (!planFile.ok) return planFile;
+  const planTitle = optionalString(obj, "plan_title");
+  if (!planTitle.ok) return planTitle;
+  const githubRepo = optionalString(obj, "github_repo");
+  if (!githubRepo.ok) return githubRepo;
+  const updatedAt = optionalString(obj, "updated_at");
+  if (!updatedAt.ok) return updatedAt;
+  const { github_issue: githubIssue, current_wave: currentWave } = obj;
+  if (githubIssue !== undefined && (typeof githubIssue !== "number" || !Number.isInteger(githubIssue) || githubIssue < 1)) {
+    return parseErr(`github_issue must be an integer >= 1 when present, got ${JSON.stringify(githubIssue)}`);
   }
-  for (const field of ["plan_title", "github_repo", "updated_at"] as const) {
-    if (obj[field] !== undefined && typeof obj[field] !== "string") {
-      return `${field} must be a string when present, got ${JSON.stringify(obj[field])}`;
-    }
+  if (currentWave !== undefined && (typeof currentWave !== "number" || !Number.isSafeInteger(currentWave) || currentWave < 1)) {
+    return parseErr(`current_wave must be an integer >= 1 within the safe-integer range when present, got ${JSON.stringify(currentWave)}`);
   }
-  if (obj.github_issue !== undefined &&
-      (typeof obj.github_issue !== "number" || !Number.isInteger(obj.github_issue) || obj.github_issue < 1)) {
-    return `github_issue must be an integer >= 1 when present, got ${JSON.stringify(obj.github_issue)}`;
-  }
-  if (obj.current_wave !== undefined &&
-      (typeof obj.current_wave !== "number" || !Number.isSafeInteger(obj.current_wave) || obj.current_wave < 1)) {
-    return `current_wave must be an integer >= 1 within the safe-integer range when present, got ${JSON.stringify(obj.current_wave)}`;
-  }
-  return null;
+  return parseOk({
+    // The order a document path a raw graph omits takes in the loaded one.
+    spec_file: specFile.value ?? null,
+    plan_file: planFile.value ?? null,
+    ...present("spec_dir", specDir.value),
+    ...present("plan_title", planTitle.value),
+    ...present("github_repo", githubRepo.value),
+    ...present("updated_at", updatedAt.value),
+    ...present("github_issue", githubIssue),
+    ...present("current_wave", currentWave),
+  });
 }
 
-/** A copy of `record` without `keys`, every other key kept in order: how a
- *  migration retires a field in one expression. */
-function withoutKeys(record: Record<string, unknown>, ...keys: readonly string[]): Record<string, unknown> {
+function optionalNullableString(obj: Readonly<Record<string, unknown>>, field: string): ParseResult<string | null | undefined> {
+  const value = obj[field];
+  return value === undefined || value === null || typeof value === "string"
+    ? parseOk(value)
+    : parseErr(`${field} must be a string or null when present, got ${JSON.stringify(value)}`);
+}
+
+function optionalString(obj: Readonly<Record<string, unknown>>, field: string): ParseResult<string | undefined> {
+  const value = obj[field];
+  return value === undefined || typeof value === "string"
+    ? parseOk(value)
+    : parseErr(`${field} must be a string when present, got ${JSON.stringify(value)}`);
+}
+
+/** The raw document without `keys`, every other key kept in order: the fields no section parser installs. */
+function withoutKeys(record: Readonly<Record<string, unknown>>, ...keys: readonly string[]): Readonly<Record<string, unknown>> {
   return Object.fromEntries(Object.entries(record).filter(([key]) => !keys.includes(key)));
 }
 
@@ -3002,7 +3016,7 @@ function parseTaskGraphTasks(
   obj: Record<string, unknown>,
   executingTasks: readonly TaskId[],
   scope: RedThenGreenScope,
-): ParseResult<readonly ParsedTask[]> {
+): ParseResult<Pick<ParsedTaskGraph, "tasks" | "spec_trace_version">> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
   const parsedTasks: ParsedTask[] = [];
@@ -3014,7 +3028,9 @@ function parseTaskGraphTasks(
   const rosterError = taskRosterError(parsedTasks, executingTasks, obj.wave_plan_edits);
   if (rosterError !== null) return parseErr(rosterError);
   const trace = parseSpecTraceContract(obj.spec_trace_version, parsedTasks);
-  return trace.ok ? parseOk(Object.freeze(parsedTasks)) : parseErr(specTraceDiagnosticMessages(trace).join("; "));
+  if (!trace.ok) return parseErr(specTraceDiagnosticMessages(trace).join("; "));
+  const tasksField = { tasks: Object.freeze(parsedTasks) };
+  return parseOk(obj.spec_trace_version === 2 ? { ...tasksField, spec_trace_version: 2 } : tasksField);
 }
 
 /** The first rule the loaded Tasks break together: distinct ids, one Distill Task per Wave, reservations, dependencies. */
@@ -3036,12 +3052,13 @@ function taskRosterError(
   return taskDependencyErrors(tasks, auditedSameWaveEdges(wavePlanEdits))[0] ?? null;
 }
 
-function parseTaskGraphWaveGates(obj: Record<string, unknown>): ParseResult<Record<string, unknown>> {
+function parseTaskGraphWaveGates(obj: Record<string, unknown>): ParseResult<Readonly<Record<string, WaveGate>>> {
   const waveGates = obj.wave_gates ?? {};
   if (!isRecord(waveGates)) {
     return parseErr("wave_gates must be an object");
   }
-  for (const [wave, gate] of Object.entries(waveGates as Record<string, unknown>)) {
+  const parsed: (readonly [string, WaveGate])[] = [];
+  for (const [wave, raw] of Object.entries(waveGates)) {
     // Wave numbers are written as String(wave) with wave >= 1 — canonical
     // decimal, no leading zeros. A key outside that domain ("01", "abc",
     // "-1", "1.0") would load here and persist, even though every writer
@@ -3050,19 +3067,15 @@ function parseTaskGraphWaveGates(obj: Record<string, unknown>): ParseResult<Reco
     if (!/^(0|[1-9]\d*)$/.test(wave) || !Number.isSafeInteger(Number(wave)) || Number(wave) < 1) {
       return parseErr(`wave_gates key must be a canonical positive safe-integer wave number, got ${JSON.stringify(wave)}`);
     }
-    const err = waveGateError(gate, wave);
-    if (err !== null) return parseErr(err);
+    const gate = parseWaveGate(raw, wave);
+    if (!gate.ok) return gate;
+    parsed.push([wave, gate.value]);
   }
-  return parseOk(waveGates as Record<string, unknown>);
+  return parseOk(Object.fromEntries(parsed));
 }
 
-type ParsedTaskGraphAuthorityFields = Readonly<{
-  activeWaveGate: ActiveWaveGateRegistration | undefined;
-  waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
-  waveReviewEpoch: WaveReviewEpochAuthority | undefined;
-  verificationManifest: FrozenVerificationManifest | undefined;
-  activeWaveCompletionSuite: AcceptedWaveCompletionReceipt | undefined;
-}>;
+/** The Wave Gate authority's wire fields: registrations, review epoch and the active Wave's completion suite. */
+type TaskGraphAuthority = Pick<TaskGraph, "active_wave_gate" | "wave_gate_history" | "wave_review_epoch" | "active_wave_completion_suite">;
 
 function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerificationManifest | undefined> {
   if (raw === undefined) return parseOk(undefined);
@@ -3130,9 +3143,7 @@ function parseEngineRevisionField(raw: unknown): ParseResult<EngineRevisionPin |
  * Acceptance Contracts' shape.
  */
 function parseFrozenVerificationFields(obj: Record<string, unknown>): ParseResult<Readonly<{
-  verificationManifest: FrozenVerificationManifest | undefined;
-  testEvidence: EngineRunTestEvidence | undefined;
-  engineRevision: EngineRevisionPin | undefined;
+  fields: Pick<TaskGraph, "verification_manifest" | "test_evidence" | "engine_revision">;
   contractShapes: readonly AcceptanceContract[] | undefined;
 }>> {
   const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
@@ -3144,9 +3155,11 @@ function parseFrozenVerificationFields(obj: Record<string, unknown>): ParseResul
   const contractShapes = parseAcceptanceContractsShape(obj.acceptance_contracts);
   if (!contractShapes.ok) return contractShapes;
   return parseOk({
-    verificationManifest: verificationManifest.value,
-    testEvidence: testEvidence.value,
-    engineRevision: engineRevision.value,
+    fields: {
+      ...present("verification_manifest", verificationManifest.value),
+      ...present("test_evidence", testEvidence.value),
+      ...present("engine_revision", engineRevision.value),
+    },
     contractShapes: contractShapes.value,
   });
 }
@@ -3154,16 +3167,6 @@ function parseFrozenVerificationFields(obj: Record<string, unknown>): ParseResul
 /** The graph fields the owner check's authority derives from: the contracts
  *  name the Tasks whose stubs owe nothing (`owesInWave`). */
 type OwnerStampedGraph = Pick<TaskGraph, "tasks" | "owner_obligations" | "acceptance_contracts">;
-
-/** The proven Tasks and obligation fields as the owner check's authority reads them. */
-const ownerStampedGraph = (
-  tasks: readonly ParsedTask[],
-  obligations: Readonly<{ acceptanceContracts: readonly AcceptanceContract[] | undefined; ownerObligations: readonly OwnerObligation[] | undefined }>,
-): OwnerStampedGraph => ({
-  tasks,
-  owner_obligations: obligations.ownerObligations,
-  acceptance_contracts: obligations.acceptanceContracts,
-});
 
 function completionRosterConflict(
   receipt: AcceptedWaveCompletionReceipt,
@@ -3241,10 +3244,10 @@ function parseTaskGraphAuthorityFields(
   obj: Record<string, unknown>,
   verificationManifest: FrozenVerificationManifest | undefined,
   stamped: OwnerStampedGraph,
-): ParseResult<ParsedTaskGraphAuthorityFields> {
+): ParseResult<TaskGraphAuthority> {
   const registrations = parseWaveGateRegistrations(obj);
   if (!registrations.ok) return parseErr(registrations.error);
-  const { activeWaveGate, waveGateHistory } = registrations.value;
+  const activeWaveGate = registrations.value.active_wave_gate;
   const waveReviewEpoch = parseWaveReviewEpoch(obj.wave_review_epoch);
   if (!waveReviewEpoch.ok) return parseErr(waveReviewEpoch.error);
   if (activeWaveGate !== undefined && waveReviewEpoch.value !== undefined &&
@@ -3267,28 +3270,18 @@ function parseTaskGraphAuthorityFields(
   );
   if (!activeWaveCompletionSuite.ok) return parseErr(activeWaveCompletionSuite.error);
   return parseOk({
-    activeWaveGate,
-    waveGateHistory,
-    waveReviewEpoch: waveReviewEpoch.value,
-    verificationManifest,
-    activeWaveCompletionSuite: activeWaveCompletionSuite.value,
+    ...registrations.value,
+    ...present("wave_review_epoch", waveReviewEpoch.value),
+    ...present("active_wave_completion_suite", activeWaveCompletionSuite.value),
   });
 }
 
-type ParsedTaskGraphHistoryFields = Readonly<{
-  reopeningHistory: readonly WaveReopeningAudit[] | undefined;
-  taskReopeningHistory: readonly TaskReopeningAudit[] | undefined;
-  forwardFixHistory: readonly ForwardFixAudit[] | undefined;
-  forwardFixWithdrawals: readonly ForwardFixWithdrawal[] | undefined;
-  orphanedHistory: readonly OrphanedWaveGateRetirement[] | undefined;
-  specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
-  retiredReviewRuns: readonly RetiredWaveReviewRun[] | undefined;
-  specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
-  specAmendments: readonly SpecAmendment[] | undefined;
-  wavePlanEdits: readonly WavePlanEdit[] | undefined;
-  retroRecords: readonly RetroRecord[] | undefined;
-  advisoryDispositions: readonly AdvisoryDisposition[] | undefined;
-}>;
+/** The append-only audit histories' wire fields. */
+type TaskGraphHistory = Pick<TaskGraph,
+  | "wave_reopening_history" | "task_reopening_history" | "forward_fix_history" | "forward_fix_withdrawals"
+  | "retro_records" | "advisory_dispositions" | "orphaned_wave_gate_history" | "spec_trace_wave_gate_retirements"
+  | "retired_wave_review_runs" | "spec_trace_amendments" | "spec_amendments" | "wave_plan_edits"
+>;
 
 function activeWaveGateRetirementConflict(
   activeWaveGate: ActiveWaveGateRegistration | undefined,
@@ -3346,82 +3339,92 @@ function activeWaveGateInstallationAuditConflict(
  */
 function parseTaskGraphLinkedHistory(
   obj: Record<string, unknown>,
-  authority: ParsedTaskGraphAuthorityFields,
+  authority: TaskGraphAuthority,
   tasks: readonly ParsedTask[],
   verificationManifest: FrozenVerificationManifest | undefined,
-): ParseResult<ParsedTaskGraphHistoryFields> {
-  const history = parseTaskGraphHistoryFields(obj, authority.activeWaveGate, authority.waveGateHistory, tasks);
-  if (!history.ok) return history;
-  const testsOnlyLink = testsOnlyLinkError(tasks, history.value.taskReopeningHistory, verificationManifest);
-  return testsOnlyLink === null ? history : parseErr(testsOnlyLink);
+): ParseResult<TaskGraphHistory> {
+  const audits = parseTaskGraphAuditLogs(obj, tasks);
+  if (!audits.ok) return audits;
+  const retirements = parseTaskGraphRetirementLogs(obj, authority, tasks);
+  if (!retirements.ok) return retirements;
+  const testsOnlyLink = testsOnlyLinkError(tasks, audits.value.task_reopening_history, verificationManifest);
+  return testsOnlyLink === null ? parseOk({ ...audits.value, ...retirements.value }) : parseErr(testsOnlyLink);
 }
 
-function parseTaskGraphHistoryFields(
-  obj: Record<string, unknown>,
-  activeWaveGate: ActiveWaveGateRegistration | undefined,
-  waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined,
-  tasks: readonly ParsedTask[],
-): ParseResult<ParsedTaskGraphHistoryFields> {
+/** The reopening, plan-edit, Forward Fix, retro and advisory logs, each against the roster it names. */
+function parseTaskGraphAuditLogs(obj: Record<string, unknown>, tasks: readonly ParsedTask[]): ParseResult<Pick<TaskGraph,
+  | "wave_reopening_history" | "task_reopening_history" | "wave_plan_edits" | "forward_fix_history"
+  | "forward_fix_withdrawals" | "retro_records" | "advisory_dispositions"
+>> {
   const reopeningHistory = parseWaveReopeningHistory(obj.wave_reopening_history);
-  if (!reopeningHistory.ok) return parseErr(reopeningHistory.error);
+  if (!reopeningHistory.ok) return reopeningHistory;
   const taskReopeningHistory = parseTaskReopeningHistory(obj.task_reopening_history, tasks);
-  if (!taskReopeningHistory.ok) return parseErr(taskReopeningHistory.error);
+  if (!taskReopeningHistory.ok) return taskReopeningHistory;
   const wavePlanEdits = parseWavePlanEdits(obj.wave_plan_edits, tasks);
-  if (!wavePlanEdits.ok) return parseErr(wavePlanEdits.error);
+  if (!wavePlanEdits.ok) return wavePlanEdits;
   const forwardFixHistory = parseForwardFixHistory(obj.forward_fix_history, tasks);
-  if (!forwardFixHistory.ok) return parseErr(forwardFixHistory.error);
+  if (!forwardFixHistory.ok) return forwardFixHistory;
   const forwardFixWithdrawals = parseForwardFixWithdrawals(obj.forward_fix_withdrawals, tasks);
-  if (!forwardFixWithdrawals.ok) return parseErr(forwardFixWithdrawals.error);
+  if (!forwardFixWithdrawals.ok) return forwardFixWithdrawals;
   const retroRecords = parseRetroRecords(obj.retro_records, tasks);
-  if (!retroRecords.ok) return parseErr(retroRecords.error);
+  if (!retroRecords.ok) return retroRecords;
   const advisoryDispositions = parseAdvisoryDispositions(obj.advisory_dispositions);
   if (!advisoryDispositions.ok) return parseErr(advisoryDispositions.error);
+  return parseOk({
+    ...present("wave_reopening_history", reopeningHistory.value),
+    ...present("task_reopening_history", taskReopeningHistory.value),
+    ...present("wave_plan_edits", wavePlanEdits.value),
+    ...present("forward_fix_history", forwardFixHistory.value),
+    ...present("forward_fix_withdrawals", forwardFixWithdrawals.value),
+    ...present("retro_records", retroRecords.value),
+    ...present("advisory_dispositions", advisoryDispositions.value),
+  });
+}
+
+/** The Wave Gate retirement and Spec amendment logs, against the registrations they retire and the roster. */
+function parseTaskGraphRetirementLogs(
+  obj: Record<string, unknown>,
+  authority: TaskGraphAuthority,
+  tasks: readonly ParsedTask[],
+): ParseResult<Pick<TaskGraph,
+  | "orphaned_wave_gate_history" | "spec_trace_wave_gate_retirements" | "retired_wave_review_runs"
+  | "spec_trace_amendments" | "spec_amendments"
+>> {
+  const { active_wave_gate: activeWaveGate, wave_gate_history: waveGateHistory } = authority;
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
-  if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
+  if (!orphanedHistory.ok) return orphanedHistory;
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
-  if (!specTraceRetirements.ok) return parseErr(specTraceRetirements.error);
+  if (!specTraceRetirements.ok) return specTraceRetirements;
   if ((specTraceRetirements.value?.length ?? 0) > 0 && obj.spec_trace_version !== 2) {
     return parseErr("spec_trace_wave_gate_retirements requires spec_trace_version 2");
   }
-  const activeConflict = activeWaveGateRetirementConflict(activeWaveGate, orphanedHistory.value, specTraceRetirements.value);
-  if (activeConflict !== null) return parseErr(activeConflict);
-  const specTraceConflict = specTraceRetirementCollision(waveGateHistory, orphanedHistory.value, specTraceRetirements.value);
-  if (specTraceConflict !== null) return parseErr(specTraceConflict);
-  const installationConflict = activeWaveGateInstallationAuditConflict(activeWaveGate, orphanedHistory.value);
-  if (installationConflict !== null) return parseErr(installationConflict);
+  const conflict = activeWaveGateRetirementConflict(activeWaveGate, orphanedHistory.value, specTraceRetirements.value) ??
+    specTraceRetirementCollision(waveGateHistory, orphanedHistory.value, specTraceRetirements.value) ??
+    activeWaveGateInstallationAuditConflict(activeWaveGate, orphanedHistory.value);
+  if (conflict !== null) return parseErr(conflict);
   const retiredReviewRuns = parseRetiredWaveReviewRuns(obj.retired_wave_review_runs);
-  if (!retiredReviewRuns.ok) return parseErr(retiredReviewRuns.error);
+  if (!retiredReviewRuns.ok) return retiredReviewRuns;
   // A retired run's tombstone is gone: the registration that still names it
   // was never retired.
   if (activeWaveGate !== undefined && retiredReviewRuns.value?.some(({ runId }) => runId === activeWaveGate.runId)) {
     return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already in retired_wave_review_runs`);
   }
   const specTraceAmendments = parseSpecTraceAmendments(obj.spec_trace_amendments);
-  if (!specTraceAmendments.ok) return parseErr(specTraceAmendments.error);
+  if (!specTraceAmendments.ok) return specTraceAmendments;
   const specAmendments = parseSpecAmendments(obj.spec_amendments, tasks);
-  if (!specAmendments.ok) return parseErr(specAmendments.error);
+  if (!specAmendments.ok) return specAmendments;
   if ((specTraceAmendments.value?.length ?? 0) > 0 && obj.spec_trace_version !== 2) {
     return parseErr("spec_trace_amendments requires spec_trace_version 2");
   }
   // parseTaskGraphTasks already proved every v2 Task id and trace array.
-  const amendmentTraceError = amendmentHistoryError(
-    specTraceAmendments.value,
-    tasks,
-  );
+  const amendmentTraceError = amendmentHistoryError(specTraceAmendments.value, tasks);
   if (amendmentTraceError !== null) return parseErr(amendmentTraceError);
   return parseOk({
-    reopeningHistory: reopeningHistory.value,
-    taskReopeningHistory: taskReopeningHistory.value,
-    forwardFixHistory: forwardFixHistory.value,
-    forwardFixWithdrawals: forwardFixWithdrawals.value,
-    orphanedHistory: orphanedHistory.value,
-    specTraceRetirements: specTraceRetirements.value,
-    retiredReviewRuns: retiredReviewRuns.value,
-    specTraceAmendments: specTraceAmendments.value,
-    specAmendments: specAmendments.value,
-    wavePlanEdits: wavePlanEdits.value,
-    retroRecords: retroRecords.value,
-    advisoryDispositions: advisoryDispositions.value,
+    ...present("orphaned_wave_gate_history", orphanedHistory.value),
+    ...present("spec_trace_wave_gate_retirements", specTraceRetirements.value),
+    ...present("retired_wave_review_runs", retiredReviewRuns.value),
+    ...present("spec_trace_amendments", specTraceAmendments.value),
+    ...present("spec_amendments", specAmendments.value),
   });
 }
 
@@ -3765,10 +3768,8 @@ function parseSkeletonOutcomesField(
   return parseOk(Object.freeze(outcomes));
 }
 
-type ParsedSkeletonFields = Readonly<{
-  exportBindings: readonly ExportBinding[] | undefined;
-  skeletons: readonly SkeletonRecord[] | undefined;
-}>;
+/** The graph's G2 fields. */
+type TaskGraphSkeletons = Pick<TaskGraph, "export_bindings" | "skeletons">;
 
 /**
  * Why one recorded outcome contradicts the graph's stamp and records, or
@@ -3823,16 +3824,16 @@ function recordedOutcomeConflict(
  * no outcome, and each outcome agrees with the stamp and records
  * (`recordedOutcomeConflict`).
  */
-function recordedOutcomesError(tasks: readonly ParsedTask[], fields: ParsedSkeletonFields): string | null {
+function recordedOutcomesError(tasks: readonly ParsedTask[], fields: TaskGraphSkeletons): string | null {
   for (const [index, task] of tasks.entries()) {
-    const outcomes = task.skeleton_outcomes as readonly PathSkeletonOutcome[] | undefined;
+    const outcomes = task.skeleton_outcomes;
     if (outcomes === undefined) continue;
-    const label = `tasks[${index}] ("${String(task.id)}").skeleton_outcomes`;
-    if (fields.exportBindings === undefined) {
+    const label = `${taskLabel(index, task.id)}.skeleton_outcomes`;
+    if (fields.export_bindings === undefined) {
       return `${label} is recorded, but the TaskGraph has no export_bindings stamp; a graph populated before G2 records no skeleton outcome`;
     }
     const stamped = {
-      exportBindings: fields.exportBindings,
+      exportBindings: fields.export_bindings,
       skeletons: fields.skeletons ?? [],
       holdsSkeletons: taskRolePolicy(task).holdsSkeletons,
     };
@@ -3849,35 +3850,16 @@ function parseTaskGraphSkeletonFields(
   obj: Record<string, unknown>,
   contracts: readonly AcceptanceContract[] | undefined,
   tasks: readonly ParsedTask[],
-): ParseResult<ParsedSkeletonFields> {
+): ParseResult<TaskGraphSkeletons> {
   const exportBindings = parseExportBindingsField(obj.export_bindings, contracts);
   if (!exportBindings.ok) return exportBindings;
   const skeletons = parseSkeletonsField(obj.skeletons, exportBindings.value);
   if (!skeletons.ok) return skeletons;
-  const fields: ParsedSkeletonFields = { exportBindings: exportBindings.value, skeletons: skeletons.value };
+  const fields: TaskGraphSkeletons = { ...present("export_bindings", exportBindings.value), ...present("skeletons", skeletons.value) };
   // parseTaskGraphTasks already proved each Task's outcomes against its own file_list.
   const outcomesError = recordedOutcomesError(tasks, fields);
   return outcomesError === null ? parseOk(fields) : parseErr(outcomesError);
 }
-
-type ParsedTaskGraphParts = Readonly<{
-  phaseArtifacts: Readonly<Record<string, string>>;
-  skippedPhases: readonly Phase[];
-  tasks: readonly ParsedTask[];
-  executingTasks: readonly TaskId[] | undefined;
-  waveGates: Readonly<Record<string, unknown>>;
-  specCheck: SpecCheck | undefined;
-  specIndexObservation: SpecIndexObservation | undefined;
-  proofBoundaryObservation: ProofBoundaryObservation | undefined;
-  planDesignReview: RecordedPlanDesignReview | undefined;
-  acceptanceContracts: readonly AcceptanceContract[] | undefined;
-  ownerObligations: readonly OwnerObligation[] | undefined;
-  skeletonFields: ParsedSkeletonFields;
-  authority: ParsedTaskGraphAuthorityFields;
-  history: ParsedTaskGraphHistoryFields;
-  testEvidence: EngineRunTestEvidence | undefined;
-  engineRevision: EngineRevisionPin | undefined;
-}>;
 
 /** A loaded Task: its id is a parsed `TaskId`. */
 export type ParsedTask = Task & Readonly<{ id: TaskId }>;
@@ -3887,96 +3869,21 @@ export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Rea
   executing_tasks?: readonly TaskId[];
 }>;
 
-/** The proven audit histories as the graph's fields: each present one under its wire name, an absent one absent. */
-function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<TaskGraph> {
-  const {
-    reopeningHistory, taskReopeningHistory, forwardFixHistory, forwardFixWithdrawals, orphanedHistory,
-    specTraceRetirements, retiredReviewRuns, specTraceAmendments, specAmendments, wavePlanEdits, retroRecords,
-    advisoryDispositions,
-  } = history;
-  return {
-    ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
-    ...(taskReopeningHistory === undefined ? {} : { task_reopening_history: taskReopeningHistory }),
-    ...(forwardFixHistory === undefined ? {} : { forward_fix_history: forwardFixHistory }),
-    ...(forwardFixWithdrawals === undefined ? {} : { forward_fix_withdrawals: forwardFixWithdrawals }),
-    ...(retroRecords === undefined ? {} : { retro_records: retroRecords }),
-    ...(advisoryDispositions === undefined ? {} : { advisory_dispositions: advisoryDispositions }),
-    ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
-    ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
-    ...(retiredReviewRuns === undefined ? {} : { retired_wave_review_runs: retiredReviewRuns }),
-    ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
-    ...(specAmendments === undefined ? {} : { spec_amendments: specAmendments }),
-    ...(wavePlanEdits === undefined ? {} : { wave_plan_edits: wavePlanEdits }),
-  };
-}
+/** The document fields: lifecycle, document paths and scalars, and the observations of the documents. */
+type TaskGraphDocuments = TaskGraphLifecycle & TaskGraphScalars &
+  Pick<TaskGraph, "spec_index_observation" | "proof_boundary_observation" | "plan_design_review">;
 
-function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): ParsedTaskGraph {
-  // Fresh recursively frozen copies, never aliases of parsed JSON: a caller
-  // retaining the raw object cannot mutate nested Task or Wave Gate data and
-  // bypass StateManager.update's locked transform.
-  const frozenTasks = Object.freeze(parts.tasks.map((task) => frozenJsonCopy(task)));
-  const frozenWaveGates = Object.freeze(Object.fromEntries(
-    Object.entries(parts.waveGates).map(([wave, gate]) => [wave, frozenJsonCopy(gate)]),
-  ));
-  const {
-    activeWaveGate,
-    waveGateHistory,
-    waveReviewEpoch,
-    verificationManifest,
-    activeWaveCompletionSuite,
-  } = parts.authority;
-  // The single blessed cast: every union field above is proven in place.
-  return {
-    // `test_evidence` is installed only as its parsed value, never as the raw JSON.
-    ...withoutKeys(obj, "test_evidence", "engine_revision"),
-    phase_artifacts: parts.phaseArtifacts,
-    skipped_phases: parts.skippedPhases,
-    spec_file: obj.spec_file ?? null,
-    plan_file: obj.plan_file ?? null,
-    tasks: frozenTasks,
-    ...(parts.executingTasks === undefined
-      ? {}
-      : { executing_tasks: parts.executingTasks }),
-    wave_gates: frozenWaveGates,
-    ...(parts.specCheck === undefined ? {} : { spec_check: parts.specCheck }),
-    ...(parts.specIndexObservation === undefined
-      ? {}
-      : { spec_index_observation: parts.specIndexObservation }),
-    ...(parts.proofBoundaryObservation === undefined
-      ? {}
-      : { proof_boundary_observation: parts.proofBoundaryObservation }),
-    ...(parts.planDesignReview === undefined ? {} : { plan_design_review: parts.planDesignReview }),
-    ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
-    ...(verificationManifest === undefined ? {} : { verification_manifest: verificationManifest }),
-    ...(parts.testEvidence === undefined ? {} : { test_evidence: parts.testEvidence }),
-    ...(parts.engineRevision === undefined ? {} : { engine_revision: parts.engineRevision }),
-    ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
-    ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
-    ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
-    ...historyGraphFields(parts.history),
-    ...(parts.acceptanceContracts === undefined ? {} : { acceptance_contracts: parts.acceptanceContracts }),
-    ...(parts.ownerObligations === undefined ? {} : { owner_obligations: parts.ownerObligations }),
-    ...(parts.skeletonFields.exportBindings === undefined ? {} : { export_bindings: parts.skeletonFields.exportBindings }),
-    ...(parts.skeletonFields.skeletons === undefined ? {} : { skeletons: parts.skeletonFields.skeletons }),
-  } as unknown as ParsedTaskGraph;
-}
-
-function parseTaskGraphDocumentFields(
-  obj: Record<string, unknown>,
-): ParseResult<Pick<ParsedTaskGraphParts,
-  "phaseArtifacts" | "skippedPhases" | "specIndexObservation" | "proofBoundaryObservation" | "planDesignReview">> {
-  const lifecycleErrors = taskGraphLifecycleErrors(obj);
-  if (lifecycleErrors[0] !== undefined) return parseErr(lifecycleErrors[0]);
-  const phaseArtifacts = Object.freeze({ ...(obj.phase_artifacts as Record<string, string>) });
-  const skippedPhases = Object.freeze([...(Array.isArray(obj.skipped_phases) ? obj.skipped_phases : [])] as Phase[]);
-  const scalarError = taskGraphScalarFieldError(obj);
-  if (scalarError !== null) return parseErr(scalarError);
+function parseTaskGraphDocumentFields(obj: Record<string, unknown>): ParseResult<TaskGraphDocuments> {
+  const lifecycle = parseTaskGraphLifecycle(obj);
+  if (!lifecycle.ok) return lifecycle;
+  const scalars = parseTaskGraphScalars(obj);
+  if (!scalars.ok) return scalars;
   const specIndexObservation = obj.spec_index_observation === undefined
     ? parseOk<SpecIndexObservation | undefined>(undefined)
     : parseSpecIndexObservation(obj.spec_index_observation);
   if (!specIndexObservation.ok) return parseErr(specIndexObservation.error);
   if (specIndexObservation.value !== undefined &&
-      specIndexObservationPath(specIndexObservation.value) !== (obj.spec_file ?? null)) {
+      specIndexObservationPath(specIndexObservation.value) !== scalars.value.spec_file) {
     return parseErr("spec_index_observation path must match protected spec_file authority");
   }
   // Legacy graphs predate the observation; absence stays absent (unknown).
@@ -3993,18 +3900,19 @@ function parseTaskGraphDocumentFields(
     : parsePlanDesignReview(obj.plan_design_review);
   if (planDesignReview !== undefined && !planDesignReview.ok) return parseErr(planDesignReview.error);
   return parseOk({
-    phaseArtifacts,
-    skippedPhases,
-    specIndexObservation: specIndexObservation.value,
-    proofBoundaryObservation: proofBoundaryObservation?.value,
-    planDesignReview: planDesignReview?.value,
+    // The order a field a raw graph omits takes in the loaded one.
+    phase_artifacts: lifecycle.value.phase_artifacts,
+    skipped_phases: lifecycle.value.skipped_phases,
+    ...scalars.value,
+    current_phase: lifecycle.value.current_phase,
+    ...present("spec_index_observation", specIndexObservation.value),
+    ...present("proof_boundary_observation", proofBoundaryObservation?.value),
+    ...present("plan_design_review", planDesignReview?.value),
   });
 }
 
-type ParsedTaskGraphGating = Readonly<{
-  waveGates: Readonly<Record<string, unknown>>;
-  specCheck: SpecCheck | undefined;
-}>;
+/** The Wave Gates, after an UNKNOWN spec-check's block migration, and the spec-check record. */
+type TaskGraphGating = Pick<TaskGraph, "wave_gates" | "spec_check">;
 
 /**
  * Parse the wave gates and spec-check, migrate an UNKNOWN spec-check's block,
@@ -4013,9 +3921,9 @@ type ParsedTaskGraphGating = Readonly<{
 function parseTaskGraphGating(
   obj: Record<string, unknown>,
   tasks: readonly ParsedTask[],
-): ParseResult<ParsedTaskGraphGating> {
+): ParseResult<TaskGraphGating> {
   const waveGates = parseTaskGraphWaveGates(obj);
-  if (!waveGates.ok) return parseErr(waveGates.error);
+  if (!waveGates.ok) return waveGates;
   const specCheck = parseSpecCheckField(obj.spec_check);
   if (!specCheck.ok) return parseErr(specCheck.error);
   const rawSpecCheck = isRecord(obj.spec_check) ? obj.spec_check : null;
@@ -4023,20 +3931,14 @@ function parseTaskGraphGating(
   // those unusable counts, so reconcile the old spec-check-only block from the
   // migrated evidence before enforcing the no-causeless-block invariant.
   const migratedWaveGates = rawSpecCheck?.verdict === "UNKNOWN" && specCheck.value !== undefined
-    ? reconcileWaveBlock(
-        waveGates.value as Readonly<Record<string, WaveGate>>,
-        tasks,
-        specCheck.value,
-        specCheck.value.wave,
-      )
+    ? reconcileWaveBlock(waveGates.value, tasks, specCheck.value, specCheck.value.wave)
     : waveGates.value;
-  const blockedCauseError = blockedGateCauseError(
-    migratedWaveGates,
-    tasks,
-    specCheck.value,
-  );
+  const blockedCauseError = blockedGateCauseError(migratedWaveGates, tasks, specCheck.value);
   if (blockedCauseError !== null) return parseErr(blockedCauseError);
-  return parseOk({ waveGates: migratedWaveGates, specCheck: specCheck.value });
+  // A fresh recursively frozen copy, never an alias of parsed JSON: a caller
+  // retaining the raw object cannot mutate a Wave Gate and bypass
+  // StateManager.update's locked transform.
+  return parseOk({ wave_gates: frozenJsonCopy(migratedWaveGates), ...present("spec_check", specCheck.value) });
 }
 
 /** What the graph owes: its bound Acceptance Contracts and its stamped Owner Obligations. */
@@ -4044,12 +3946,15 @@ function parseTaskGraphObligationFields(
   obj: Record<string, unknown>,
   contractShapes: readonly AcceptanceContract[] | undefined,
   tasks: readonly ParsedTask[],
-): ParseResult<{ acceptanceContracts: readonly AcceptanceContract[] | undefined; ownerObligations: readonly OwnerObligation[] | undefined }> {
+): ParseResult<Pick<TaskGraph, "acceptance_contracts" | "owner_obligations">> {
   const acceptanceContracts = bindAcceptanceContracts(contractShapes, tasks);
-  if (!acceptanceContracts.ok) return parseErr(acceptanceContracts.error);
+  if (!acceptanceContracts.ok) return acceptanceContracts;
   const ownerObligations = parseOwnerObligationsField(obj.owner_obligations);
-  if (!ownerObligations.ok) return parseErr(ownerObligations.error);
-  return parseOk({ acceptanceContracts: acceptanceContracts.value, ownerObligations: ownerObligations.value });
+  if (!ownerObligations.ok) return ownerObligations;
+  return parseOk({
+    ...present("acceptance_contracts", acceptanceContracts.value),
+    ...present("owner_obligations", ownerObligations.value),
+  });
 }
 
 /** Task fields only an engine older than the current shapes wrote (ADR-0098). */
@@ -4105,57 +4010,56 @@ function legacyStateFileRefusal(shape: string): string {
 /**
  * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
  * union-typed field (current_phase, task status / review_status /
- * test_result.verdict) is PROVEN in the union before the cast, so a
- * drifted or hand-edited value fails loudly at the load boundary instead
- * of exploding later inside an `.exhaustive()` match (testResultPassed) or
- * silently flowing through typed gate logic. Unknown extra fields pass
- * through untouched (legacyTestsPassedNote still fires downstream);
- * missing tasks/wave_gates default for early phases (populated in Phase 4).
+ * test_result.verdict) is PROVEN in the union, so a drifted or hand-edited
+ * value fails loudly at the load boundary instead of exploding later inside an
+ * `.exhaustive()` match (testResultPassed) or silently flowing through typed
+ * gate logic. Each section parser returns its TaskGraph fields under their
+ * wire names; the graph is the raw document with every section's parsed
+ * fields installed over it. Unknown extra fields pass through untouched
+ * (legacyTestsPassedNote still fires downstream); missing tasks/wave_gates
+ * default for early phases (populated in Phase 4).
  */
 export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!isRecord(raw)) return parseErr("not an object");
-  const obj = raw as Record<string, unknown>;
+  const obj = raw;
   const legacyShape = legacyStateFileShape(obj);
   if (legacyShape !== null) return parseErr(legacyStateFileRefusal(legacyShape));
   const documents = parseTaskGraphDocumentFields(obj);
-  if (!documents.ok) return parseErr(documents.error);
+  if (!documents.ok) return documents;
   const executingTasks = parseExecutingTaskIds(obj.executing_tasks);
-  if (!executingTasks.ok) return parseErr(executingTasks.error);
+  if (!executingTasks.ok) return executingTasks;
   // The frozen manifest and the contracts' shape are parsed before the Tasks:
   // the manifest decides the graph's I6 era and the contracts name the
   // writers it exempts, and so which obligations each stored Proof must carry
   // (INV-6). The contracts are bound to the roster once the Tasks are proven.
   const frozen = parseFrozenVerificationFields(obj);
-  if (!frozen.ok) return parseErr(frozen.error);
-  const { verificationManifest, testEvidence, engineRevision, contractShapes } = frozen.value;
-  const tasks = parseTaskGraphTasks(
-    obj,
-    executingTasks.value ?? [],
-    redThenGreenScope(verificationManifest, contractShapes ?? []),
-  );
-  if (!tasks.ok) return parseErr(tasks.error);
-  const gating = parseTaskGraphGating(obj, tasks.value);
-  if (!gating.ok) return parseErr(gating.error);
-  const obligations = parseTaskGraphObligationFields(obj, contractShapes, tasks.value);
-  if (!obligations.ok) return parseErr(obligations.error);
-  const skeletonFields = parseTaskGraphSkeletonFields(obj, obligations.value.acceptanceContracts, tasks.value);
-  if (!skeletonFields.ok) return parseErr(skeletonFields.error);
-  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest, ownerStampedGraph(tasks.value, obligations.value));
-  if (!authority.ok) return parseErr(authority.error);
-  const history = parseTaskGraphLinkedHistory(obj, authority.value, tasks.value, verificationManifest);
-  if (!history.ok) return parseErr(history.error);
-
-  return parseOk(taskGraphFromParsedParts(obj, {
+  if (!frozen.ok) return frozen;
+  const { fields: verification, contractShapes } = frozen.value;
+  const manifest = verification.verification_manifest;
+  const tasks = parseTaskGraphTasks(obj, executingTasks.value ?? [], redThenGreenScope(manifest, contractShapes ?? []));
+  if (!tasks.ok) return tasks;
+  const gating = parseTaskGraphGating(obj, tasks.value.tasks);
+  if (!gating.ok) return gating;
+  const obligations = parseTaskGraphObligationFields(obj, contractShapes, tasks.value.tasks);
+  if (!obligations.ok) return obligations;
+  const skeletons = parseTaskGraphSkeletonFields(obj, obligations.value.acceptance_contracts, tasks.value.tasks);
+  if (!skeletons.ok) return skeletons;
+  const authority = parseTaskGraphAuthorityFields(obj, manifest, { tasks: tasks.value.tasks, ...obligations.value });
+  if (!authority.ok) return authority;
+  const history = parseTaskGraphLinkedHistory(obj, authority.value, tasks.value.tasks, manifest);
+  if (!history.ok) return history;
+  return parseOk({
+    // `test_evidence` and `engine_revision` are installed only as their parsed
+    // values, after the fields a raw graph may omit.
+    ...withoutKeys(obj, "test_evidence", "engine_revision"),
     ...documents.value,
-    tasks: tasks.value,
-    executingTasks: executingTasks.value,
-    waveGates: gating.value.waveGates,
-    specCheck: gating.value.specCheck,
+    ...tasks.value,
+    ...present("executing_tasks", executingTasks.value),
+    ...gating.value,
+    ...verification,
+    ...authority.value,
+    ...history.value,
     ...obligations.value,
-    skeletonFields: skeletonFields.value,
-    authority: authority.value,
-    history: history.value,
-    testEvidence,
-    engineRevision,
-  }));
+    ...skeletons.value,
+  });
 }
