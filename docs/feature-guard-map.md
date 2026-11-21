@@ -59,7 +59,7 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 617 src files / ~168.8k lines TS; `engine/tests/` holds 944 TS files / ~260.5k lines (fixtures and helpers included), of which 826 test files are executed (802 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 616 src files / ~168.3k lines TS; `engine/tests/` holds 948 TS files / ~260.8k lines (fixtures and helpers included), of which 829 test files are executed (805 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.3k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
@@ -695,7 +695,7 @@ killed" — both engine-observed.
 
 ### 4.13 Persistence
 
-**The State File.** `state-manager.ts` + `state-file-wire.ts` (3.9k lines of pure
+**The State File.** `state-manager.ts` + `state-file-wire.ts` (4.1k lines of pure
 `(unknown → ParseResult)` wire parsers — the whole graph is parsed before use,
 "parse, do not cast"):
 
@@ -957,8 +957,8 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **826 executed test files / ~260.5k lines** — 802 under `engine/tests/` (944 TS files there
-  including fixtures and helpers; core 304 test files, handlers 189, pi 50,
+- **829 executed test files / ~260.8k lines** — 805 under `engine/tests/` (948 TS files there
+  including fixtures and helpers; core 306 test files, handlers 189, pi 50,
   linter 47, orchestration 38, utils 35, machine 30, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
@@ -1429,7 +1429,7 @@ prefer-array-methods, switch-totality.
 
 **utils/** — no-follow-fs (anchored fs primitives, lowest shell layer), lock, path-presence
 (ENOENT-only absence), git* (command scope, execution policy, leaves, probe, spawn
-outcome), attempt-baseline, declared-artifact-snapshot, repository-change-baseline,
+outcome), declared-artifact-snapshot, repository-change-baseline,
 workspace-digest, agent-definition, agent-transcript-path, child-launch-route,
 claude-config-dir, emission-environment, find-file, frontmatter, hook-diagnostic,
 loom-package-root, model-routing-context, persisted-output, pi-auth-store,

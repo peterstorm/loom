@@ -38,9 +38,9 @@ by a different route that grew up beside the plan:
   journal.
 - **The standalone and wave refutation panels** accumulate their events in memory while the panel completes.
   They then persist through `refutationPanelCheckpoint`: an event prefix that must replay exactly to the recorded
-  state. It is embedded in the program's own checkpoint and re-proved by `parseRefutationPanelCheckpoint` on
-  every read. (`refutationPanelCheckpoint` and `parseRefutationPanelCheckpoint` are the refutation panel's
-  wrappers over the kernel's generic `panelProgramCheckpoint` and `parsePanelProgramCheckpoint`.)
+  state. It is embedded in the program's own checkpoint and re-proved by `parseRefutationPanelCheckpointRecord` on
+  every read. (`refutationPanelCheckpoint` and `parseRefutationPanelCheckpointRecord` are the refutation panel's
+  wrappers over the kernel's generic `panelProgramCheckpoint` and `parsePanelProgramCheckpointRecord`.)
 - **Remediation** stages through `git-remediation.ts` called directly from its façade. It uses a temporary index
   and installs only on a verified witness, so the DAGs that were meant to describe it add nothing.
 
@@ -84,7 +84,7 @@ whose event prefix re-proves its state. Fugue is not part of the engine.**
   seam.
 
   The persistent panel kernel keeps replay, checkpoint and checkpoint-parse (`panelProgramCheckpoint` and
-  `parsePanelProgramCheckpoint`).
+  `parsePanelProgramCheckpointRecord`).
 - **What goes:**
   - orchestration/fugue-program-runtime.ts, every file under orchestration/dags/, and their tests;
   - `planPanelProgramPersistence`, `plan*PanelPersistence`, `parsePanelPersistenceReceipt` and the panel history
