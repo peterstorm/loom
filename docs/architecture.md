@@ -141,7 +141,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Engine-owned paths | `engine-owned-paths.ts`, the one definition of every repository path class the engine writes or protects (Git metadata, each harness's state and review directories, Run Directory layouts, completion reports); `engine-runtime-paths.ts` adds the State File's own lock and staging leaves. the workspace digest, defect accounting and remediation each exclude the classes they mean (Task scope judges the State File's own companions through `engine-runtime-paths.ts`), and remediation records the digest of the one evidence table its predicate interprets, and the lint rule `.claude/linter/rules/inv-10-one-engine-owned-path-module.json` refuses a module that restates one of the paths (loom#198, Cause 2) | One answer to "is this path the engine's?" |
 | Remediation | `remediation-machine.ts` | Scope authority, excluded evidence paths (`isEngineEvidencePath`, for both harnesses; an authority recorded under the earlier Claude-only policy digest stays readable and is held to the current policy), audit/stage/install lifecycle |
 | Model policy | `model-profiles.ts` (profile and Agent Catalog, resolution, issuance eligibility), `agent-catalog-projections.ts`, `pi-spawn-input.ts`, `model-calibration.ts` | Explicit cross-harness bindings, catalog-derived dispatch sets, deterministic calibration scoring |
-| Compatibility | `legacy-archive.ts` | Read-only parsers for historical artifacts; never new domain behavior |
+| Compatibility | `legacy-archive.ts` | The frozen Wave Gate compatibility migration for graphs that predate registration; never new domain behavior |
 
 ### Algebraic state machines
 
@@ -436,7 +436,7 @@ Determinism is scoped to what Loom can observe and own:
 - the shell guard judges command text, not an abstract Bash execution graph;
 - a machine's digest pin is engine source the user's account can write, so code an agent gets executed indirectly (a Git hook, a package script) could rewrite a machine and its pin together; pinning turns that into a coordinated change of shipped code, and only OS isolation would close it;
 - Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
-- legacy readers remain for historical evidence but are frozen in `core/legacy-archive.ts`.
+- the legacy Wave Gate compatibility migration remains for graphs that predate registration, frozen in `core/legacy-archive.ts`; the manual standalone-review and review-panel helpers and their unversioned formats are retired (ADR-0096), so their historical run directories are inert.
 
 These are documented boundaries, not silent claims of enforcement. The evidence ledger's own limits, including what red-then-green does not prove, are in [Guarded Skill Machines](../machines/README.md#known-residual-limits).
 

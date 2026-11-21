@@ -47,7 +47,7 @@ import {
   type AuthoritativeStandaloneReviewResult,
 } from "../../src/core/standalone-review";
 import { standaloneCurrentPanelCriticals, type FrozenStandalonePanelAuthority } from "../../src/core/standalone-refutation-panel";
-import { capturedReviewerResultFromText } from "../../src/core/standalone-reviewer-capture";
+import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
 import { prepareStandaloneReview } from "../../src/core/standalone-review-preparation";
 import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review-records";
 import { type FrozenStandaloneReviewAuthority, type StandaloneReviewAggregate } from "../../src/core/standalone-review-model";
@@ -325,7 +325,7 @@ export function standaloneFixture(
       byteLength: bytes.byteLength,
     });
     if (!artifact.ok) throw new Error(artifact.error.message);
-    const captured = capturedReviewerResultFromText(artifact.value, transcript);
+    const captured = capturedReviewerResultFromBytes(artifact.value, Buffer.from(transcript, "utf-8"));
     if (!captured.ok) throw new Error(captured.error.message);
     const result = acceptedAgentResult(request, captured.value);
     if (!result.ok) throw new Error(result.error.message);

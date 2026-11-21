@@ -45,7 +45,6 @@ import {
   bindStandaloneCaptureAuthority,
   captureStandaloneReviewerBytes,
   capturedReviewerResultFromBytes,
-  capturedReviewerResultFromText,
   completeStandaloneReviewerCapture,
   fingerprintCapturedReviewerResult,
   parseCapturedReviewerResult,
@@ -57,14 +56,10 @@ import { parseStandalonePanelOutcomes, type FrozenStandalonePanelAuthority } fro
 import { prepareFreshStandaloneReview, prepareStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
 import { serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate, serializeStandaloneReviewAuthority } from "../../src/core/standalone-review-records";
 import { admitStandaloneTranscript } from "../../src/core/standalone-transcript-admission";
-import { type FrozenStandaloneReviewAuthority } from "../../src/core/standalone-review-model";
-import {
-  aggregateLegacyStandaloneReview,
-  parseAdjudicatedStandaloneReview,
-} from "../../src/core/legacy-archive";
+import { type FrozenStandaloneReviewAuthority, type StandaloneReviewState } from "../../src/core/standalone-review-model";
+import { parseStandaloneReviewScope } from "../../src/core/standalone-review-scope";
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, type StandaloneRefutationCompletionReceipt } from "../../src/core/standalone-refutation-completion";
 import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
-import { prepareStandaloneReviewHarnessCapture } from "../../src/handlers/helpers/standalone-review";
 import {
   deriveRefutationVerifierBinding,
   parseRefutationPanelAuthority,
@@ -116,18 +111,34 @@ interface MutablePanelOutcomes {
   outcomes: MutablePanelOutcome[];
 }
 
-function required() {
-  const result = aggregateLegacyStandaloneReview({
-    runId: "run.abc",
-    scope: ["src/x.ts"],
-    transcripts: [
-      { agent: "code-reviewer", output: transcript(["real blocker"], ["small improvement"]) },
-      { agent: "type-design-analyzer", output: transcript(["duplicate wording"]) },
-    ],
-  });
-  expect(result.ok).toBe(true);
-  if (!result.ok || result.value.kind !== "requires-refutation") throw new Error("expected criticals");
+/**
+ * A standalone review state built the way a registered run builds it: the
+ * prepared two-reviewer roster (code-reviewer, type-design-analyzer), its
+ * captured transcripts in that order, the complete-roster proof, and
+ * `aggregateStandaloneReview`.
+ */
+function canonicalState(outputs: readonly [string, string]): StandaloneReviewState {
+  const authority = preparedAuthority();
+  const { completion } = completeCapturedRoster(authority, outputs);
+  const result = aggregateStandaloneReview({ authority, completion });
+  if (!result.ok) throw new Error(result.errors.join("\n"));
   return result.value;
+}
+
+function required() {
+  const state = canonicalState([
+    transcript(["real blocker"], ["small improvement"]),
+    transcript(["duplicate wording"]),
+  ]);
+  if (state.kind !== "requires-refutation") throw new Error("expected criticals");
+  return state;
+}
+
+/** Only code-reviewer raises findings; the type-design-analyzer transcript is clean. */
+function codeReviewerCritical(claim: string) {
+  const state = canonicalState([transcript([claim]), transcript()]);
+  if (state.kind !== "requires-refutation") throw new Error("critical fixture required");
+  return state;
 }
 
 describe("standalone review aggregate", () => {
@@ -139,14 +150,10 @@ describe("standalone review aggregate", () => {
     ]);
   });
 
-  it("fails closed when any reviewer omits its evidence marker", () => {
-    const result = aggregateLegacyStandaloneReview({
-      runId: "run.abc",
-      scope: ["src/x.ts"],
-      transcripts: [{ agent: "code-reviewer", output: "looks fine" }],
-    });
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.errors.join("\n")).toContain("CRITICAL_COUNT marker not found");
+  it("fails closed when a reviewer omits its evidence marker", () => {
+    const admission = admitIssuedLegacyTranscript(["src/x.ts"], "looks fine");
+    expect(admission.ok).toBe(false);
+    expect(!admission.ok && admission.problems.join("\n")).toContain("CRITICAL_COUNT marker not found");
   });
 
   it.each([
@@ -159,35 +166,15 @@ describe("standalone review aggregate", () => {
     ["newline", "src/bad\npath.ts", "single line without NUL"],
     ["NUL", "src/bad\0path.ts", "NUL"],
   ])("rejects malformed %s scope paths", (_label, scopePath, message) => {
-    const result = aggregateLegacyStandaloneReview({
-      runId: "run.abc",
-      scope: [scopePath],
-      transcripts: [{ agent: "code-reviewer", output: transcript() }],
-    });
+    const result = parseStandaloneReviewScope([scopePath]);
     expect(result.ok).toBe(false);
     expect(!result.ok && result.errors.join("\n")).toContain(message);
   });
 
   it("rejects duplicate canonical scope paths", () => {
-    const result = aggregateLegacyStandaloneReview({
-      runId: "run.abc",
-      scope: ["src/x.ts", "src/x.ts"],
-      transcripts: [{ agent: "code-reviewer", output: transcript() }],
-    });
+    const result = parseStandaloneReviewScope(["src/x.ts", "src/x.ts"]);
     expect(result.ok).toBe(false);
     expect(!result.ok && result.errors.join("\n")).toContain("must be distinct");
-  });
-
-  it("rejects a transcript finding outside the frozen scope", () => {
-    const result = aggregateLegacyStandaloneReview({
-      runId: "run.abc",
-      scope: ["src/inside.ts"],
-      transcripts: [{ agent: "code-reviewer", output: transcript(["outside blocker"]) }],
-    });
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.errors.join("\n")).toContain(
-      "code-reviewer findings[0].file is outside the frozen review scope: src/x.ts",
-    );
   });
 
   describe("admitStandaloneTranscript", () => {
@@ -226,15 +213,9 @@ describe("standalone review aggregate", () => {
       // never a per-transcript one — otherwise the retry path and the
       // aggregate boundary could drift.
       const output = transcript(["in scope blocker"]);
-      const scope = ["src/x.ts"];
-      const admission = admitIssuedLegacyTranscript(scope, output);
-      const result = aggregateLegacyStandaloneReview({
-        runId: "run.abc",
-        scope,
-        transcripts: [{ agent: "code-reviewer", output }],
-      });
+      const admission = admitIssuedLegacyTranscript(["src/x.ts"], output);
       expect(admission.ok).toBe(true);
-      expect(result.ok).toBe(true);
+      expect(canonicalState([output, transcript()]).kind).toBe("requires-refutation");
     });
   });
 
@@ -243,22 +224,11 @@ describe("standalone review aggregate", () => {
       '"file":"src/x.ts"',
       '"file":null',
     );
-    const result = aggregateLegacyStandaloneReview({
-      runId: "run.abc",
-      scope: ["src/x.ts"],
-      transcripts: [{ agent: "code-reviewer", output }],
-    });
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value.aggregate.findings[0]?.file).toBeNull();
+    expect(canonicalState([output, transcript()]).aggregate.findings[0]?.file).toBeNull();
   });
 
   it("represents zero criticals as an explicit clean state", () => {
-    const result = aggregateLegacyStandaloneReview({
-      runId: "run.abc",
-      scope: ["src/x.ts"],
-      transcripts: [{ agent: "code-reviewer", output: transcript([], ["small improvement"]) }],
-    });
-    expect(result.ok && result.value.kind).toBe("clean");
+    expect(canonicalState([transcript([], ["small improvement"]), transcript()]).kind).toBe("clean");
   });
 
   it("round-trips the aggregate through its untrusted boundary", () => {
@@ -372,8 +342,6 @@ describe("standalone review adjudication", () => {
       { lens: "intent", reason: "deliberate" },
     ]);
     expect(result.value.advisories.map((finding) => finding.claim)).toEqual(["small improvement"]);
-    const serialized = JSON.parse(serializeAdjudicatedStandaloneReview(result.value));
-    expect(parseAdjudicatedStandaloneReview(serialized).ok).toBe(false);
   });
 
   it("rejects missing, foreign, duplicate, or threshold-inconsistent outcomes", () => {
@@ -430,14 +398,9 @@ describe("standalone review adjudication", () => {
   });
 
   it("deep-copies and freezes every nested panel outcome, vote, and refutation record", () => {
-    const aggregated = aggregateLegacyStandaloneReview({
-      runId: "run.freeze-panel",
-      scope: ["src/x.ts"],
-      transcripts: [{ agent: "code-reviewer", output: transcript(["mutable blocker"]) }],
-    });
-    if (!aggregated.ok || aggregated.value.kind !== "requires-refutation") throw new Error("critical fixture required");
-    const finding = aggregated.value.criticals[0]!;
-    const panelFindings = buildStandaloneFindingBrief(aggregated.value.aggregate).findings;
+    const aggregated = codeReviewerCritical("mutable blocker");
+    const finding = aggregated.criticals[0]!;
+    const panelFindings = buildStandaloneFindingBrief(aggregated.aggregate).findings;
     const raw: MutablePanelOutcomes = {
       lenses: ["reproduction", "intent"], threshold: 2, surviving: 0, refuted: 1,
       outcomes: [{
@@ -451,7 +414,7 @@ describe("standalone review adjudication", () => {
       }],
     };
     const parsed = parseStandalonePanelOutcomes(
-      raw, aggregated.value.criticals, panelFindings, ["reproduction", "intent"],
+      raw, aggregated.criticals, panelFindings, ["reproduction", "intent"],
     );
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -473,14 +436,8 @@ describe("standalone review adjudication", () => {
   });
 
   it("accepts sanitized panel claims while retaining the original aggregate claim", () => {
-    const aggregated = aggregateLegacyStandaloneReview({
-      runId: "run.braces",
-      scope: ["src/x.ts"],
-      transcripts: [{ agent: "code-reviewer", output: transcript(["the {config} value is unchecked"]) }],
-    });
-    expect(aggregated.ok).toBe(true);
-    if (!aggregated.ok || aggregated.value.kind !== "requires-refutation") return;
-    const panelFindings = buildStandaloneFindingBrief(aggregated.value.aggregate).findings;
+    const aggregated = codeReviewerCritical("the {config} value is unchecked");
+    const panelFindings = buildStandaloneFindingBrief(aggregated.aggregate).findings;
     expect(panelFindings[0]?.claim).toBe("the config value is unchecked");
     const raw = {
       lenses: ["reproduction", "intent"], threshold: 2, surviving: 1, refuted: 0,
@@ -494,13 +451,13 @@ describe("standalone review adjudication", () => {
     };
     const parsed = parseStandalonePanelOutcomes(
       raw,
-      aggregated.value.criticals,
+      aggregated.criticals,
       panelFindings,
       ["reproduction", "intent"],
     );
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    const finalized = finalizeStandaloneReview(aggregated.value.aggregate, parsed.value);
+    const finalized = finalizeStandaloneReview(aggregated.aggregate, parsed.value);
     expect(finalized.ok).toBe(true);
     if (finalized.ok) {
       expect(finalized.value.survivingCriticals[0]?.claim).toBe("the {config} value is unchecked");
@@ -601,6 +558,23 @@ interface ProvenCapturedRoster {
   readonly reviewerProtocols: ReviewerProtocolAuthorityResolver;
 }
 
+/** One issued request's exact output, captured against the artifact its bytes prove. */
+function capturedOutput(runId: string, request: SpawnRequest, output: string): CapturedReviewerResult {
+  const rawBytes = Buffer.from(output, "utf-8");
+  const artifact = parseArtifactRef({
+    runId,
+    slot: request.authority.outputSlot,
+    digest: createHash("sha256").update(rawBytes).digest("hex"),
+    byteLength: rawBytes.byteLength,
+  });
+  expect(artifact.ok).toBe(true);
+  if (!artifact.ok) throw new Error(artifact.error.message);
+  const captured = capturedReviewerResultFromBytes(artifact.value, rawBytes);
+  expect(captured.ok).toBe(true);
+  if (!captured.ok) throw new Error(captured.error.message);
+  return captured.value;
+}
+
 function completeCapturedRoster(
   authority: FrozenStandaloneReviewAuthority,
   outputs: readonly string[],
@@ -643,19 +617,7 @@ function completeCapturedRoster(
   const issuedBySlot = new Map(action.value.requests.map((request) => [request.authority.slotId, request] as const));
   const accepted = outputs.map((output, index) => {
     const request = issuedBySlot.get(authority.roster.orderedSlots[index]!.slotId) as SpawnRequest;
-    const rawBytes = Buffer.from(output, "utf-8");
-    const artifact = parseArtifactRef({
-      runId: authority.runId,
-      slot: request.authority.outputSlot,
-      digest: createHash("sha256").update(rawBytes).digest("hex"),
-      byteLength: rawBytes.byteLength,
-    });
-    expect(artifact.ok).toBe(true);
-    if (!artifact.ok) throw new Error(artifact.error.message);
-    const captured = capturedReviewerResultFromText(artifact.value, output);
-    expect(captured.ok).toBe(true);
-    if (!captured.ok) throw new Error(captured.error.message);
-    const result = acceptedAgentResult(request, captured.value);
+    const result = acceptedAgentResult(request, capturedOutput(authority.runId, request, output));
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.error.message);
     return result.value;
@@ -995,7 +957,7 @@ describe("standalone v1 authority and byte-aware complete-roster aggregation", (
     });
     expect(artifact.ok).toBe(true);
     if (!artifact.ok) return;
-    expect(capturedReviewerResultFromText(artifact.value, output).ok).toBe(false);
+    expect(capturedReviewerResultFromBytes(artifact.value, Buffer.from(output, "utf-8")).ok).toBe(false);
   });
 });
 
@@ -1118,11 +1080,7 @@ describe("fresh preparation and request-bound byte capture", () => {
     expect(rebound.ok).toBe(true);
     if (!rebound.ok) return;
     const bytes = Buffer.from(transcript([], ["captured without parent publication"]), "utf-8");
-    const prepared = prepareStandaloneReviewHarnessCapture({
-      captureAuthority: rebound.value,
-      requestId: issued[0]!.authority.requestId,
-      rawBytes: bytes,
-    });
+    const prepared = captureStandaloneReviewerBytes(rebound.value, issued[0]!.authority.requestId, bytes);
     expect(prepared.ok).toBe(true);
     if (!prepared.ok) return;
     const reloaded = parsePreparedStandaloneReviewerCapture(
@@ -1180,140 +1138,6 @@ describe("fresh preparation and request-bound byte capture", () => {
       ...(["runId", "slot", "digest", "byteLength"] as const).map((field) => ({ ...base, artifact: wrongArtifact(field) })),
     ];
     for (const receipt of tampered) expect(completeStandaloneReviewerCapture(prepared.value, receipt).ok).toBe(false);
-  });
-});
-
-describe("historical standalone result compatibility and v1 authority", () => {
-  const criticalFinding = {
-    id: "code-reviewer-1", agent: "code-reviewer", severity: "critical" as const,
-    file: "src/x.ts", line: 3, claim: "the {config} value is unchecked",
-  };
-  const advisoryFinding = {
-    id: "code-reviewer-2", agent: "code-reviewer", severity: "advisory" as const,
-    file: "src/x.ts", line: 4, claim: "rename this value",
-  };
-
-  it("reads the genuine unversioned serializer shape and normalizes old panel fields/task identity", () => {
-    // Historical serializer shape: no schema/subject/evidence, no panel
-    // counts, and no outcome task_id.
-    const historical = {
-      run_id: "run.historical",
-      scope: ["src/x.ts"],
-      surviving_critical_findings: [criticalFinding],
-      advisory_findings: [advisoryFinding],
-      refuted_critical_findings: [],
-      panel: {
-        lenses: ["reproduction", "intent", "blast-radius"], threshold: 2,
-        outcomes: [{
-          finding_id: "standalone-review:code-reviewer-1",
-          claim: "the config value is unchecked", survives: true,
-          refuted_by: [], reasoning: [], upheld_by: ["reproduction", "intent"], uncertain_from: ["blast-radius"],
-        }],
-      },
-    };
-    const parsed = parseAdjudicatedStandaloneReview(historical);
-    expect(parsed.ok).toBe(true);
-    if (parsed.ok) {
-      expect(parsed.value.authorityKind).toBe("unauthenticated-historical");
-      expect(parsed.value.panel?.outcomes[0]?.findingId).toBe("standalone-review:code-reviewer-1");
-      expect(parsed.value.panel?.outcomes[0]?.claim).toBe("the config value is unchecked");
-    }
-  });
-
-  it("reads a pre-panel critical disposition only when it is genuinely unversioned", () => {
-    const historical = {
-      run_id: "run.pre-panel", scope: ["src/x.ts"],
-      surviving_critical_findings: [criticalFinding], advisory_findings: [], refuted_critical_findings: [], panel: null,
-    };
-    expect(parseAdjudicatedStandaloneReview(historical).ok).toBe(true);
-    expect(parseAdjudicatedStandaloneReview({
-      schema_version: 1, subject_id: "standalone-review", reviewer_evidence: [], ...historical,
-    }).ok).toBe(false);
-  });
-
-  it("rejects both clean and critical schema-v1 values without LC-2 publication authority", () => {
-    const critical = required();
-    const panelFindings = buildStandaloneFindingBrief(critical.aggregate).findings;
-    const panel = parseStandalonePanelOutcomes({
-      lenses: ["reproduction", "intent"], threshold: 2, surviving: 2, refuted: 0,
-      outcomes: critical.criticals.map((finding) => ({
-        finding_id: `${STANDALONE_REVIEW_SUBJECT}:${finding.id}`,
-        task_id: STANDALONE_REVIEW_SUBJECT,
-        claim: panelFindings.find(({ id }) => id === `${STANDALONE_REVIEW_SUBJECT}:${finding.id}`)!.claim,
-        survives: true, refuted_by: [], reasoning: [],
-        upheld_by: ["reproduction", "intent"], uncertain_from: [],
-      })),
-    }, critical.criticals, panelFindings, ["reproduction", "intent"]);
-    if (!panel.ok) throw new Error(panel.errors.join("; "));
-    const criticalResult = finalizeStandaloneReview(critical.aggregate, panel.value);
-    const clean = aggregateLegacyStandaloneReview({
-      runId: "run.clean-v1", scope: ["src/x.ts"],
-      transcripts: [{ agent: "code-reviewer", output: transcript() }],
-    });
-    if (!criticalResult.ok || !clean.ok) throw new Error("result fixtures failed");
-    const cleanResult = finalizeStandaloneReview(clean.value.aggregate, null);
-    if (!cleanResult.ok) throw new Error(cleanResult.errors.join("; "));
-
-    for (const raw of [criticalResult.value, cleanResult.value].map((result) =>
-      JSON.parse(serializeAdjudicatedStandaloneReview(result)))) {
-      const parsed = parseAdjudicatedStandaloneReview(raw);
-      expect(parsed.ok).toBe(false);
-      if (!parsed.ok) expect(parsed.errors.join("\n")).toContain("authoritative LC-2 publication parsing");
-    }
-  });
-
-  it("enforces frozen scope for every final disposition and canonical claim authority", () => {
-    const state = required();
-    const panelFindings = buildStandaloneFindingBrief(state.aggregate).findings;
-    const panel = parseStandalonePanelOutcomes({
-      lenses: ["reproduction", "intent"], threshold: 2, surviving: 2, refuted: 0,
-      outcomes: state.criticals.map((finding) => ({
-        finding_id: `standalone-review:${finding.id}`, task_id: "standalone-review",
-        claim: panelFindings.find(({ id }) => id === `standalone-review:${finding.id}`)!.claim,
-        survives: true, refuted_by: [], reasoning: [], upheld_by: ["reproduction", "intent"], uncertain_from: [],
-      })),
-    }, state.criticals, panelFindings, ["reproduction", "intent"]);
-    expect(panel.ok).toBe(true);
-    if (!panel.ok) return;
-    const finalized = finalizeStandaloneReview(state.aggregate, panel.value);
-    expect(finalized.ok).toBe(true);
-    if (!finalized.ok) return;
-    const canonical = JSON.parse(serializeAdjudicatedStandaloneReview(finalized.value)) as {
-      surviving_critical_findings: Array<{ file: string }>;
-      advisory_findings: Array<{ file: string }>;
-      panel: { outcomes: Array<{ claim: string }> };
-    };
-    const outsideSurvivor = structuredClone(canonical);
-    outsideSurvivor.surviving_critical_findings[0]!.file = "src/outside.ts";
-    const outsideAdvisory = structuredClone(canonical);
-    outsideAdvisory.advisory_findings[0]!.file = "src/outside.ts";
-    const replacedClaim = structuredClone(canonical);
-    replacedClaim.panel.outcomes[0]!.claim = "self-authenticated replacement";
-    const outsideRefuted = structuredClone(canonical) as typeof canonical & {
-      refuted_critical_findings: Array<{
-        finding: { file: string };
-        refutations: Array<{ lens: string; reason: string }>;
-      }>;
-    };
-    const moved = outsideRefuted.surviving_critical_findings.shift()!;
-    moved.file = "src/outside.ts";
-    outsideRefuted.refuted_critical_findings = [{
-      finding: moved,
-      refutations: [
-        { lens: "reproduction", reason: "not reproducible" },
-        { lens: "intent", reason: "intentional" },
-      ],
-    }];
-    const movedOutcome = outsideRefuted.panel.outcomes[0]! as typeof outsideRefuted.panel.outcomes[number] & {
-      survives: boolean; refuted_by: string[]; reasoning: string[]; upheld_by: string[];
-    };
-    movedOutcome.survives = false;
-    movedOutcome.refuted_by = ["reproduction", "intent"];
-    movedOutcome.reasoning = ["not reproducible", "intentional"];
-    movedOutcome.upheld_by = [];
-    for (const raw of [outsideSurvivor, outsideAdvisory, outsideRefuted, replacedClaim]) {
-      expect(parseAdjudicatedStandaloneReview(raw).ok).toBe(false);
-    }
   });
 });
 
@@ -1552,7 +1376,7 @@ describe("LC-2 standalone lifecycle machine", () => {
     });
     expect(replacementArtifact.ok).toBe(true);
     if (!replacementArtifact.ok) return;
-    const replacementPayload = capturedReviewerResultFromText(replacementArtifact.value, replacementText);
+    const replacementPayload = capturedReviewerResultFromBytes(replacementArtifact.value, Buffer.from(replacementText, "utf-8"));
     expect(replacementPayload.ok).toBe(true);
     if (!replacementPayload.ok) return;
     expect(fingerprintCapturedReviewerResult(replacementPayload.value)).not.toBe(
@@ -2013,21 +1837,8 @@ describe("LC-2 standalone lifecycle machine", () => {
     const siblingRequest = batchIssued.get(slotTwo.slotId);
     if (retryRequest === undefined || siblingRequest === undefined) throw new Error("issued requests missing");
 
-    const capturedFor = (request: SpawnRequest, output: string): CapturedReviewerResult => {
-      const rawBytes = Buffer.from(output, "utf-8");
-      const artifact = parseArtifactRef({
-        runId: authority.runId,
-        slot: request.authority.outputSlot,
-        digest: createHash("sha256").update(rawBytes).digest("hex"),
-        byteLength: rawBytes.byteLength,
-      });
-      expect(artifact.ok).toBe(true);
-      if (!artifact.ok) throw new Error(artifact.error.message);
-      const captured = capturedReviewerResultFromText(artifact.value, output);
-      expect(captured.ok).toBe(true);
-      if (!captured.ok) throw new Error(captured.error.message);
-      return captured.value;
-    };
+    const capturedFor = (request: SpawnRequest, output: string): CapturedReviewerResult =>
+      capturedOutput(authority.runId, request, output);
     const acceptedRetry = acceptedAgentResult(retryRequest, capturedFor(retryRequest, transcript()));
     const acceptedSibling = acceptedAgentResult(siblingRequest, capturedFor(siblingRequest, transcript()));
     expect(acceptedRetry.ok && acceptedSibling.ok).toBe(true);

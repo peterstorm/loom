@@ -3,7 +3,8 @@
 ## Status
 Accepted (2026-11-20). Partly supersedes ADR-0030: its premise that `/loom --panel` runs the registered
 driver. Amends ADR-0029 (the registered panel bullet, its crash-window test, and the threshold rule's
-mention of the review-panel tally) and ADR-0018 (the legacy panel verdict path).
+mention of the review-panel tally), ADR-0018 (the legacy panel verdict path) and ADR-0004 (its consequence that
+historical helpers and formats remain behind `core/legacy-archive.ts`).
 
 ## Context
 Panels had more than one driver each. Only one driver per panel had a caller.
@@ -41,6 +42,14 @@ pointed the wrong way.
 The architecture journal's reader lived in `core/legacy-archive` as a "legacy panel journal" translator,
 although the runbook writes that format today.
 
+**The manual standalone review.** `helper standalone-review init|aggregate|finalize` ran a standalone
+review by hand, beside the registered `helper orchestration start standalone-review` that `/review-pr`
+drives. It aggregated through legacy-archive Section A, re-read its aggregate through Section B, and wrote
+an unversioned result through its own serializer. Its callers were the standalone-review smoke script and
+its tests; the runbook contract already forbids the prose from naming its operations. In this repository's
+untracked .claude/reviews/review-and-fix-runs, all 127 result files carry a schema version and no run holds
+the helper's review plan, so no persisted run needs the unversioned reader.
+
 ## Options Considered
 
 1. **Delete every driver without a caller (chosen)**
@@ -71,7 +80,12 @@ program inside the Wave Gate and standalone review.**
     (`helper panel-program` replays its own way);
   - the manual `helper review-panel` route, its v1 brief, manifest and outcomes formats, the run policy
     only it applied, and the `review-panel` and `standalone-review` smoke scripts that drove it;
-  - the refutation half of `core/panel-program` and the `refutation` mode of `helper panel-program`.
+  - the refutation half of `core/panel-program` and the `refutation` mode of `helper panel-program`;
+  - the manual `helper standalone-review` route, legacy-archive Sections A (legacy aggregation) and B
+    (the unversioned result parser), the unversioned result serializer, and what only they used: the
+    text-based capture and decode helpers, the canonical-transcript aggregation, and the panel-run write
+    preparation and no-follow re-exports. Its pass-through capture entry point goes too; harness capture
+    calls `captureStandaloneReviewerBytes` in core.
 - **What moves:** the architecture journal reader leaves `core/legacy-archive` for `core/panel-program`,
   beside the reducer it feeds. It is the live format, not a historical one. Its wire spelling
   (`format: "legacy-panel-program"`, `schemaVersion: 1`) and its error messages are unchanged, so every
@@ -79,7 +93,8 @@ program inside the Wave Gate and standalone review.**
 - **What stays:** the stateless architecture dispatch program, `helper panel-program architecture`, the panel
   contract, the kernel, ranking, and the persistent Refutation Panel. The pieces of `core/review-panel` the
   persistent program uses stay: the lens catalogue, the critical finding projection, the verdict parser and
-  the refutation threshold.
+  the refutation threshold. `core/legacy-archive` keeps Section C, the Wave Gate compatibility migration,
+  unchanged.
 
 ## Consequences
 
@@ -91,5 +106,6 @@ program inside the Wave Gate and standalone review.**
 **Negative:**
 - A registered architecture or refutation run started by hand, outside every runbook, is no longer
   resumable. `resume` reports the registration as malformed.
-- `helper review-panel` and `helper panel-program refutation` now fail with a usage error. A v1
-  reviews/panel-runs directory is inert history: nothing reads it, and nothing rewrites it.
+- `helper review-panel`, `helper standalone-review` and `helper panel-program refutation` now fail. A v1
+  reviews/panel-runs directory and an unversioned standalone result are inert history: nothing reads them,
+  and nothing rewrites them.

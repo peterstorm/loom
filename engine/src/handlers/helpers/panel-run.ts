@@ -1,11 +1,12 @@
 /**
- * Panel run shell — the filesystem boundary every panel helper shares.
+ * Panel run shell — the filesystem boundary of the architecture panel's
+ * `helper panel-contract`.
  *
  * Companion to `core/panel-kernel.ts`: the kernel owns the pure envelope rules,
- * this owns the untrusted-path rules. Both panels write their artifacts into a
- * unique run directory under a runs-root inside the cwd, and both must reject
- * a symlinked hop, an escaping path, and an empty or non-regular artifact
- * before any agent output is believed.
+ * this owns the untrusted-path rules. The panel writes its artifacts into a
+ * unique run directory under a runs-root inside the cwd, and the helper must
+ * reject a symlinked hop, an escaping path, and an empty or non-regular
+ * artifact before any agent output is believed.
  *
  * Not pure: lstat/realpath/read/write. Kept out of `core/` for that reason.
  */
@@ -17,16 +18,10 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
 import { fail, ok } from "../../core/panel-kernel";
-import {
-  type AnchoredDirectory,
-  closeAnchoredDirectory,
-  ensureRelativeDirectoryNoFollow,
-  openDirectoryNoFollow,
-} from "../../utils/no-follow-fs";
 
 // `RunLayout` and the architecture layout are pure data and live in the kernel, beside
 // the manifest parsers that give them meaning — those parsers used to hardcode
@@ -81,36 +76,6 @@ function entryErrors(label: string, path: string, kind: "directory" | "file"): s
     errors.push(`cannot inspect ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
   return errors;
-}
-
-/**
- * Bind a run DIRECTORY to an explicit panel-runs root, for the operations that
- * run before a manifest exists (the review panel writes its brief and manifest
- * from the engine). Same containment and symlink rules as parseRunBoundary,
- * minus the manifest itself.
- */
-export function parseRunDirectory(runsRoot: string, runDir: string): ParseResult<string> {
-  const cwd = realpathSync(process.cwd());
-  const absoluteRoot = resolve(runsRoot);
-  const absoluteRunDir = resolve(runDir);
-
-  const errors = runsRootErrors(cwd, relative(cwd, absoluteRoot));
-  if (runDir.split(/[\\/]/).some((segment) => segment === "." || segment === "..")) {
-    errors.push(`run directory must not contain dot path segments: ${runDir}`);
-  }
-  if (dirname(absoluteRunDir) !== absoluteRoot) {
-    errors.push("run directory must be directly inside --runs-root");
-  }
-  errors.push(...entryErrors("run directory", absoluteRunDir, "directory"));
-  try {
-    if (realpathSync(runDir) !== absoluteRunDir) {
-      errors.push(`run directory must resolve directly to its lexical path: ${runDir}`);
-    }
-  } catch (error) {
-    errors.push(`cannot resolve run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  return errors.length > 0 ? fail(errors) : ok(runDir);
 }
 
 /** Bind the run to an explicit panel-runs root and reject every symlinked hop. */
@@ -245,118 +210,6 @@ function surplusItemErrors(
           `declares, so this run would decide on a subset of the work done`,
       ];
 }
-
-/**
- * Prepare a run-scoped directory and prove every path the engine is about to
- * WRITE is safe to write.
- *
- * The read side has always been checked (`entryErrors`, `artifactError`); the
- * review panel is the first panel where the engine authors artifacts, and a
- * write follows a symlink just as happily as a read does. `mkdirSync` is a
- * silent no-op on an existing symlinked directory, and `writeFileSync` through
- * a symlinked `brief.md` lands the JSON wherever it points — outside the run
- * root the containment checks all compare against. Checked BEFORE the write,
- * because `artifactErrors` runs at the manifest step, by which time the bytes
- * have already landed.
- */
-export function requireRunDirectoriesNoFollow(
-  runDir: string,
-  directories: readonly string[],
-): ParseResult<void> {
-  // The run directory is the BASE: the operator's path to it may traverse a
-  // system symlink (macOS resolves `/var` to `/private/var`), while nothing
-  // BELOW it may. Resolving it once here is what lets every anchored open
-  // below hold to the strict no-symlink rule — the same reason
-  // `runArtifactErrors` compares containment against `realRunDir`.
-  const resolvedRunDir = realRunDir(runDir);
-  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
-  const root = resolvedRunDir.value;
-  const errors: string[] = [];
-  for (const directory of directories) {
-    const path = join(root, directory);
-    let anchored: AnchoredDirectory | null = null;
-    try {
-      const fromRun = relative(root, resolve(path));
-      if (fromRun === ".." || fromRun.startsWith(`..${sep}`) || isAbsolute(fromRun)) {
-        throw new Error(`run subdirectory escapes run directory: ${path}`);
-      }
-      anchored = openDirectoryNoFollow(path);
-    } catch (error) {
-      errors.push(`cannot anchor existing run subdirectory ${path}: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      if (anchored !== null) closeAnchoredDirectory(anchored);
-    }
-  }
-  return errors.length > 0 ? fail(errors) : ok(undefined);
-}
-
-export function prepareWriteTargets(
-  runDir: string,
-  directories: readonly string[],
-  files: readonly string[],
-): ParseResult<void> {
-  // Resolve the run BASE once, for the reason documented on
-  // `requireRunDirectoriesNoFollow`; every path built below it is then held to
-  // the strict no-symlink rule.
-  const resolvedRunDir = realRunDir(runDir);
-  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
-  const root = resolvedRunDir.value;
-  const errors: string[] = [];
-  let runDirectory: AnchoredDirectory | null = null;
-  try {
-    runDirectory = openDirectoryNoFollow(root);
-  } catch (error) {
-    errors.push(`cannot anchor run directory ${root}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  for (const directory of directories) {
-    const path = join(root, directory);
-    try {
-      if (runDirectory === null) throw new Error("run directory anchor is unavailable");
-      ensureRelativeDirectoryNoFollow(runDirectory, root, path);
-    } catch (error) {
-      errors.push(`cannot create ${path}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
-    errors.push(...entryErrors("run subdirectory", path, "directory"));
-  }
-  if (runDirectory !== null) closeAnchoredDirectory(runDirectory);
-  for (const file of files) {
-    const path = join(root, file);
-    try {
-      // Absent is the expected state for a fresh run directory and is fine;
-      // anything that EXISTS must be a plain file we are overwriting in place.
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink()) errors.push(`write target must not be a symbolic link: ${path}`);
-      else if (!stat.isFile()) errors.push(`write target must be a regular file: ${path}`);
-    } catch (error) {
-      // ONLY ENOENT means "nothing to follow, nothing to check". A blanket
-      // catch read EACCES on a parent component and ELOOP as "absent, safe to
-      // write" — which is precisely the state this function exists to refuse.
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-        errors.push(
-          `cannot verify write target ${path}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  }
-  return errors.length > 0 ? fail(errors) : ok(undefined);
-}
-
-/**
- * Anchored run-artifact operations now live in the orchestration layer so the
- * anchored RunDirHandle and these helpers share one implementation.
- * Re-exported here because they are part of this module's established public
- * surface.
- */
-export {
-  closeAnchoredDirectory,
-  openDirectoryNoFollow,
-  publishStagedRunFile,
-  readRunFileNoFollow,
-  removeRunFileNoFollow,
-  writeRunFileExclusiveNoFollow,
-  writeRunFileNoFollow,
-} from "../../utils/no-follow-fs";
 
 /** Canonical per-criterion verdict path. Positional by index, but the content
  *  is re-validated against `criteria[index]` when read, so a verdict written to

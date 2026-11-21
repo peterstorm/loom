@@ -16,7 +16,6 @@ import { capturedReviewerResultFromBytes } from "../../src/core/standalone-revie
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
 import { renderStandaloneReviewSummary, serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate } from "../../src/core/standalone-review-records";
 import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
-import { parseAdjudicatedStandaloneReview, parseHistoricalStandaloneAggregate } from "../../src/core/legacy-archive";
 import { parsedAuthority } from "../../src/handlers/helpers/programs/registration";
 import { standaloneRequestId } from "../../src/handlers/helpers/programs/standalone-requests";
 import { fixtureReviewerProtocols, standaloneFixtureRegistration } from "../fixtures/standalone-reviewer-protocol";
@@ -167,9 +166,5 @@ describe("current standalone publication authority", () => {
       { ...raw, aggregate: { ...raw.aggregate, findings: raw.aggregate.findings.map(({ protocolVersion: _removed, ...finding }: { protocolVersion: number }) => finding) } },
     ]) expect(parseStandaloneReviewMachineState(changed, f.publications, f.protocols, value(parsedAuthority(f.registration))).ok).toBe(false);
     expect(Object.keys(JSON.parse(serializeStandaloneAggregate(c.aggregate))).slice(0, 3)).toEqual(["schema_version", "reviewer_protocol", "run_id"]);
-    expect(parseHistoricalStandaloneAggregate(JSON.parse(serializeStandaloneAggregate(c.aggregate))).ok).toBe(false);
-    const current = JSON.parse(serializeAdjudicatedStandaloneReview(c.done.result));
-    const { schema_version: _version, reviewer_protocol: _protocol, subject_id: _subject, reviewer_evidence: _evidence, ...stripped } = current;
-    expect(parseAdjudicatedStandaloneReview(stripped).ok).toBe(false);
   });
 });

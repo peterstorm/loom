@@ -84,6 +84,13 @@ describe("the retired review-panel helper (ADR-0096)", () => {
   });
 });
 
+describe("the retired manual standalone-review helper (ADR-0096)", () => {
+  it("has no route: a standalone review runs only as the registered orchestration program", () => {
+    expect(KNOWN_HANDLERS["helper"]!.has("standalone-review")).toBe(false);
+    expect(KNOWN_HANDLERS["helper"]!.has("orchestration")).toBe(true);
+  });
+});
+
 describe("wave-gate.md delegates the review-panel contract to the façade", () => {
   const runbook = readFileSync(join(REPO_ROOT, "commands", "wave-gate.md"), "utf-8");
 

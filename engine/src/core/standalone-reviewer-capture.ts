@@ -92,15 +92,6 @@ export function capturedReviewerResultFromBytes(
   }));
 }
 
-export function capturedReviewerResultFromText(
-  rawArtifact: unknown,
-  rawOutput: unknown,
-): DomainResult<CapturedReviewerResult, SemanticPayloadParseError> {
-  return typeof rawOutput === "string" && rawOutput.length > 0
-    ? capturedReviewerResultFromBytes(rawArtifact, Buffer.from(rawOutput, "utf-8"))
-    : failure({ message: "captured reviewer rawOutput must be a non-empty string" });
-}
-
 /** Payload parser supplied directly to T1's parseCompleteRoster. */
 export function parseCapturedReviewerResult(raw: unknown): DomainResult<CapturedReviewerResult, SemanticPayloadParseError> {
   if (!isRecord(raw)) return failure({ message: "captured reviewer result must be an object" });
@@ -112,14 +103,6 @@ export function parseCapturedReviewerResult(raw: unknown): DomainResult<Captured
   const encoded = parseRawReviewerBytes(raw.rawBytes);
   if (!encoded.ok) return encoded;
   return capturedReviewerResultFromBytes(raw.artifact, Buffer.from(encoded.value.data, "base64"));
-}
-
-export function decodeCapturedReviewerText(captured: CapturedReviewerResult): DomainResult<string, SemanticPayloadParseError> {
-  try {
-    return success(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(captured.rawBytes.data, "base64")));
-  } catch {
-    return failure({ message: "captured reviewer bytes are not valid UTF-8 semantic output" });
-  }
 }
 
 /** Stable identity retained by LC-2 when a sibling result is accepted early. */

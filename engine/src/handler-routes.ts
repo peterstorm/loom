@@ -31,7 +31,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "complete-orchestration", "lint-wave-gate", "validate-lint-rules",
     "panel-contract", "model-profiles", "review-packet", "reopen-completed-wave",
-    "model-calibration", "panel-program", "standalone-review", "orchestration", "family-sites",
+    "model-calibration", "panel-program", "orchestration", "family-sites",
     "security-audit", "accept-plan-design-review", "mutation-check", "owner-check", "lint-coverage", "run-tests", "suggest-affected-runner", "retro-facts", "record-retro",
   ]),
 };
@@ -108,7 +108,6 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/complete-orchestration",
   "helper/review-packet",
   "helper/reopen-completed-wave",
-  "helper/standalone-review",
   "helper/orchestration",
   // A security-audit run owns a run directory and its coverage ledger; a
   // Pi-launched process must prove it matches the extension runtime before

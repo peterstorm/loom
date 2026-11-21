@@ -18,7 +18,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0001](ADR-0001-linter-module-within-engine.md) | Linter as Module within Engine | Accepted | — |
 | [ADR-0002](ADR-0002-defense-in-depth-redos-protection.md) | Defense-in-Depth ReDoS Protection | Accepted | — |
 | [ADR-0003](ADR-0003-fail-closed-error-handling.md) | Fail-Closed Error Handling | Accepted | — |
-| [ADR-0004](ADR-0004-engine-owned-orchestration-automation.md) | Engine-Owned Orchestration Automation | Accepted | — |
+| [ADR-0004](ADR-0004-engine-owned-orchestration-automation.md) | Engine-Owned Orchestration Automation | Accepted | amended by ADR-0096 |
 | [ADR-0005](ADR-0005-per-program-facade-drivers.md) | Program façade drivers stay per-program; no shared driver framework | Accepted | — |
 | [ADR-0006](ADR-0006-lc1-reaches-production-by-projection.md) | LC-1 reaches production by projection, not by checkpoint | Accepted | — |
 | [ADR-0007](ADR-0007-curated-public-surface.md) | A facade publishes a curated Public Surface, not the union of its volumes | Accepted | — |
@@ -110,4 +110,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0093](ADR-0093-a-reopen-names-what-the-finding-needs.md) | A reopen names what the Finding needs | Accepted (2026-11-18) | — |
 | [ADR-0094](ADR-0094-a-re-reviewed-tasks-roster-follows-what-changed.md) | A re-reviewed Task's roster follows what changed | Accepted (2026-11-18) | extends ADR-0091 |
 | [ADR-0095](ADR-0095-the-linter-measures-functions-through-a-lazy-compiler-seam.md) | The linter measures functions through a lazy compiler seam | Accepted (2026-11-18) | amends ADR-0042 |
-| [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md) | Each panel has one driver, and the manual review helpers retire | Accepted (2026-11-20) | partly supersedes ADR-0030; amends ADR-0018, ADR-0029 |
+| [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md) | Each panel has one driver, and the manual review helpers retire | Accepted (2026-11-20) | partly supersedes ADR-0030; amends ADR-0004, ADR-0018, ADR-0029 |

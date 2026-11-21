@@ -149,7 +149,7 @@ The guard's list also holds `complete-wave-gate`, `store-test-evidence`, `reconc
 
 - `validate-task-graph`, `validate-lint-rules`, and `lint-wave-gate` (a diagnostic; the registered Wave Gate runs the same full-tier lint itself).
 - `orchestration status`, `contract-status`, `retro-facts` and `stop-check-plan --task <id>`: pure reads of the State File that write only to stdout. `retro-facts [--wave <N>] [--graph <path>]` prints the friction the run recorded, for `/retro`. `contract-status` takes no arguments and prints each Acceptance Contract's freeze state, roster and due Waves. `stop-check-plan` prints what the Acceptance Stop Check would do at that Task's stop, or the one reason the check is off; it refuses an unknown Task id with a non-zero exit. See `docs/reference/helpers.md`.
-- `panel-contract` (the architecture panel) and `standalone-review`: each writes only into a run directory under the runs root it is given (`.claude/specs/{date_slug}/panel-runs/`, `.claude/reviews/review-and-fix-runs/`). Invoked against a guarded path they are blocked like anything else.
+- `panel-contract` (the architecture panel): it writes only into a run directory under the runs root it is given (`.claude/specs/{date_slug}/panel-runs/`). Invoked against a guarded path it is blocked like anything else.
 - `accept-plan-design-review` (Phase 3.6): its arguments name only a runs root under `.claude/reviews/`, and its one State File write goes through the engine's locked writer.
 
 Everything else is driven by hooks.

@@ -3,6 +3,11 @@
 ## Status
 Accepted
 
+Amended by [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md)
+(2026-11-20): the manual standalone-review and review-panel helpers and their unversioned formats are
+retired, so "historical helpers/formats remain behind `core/legacy-archive.ts`" no longer holds for them.
+The archive keeps only the Wave Gate compatibility migration.
+
 ## Context
 
 Loom's orchestration mechanics lived in prose. The wave gate, the architecture

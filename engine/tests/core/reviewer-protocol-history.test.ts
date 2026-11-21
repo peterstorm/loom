@@ -25,7 +25,7 @@ import {
   startStandaloneReviewMachine,
 } from "../../src/core/standalone-review";
 import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
-import { aggregateLegacyStandaloneReview } from "../../src/core/legacy-archive";
+import { attributeFindings } from "../../src/core/findings";
 import { parseIssuedReviewerProtocol, resolveReviewFindings, type IssuedStandaloneReviewerProtocol, type ReviewerProtocolAuthorityResolver } from "../../src/core/review-output";
 import { parseRegistration, parsedAuthority } from "../../src/handlers/helpers/programs/registration";
 import { loadReviewerV1Golden, type ReviewerV1Golden } from "../fixtures/reviewer-protocol-v1";
@@ -652,6 +652,13 @@ describe("isolated legacy examples (not authoritative historical Runs)", () => {
     expect(resolution.findings.advisory).toEqual([]);
   });
 
+  /** What standalone aggregation keeps of one v1 transcript: its resolved drafts, attributed to the reviewer. */
+  const attributedFindings = (output: string) => {
+    const resolution = resolveReviewFindings(output, "code-reviewer");
+    if (resolution.kind !== "findings") throw new Error("Expected legacy findings");
+    return attributeFindings(resolution.findings.drafts, "code-reviewer");
+  };
+
   it("pins both synthetic shortfalls, original order/IDs, and declared rather than derived counts", () => {
     const output = illustrative("shortfall");
     const resolution = resolveReviewFindings(output, "code-reviewer");
@@ -663,26 +670,25 @@ describe("isolated legacy examples (not authoritative historical Runs)", () => {
       ["advisory", "Review output parsing failed - 1 of 2 advisory findings not captured"],
       ["critical", "captured blocker"], ["advisory", "captured benefit"],
     ]);
-    const aggregate = value(aggregateLegacyStandaloneReview({ runId: "illustrative-shortfall", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
-    expect(aggregate.aggregate.findings.map(({ id }) => id)).toEqual(["code-reviewer-1", "code-reviewer-2", "code-reviewer-3", "code-reviewer-4"]);
-    expect(aggregate.aggregate.findings.filter(({ severity }) => severity === "critical")).toHaveLength(2);
+    const findings = attributedFindings(output);
+    expect(findings.map(({ id }) => id)).toEqual(["code-reviewer-1", "code-reviewer-2", "code-reviewer-3", "code-reviewer-4"]);
+    expect(findings.filter(({ severity }) => severity === "critical")).toHaveLength(2);
   });
 
   it("preserves explicit duplicate multiplicity after normalization and filters sentinels", () => {
     const output = illustrative("normalization-and-duplicates");
-    const aggregate = value(aggregateLegacyStandaloneReview({ runId: "illustrative-duplicates", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
-    expect(aggregate.kind).toBe("clean");
-    expect(aggregate.aggregate.findings).toEqual([1, 2].map((ordinal) => ({
+    const findings = attributedFindings(output);
+    expect(findings.some(({ severity }) => severity === "critical")).toBe(false);
+    expect(findings).toEqual([1, 2].map((ordinal) => ({
       severity: "advisory", file: "src/x.ts", line: 4, claim: "repeated benefit", id: `code-reviewer-${ordinal}`, agent: "code-reviewer",
     })));
   });
 
-  it("legacy aggregate normalization conserves every emitted duplicate and its ordinal", () => {
+  it("legacy attribution normalization conserves every emitted duplicate and its ordinal", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 12 }), fc.constantFrom(" ", "   ", "\n", "\t", " \n\t "), (count, whitespace) => {
       const output = ["### Machine Summary", "CRITICAL_COUNT: 0", `ADVISORY_COUNT: ${count}`, "```findings",
         JSON.stringify(Array.from({ length: count }, () => ({ severity: "advisory", file: "src/x.ts", line: 4, claim: `${whitespace}repeated${whitespace}benefit${whitespace}` }))), "```"].join("\n");
-      const aggregate = value(aggregateLegacyStandaloneReview({ runId: "illustrative-property", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
-      expect(aggregate.aggregate.findings.map(({ id, claim }) => [id, claim])).toEqual(
+      expect(attributedFindings(output).map(({ id, claim }) => [id, claim])).toEqual(
         Array.from({ length: count }, (_, ordinal) => [`code-reviewer-${ordinal + 1}`, "repeated benefit"]));
     }), { numRuns: 50 });
   });
