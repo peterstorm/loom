@@ -38,13 +38,12 @@ import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture"
 import { reduceStandaloneReviewMachine } from "../engine/src/core/standalone-review";
 import {
   parseArtifactDigest,
-  parseContextDigest,
   type ArtifactDigest,
   type ContextDigest,
   type RequestId,
   type SlotId,
 } from "../engine/src/core/orchestration-contract";
-import { orchestrationMarkers } from "./review-run-authority";
+import { piTaskIdentity } from "./review-run-authority";
 
 /** Whether a touch made its run current (`bound`) or found it already bound. */
 export type TrustedReviewRunTouch = "bound" | "already-bound";
@@ -236,13 +235,9 @@ function witnessedCapture(
   task: string,
   outcome: Extract<CaptureOutcome, { kind: "captured" }>,
 ): TrustedReviewCapture {
-  const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);
-  if (markers === null || markers.requestId !== outcome.receipt.requestId) {
+  const identity = piTaskIdentity(task, `captured request ${outcome.receipt.requestId}`);
+  if (identity === null || identity.requestId !== outcome.receipt.requestId) {
     throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
-  }
-  const contextDigest = parseContextDigest(markers.contextDigest);
-  if (!contextDigest.ok) {
-    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid context marker: ${contextDigest.error.message}`);
   }
   const digest = parseArtifactDigest(outcome.receipt.digest);
   if (!digest.ok) {
@@ -253,7 +248,7 @@ function witnessedCapture(
     slotId: outcome.receipt.slotId,
     attempt: outcome.receipt.attempt,
     role,
-    contextDigest: contextDigest.value,
+    contextDigest: identity.contextDigest,
     digest: digest.value,
     byteLength: outcome.receipt.byteLength,
   });

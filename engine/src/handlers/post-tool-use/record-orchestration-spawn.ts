@@ -1,8 +1,9 @@
 /**
  * Claude spawn-side request correlator.
  *
- * The façade places one LOOM_REQUEST_ID marker in every engine-issued Agent
- * prompt. Claude's PostToolUse payload is the first boundary that contains
+ * The façade places the LOOM_REQUEST_ID / LOOM_CONTEXT_DIGEST authority markers
+ * in every engine-issued Agent prompt (`renderSpawnTaskText`), read back by the
+ * one parser beside it. Claude's PostToolUse payload is the first boundary that contains
  * both that exact prompt and the harness-native child id, so this handler
  * persists the binding — for a background spawn, before SubagentStop can
  * present result bytes. A foreground spawn finishes before its Agent call
@@ -20,9 +21,9 @@ import {
   claudeRunContext,
   explicitClaudeRun,
   recordClaudeSpawnCorrelator,
-  requestMarkers,
   resolveClaudeSpawnRun,
 } from "../../orchestration/claude-run-authority";
+import { parseIssuedTaskIdentity } from "../../core/spawn-task-text";
 import { subagentDir } from "../../config";
 import { stripNamespace } from "../../utils/strip-namespace";
 
@@ -61,17 +62,17 @@ export async function recordClaudeSpawnCorrelation(
   const prompt = typeof toolInput?.["prompt"] === "string"
     ? toolInput["prompt"]
     : typeof toolInput?.["task"] === "string" ? toolInput["task"] : "";
-  const markers = requestMarkers(prompt);
+  const identity = parseIssuedTaskIdentity(prompt);
   const context = claudeRunContext(input?.session_id, process.env, bindingDirectory);
-  // PostToolUse is global. A call without an engine marker is unrelated legacy
+  // PostToolUse is global. A call without engine markers is unrelated legacy
   // work and must not be claimed by any run — but half an explicit authority
   // is still a fault, whatever the prompt carries.
-  if (markers.length === 0) {
+  if (identity.kind === "unbound") {
     const explicit = explicitClaudeRun(context);
     return explicit.ok ? { kind: "passthrough" } : { kind: "error", message: explicit.message };
   }
-  if (markers.length !== 1) return { kind: "error", message: "Claude orchestration prompt must carry exactly one LOOM_REQUEST_ID marker" };
-  const run = resolveClaudeSpawnRun(context, markers[0]);
+  if (identity.kind === "malformed") return { kind: "error", message: `Claude orchestration prompt ${identity.reason}` };
+  const run = resolveClaudeSpawnRun(context, identity);
   if (!run.ok) return { kind: "error", message: run.message };
 
   const rawRole = toolInput?.["subagent_type"] ?? toolInput?.["agent"];
@@ -83,7 +84,7 @@ export async function recordClaudeSpawnCorrelation(
   }
 
   const recorded = await recordClaudeSpawnCorrelator(run.value, {
-    requestId: markers[0],
+    identity,
     role,
     nativeId: nativeIds[0],
   });

@@ -198,7 +198,7 @@ describe("the Trusted Review Witness Aggregate", () => {
       const { cwd, runsRoot } = project("p");
       const binding = runBinding(runsRoot, "run.a");
       expect(() => witnesses.remember(SESSION, binding, "code-reviewer", markedTask("not-a-digest"), captured("d".repeat(64))))
-        .toThrow("captured request req-witness-1 carries an invalid context marker");
+        .toThrow("captured request req-witness-1 carries unusable authority markers: task LOOM_CONTEXT_DIGEST marker is not canonical");
       expect(() => witnesses.remember(SESSION, binding, "code-reviewer", markedTask(CONTEXT_DIGEST), captured("not-a-digest")))
         .toThrow("captured request req-witness-1 carries an invalid receipt digest");
       await expect(witnesses.verify({ cwd, sessionId: SESSION }))

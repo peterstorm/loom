@@ -14,6 +14,7 @@ import { PI_AGENT_DIRECTORY_VARIABLE } from "../engine/src/core/pi-agent-directo
 import { DESKTOP_VLLM_ROUTE } from "../engine/src/core/model-profiles";
 import { startRouteStub } from "./route-stub";
 import { CONFORMANCE_NOT_OWED } from "../engine/src/core/skeleton/conformance-verdict";
+import { parseIssuedTaskIdentity } from "../engine/src/core/spawn-task-text";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = join(ROOT, "engine", "src", "cli.ts");
@@ -148,10 +149,11 @@ function asSpawnBatch(value: unknown, label: string): SpawnBatch {
     check(authority.attempt === 1 || authority.attempt === 2, `${label} attempt is invalid`);
     check(typeof authority.role === "string", `${label} role is missing`);
     check(typeof authority.contextDigest === "string", `${label} contextDigest is missing`);
-    check(typeof request.task === "string" && request.task.includes(`LOOM_REQUEST_ID: ${authority.requestId}`),
-      `${label} request task is missing its request marker`);
-    check(request.task.includes(`LOOM_CONTEXT_DIGEST: ${authority.contextDigest}`),
-      `${label} request task is missing its context marker`);
+    check(typeof request.task === "string", `${label} request task is missing`);
+    const identity = parseIssuedTaskIdentity(String(request.task));
+    check(identity.kind === "bound" && identity.requestId === authority.requestId &&
+      identity.contextDigest === authority.contextDigest,
+      `${label} request task's authority markers do not name its request and context: ${JSON.stringify(identity)}`);
   }
   return action as unknown as SpawnBatch;
 }

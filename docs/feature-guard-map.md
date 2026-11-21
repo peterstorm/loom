@@ -1337,7 +1337,7 @@ sibling-entry-point.ts — the one plan shape the plan model and the owner-verif
 spawn-admission.ts — the pure decision that accepts or blocks one Pi subagent spawn batch before any state mutation ·
 spawn-emission-gate.ts — the façade's emission gate: the verdict on a Pi parent's spawn batch ·
 spawn-request-authority.ts — an emitted spawn batch's request authorities, parsed once as the stored-request parser admits them ·
-spawn-task-text.ts — engine-issued spawn task text: authority markers, packet path, Skill marker, emission descriptor, delivery bootstrap ·
+spawn-task-text.ts — engine-issued spawn task text: authority markers, packet path, Skill marker, emission descriptor, delivery bootstrap; `parseIssuedTaskIdentity`, the one reader of the two authority markers for both harnesses (ADR-0099) ·
 spec-check.ts/spec-trace*.ts — requirement trace and its amendment/migration ·
 standalone-* (19 modules) — the standalone review program: kinds, scope, rosters, read coverage, attempt admission, transcripts, records, lineage, disposition, refutation, successor, checkpoint ·
 stop-check-*.ts — the stop-check planner and note surface ·

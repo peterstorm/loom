@@ -42,13 +42,13 @@ import {
   canonicalRecord,
   parseArtifactDigest,
   parseContextDigest,
-  parseRequestId,
   type ArtifactDigest,
   type ContextDigest,
   type DomainResult,
   type RequestId,
 } from "./orchestration-contract/identity";
 import { sha256Hex } from "./digest";
+import { parseIssuedTaskIdentity, type IssuedTaskIdentity } from "./spawn-task-text";
 
 /** Read the reserved request from the parent session's registered Run
  *  Directory. Never derive this answer from task text: the descriptor and
@@ -203,76 +203,6 @@ export function parseEmissionDescriptor(task: string): EmissionDescriptorParse {
   return canonicalRecord({ kind: "issued" as const, binding: minted.value, contextDigest: digest.value });
 }
 
-/**
- * One exact task marker line (`MARKER: value`, whitespace-free value), as the
- * expected-capability decision reads the request identity its task carries.
- * Repeated identical lines stay bound (harmless re-render). Absence and
- * contradiction are distinct arms; any value outside the marker grammar,
- * including a whitespace-bearing value, is classified as contradictory so a
- * descriptor can never bind to an identity the task does not carry.
- */
-type TaskMarker =
-  | Readonly<{ kind: "absent" }>
-  | Readonly<{ kind: "bound"; value: string }>
-  | Readonly<{ kind: "contradictory" }>;
-
-function taskMarker(task: string, marker: string): TaskMarker {
-  const markerPrefix = `${marker}:`;
-  const valuePrefix = `${markerPrefix} `;
-  const lines = task.split("\n").filter((line) => line.startsWith(markerPrefix));
-  const values = lines
-    .map((line) => line.startsWith(valuePrefix) ? line.slice(valuePrefix.length) : "")
-    .filter((value) => value.length > 0 && !/\s/.test(value));
-  if (values.length < lines.length) return canonicalRecord({ kind: "contradictory" as const });
-  const distinct = new Set(values);
-  if (distinct.size === 0) return canonicalRecord({ kind: "absent" as const });
-  return distinct.size === 1
-    ? canonicalRecord({ kind: "bound" as const, value: values[0] })
-    : canonicalRecord({ kind: "contradictory" as const });
-}
-
-const markerReason = (state: TaskMarker): string =>
-  state.kind === "bound" ? `names ${state.value}`
-  : state.kind === "absent" ? "is absent"
-  : "is contradictory";
-
-/** Parsed task identity used only to locate independent issuance authority.
- * A descriptor never contributes either field. */
-type TaskIssuedIdentity =
-  | Readonly<{ kind: "unbound" }>
-  | Readonly<{ kind: "malformed"; reason: string }>
-  | Readonly<{ kind: "bound"; requestId: RequestId; contextDigest: ContextDigest }>;
-
-function parseTaskIssuedIdentity(task: string): TaskIssuedIdentity {
-  const requestMarker = taskMarker(task, "LOOM_REQUEST_ID");
-  const digestMarker = taskMarker(task, "LOOM_CONTEXT_DIGEST");
-  if (requestMarker.kind === "absent" && digestMarker.kind === "absent") {
-    return canonicalRecord({ kind: "unbound" as const });
-  }
-  if (requestMarker.kind !== "bound" || digestMarker.kind !== "bound") {
-    return canonicalRecord({
-      kind: "malformed" as const,
-      reason: `task issuance identity is incomplete or contradictory: LOOM_REQUEST_ID marker ${markerReason(requestMarker)}; ` +
-        `LOOM_CONTEXT_DIGEST marker ${markerReason(digestMarker)}`,
-    });
-  }
-  const requestId = parseRequestId(requestMarker.value);
-  if (!requestId.ok) {
-    return canonicalRecord({
-      kind: "malformed" as const,
-      reason: `task LOOM_REQUEST_ID marker is not canonical: ${requestId.error.message}`,
-    });
-  }
-  const contextDigest = parseContextDigest(digestMarker.value);
-  if (!contextDigest.ok) {
-    return canonicalRecord({
-      kind: "malformed" as const,
-      reason: `task LOOM_CONTEXT_DIGEST marker is not canonical: ${contextDigest.error.message}`,
-    });
-  }
-  return canonicalRecord({ kind: "bound" as const, requestId: requestId.value, contextDigest: contextDigest.value });
-}
-
 /** The exact route whose provider serializer accepted every frozen emission
  * schema during qualification (ADR-0012). Qualification is deliberately
  * module-local policy, separate from the model-profile catalog: it names the
@@ -393,7 +323,7 @@ const matchesAuthority = (candidate: EmissionAuthorityBinding, expected: Emissio
   candidate.binding.toolName === expected.binding.toolName &&
   candidate.binding.schemaDigest === expected.binding.schemaDigest;
 
-type BoundTaskIdentity = Extract<TaskIssuedIdentity, Readonly<{ kind: "bound" }>>;
+type BoundTaskIdentity = Extract<IssuedTaskIdentity, Readonly<{ kind: "bound" }>>;
 type CapabilityStep<T> = DomainResult<T, SpawnEmissionRefusal>;
 
 /** The issued authority's decision, before the untrusted descriptor is read. */
@@ -513,7 +443,7 @@ export function expectedSpawnEmissionCapability(
   readIssuedRequest: IssuedSpawnRequestReader,
 ): SpawnEmissionAdmission {
   const descriptor = parseEmissionDescriptor(item.task);
-  const identity = parseTaskIssuedIdentity(item.task);
+  const identity = parseIssuedTaskIdentity(item.task);
   if (identity.kind === "unbound") {
     return descriptor.kind === "absent"
       ? admitted(NO_EMISSION_TOOL)

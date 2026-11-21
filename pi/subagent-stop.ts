@@ -92,10 +92,10 @@ import {
 import { piSpawnRosterId } from "./tool-input";
 import type { PiEmissionLaunchBridge } from "./emission-launch-bridge";
 import {
-  orchestrationMarkers,
+  piIssuingRunBinding,
   piResultAuthorityProblem,
+  piTaskIdentity,
   recordPiRequestCaptureRejection,
-  sessionRunBinding,
 } from "./review-run-authority";
 import type { TrustedReviewWitnesses } from "./trusted-review-witness";
 import { capturePiSubagentResult, classifyPiEmissionStartupRefusal } from "./review-capture";
@@ -738,10 +738,12 @@ async function processPiResult(
   };
   const agentType = stripNamespace(result.agent);
   const reservedItem = reservation?.items[resultIndex];
-  const markers = orchestrationMarkers(result.task, `Pi result ${resultIndex + 1}/${agentType}`);
+  const markers = piTaskIdentity(result.task, `Pi result ${resultIndex + 1}/${agentType}`);
+  // Without a reservation, only the session's own bindings can name the run:
+  // the reservation is where a spawn-time explicit run was carried.
   const durableRunBinding = reservation?.orchestrationRunBinding ??
     (markers !== null && resultSessionId !== null
-      ? sessionRunBinding(resultSessionId, [markers])
+      ? piIssuingRunBinding(resultSessionId, null, [markers])
       : null);
   const runBound = durableRunBinding !== null ||
     process.env[RUNS_ROOT_ENV] !== undefined || process.env[RUN_DIR_ENV] !== undefined;

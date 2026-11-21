@@ -831,7 +831,7 @@ describe("invalid evidence is audited but never accepted", () => {
 // --- End-to-end Claude capture ----------------------------------------------
 
 describe("Claude capture against a real run directory", () => {
-  async function stagedRun(): Promise<Readonly<{ runsRoot: string; runDir: string }>> {
+  async function stagedRun(): Promise<Readonly<{ runsRoot: string; runDir: string; request: AgentRequestAuthority }>> {
     const root = canonicalTempDir("loom-capture-run-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
@@ -865,7 +865,7 @@ describe("Claude capture against a real run directory", () => {
         tool_name: "Agent",
         tool_input: {
           subagent_type: "code-reviewer",
-          prompt: `LOOM_REQUEST_ID: ${request.requestId}\nReview the reserved packet`,
+          prompt: `LOOM_REQUEST_ID: ${request.requestId}\nLOOM_CONTEXT_DIGEST: ${request.contextDigest}\nReview the reserved packet`,
         },
         tool_response: { agent_id: "agent-abc" },
       });
@@ -876,7 +876,7 @@ describe("Claude capture against a real run directory", () => {
       if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
       else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
     }
-    return { runsRoot, runDir };
+    return { runsRoot, runDir, request };
   }
 
   function transcript(root: string, text: string): string {
@@ -924,7 +924,7 @@ describe("Claude capture against a real run directory", () => {
   });
 
   it("rejects a Claude spawn whose exact request belongs to another role", async () => {
-    const { runsRoot, runDir } = await stagedRun();
+    const { runsRoot, runDir, request } = await stagedRun();
     const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
     const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
     process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
@@ -934,7 +934,7 @@ describe("Claude capture against a real run directory", () => {
         tool_name: "Agent",
         tool_input: {
           subagent_type: "silent-failure-hunter",
-          prompt: "LOOM_REQUEST_ID: request:reviewer:1\nReview",
+          prompt: `LOOM_REQUEST_ID: request:reviewer:1\nLOOM_CONTEXT_DIGEST: ${request.contextDigest}\nReview`,
         },
         tool_response: { agent_id: "agent-wrong-role" },
       });
