@@ -4,7 +4,7 @@
 Accepted (2026-11-20). Partly supersedes ADR-0030: its premise that `/loom --panel` runs the registered
 driver. Amends ADR-0029 (the registered panel bullet, its crash-window test, and the threshold rule's
 mention of the review-panel tally), ADR-0018 (the legacy panel verdict path) and ADR-0004 (its consequence that
-historical helpers and formats remain behind `core/legacy-archive.ts`).
+historical helpers and formats remain behind core/legacy-archive.ts).
 
 ## Context
 Panels had more than one driver each. Only one driver per panel had a caller.
@@ -39,7 +39,7 @@ pointed the wrong way.
 - `helper panel-program refutation`, the refutation half of the stateless dispatch reducer. Nothing
   replays a refutation journal: the persistent program records its own.
 
-The architecture journal's reader lived in `core/legacy-archive` as a "legacy panel journal" translator,
+The architecture journal's reader lived in core/legacy-archive as a "legacy panel journal" translator,
 although the runbook writes that format today.
 
 **The manual standalone review.** `helper standalone-review init|aggregate|finalize` ran a standalone
@@ -86,15 +86,15 @@ program inside the Wave Gate and standalone review.**
     text-based capture and decode helpers, the canonical-transcript aggregation, and the panel-run write
     preparation and no-follow re-exports. Its pass-through capture entry point goes too; harness capture
     calls `captureStandaloneReviewerBytes` in core.
-- **What moves:** the architecture journal reader leaves `core/legacy-archive` for `core/panel-program`,
+- **What moves:** the architecture journal reader leaves core/legacy-archive for `core/panel-program`,
   beside the reducer it feeds. It is the live format, not a historical one. Its wire spelling
   (`format: "legacy-panel-program"`, `schemaVersion: 1`) and its error messages are unchanged, so every
   journal on disk still reads.
 - **What stays:** the stateless architecture dispatch program, `helper panel-program architecture`, the panel
   contract, the kernel, ranking, and the persistent Refutation Panel. The pieces of `core/review-panel` the
   persistent program uses stay: the lens catalogue, the critical finding projection, the verdict parser and
-  the refutation threshold. `core/legacy-archive` keeps Section C, the Wave Gate compatibility migration,
-  unchanged.
+  the refutation threshold. core/legacy-archive keeps Section C, the Wave Gate compatibility migration,
+  unchanged here; ADR-0098 then retires Section C and with it the whole file.
 
 ## Consequences
 

@@ -129,12 +129,6 @@
           ],
           "reason": "digest-only hashing and path math over the resource inventory it is given"
         },
-        "engine/src/core/legacy-archive.ts": {
-          "allow": [
-            "node:crypto"
-          ],
-          "reason": "digest-only hashing of the legacy journal archive bytes"
-        },
         "engine/src/core/orchestration-contract/bytes.ts": {
           "allow": [
             "node:crypto"
