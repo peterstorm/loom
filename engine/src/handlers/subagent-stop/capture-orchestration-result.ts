@@ -179,7 +179,7 @@ export async function establishClaudeStopRun(
     return { ok: false, message: `cannot resolve the role of Claude agent ${nativeId}: ${error instanceof Error ? error.message : String(error)}` };
   }
   if (role.length === 0) return { ok: false, message: `Claude agent ${nativeId} has no agent role to correlate` };
-  const recorded = await recordClaudeSpawnCorrelator(authority.run, { requestId: authority.requestId, role, nativeId });
+  const recorded = await recordClaudeSpawnCorrelator(authority.run, { identity: authority.identity, role, nativeId });
   return recorded.ok ? { ok: true, value: Object.freeze({ kind: "bound", run: authority.run }) } : recorded;
 }
 

@@ -719,9 +719,3 @@ function parseContextPacketRecord(raw: unknown): DomainResult<ContextPacket | St
   }
   return packet;
 }
-
-/** Section payload bytes only; excludes packet metadata and JSON serialization overhead. */
-export function contextPacketByteLength(packet: ContextPacket): number {
-  return [...packet.fixedContext, ...packet.variableContext]
-    .reduce((total, section) => total + section.byteLength, 0);
-}

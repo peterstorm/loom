@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   parseFrozenVerificationManifest,
   parseVerificationManifest,
   TASK_MUTATION_CHECK_SETTINGS,
@@ -58,7 +58,7 @@ describe("taskMutationCheck through the manifest's forms", () => {
     expect(source.ok && KEY in source.value).toBe(false);
     expect(KEY in storedForm(undefined)).toBe(false);
     expect(reread(storedForm(undefined))).toBe("on");
-    for (const manifest of [defaultVerificationManifest(), legacyDefaultVerificationManifest(), undefined]) {
+    for (const manifest of [defaultVerificationManifest(), preI6DefaultVerificationManifest(), undefined]) {
       expect(taskMutationCheckSetting(manifest)).toBe("on");
     }
     expect(KEY in defaultVerificationManifest()).toBe(false);

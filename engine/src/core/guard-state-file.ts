@@ -61,22 +61,33 @@
  * line fails closed.
  *
  * ── Walker map ──────────────────────────────────────────────────────────────
- * The shell grammar this guard judges through lives in three pure modules
- * shared with every other Bash guard (the subagent authority guard included):
+ * The shell grammar this guard judges through lives in pure modules shared
+ * with every other Bash guard (the subagent authority guard included):
  * core/shell-command-head (simple commands, wrappers, read-only heads,
- * redirects, pipe-chains), core/shell-heredoc (heredoc bodies) and
- * core/shell-match-views (matching views and glob intersection). This module
+ * pipe-chains), core/shell-redirects (output redirects), core/shell-heredoc
+ * (heredoc bodies) and core/shell-match-views (matching views and glob
+ * intersection). This module
  * keeps only the state-file POLICY: what is guarded, which helpers vouch, and
  * the decision. The names below are those modules' walkers.
  *
- * The grammar is a de-facto POSIX grammar, implemented as several \"walkers\"
- * that each reimplement quote/escape state with slightly different semantics.
+ * The grammar is a de-facto POSIX grammar, implemented as a few \"walkers\".
  * Their history is a series of divergence bugs (rounds 15–18 twin-scanner
  * drift; the round-20 double-quoted-apostrophe regression; the heredoc
  * inline-program gap), so each walker's purpose and its DIVERGENT semantics
  * are named here, and tests/core/guard-state-file-walkers.test.ts pins the
  * contracts an independent reference walker would catch if any of them drift:
  *
+ *  - lexShellQuotes / scanUnquoted (core/shell-quoting) — THE quote lexer
+ *    (`"` `'` `` ` `` regions, `\` escapes except in single quotes). Every
+ *    command-level scan walks it: the segment splitter, stripComment,
+ *    stripEnvPrefix, shellWords / commandWords, splitFusedRedirect,
+ *    redirectsOf, segmentInvokesHelper (through shellWords) and the evidence
+ *    scanner's word reader. A new command-level scan supplies a visitor; it
+ *    never writes a quote loop.
+ *  - redirectsOf (core/shell-redirects) — THE output-redirect scan, a typed
+ *    union per redirect. hasOutputRedirect, outputRedirectTargets and the
+ *    evidence scanner's redirect targets are projections of it, so the guard
+ *    and the ledger cannot disagree on which redirects a segment has.
  *  - scanSubstitutions (core/shell-substitution) — the ONE shared substitution
  *    traversal (quote state `'"' | "'" | null`; a `'` inside `"…"` is literal;
  *    `$(…)`/backticks stay LIVE inside double quotes; `<(…)`/`>(…)` is live
@@ -115,16 +126,16 @@ import { stripComment, stripEnvPrefix } from "./shell-command";
 import {
   bindingNames,
   commandNamesRebound,
-  hasOutputRedirect,
   hasReadOnlyHead,
   isRedirectsOnly,
-  outputRedirectTargets,
   pipeChains,
   SHELL_STATE_NAMES,
+  shellWords,
   unquote,
   withoutReservedWords,
 } from "./shell-command-head";
 import { MAX_SUBSTITUTION_DEPTH, splitHeredocs } from "./shell-heredoc";
+import { hasOutputRedirect, outputRedirectTargets } from "./shell-redirects";
 import {
   knownWordOutput,
   leadingDotPolicyOf,
@@ -138,7 +149,6 @@ import {
 /** The helpers whose own segment may write guarded state (never a protected
  *  directory) — matched by `segmentInvokesHelper` below. */
 export const WHITELISTED_HELPERS: readonly string[] = [
-  "complete-wave-gate",
   "mark-tests-passed",
   "store-review-findings",
   "store-spec-check",
@@ -187,15 +197,16 @@ function blockFor(chain: readonly string[], segment: string): HookResult {
 /**
  * Does this simple-command segment ACTUALLY invoke a whitelisted helper?
  * The only documented invocation shape is `bun <path>/cli.ts helper <name>`
- * — matched token-by-token at the segment HEAD (after comment/env-prefix
+ * — matched word-by-word at the segment HEAD (after comment/env-prefix
  * stripping), so a helper name appearing anywhere else in the segment
- * (echo argument, comment, path component) never matches.
+ * (echo argument, comment, path component) never matches. The words are the
+ * shell's (`shellWords`), and a word holding whitespace (`"/a b/cli.ts"`,
+ * `${X:-a b}`) never matches: an allowlist admits only what every reading of
+ * the line agrees on.
  */
 function segmentInvokesHelper(segment: string): boolean {
-  const tokens = stripEnvPrefix(stripComment(segment).trim())
-    .split(/\s+/)
-    .filter((t) => t !== "")
-    .map(unquote);
+  const tokens = shellWords(stripEnvPrefix(stripComment(segment).trim())).slice(0, 4).map(unquote);
+  if (tokens.some((token) => /\s/.test(token))) return false;
   const head = tokens[0] ?? "";
   const headBase = head.slice(head.lastIndexOf("/") + 1);
   if (headBase !== "bun") return false;

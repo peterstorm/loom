@@ -221,7 +221,7 @@ the brief refuses to render while the plan's bindings drift from the stamp.
    all fail) before implementation starts.
 4. **PostToolUse `lint-file`** enforces checkable invariants on every edit,
    forever — they outlive the feature that introduced them.
-5. **`complete-wave-gate`** verifies as evidence that every lifecycle machine
+5. **The Wave Gate's checks** (`core/wave-gate-checks.ts`) verify as evidence that every lifecycle machine
    file bound to a completing wave's tasks actually exists on disk — the
    decompose-time promise is re-checked when the wave claims it delivered.
    The plan is resolved from state `plan_file`, falling back to the recorded

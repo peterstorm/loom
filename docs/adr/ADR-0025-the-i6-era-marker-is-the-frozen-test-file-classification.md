@@ -78,7 +78,7 @@ Only TaskGraphs frozen before this feature lack `testFiles`: those with a pre-fe
 with no manifest at all.
 
 **Legacy default split.** `defaultVerificationManifest()` is now only the population freeze, and it carries
-`testFiles`. `legacyDefaultVerificationManifest()` keeps the old engine-default bytes and digest exactly. The
+`testFiles`. `preI6DefaultVerificationManifest()` keeps the old engine-default bytes and digest exactly. The
 two read-time fallbacks for a graph without a `verification_manifest` use it: the suite-receipt digest check
 in `engine/src/state-file-wire.ts` and `engine/src/core/wave-completion-suite-readiness.ts`.
 `parseFrozenVerificationManifest` accepts `testFiles` as an optional key and includes it in the digest
@@ -128,7 +128,7 @@ decides, and `redThenGreenEra` is consulted only for a Task with no frozen Proof
   A possible follow-up is an explicit era sum type on the frozen manifest (pre-feature vs post-feature), which
   would make `redThenGreenEra` a total match and let post-feature freeze paths require `testFiles` by type.
 - The engine now has two engine-default manifests (`defaultVerificationManifest` and
-  `legacyDefaultVerificationManifest`). Using the wrong one at a read-time fallback would break old receipts
+  `preI6DefaultVerificationManifest`). Using the wrong one at a read-time fallback would break old receipts
   or obligation matching. Each fallback must be chosen on purpose.
 - The era cannot be switched on per graph after population. A graph frozen before this feature never owes
   I6, even if it is resumed long after the feature shipped. To get I6 on that work, the graph has to be
@@ -151,7 +151,7 @@ The follow-up named under *Negative* is taken, without changing the State File s
 - **Post-feature freezers are typed.** `defaultVerificationManifest()` and `freezeVerificationManifest()`
   return `I6EraVerificationManifest`, a `FrozenVerificationManifest` whose `testFiles` is required. A new
   post-feature freeze path that drops the classification no longer compiles.
-  `legacyDefaultVerificationManifest()` deliberately returns the wider type, and `FrozenVerificationManifest`
+  `preI6DefaultVerificationManifest()` deliberately returns the wider type, and `FrozenVerificationManifest`
   keeps `testFiles` optional, because pre-feature graphs must still parse. Population keeps accepting the
   wider type, so tests can still simulate a graph frozen before the feature.
 - **The INV-6 lint rule** refuses these inline forms of the test outside the two owners: an equality on

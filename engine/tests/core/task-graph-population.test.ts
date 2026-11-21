@@ -19,6 +19,7 @@ import type { SkeletonRecord } from "../../src/core/skeleton/types";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import { isDistillTask } from "../../src/core/distill-task";
 import { mutationManifest } from "../fixtures/task-mutation";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 /** The authored roster as population wrote it, without the Distill Tasks it appends (ADR-0068). */
 const authoredTasksOf = (state: TaskGraph) => state.tasks.filter((task) => !isDistillTask(task));
@@ -570,7 +571,7 @@ describe("populateTaskGraph owns the decompose → execute transition (issue #50
 
   it("re-population during execute stays in execute", () => {
     const result = populateTaskGraph(
-      graph({ current_phase: "execute", phase_artifacts: { decompose: "task_graph" } }),
+      graph({ current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: { decompose: "task_graph" } }),
       command(),
     );
 
@@ -696,7 +697,7 @@ describe("engine-run test evidence at population (loom#198)", () => {
 
   it("freezes none without an affectedRunner, and re-population drops a stale one", () => {
     const stale = { kind: "engine-run" as const, manifestDigest: "0".repeat(64), adoptedBy: "population" as const };
-    const result = populateTaskGraph(graph({ current_phase: "execute", test_evidence: stale }), command());
+    const result = populateTaskGraph(graph({ current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), test_evidence: stale }), command());
     if (!result.ok) throw new Error(result.error.message);
     expect(result.value.state.test_evidence).toBeUndefined();
   });

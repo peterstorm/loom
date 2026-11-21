@@ -64,7 +64,7 @@ import { newWaveGate } from "../../src/core/wave-gate-model";
 import { reconcileTaskFromStoredEvidence } from "../../src/handlers/helpers/reconcile-implementation-proof";
 import { observeTaskLocalCompletion, REAL_TASK_LOCAL_PORTS } from "../../src/handlers/helpers/task-local-completion";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
-import { parseTaskGraph, taskUnionError } from "../../src/state-file-wire";
+import { parseStoredTask, parseTaskGraph } from "../../src/state-file-wire";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { captureDeclaredArtifactBaseline } from "../../src/utils/declared-artifact-snapshot";
 import { captureRepositoryChangeBaseline } from "../../src/utils/repository-change-baseline";
@@ -87,6 +87,7 @@ import {
   siblingTaskFixture,
   trustedPassEvidence,
 } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const IMPL = "src/order.ts";
 const TEST = "src/order.test.ts";
@@ -254,7 +255,7 @@ describe("reopenImplementedTasks --needs tests", () => {
     regression: { kind: "waived", reason: "documentation-only" }, new_tests: { kind: "required" },
   };
   const legacyGraph = (tasks: readonly Task[]): TaskGraph => protectedGraphFixture({
-    spec_trace_version: 2, current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+    spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, current_wave: 1, executing_tasks: [], tasks, wave_gates: { "1": newWaveGate() },
   });
   const legacyImplemented = (id: string): Task =>
@@ -466,7 +467,7 @@ describe("the State File proves a tests-only Task", () => {
   it("refuses an Acceptance Contract writer's tests-only scope", () => {
     const t1 = (raw().tasks as Record<string, unknown>[]).find((task) => task.id === "T1");
     const writers = redThenGreenScope(i6RunnerManifest(), [{ id: "CT-1", contractTask: "T1" }]);
-    expect(taskUnionError(t1, 0, writers)).toContain("an Acceptance Contract writer cannot be reopened for tests only");
+    expect(parseStoredTask(t1, 0, writers)).toMatchObject({ ok: false, error: expect.stringContaining("an Acceptance Contract writer cannot be reopened for tests only") });
   });
 
   it("refuses a scope on an implemented Task and an audit that spells out the default", () => {
@@ -534,7 +535,6 @@ function settled(state: TaskGraph, attempt: ImplementationAttemptAuthority, befo
   const t1 = byId(state, "T1");
   const written = FILES.filter((file) => before[file] !== after[file]);
   return settle(state, attempt, buildTaskLocalByteObservation({
-    authority: attempt,
     attemptBaseline: snapshot(before),
     currentAttemptScope: snapshot(after),
     proofBaseline: t1.artifact_baseline,
@@ -683,7 +683,7 @@ describe("a tests-only attempt settled against a repository", () => {
     };
     writeFileSync(join(root, TEST), "it('totals', () => {});\nit('kills the boundary mutant', () => {});\n");
     const bytes = observe(root, uncaptured, attempt, [TEST]);
-    expect(bytes.suite.checks[0]?.outcome).toMatchObject({
+    expect(bytes.byteScope).toMatchObject({
       kind: "observation-unavailable",
       reason: expect.stringContaining("without capturing its reopen baseline"),
     });
@@ -699,7 +699,7 @@ describe("operations beside a tests-only Task", () => {
   it("is left to its attempt by reconcile, however satisfied its stored evidence looks", () => {
     const t1: Task = { ...byId(committed(graph()), "T1"), test_result: { verdict: "trusted-pass" }, files_modified: [TEST] };
     const reconciled = reconcileTaskFromStoredEvidence(
-      t1, [TEST], parseNewTestEvidence(true, "1 new test"), false, i6RunnerManifest(), CONFORMANCE_NOT_OWED,
+      t1, [TEST], parseNewTestEvidence(true, "1 new test"), i6RunnerManifest(), CONFORMANCE_NOT_OWED,
     );
     expect(reconciled).toBe(t1);
   });

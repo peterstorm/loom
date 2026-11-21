@@ -19,7 +19,7 @@ import { judgeTestRun, type TestVerdict } from "./test-report";
  */
 export type TestRunJudge = (run: Extract<Evidence, { kind: "TestRun" }>) => TestVerdict;
 
-export const judgeRunFacts: TestRunJudge = (run) => judgeTestRun(run.exit, run.report);
+const judgeRunFacts: TestRunJudge = (run) => judgeTestRun(run.exit, run.report);
 
 /** Which countable tokens an evidence event increments. */
 export function tokensFor(e: Evidence, judge: TestRunJudge = judgeRunFacts): EventToken[] {

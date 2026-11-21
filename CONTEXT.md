@@ -75,7 +75,7 @@ The uniquely named directory holding one registered program run (a panel, a Stan
 _Avoid_: Workspace, scratch dir, output dir
 
 **Implementation Attempt**:
-One engine-reserved execution of one Task under one semantic attempt ordinal and one immutable byte baseline. Only engine-issued attempt authority can settle it; a Task id inferred from concurrent execution state is cleanup evidence, not completion authority.
+One engine-reserved execution of one Task under one semantic attempt ordinal and one immutable byte baseline. Only engine-issued attempt authority can settle it. No Task id is ever inferred from concurrent execution state: every executing Task of a loadable State File holds its attempt (ADR-0098), and a result without that authority settles nothing.
 _Avoid_: Agent run, retry (that is a transition between attempts), subagent result
 
 **Settlement**:

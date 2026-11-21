@@ -54,7 +54,7 @@
 
 import type { ReviewStatus, Task } from "../types";
 import { parseReviewPath, type HeadSha, type PacketId } from "./review-packet";
-import { parseRequestId, parseSlotId, parseOrchestrationRunId } from "./orchestration-contract";
+import { parseRequestId, parseSlotId, parseOrchestrationRunId, type DomainResult } from "./orchestration-contract";
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 import { isExactGitSha } from "./git-sha";
 import { isRecord } from "./plain-record";
@@ -604,8 +604,7 @@ function parseNarrowedFrom(raw: unknown, expectedAgents: readonly string[]): rea
  * Repair-path parse of `Task.findings`: malformed entries are DROPPED.
  *
  * Callers are the ones that OWN the drop: `fixFull` repair
- * (validate-task-graph), legacy-archive's replay of already-adjudicated
- * records, and standalone-review's reviewer-evidence parse. Task-graph LOAD
+ * (validate-task-graph) and standalone-review's reviewer-evidence parse. Task-graph LOAD
  * does NOT come through here — it fails loudly instead (findingsUnionError),
  * because dropping on every read would silently lose a critical. The repair is
  * only safe because `fixFull` re-derives the two `string[]` views from
@@ -707,26 +706,38 @@ const REPAIR_HINT = "repair and install atomically with: helper repair-task-grap
  *
  * `Task.findings?: readonly Finding[]` is a type-level claim that disk data has
  * to earn, exactly like `status` and `test_result.verdict` earn theirs in
- * `taskUnionError`. Without this the cast is a lie and a hand-edited entry
+ * `parseStoredTask`. Without this the cast is a lie and a hand-edited entry
  * surfaces as an unhandled TypeError from inside a panel helper rather than as
  * a contract diagnostic.
  */
 export function findingsUnionError(raw: unknown, label: string): string | null {
-  if (raw === undefined) return null;
-  if (!Array.isArray(raw)) return `${label} must be an array when present`;
-  const index = raw.findIndex((entry) => parseStoredFinding(entry) === null);
-  if (index >= 0) return `${label}[${index}] is not a well-formed finding (${REPAIR_HINT})`;
+  const parsed = parseStoredFindingsField(raw, label);
+  return parsed.ok ? null : parsed.error;
+}
+
+/**
+ * The load boundary's parse of `Task.findings`: absent, or every entry a
+ * well-formed finding under a distinct id — the parsed, frozen findings, or
+ * the first diagnostic refusing them (`findingsUnionError` is its verdict).
+ */
+export function parseStoredFindingsField(raw: unknown, label: string): DomainResult<readonly Finding[] | undefined, string> {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(raw)) return { ok: false, error: `${label} must be an array when present` };
+  const parsed = raw.map(parseStoredFinding);
+  const index = parsed.findIndex((entry) => entry === null);
+  if (index >= 0) return { ok: false, error: `${label}[${index}] is not a well-formed finding (${REPAIR_HINT})` };
+  const findings = parsed.filter((entry): entry is Finding => entry !== null);
 
   // Ids must be distinct, and this is the only place that can prove it. Two
   // findings sharing an id make `applyFindingOutcomes`' id filter delete BOTH
   // where one was adjudicated, and attach the panel's reasoning to the wrong
   // claim — the exact failure `nextOrdinal` is built to foreclose on the
   // minting side. Minting is guarded; a hand-edited or drifted file is not.
-  const ids = raw.map((entry) => (entry as Record<string, unknown>).id as string);
+  const ids = findings.map(({ id }) => id);
   const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
   return duplicate < 0
-    ? null
-    : `${label}[${duplicate}] repeats finding id '${ids[duplicate]}' (${REPAIR_HINT})`;
+    ? { ok: true, value: Object.freeze(findings) }
+    : { ok: false, error: `${label}[${duplicate}] repeats finding id '${ids[duplicate]}' (${REPAIR_HINT})` };
 }
 
 /**
@@ -777,7 +788,7 @@ export function findingsLockstepError(
     // Shape FIRST, and as an error rather than a filter: a non-string in the
     // view is not something to quietly skip past on the way to a multiset
     // comparison — it is the defect. Checked here rather than only in
-    // `taskUnionError` so both entry points are covered by one rule.
+    // `parseStoredTask` so both entry points are covered by one rule.
     const shapeError = findingsViewError(view, `${label}: ${severity}_findings`);
     if (shapeError !== null) return shapeError;
     const claims = (view ?? []) as readonly string[];
@@ -795,35 +806,36 @@ export function findingsLockstepError(
   return null;
 }
 
-function retiredFindingsUnionError<T extends Readonly<{ finding: Finding }>>(
+function parseRetiredFindingsField<T extends Readonly<{ finding: Finding }>>(
   raw: unknown,
   label: string,
   parse: (entry: unknown) => T | null,
   recordKind: "refutation" | "resolution",
   findingKind: "refuted" | "resolved",
-): string | null {
-  if (raw === undefined) return null;
-  if (!Array.isArray(raw)) return `${label} must be an array when present`;
+): DomainResult<readonly T[] | undefined, string> {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(raw)) return { ok: false, error: `${label} must be an array when present` };
   const parsed = raw.map(parse);
   const index = parsed.findIndex((entry) => entry === null);
-  if (index >= 0) return `${label}[${index}] is not a well-formed ${recordKind} record (${REPAIR_HINT})`;
-  const ids = parsed.flatMap((entry) => entry === null ? [] : [entry.finding.id]);
+  if (index >= 0) return { ok: false, error: `${label}[${index}] is not a well-formed ${recordKind} record (${REPAIR_HINT})` };
+  const records = parsed.filter((entry): entry is T => entry !== null);
+  const ids = records.map((entry) => entry.finding.id);
   const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
   return duplicate < 0
-    ? null
-    : `${label}[${duplicate}] repeats ${findingKind} finding id '${ids[duplicate]}' (${REPAIR_HINT})`;
+    ? { ok: true, value: Object.freeze(records) }
+    : { ok: false, error: `${label}[${duplicate}] repeats ${findingKind} finding id '${ids[duplicate]}' (${REPAIR_HINT})` };
 }
 
-/** Load-boundary check for `Task.refuted_findings`. */
-export function refutationsUnionError(raw: unknown, label: string): string | null {
+/** The load boundary's parse of `Task.refuted_findings`: absent, or well-formed records under distinct finding ids. */
+export function parseStoredRefutationsField(raw: unknown, label: string): DomainResult<readonly RefutedFinding[] | undefined, string> {
   // Two records under one id attach different verdicts to the same claim, so
   // the audit trail can no longer say which verdict was applied.
-  return retiredFindingsUnionError(raw, label, parseStoredRefutation, "refutation", "refuted");
+  return parseRetiredFindingsField(raw, label, parseStoredRefutation, "refutation", "refuted");
 }
 
-/** Load-boundary check for findings retired because a later implementation fixed them. */
-export function resolutionsUnionError(raw: unknown, label: string): string | null {
-  return retiredFindingsUnionError(raw, label, parseStoredResolution, "resolution", "resolved");
+/** The load boundary's parse of `Task.resolved_findings`: findings retired because a later implementation fixed them. */
+export function parseStoredResolutionsField(raw: unknown, label: string): DomainResult<readonly ResolvedFinding[] | undefined, string> {
+  return parseRetiredFindingsField(raw, label, parseStoredResolution, "resolution", "resolved");
 }
 
 function hasReservedFindingFields(record: Record<string, unknown>): boolean {
@@ -1121,7 +1133,7 @@ function evidencePacketId(run: ReviewRun, agent: string): string {
  * run's expected batch, while legacy failures belong to the configured reviewer
  * roster supplied by the state boundary.
  *
- * Lives here, with the other aggregate rules, so `taskUnionError` and
+ * Lives here, with the other aggregate rules, so `parseStoredTask` and
  * `validate-task-graph` enforce it from one definition.
  */
 export function evidenceFailureError(
@@ -1182,7 +1194,7 @@ export function evidenceFailureError(
  * Load-boundary check that no id is live and refuted at the same time.
  *
  * `findingsUnionError` proves uniqueness within `findings` and
- * `refutationsUnionError` within `refuted_findings`; neither can see the other
+ * `parseStoredRefutationsField` within `refuted_findings`; neither can see the other
  * array, and the ACROSS case is the one with a terminal consequence. The tally's
  * replay guard builds `alreadyRefuted` from `refuted_findings` and refuses to
  * adjudicate any brief item whose id is in it — so a live finding sharing an id
@@ -1898,7 +1910,7 @@ function localFindingId(briefId: string, taskId: string): string {
  * is never promoted — nothing was adjudicated there.
  *
  * (`store-review-findings` — the manual operator override — and
- * `complete-wave-gate`'s advancement also write `passed`. Neither adjudicates a
+ * the Wave Gate completion's advancement also write `passed`. Neither adjudicates a
  * finding; they replace the review record and close out a verified wave.)
  */
 export function applyFindingOutcomes(
@@ -1936,7 +1948,7 @@ export function applyFindingOutcomes(
     // Throw rather than skip, for the reason `requireEntry` throws: the brief
     // is built from `task.findings` and the load boundary proves lockstep, so a
     // miss here is a broken invariant, not a degraded input. Skipping it wrote
-    // no audit record while `serializeOutcomes` and the operator line both
+    // no audit record while the serialized tally and the operator line both
     // still reported the finding as refuted — and dropping the last critical
     // that way promotes `blocked → passed` with nothing to show for it. The
     // reachable window is a `store-review-findings` override landing between

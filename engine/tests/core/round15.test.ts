@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -26,14 +26,12 @@ import {
   type RefutedFinding,
 } from "../../src/core/findings";
 import {
-  carriedOverCount,
   parseMachineSummary,
   reviewResolutionLog,
 } from "../../src/core/review-output";
 import {
   defaultRefutationThreshold,
   selectReviewLenses,
-  staleWaveError,
   tallyRefutations,
   REVIEW_LENSES,
   type BriefFinding,
@@ -42,11 +40,13 @@ import {
 } from "../../src/core/review-panel";
 import { exactOrderedSetErrors, sanitizeProse, selectLenses } from "../../src/core/panel-kernel";
 import { aggregateVerdicts, architectureCriterion, candidateFilename, CODEBASE_FIT_CRITERION, type ArchitectureCriterion, type JudgeVerdict } from "../../src/core/panel-contract";
-import { artifactError, pruneSurplusItems } from "../../src/handlers/helpers/panel-run";
+import { artifactError } from "../../src/handlers/helpers/panel-run";
 import { deriveAgentTranscriptPath } from "../../src/utils/agent-transcript-path";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { Task } from "../../src/types";
 import { fixFull, validateFull } from "../../src/handlers/helpers/validate-task-graph";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 
 // ---------------------------------------------------------------------------
 // C3 — the repair the load boundary recommends has to actually work
@@ -124,18 +124,16 @@ describe("deduplicateFindingIds restores the postcondition it exists for", () =>
         (ordinals) => {
           const graph = {
             current_phase: "execute",
+            verification_manifest: preI6DefaultVerificationManifest(),
             phase_artifacts: {},
             plan_title: "t",
             plan_file: ".claude/plans/p.md",
             spec_file: ".claude/specs/s/spec.md",
             tasks: [{
-              id: "T1",
-              description: "d",
-              agent: "code-implementer-agent",
-              wave: 1,
-              status: "implemented",
-              depends_on: [],
-              new_tests_required: false,
+              ...taskFixture({
+                id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
+                status: "implemented", depends_on: [], new_tests_required: false,
+              }),
               findings: ordinals.map((n, i) => one("code-reviewer", n, `claim ${i}`)),
             }],
           };
@@ -158,7 +156,7 @@ describe("applyFindingOutcomes derives the views rather than subtracting from th
   const claims = (severity: "critical" | "advisory", texts: readonly string[]): Task => {
     const base: Task = {
       id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-      status: "implemented", legacy_missing_proof: true, depends_on: [], review_status: "pending",
+      status: "implemented", proof: satisfiedProof([]), depends_on: [], review_status: "pending",
     };
     return mergeFindings(
       base,
@@ -232,7 +230,7 @@ describe("applyFindingOutcomes derives the views rather than subtracting from th
           const start = mergeFindings(
             {
               id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-              status: "implemented", legacy_missing_proof: true, depends_on: [], review_status: "pending",
+              status: "implemented", proof: satisfiedProof([]), depends_on: [], review_status: "pending",
             },
             {
               drafts: specs.map((s) => ({
@@ -287,38 +285,17 @@ describe("view-only claims that cannot be given identity are reported, not vanis
   it("--fix emits an operator note naming the dropped claim and its consequence", () => {
     const repaired = fixFull({
       current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       tasks: [{
         id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", depends_on: [], new_tests_required: false,
+        status: "implemented", proof: satisfiedProof([]), depends_on: [], new_tests_required: false,
         critical_findings: ["none"],
       }],
     });
     const note = repaired.notes.find((n) => n.includes("DROPPED view-only claim"));
     expect(note, `notes were: ${repaired.notes.join(" | ")}`).toBeDefined();
     expect(note).toContain("blocked the gate before this repair and no longer does");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// A1 — the brief's wave proof fails CLOSED
-// ---------------------------------------------------------------------------
-
-describe("staleWaveError", () => {
-  it("accepts the wave the graph is on", () => {
-    expect(staleWaveError(2, 2)).toBeNull();
-  });
-
-  it("refuses a closed wave", () => {
-    expect(staleWaveError(1, 2)).toContain("is not the graph's current wave");
-  });
-
-  it("refuses a graph with NO current wave rather than accepting anything", () => {
-    // The guard used to skip entirely when `current_wave` was absent — the one
-    // state where "which wave is this?" has no answer, so every --wave passed.
-    const error = staleWaveError(7, undefined);
-    expect(error).not.toBeNull();
-    expect(error).toContain("records no current wave");
   });
 });
 
@@ -460,14 +437,7 @@ describe("chooseSource keeps claim identity and marker severity in lockstep", ()
     ].join("\n"))!;
     expect(parsed.blockStatus.kind).toBe("superseded");
     expect(parsed.advisory).toContain("a nit only the block named");
-    expect(carriedOverCount(parsed.blockStatus)).toBe(1);
-  });
-
-  it("carriedOverCount is zero for every arm that carries nothing", () => {
-    expect(carriedOverCount({ kind: "absent" })).toBe(0);
-    expect(carriedOverCount({ kind: "used" })).toBe(0);
-    expect(carriedOverCount({ kind: "rejected", reason: "invalid JSON" })).toBe(0);
-    expect(carriedOverCount({ kind: "partial", carriedOver: 3 })).toBe(3);
+    expect(parsed.blockStatus).toMatchObject({ carriedOver: 1 });
   });
 });
 
@@ -478,6 +448,7 @@ describe("chooseSource keeps claim identity and marker severity in lockstep", ()
 describe("the load boundary proves wave_gates and spec_check, not just tasks", () => {
   const graph = (extra: Record<string, unknown>) => ({
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     tasks: [],
     ...extra,
@@ -836,106 +807,13 @@ describe("tallyRefutations across panel sizes", () => {
   });
 
   it("selectReviewLenses returns nested prefixes, which is why the size is pinned", () => {
-    // The reason `panelSizeConflict` exists: re-deriving the lens SET cannot
-    // detect a truncated list, because a shorter panel reproduces its own
-    // derivation exactly.
+    // Why a panel's roster is recorded rather than re-derived: re-deriving the
+    // lens SET cannot detect a truncated list, because a shorter panel
+    // reproduces its own derivation exactly.
     const three = selectReviewLenses({ reproduction: false, security: false, testIntegrity: false } as never, 3);
     const four = selectReviewLenses({ reproduction: false, security: false, testIntegrity: false } as never, 4);
     expect(three.ok && four.ok).toBe(true);
     if (three.ok && four.ok) expect(four.value.slice(0, 3)).toEqual([...three.value]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// A2 / A18 — the run-directory shell, tested directly
-// ---------------------------------------------------------------------------
-
-describe("pruneSurplusItems — a re-brief owns its item directory", () => {
-  const withRun = (name: string, body: (runDir: string, itemDir: string) => void) => {
-    const runDir = join(tmpdir(), `prune-${name}-${process.pid}-${Date.now()}`);
-    const itemDir = "findings";
-    mkdirSync(join(runDir, itemDir), { recursive: true });
-    try {
-      body(runDir, itemDir);
-    } finally {
-      rmSync(runDir, { recursive: true, force: true });
-    }
-  };
-
-  it("removes the artifact a shrunken brief no longer names", () => {
-    // The stale file used to survive and surface two steps later as `manifest`
-    // failing with "the panel that produced them was larger than the manifest
-    // declares" — a diagnostic describing the opposite of what happened.
-    withRun("stale", (runDir, itemDir) => {
-      writeFileSync(join(runDir, itemDir, "finding-T1-code-reviewer-1.json"), "{}");
-      writeFileSync(join(runDir, itemDir, "finding-T1-code-reviewer-2.json"), "{}");
-      const pruned = pruneSurplusItems(runDir, itemDir, ["finding-T1-code-reviewer-1.json"]);
-      expect(pruned.ok).toBe(true);
-      if (pruned.ok) expect(pruned.value).toEqual(["finding-T1-code-reviewer-2.json"]);
-      expect(readdirSync(join(runDir, itemDir))).toEqual(["finding-T1-code-reviewer-1.json"]);
-    });
-  });
-
-  it("keeps everything the brief still names", () => {
-    withRun("keep", (runDir, itemDir) => {
-      writeFileSync(join(runDir, itemDir, "a.json"), "{}");
-      const pruned = pruneSurplusItems(runDir, itemDir, ["a.json"]);
-      expect(pruned.ok).toBe(true);
-      if (pruned.ok) expect(pruned.value).toEqual([]);
-      expect(readdirSync(join(runDir, itemDir))).toEqual(["a.json"]);
-    });
-  });
-
-  it("REFUSES to unlink a symlink rather than cleaning it up", () => {
-    // This runs `rm` inside a directory derived from an argument. A symlink is a
-    // reason to stop, not something to tidy.
-    withRun("symlink", (runDir, itemDir) => {
-      const target = join(runDir, "outside.json");
-      writeFileSync(target, "{}");
-      symlinkSync(target, join(runDir, itemDir, "linked.json"));
-      const pruned = pruneSurplusItems(runDir, itemDir, []);
-      expect(pruned.ok).toBe(false);
-      if (!pruned.ok) expect(pruned.errors[0]).toContain("must not be a symbolic link");
-    });
-  });
-
-  it("REFUSES a nested directory rather than recursing", () => {
-    withRun("nested", (runDir, itemDir) => {
-      mkdirSync(join(runDir, itemDir, "subdir"));
-      const pruned = pruneSurplusItems(runDir, itemDir, []);
-      expect(pruned.ok).toBe(false);
-      if (!pruned.ok) expect(pruned.errors[0]).toContain("must be a regular file");
-    });
-  });
-
-  it("REFUSES a symlinked item directory without deleting its outside sentinel", () => {
-    const root = mkdtempSync(join(tmpdir(), "prune-parent-symlink-"));
-    const runDir = join(root, "run");
-    const outside = join(root, "outside");
-    mkdirSync(runDir);
-    mkdirSync(outside);
-    const sentinel = join(outside, "sentinel.json");
-    writeFileSync(sentinel, "outside\n");
-    symlinkSync(outside, join(runDir, "findings"));
-    try {
-      const pruned = pruneSurplusItems(runDir, "findings", []);
-      expect(pruned.ok).toBe(false);
-      expect(readFileSync(sentinel, "utf-8")).toBe("outside\n");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("a first brief, with no item directory yet, is not an error", () => {
-    const runDir = join(tmpdir(), `prune-fresh-${process.pid}-${Date.now()}`);
-    mkdirSync(runDir, { recursive: true });
-    try {
-      const pruned = pruneSurplusItems(runDir, "findings", ["a.json"]);
-      expect(pruned.ok).toBe(true);
-      if (pruned.ok) expect(pruned.value).toEqual([]);
-    } finally {
-      rmSync(runDir, { recursive: true, force: true });
-    }
   });
 });
 

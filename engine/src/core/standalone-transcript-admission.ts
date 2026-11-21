@@ -1,19 +1,14 @@
 /**
  * Standalone transcript admission: ONE semantic parse per reviewer transcript under its
- * Issued Reviewer Protocol, against the frozen scope. Historical v1 diagnostics and the
- * legacy archive's canonical-transcript aggregation share the same scoped legacy parse.
+ * Issued Reviewer Protocol, against the frozen scope. A rejected historical v1 transcript
+ * keeps its scoped legacy diagnostics.
  */
-import { attributeFindings, type Finding } from "./findings";
-import { fail, ok, type ParseResult } from "./panel-kernel";
 import {
   parseReviewerEvidence as parseIssuedReviewerEvidence, resolveReviewFindings,
   type IssuedStandaloneReviewerProtocol, type ParsedFindings,
 } from "./review-output";
 import { renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
-import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
-import type { StandaloneReviewAggregate, StandaloneReviewerEvidence, StandaloneReviewState } from "./standalone-review-model";
-import { findingScopeErrors, type StandaloneReviewerRole } from "./standalone-review-scope";
-import { nonEmptyOf } from "./orchestration-contract";
+import { findingScopeErrors } from "./standalone-review-scope";
 
 export type StandaloneTranscriptAdmission =
   | Readonly<{ ok: true; findings: ParsedFindings }>
@@ -56,7 +51,7 @@ export function admitStandaloneTranscript(
     : renderReviewerPayloadDiagnostic(parsed.error, rawBytes.byteLength)]) });
 }
 
-/** Historical archive only; registered completion always consumes issued protocol authority. */
+/** Historical v1 diagnostics only; admitted evidence always comes from the issued protocol parse. */
 function admitLegacyStandaloneTranscript(
   scope: readonly string[],
   output: string,
@@ -70,41 +65,4 @@ function admitLegacyStandaloneTranscript(
   return problems.length > 0
     ? Object.freeze({ ok: false, problems: Object.freeze(problems) })
     : Object.freeze({ ok: true, findings: resolution.findings });
-}
-
-export function aggregateCanonicalTranscripts(
-  runId: string,
-  scope: readonly string[],
-  transcripts: readonly Readonly<{ agent: StandaloneReviewerRole; output: string; evidence: StandaloneReviewerEvidence }>[],
-): ParseResult<StandaloneReviewState> {
-  const errors: string[] = [];
-  const findings: Finding[] = [];
-  for (const transcript of transcripts) {
-    const admission = admitLegacyStandaloneTranscript(scope, transcript.output, transcript.agent);
-    if (!admission.ok) {
-      errors.push(...admission.problems);
-      continue;
-    }
-    findings.push(...attributeFindings(admission.findings.drafts, transcript.agent));
-  }
-  if (errors.length > 0) return fail(errors);
-  const ids = findings.map(({ id }) => id);
-  if (new Set(ids).size !== ids.length) return fail(["attributed standalone finding ids must be distinct across review agents"]);
-  const aggregate: StandaloneReviewAggregate = Object.freeze({
-    schemaVersion: 1,
-    runId,
-    subjectId: STANDALONE_REVIEW_SUBJECT,
-    scope: Object.freeze([...scope]),
-    reviewerEvidence: Object.freeze(transcripts.map(({ evidence }) => evidence)),
-    findings: Object.freeze(findings),
-  });
-  const criticals = findings.filter((finding) => finding.severity === "critical");
-  const [head, ...tail] = criticals;
-  return head === undefined
-    ? ok(Object.freeze({ kind: "clean", aggregate }))
-    : ok(Object.freeze({
-        kind: "requires-refutation",
-        aggregate,
-        criticals: nonEmptyOf(head, ...tail),
-      }));
 }

@@ -34,7 +34,6 @@ import {
   RTG_UNDETERMINABLE,
   SHOWN,
   STORED_NO_OBLIGATION,
-  STORED_NO_PROOF,
   STORED_PENDING,
   STORED_PREFIX,
   TEST_FILES_HEADING,
@@ -46,7 +45,7 @@ import {
 } from "../../src/core/red-then-green-status";
 import { UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { classifyTaskFiles } from "../../src/core/test-file-classification";
-import { legacyDefaultVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import { COVERED_BY_ACCEPTANCE_CONTRACT } from "../../src/core/verification-policy";
 import type { Evidence } from "../../src/machine/types";
 import type { Task, TaskGraph } from "../../src/types";
@@ -100,8 +99,6 @@ const withT1WritingContract = (graph: TaskGraph): TaskGraph => ({
   }],
 });
 
-/** A legacy `implemented` Task: no frozen Proof at all. */
-const legacyTask = (id: string): Task => taskFixture({ ...base(id, 2, FILES), new_tests_required: true, status: "implemented" });
 
 /** A file that failed to load (a missing module's import error): JUnit's one failing synthetic testcase. */
 const collectionError = (file: string): TestFileResult => ({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
@@ -186,7 +183,7 @@ describe("redThenGreenStatusView: duty", () => {
   });
 
   it("is not owed because the TaskGraph predates I6, with no manifest or one frozen without a classification", () => {
-    for (const manifest of [undefined, legacyDefaultVerificationManifest()]) {
+    for (const manifest of [undefined, preI6DefaultVerificationManifest()]) {
       const graph = graphOf([requiredTask("T1", "not-owed")], manifest);
       expect(redThenGreenDuty(taskOf(graph, "T1"), graph.verification_manifest)).toEqual({ kind: "not-owed" });
       expect(redThenGreenStatusView(input(graph, "T1"))).toMatchObject({
@@ -249,16 +246,6 @@ describe("redThenGreenStatusView: duty", () => {
     });
   });
 
-  it("is undeterminable with redThenGreenDuty's reason for proof-unfrozen", () => {
-    const graph = graphOf([legacyTask("T1")], I6_MANIFEST);
-    const duty = redThenGreenDuty(taskOf(graph, "T1"), graph.verification_manifest);
-    if (duty.kind !== "proof-unfrozen") throw new Error("fixture must be proof-unfrozen");
-    expect(redThenGreenStatusView(input(graph, "T1"))).toMatchObject({
-      status: "implemented",
-      wave: 2,
-      duty: { kind: "undeterminable", reason: duty.reason },
-    });
-  });
 });
 
 describe("redThenGreenStatusView: live attempt", () => {
@@ -340,11 +327,6 @@ describe("redThenGreenStatusView: live attempt", () => {
 });
 
 describe("redThenGreenStatusView: stored result", () => {
-  it("is no-proof for a legacy Task without a frozen Proof", () => {
-    const graph = graphOf([legacyTask("T1")], I6_MANIFEST);
-    expect(redThenGreenStatusView(input(graph, "T1"))).toMatchObject({ stored: { kind: "no-proof" } });
-  });
-
   it("is no-obligation when the frozen Proof owes no red-then-green", () => {
     const graph = graphOf([waivedTask("T1", COVERED_BY_ACCEPTANCE_CONTRACT)], I6_MANIFEST);
     expect(redThenGreenStatusView(input(graph, "T1"))).toMatchObject({ stored: { kind: "no-obligation" } });
@@ -471,13 +453,14 @@ describe("renderRedThenGreenStatus", () => {
   });
 
   it("prints an undeterminable duty with its reason, and no files section", () => {
-    const graph = graphOf([legacyTask("T1")], I6_MANIFEST);
+    const graph = graphOf([requiredTask("T1", OWED_ERA)]);
     const duty = redThenGreenDuty(taskOf(graph, "T1"), graph.verification_manifest);
-    if (duty.kind !== "proof-unfrozen") throw new Error("fixture must be proof-unfrozen");
+    if (duty.kind !== "classification-unfrozen") throw new Error("fixture must be classification-unfrozen");
+    const task = taskOf(graph, "T1");
     expect(linesOf(input(graph, "T1"))).toEqual([
-      `T1 (Wave 2, implemented): ${RTG_UNDETERMINABLE} — ${duty.reason}`,
+      `T1 (Wave ${task.wave}, ${task.status}): ${RTG_UNDETERMINABLE} — ${duty.reason}`,
       LIVE_NONE,
-      `${STORED_PREFIX} ${STORED_NO_PROOF}`,
+      `${STORED_PREFIX} ${STORED_PENDING}`,
     ]);
   });
 
@@ -507,7 +490,6 @@ describe("renderRedThenGreenStatus", () => {
   it("prints every stored arm", () => {
     const gap: RedThenGreenGap = { kind: "green-missing", untrustedOnly: false };
     const cases: readonly (readonly [Task, readonly string[]])[] = [
-      [legacyTask("T1"), [`${STORED_PREFIX} ${STORED_NO_PROOF}`]],
       [waivedTask("T1", COVERED_BY_ACCEPTANCE_CONTRACT), [`${STORED_PREFIX} ${STORED_NO_OBLIGATION}`]],
       [requiredTask("T1", OWED_ERA), [`${STORED_PREFIX} ${STORED_PENDING}`]],
       [

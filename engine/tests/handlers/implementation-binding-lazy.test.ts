@@ -60,6 +60,7 @@ import { StateManager } from "../../src/state-manager";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../src/types";
 import { sessionIdOf } from "../fixtures/machine-identities";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const ENGINE_ROOT = join(__dirname, "..", "..");
 const { root: ROOT, statePath: STATE_PATH } = fixture;
@@ -153,7 +154,7 @@ function writeGraph(
     });
   });
   const graph: TaskGraph = {
-    current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, current_wave: 1,
     executing_tasks: [...executing], tasks, wave_gates: {},
   };

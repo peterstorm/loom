@@ -30,6 +30,7 @@ import { findingFixture } from "../fixtures/finding";
 import { value } from "../fixtures/parse-result";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import { activeWaveGateFixture, fileOf, protectedGraphFixture, siblingTaskFixture } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -82,7 +83,7 @@ const dismissedOver = (content: string) => value(advisoryDisposition({
 }));
 
 const graphOf = (stamps: Record<string, unknown> = {}): TaskGraph => protectedGraphFixture({
-  spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+  spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
   spec_file: null, plan_file: PLAN_FILE, wave_gates: {}, executing_tasks: [], tasks: [t1],
   active_wave_gate: activeWaveGateFixture({ runId: RUN_ID, wave: 1, authorityDigest: AUTHORITY }),
   ...stamps,

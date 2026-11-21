@@ -314,6 +314,7 @@ function openerLineGroups(line: string): readonly OpenerGroup[] {
   let groupStart = 0;
   const compound: string[] = [];
   let quote: '"' | "'" | null = null;
+  let lastRedirect = -1; // the last `>` the walk read unquoted (shellOperatorAt's afterRedirect)
   let i = 0;
   const n = line.length;
   while (i < n) {
@@ -332,15 +333,17 @@ function openerLineGroups(line: string): readonly OpenerGroup[] {
     if (pastSpan !== null) { i = pastSpan; continue; }
     const pastCompound = pastCompoundSyntax(line, i, compound);
     if (pastCompound !== null) { i = pastCompound; continue; }
-    const operator = shellOperatorAt(line, i);
+    const operator = shellOperatorAt(line, i, lastRedirect === i - 1);
     if (operator !== null) {
       if (cutsGroup(operator) && compound.length === 0) {
         groups.push({ start: groupStart, end: i });
         groupStart = i + operator.width;
       }
       i += operator.width;
+      if (line[i - 1] === ">") lastRedirect = i - 1;
       continue;
     }
+    if (c === ">") lastRedirect = i;
     i++;
   }
   groups.push({ start: groupStart, end: n });

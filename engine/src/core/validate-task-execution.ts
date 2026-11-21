@@ -470,9 +470,9 @@ export function createTaskExecutionAuthorityBatch(
   return { ok: true, plans: Object.freeze(plans), skeletonRecords: skeletons.records };
 }
 
-export type ProvenStaleReservation =
-  | Readonly<{ kind: "modern"; taskId: string; authority: ImplementationAttemptAuthority }>
-  | Readonly<{ kind: "legacy"; taskId: string }>;
+/** A stale reservation proven by the exact attempt authority it holds now:
+ *  every executing Task carries one (the State File refuses any other). */
+export type ProvenStaleReservation = Readonly<{ taskId: string; authority: ImplementationAttemptAuthority }>;
 
 /** Lift Task-id staleness into the exact reservation identities held now. */
 export function proveStaleReservations(
@@ -480,11 +480,8 @@ export function proveStaleReservations(
   staleTaskIds: ReadonlySet<string>,
 ): readonly ProvenStaleReservation[] {
   return Object.freeze([...staleTaskIds].flatMap((taskId): readonly ProvenStaleReservation[] => {
-    const task = state.tasks.find((candidate) => candidate.id === taskId);
-    if (task === undefined) return [];
-    return [task.active_implementation_attempt === undefined
-      ? Object.freeze({ kind: "legacy" as const, taskId })
-      : Object.freeze({ kind: "modern" as const, taskId, authority: task.active_implementation_attempt })];
+    const authority = state.tasks.find((candidate) => candidate.id === taskId)?.active_implementation_attempt;
+    return authority === undefined ? [] : [Object.freeze({ taskId, authority })];
   }));
 }
 
@@ -494,9 +491,6 @@ function exactStaleTaskIds(
 ): ReadonlySet<string> {
   return new Set(stale.flatMap((proof) => {
     const task = state.tasks.find((candidate) => candidate.id === proof.taskId);
-    if (proof.kind === "legacy") {
-      return task !== undefined && task.active_implementation_attempt === undefined ? [proof.taskId] : [];
-    }
     return task?.active_implementation_attempt?.authorityDigest === proof.authority.authorityDigest
       ? [proof.taskId]
       : [];
@@ -514,7 +508,7 @@ function baselineMatchesAuthority(
 
 function canPreserveReclaimedEvidence(
   task: Task,
-  proof: Extract<ProvenStaleReservation, { kind: "modern" }>,
+  proof: ProvenStaleReservation,
   replacement: TaskExecutionAuthorityPlan | undefined,
 ): boolean {
   return replacement !== undefined &&
@@ -533,15 +527,7 @@ function invalidateReclaimedEvidence(task: Task): Task {
     new_test_observation: undefined,
     failure_reason: "infrastructure-blocked: reservation-reclaimed",
   };
-  return task.proof === undefined
-    ? invalidated
-    : {
-        ...invalidated,
-        status: "pending",
-        proof: task.proof,
-        revalidation_required: true,
-        legacy_missing_proof: undefined,
-      };
+  return { ...invalidated, status: "pending", proof: task.proof, revalidation_required: true };
 }
 
 function reclaimTaskAttempt(
@@ -552,29 +538,23 @@ function reclaimTaskAttempt(
 ): Task {
   const proof = stale.find((candidate) => candidate.taskId === task.id);
   if (proof === undefined) return task;
-  if (proof.kind === "modern") {
-    if (task.active_implementation_attempt?.authorityDigest !== proof.authority.authorityDigest) return task;
-    const receipt = createReclaimedImplementationAttemptReceipt(proof.authority, reclaimedAt);
-    if (!receipt.ok) return task;
-    const history = task.implementation_attempt_history ?? [];
-    const archived = history.some((candidate) => candidate.authorityDigest === proof.authority.authorityDigest)
-      ? history
-      : [...history, receipt.value];
-    const reclaimed: Task = {
-      ...task,
-      active_implementation_attempt: undefined,
-      active_implementation_context: undefined,
-      attempt_artifact_baseline: undefined,
-      attempt_repository_baseline: undefined,
-      reserved_at: undefined,
-      implementation_attempt_history: archived,
-    };
-    return invalidateEvidence ? invalidateReclaimedEvidence(reclaimed) : reclaimed;
-  }
-  if (task.active_implementation_attempt === undefined) {
-    return { ...task, reserved_at: undefined, legacy_execution_reservation: undefined };
-  }
-  return task;
+  if (task.active_implementation_attempt?.authorityDigest !== proof.authority.authorityDigest) return task;
+  const receipt = createReclaimedImplementationAttemptReceipt(proof.authority, reclaimedAt);
+  if (!receipt.ok) return task;
+  const history = task.implementation_attempt_history ?? [];
+  const archived = history.some((candidate) => candidate.authorityDigest === proof.authority.authorityDigest)
+    ? history
+    : [...history, receipt.value];
+  const reclaimed: Task = {
+    ...task,
+    active_implementation_attempt: undefined,
+    active_implementation_context: undefined,
+    attempt_artifact_baseline: undefined,
+    attempt_repository_baseline: undefined,
+    reserved_at: undefined,
+    implementation_attempt_history: archived,
+  };
+  return invalidateEvidence ? invalidateReclaimedEvidence(reclaimed) : reclaimed;
 }
 
 /** Install a prevalidated batch and retire only exact stale identities. The
@@ -591,7 +571,7 @@ export function applyTaskExecutionAuthorityBatch(
     plans.map((plan) => [plan.authority.taskId, plan]),
   );
   const invalidatedTaskIds = new Set(stale.flatMap((proof) => {
-    if (proof.kind !== "modern" || !staleTaskIds.has(proof.taskId)) return [];
+    if (!staleTaskIds.has(proof.taskId)) return [];
     const task = state.tasks.find((candidate) => candidate.id === proof.taskId);
     if (task === undefined || canPreserveReclaimedEvidence(task, proof, planByTask.get(proof.taskId))) return [];
     return [proof.taskId];
@@ -614,7 +594,6 @@ export function applyTaskExecutionAuthorityBatch(
       implementation_retry_history_start: plan.retryHistoryStart,
       implementation_retry_predecessor_receipt_id: plan.retryLineagePredecessorReceiptId ?? undefined,
       reserved_at: plan.authority.reservedAt,
-      legacy_execution_reservation: undefined,
       ...(plan.skeletonOutcomes === null ? {} : { skeleton_outcomes: plan.skeletonOutcomes }),
     };
   });
@@ -660,7 +639,6 @@ export function rollbackTaskExecutionAuthorityBatch(
   rolledBackAt: IsoInstant,
 ): TaskGraph {
   const stale = authorities.map((authority) => Object.freeze({
-    kind: "modern" as const,
     taskId: authority.taskId,
     authority,
   }));

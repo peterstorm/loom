@@ -32,6 +32,7 @@ import {
 } from "./orchestration-contract";
 import {
   buildFindingBrief,
+  REVIEW_LENSES_DEFAULT,
   reviewSignals,
   selectReviewLenses,
   type BriefFinding,
@@ -85,7 +86,7 @@ export function deriveWaveRefutationPlan(
   const brief = buildFindingBrief(snapshot.wave, snapshot.graph.tasks);
   const findings = nonEmpty(brief.findings);
   if (findings === null) return preparationFailure("an empty critical Finding set cannot start a Refutation Panel");
-  const lenses = selectReviewLenses(reviewSignals(brief.findings), 3);
+  const lenses = selectReviewLenses(reviewSignals(brief.findings), REVIEW_LENSES_DEFAULT);
   if (!lenses.ok) return preparationFailure(lenses.errors.join("; "));
   const panelLenses = nonEmpty(lenses.value);
   if (panelLenses === null) return preparationFailure("no review lenses were derived");

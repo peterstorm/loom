@@ -86,6 +86,7 @@ const spawn = (requestId: string, contextPath: string, model: string) => JSON.st
     prompt: [
       "LOOM_REVIEW_CONTEXT: wave",
       `LOOM_REQUEST_ID: ${requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${"a".repeat(64)}`,
       `LOOM_CONTEXT_PATH: ${contextPath}`,
       "Read the immutable context packet and emit the reviewer result.",
     ].join("\n"),
@@ -143,6 +144,25 @@ describe("validate-agent-model — the grandfathering rescue", () => {
     const result = await validateAgentModel(spawn(requestId, contextPath, "haiku"), []);
 
     expect(result.kind, JSON.stringify(result)).toBe("allow");
+  });
+
+  it("BLOCKS the identical spawn when its request marker carries no context digest marker", async () => {
+    // The rescue reads the request through the one marker parser: an
+    // incomplete identity is no identity, so it cannot add an allow.
+    const runId = "run.grandfather1";
+    const requestId = "request:grandfathered-retry";
+    const directory = canonicalRunDirectory("wave-gate-runs", runId);
+    const contextPath = plantAuthority(directory, runId, requestId);
+    const result = await validateAgentModel(JSON.stringify({
+      tool_name: "Agent",
+      tool_input: {
+        subagent_type: "loom:comment-analyzer",
+        model: "haiku",
+        prompt: `LOOM_REQUEST_ID: ${requestId}\nLOOM_CONTEXT_PATH: ${contextPath}\nRead the immutable context packet.`,
+      },
+    }), []);
+
+    expect(result.kind).toBe("block");
   });
 
   it("BLOCKS the identical spawn when the authority sits outside the repository", async () => {

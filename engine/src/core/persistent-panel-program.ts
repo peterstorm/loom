@@ -298,13 +298,3 @@ export function parsePanelProgramCheckpointRecord<A extends PanelAuthority, I, S
   if (!statesAgree(program, checkpoint.state, replayed.value.step.state)) return persistentFailure(panelError("malformed-checkpoint", `${name} checkpoint state disagrees with its immutable event prefix`));
   return persistentSuccess(Object.freeze({ step: replayed.value.step, checkpoint: checkpointRecord(program, authority.value, replayed.value) }));
 }
-
-/** Parse a durable checkpoint to the step it replays to (`parsePanelProgramCheckpointRecord` without the record). */
-export function parsePanelProgramCheckpoint<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<A, I, S, Ac, E>,
-  raw: unknown,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<PanelStep<S, Ac, E>> {
-  const parsed = parsePanelProgramCheckpointRecord(program, raw, resolver);
-  return parsed.ok ? persistentSuccess(parsed.value.step) : parsed;
-}

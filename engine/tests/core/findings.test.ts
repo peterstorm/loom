@@ -9,8 +9,8 @@ import {
   findingsUnionError,
   mergeFindings,
   recoverViewOnlyClaims,
-  refutationsUnionError,
-  resolutionsUnionError,
+  parseStoredRefutationsField,
+  parseStoredResolutionsField,
   reviewRunError,
   type AdjudicatedFinding,
 } from "../../src/core/findings";
@@ -520,10 +520,10 @@ describe("the load boundary proves what the Task type asserts", () => {
   it("accepts an absent field and a well-formed array", () => {
     expect(findingsUnionError(undefined, "findings")).toBeNull();
     expect(findingsUnionError([wellFormed], "findings")).toBeNull();
-    expect(refutationsUnionError(undefined, "refuted_findings")).toBeNull();
+    expect(parseStoredRefutationsField(undefined, "refuted_findings")).toEqual({ ok: true, value: undefined });
     expect(
-      refutationsUnionError([{ finding: wellFormed, refutations: [{ lens: "intent", reason: "y" }] }], "r"),
-    ).toBeNull();
+      parseStoredRefutationsField([{ finding: wellFormed, refutations: [{ lens: "intent", reason: "y" }] }], "r").ok,
+    ).toBe(true);
   });
 
   it.each([
@@ -548,7 +548,7 @@ describe("the load boundary proves what the Task type asserts", () => {
       prior_finding_ids: [],
       evidence: [],
     }, Number.MAX_SAFE_INTEGER + 1, [], "run")).toContain("safe integer");
-    expect(resolutionsUnionError([{
+    expect(parseStoredResolutionsField([{
       finding: wellFormed,
       resolution: {
         kind: "resolved_by_remediation",
@@ -563,7 +563,7 @@ describe("the load boundary proves what the Task type asserts", () => {
           agent: "code-reviewer",
         }],
       },
-    }], "resolved")).toContain("not a well-formed resolution");
+    }], "resolved")).toEqual({ ok: false, error: expect.stringContaining("not a well-formed resolution") });
   });
 
   it("preserves exact retired-container malformed and duplicate diagnostics", () => {
@@ -588,18 +588,22 @@ describe("the load boundary proves what the Task type asserts", () => {
       },
     };
 
-    expect(refutationsUnionError([{}], "refuted")).toBe(
-      "refuted[0] is not a well-formed refutation record (repair and install atomically with: helper repair-task-graph)",
-    );
-    expect(refutationsUnionError([refuted, refuted], "refuted")).toBe(
-      "refuted[1] repeats refuted finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
-    );
-    expect(resolutionsUnionError([{}], "resolved")).toBe(
-      "resolved[0] is not a well-formed resolution record (repair and install atomically with: helper repair-task-graph)",
-    );
-    expect(resolutionsUnionError([resolved, resolved], "resolved")).toBe(
-      "resolved[1] repeats resolved finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
-    );
+    expect(parseStoredRefutationsField([{}], "refuted")).toEqual({
+      ok: false,
+      error: "refuted[0] is not a well-formed refutation record (repair and install atomically with: helper repair-task-graph)",
+    });
+    expect(parseStoredRefutationsField([refuted, refuted], "refuted")).toEqual({
+      ok: false,
+      error: "refuted[1] repeats refuted finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
+    });
+    expect(parseStoredResolutionsField([{}], "resolved")).toEqual({
+      ok: false,
+      error: "resolved[0] is not a well-formed resolution record (repair and install atomically with: helper repair-task-graph)",
+    });
+    expect(parseStoredResolutionsField([resolved, resolved], "resolved")).toEqual({
+      ok: false,
+      error: "resolved[1] repeats resolved finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
+    });
   });
 
   it("points at the repair command rather than leaving the operator stuck", () => {
@@ -732,7 +736,7 @@ describe("applyFindingOutcomes refuses to adjudicate what it cannot find", () =>
     mergeFindings(taskFixture({ review_status: "pending" }), makeParsed(["a blocker"]), "code-reviewer");
 
   it("throws on an outcome naming a finding the task no longer holds", () => {
-    // Silently skipping it wrote no audit record while serializeOutcomes and
+    // Silently skipping it wrote no audit record while the serialized tally and
     // the operator line both still reported the finding as refuted — and
     // dropping the wave's last critical that way promotes blocked → passed.
     // Reachable when a store-review-findings override lands between brief and

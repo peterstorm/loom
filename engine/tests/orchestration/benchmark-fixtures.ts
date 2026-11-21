@@ -112,9 +112,8 @@ export const BENCHMARK_SCENARIOS: readonly BenchmarkScenario[] = Object.freeze([
       op(`bun engine/src/cli.ts helper complete-wave-gate`, ["gate-completed"], ["refutation-tallied"]),
     ]),
     facade: Object.freeze([
-      op(`bun engine/src/cli.ts helper orchestration start refutation --run panel`, ["criticals-routed", "batch-published"]),
-      op(`bun engine/src/cli.ts helper orchestration resume --run panel`, ["roster-complete", "refutation-tallied"], ["batch-published"]),
-      op(`bun engine/src/cli.ts helper orchestration resume --run wave`, ["gate-completed"], ["refutation-tallied"]),
+      op(`bun engine/src/cli.ts helper orchestration resume --run wave`, ["criticals-routed", "batch-published"]),
+      op(`bun engine/src/cli.ts helper orchestration resume --run wave`, ["roster-complete", "refutation-tallied", "gate-completed"], ["batch-published"]),
     ]),
     terminal: "gate-completed",
     expectedArtifacts: Object.freeze(["manifest.json", "result.json", "wave-result.json"]),

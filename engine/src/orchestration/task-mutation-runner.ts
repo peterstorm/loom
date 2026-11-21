@@ -32,7 +32,6 @@ import {
   classifyTaskMutantRun,
   mutantsByFile,
   mutationRunFiles,
-  TASK_MUTATION_DEADLINE_MS,
   taskMutationResultOf,
   taskMutationUnavailable,
   type FileMutants,
@@ -46,6 +45,7 @@ import { describeCause } from "../utils/describe-cause";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
 import { matrixTestCommand, ownerAtBase, readRepositoryText, resolveWaveBase, runOnce } from "./mutation-run-steps";
 import { withMutationWorkspace, type OwnerVariant } from "./owner-mutation-workspace";
+import { TASK_RECORD_CHECK_DEADLINE_MS } from "../core/task-record";
 
 /** One runner execution over a file, with that file's bytes as `variant` says: the port `runFileMutants` sequences. */
 export type RunTaskFile = (variant: OwnerVariant) => Promise<MatrixTestRun>;
@@ -60,7 +60,7 @@ function exhausted({ deadlineMs, now, runTimeoutMs }: TaskMutationBudget): strin
   const left = deadlineMs - now();
   return left >= runTimeoutMs
     ? null
-    : `its ${TASK_MUTATION_DEADLINE_MS / 1000} s deadline cannot hold another run (${Math.max(left, 0)} ms left, one run may take ${runTimeoutMs} ms)`;
+    : `its ${TASK_RECORD_CHECK_DEADLINE_MS / 1000} s deadline cannot hold another run (${Math.max(left, 0)} ms left, one run may take ${runTimeoutMs} ms)`;
 }
 
 /**
@@ -157,7 +157,7 @@ async function runFile(
 }
 
 async function decide(input: TaskMutationRunInput): Promise<TaskMutationResult> {
-  const deadlineMs = input.now() + TASK_MUTATION_DEADLINE_MS;
+  const deadlineMs = input.now() + TASK_RECORD_CHECK_DEADLINE_MS;
   const planned = planTaskMutants(input);
   if (!planned.ok) return taskMutationUnavailable(planned.error);
   const { selected, texts } = planned.value;

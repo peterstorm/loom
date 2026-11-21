@@ -41,10 +41,6 @@ export type GateCheck =
 const pass = (summary: string): GateCheck => canonicalRecord({ passed: true, summary });
 const fail = (reason: string): GateCheck => canonicalRecord({ passed: false, reason });
 
-export function gateCheckMessage(check: GateCheck): string {
-  return check.passed ? check.summary : check.reason;
-}
-
 function proofFailureMessage(failure: ProofFailure): string {
   return match(failure)
     .with({ kind: P.union("declared-artifact-not-changed", "declared-artifact-drifted") },
@@ -63,11 +59,11 @@ function proofFailureMessage(failure: ProofFailure): string {
 }
 
 function unreadyTaskMessage(task: Task): string {
-  const failures = task.proof?.state === "failed"
+  const failures = task.proof.state === "failed"
     ? `, failures=[${task.proof.failures.map(proofFailureMessage).join(", ")}]`
     : "";
   const revalidation = task.revalidation_required === true ? ", revalidation=fresh-test-evidence-required" : "";
-  return `${task.id} (status=${task.status}, proof=${task.proof?.state ?? "missing"}${revalidation}${failures})`;
+  return `${task.id} (status=${task.status}, proof=${task.proof.state}${revalidation}${failures})`;
 }
 
 export function checkNoExecutingTasks(tasks: readonly Task[], executingTaskIds: readonly string[]): GateCheck {
@@ -81,7 +77,7 @@ export function checkNoExecutingTasks(tasks: readonly Task[], executingTaskIds: 
 export function checkImplementationProof(tasks: readonly Task[]): GateCheck {
   const unready = tasks.filter((task) =>
     task.revalidation_required === true ||
-    (task.status !== "implemented" && task.status !== "completed") || task.proof?.state !== "satisfied"
+    (task.status !== "implemented" && task.status !== "completed") || task.proof.state !== "satisfied"
   );
   return unready.length === 0
     ? pass(`1. Implementation proof verified (${tasks.length}/${tasks.length} tasks).`)
@@ -302,8 +298,10 @@ export function checkWaveCompletionSuite(
 ): GateCheck {
   const readiness = deriveWaveCompletionSuiteReadiness(state, wave, currentWorkspace, currentResult);
   return match(readiness)
-    .with({ kind: "legacy-unavailable" }, () =>
-      pass("4. Wave completion suite: legacy-unavailable (verification_manifest and active receipt absent)."))
+    .with({ kind: "legacy-unavailable" }, () => fail(
+      "FAILED: Wave completion suite unavailable: the TaskGraph carries no verification_manifest " +
+      "(a legacy State File the loader refuses, ADR-0098).",
+    ))
     .with({ kind: "required" }, (value) => fail(
       `FAILED: Wave completion suite required (${value.reason}): ${value.detail}. ` +
       renderProjectVerificationCoverage(value.projectVerificationCoverage),
@@ -485,7 +483,7 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
   const defaultGate = newWaveGate();
   const clearedTasks = state.tasks.map((task): Task => {
     if (task.wave !== decision.wave || task.status === "completed") return task;
-    if (task.status !== "implemented" || task.proof?.state !== "satisfied") return task;
+    if (task.status !== "implemented" || task.proof.state !== "satisfied") return task;
     // A Task exempt from Wave review completes with its Wave but was never
     // reviewed, so completion writes it no `passed`: its exemption is derived
     // from its role (`waveReviewStanding`), not from a stored status.
@@ -493,7 +491,6 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
       ...task,
       status: "completed",
       proof: task.proof,
-      legacy_missing_proof: undefined,
       ...(waveReviewStanding(task).kind === "reviewed" ? { review_status: "passed" as const } : {}),
     };
   });

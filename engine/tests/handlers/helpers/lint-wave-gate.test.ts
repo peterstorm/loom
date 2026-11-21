@@ -16,7 +16,7 @@ import {
   type FileLintResult,
 } from "../../../src/handlers/helpers/lint-wave-gate";
 import type { Task, TaskCommonMetadata } from "../../../src/types";
-import { taskFixture } from "../../fixtures/task-lifecycle";
+import { satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
 import { git } from "../../fixtures/git-repository";
 import type { LintResult } from "../../../src/linter/types";
 import { formatOutput } from "../../../src/linter/formatter";
@@ -29,7 +29,7 @@ const baseTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
-  legacy_missing_proof: true,
+  proof: satisfiedProof([]),
   depends_on: [],
 };
 

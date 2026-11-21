@@ -211,7 +211,7 @@ export const taskMutationCheckSetting = (manifest: FrozenVerificationManifest | 
  * turned I6 off for every graph it froze, no longer typechecks. The wider
  * `FrozenVerificationManifest` is what a TaskGraph frozen before the
  * classification existed reads back as, and what
- * `legacyDefaultVerificationManifest` deliberately returns.
+ * `preI6DefaultVerificationManifest` deliberately returns.
  */
 export type I6EraVerificationManifest = FrozenVerificationManifest & Readonly<{ testFiles: FrozenTestFiles }>;
 
@@ -789,7 +789,7 @@ function i6EraManifest(authority: I6EraAuthority): I6EraVerificationManifest {
 }
 
 const ENGINE_DEFAULT_MANIFEST = i6EraManifest({ kind: "engine-default", testFiles: ENGINE_DEFAULT_TEST_FILES });
-const LEGACY_ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default", testFiles: null });
+const PRE_I6_ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default", testFiles: null });
 
 /**
  * The authority population freezes when `.loom/verification-manifest.json` is
@@ -801,13 +801,14 @@ export function defaultVerificationManifest(): I6EraVerificationManifest {
 }
 
 /**
- * The engine default exactly as frozen before the test-file classification
- * existed: same bytes, same digest. Only read-time fallbacks for a TaskGraph
- * that carries no `verification_manifest` use it, because that graph's
- * receipts were stamped with this digest.
+ * The pre-I6 engine default: the default manifest exactly as frozen before
+ * the test-file classification existed, same bytes and same digest
+ * (ADR-0025). A pre-I6 TaskGraph carries this manifest frozen in its own
+ * State File; since ADR-0098 no read path substitutes it for a missing one,
+ * so its callers are the fixtures that mint pre-I6 graphs.
  */
-export function legacyDefaultVerificationManifest(): FrozenVerificationManifest {
-  return LEGACY_ENGINE_DEFAULT_MANIFEST;
+export function preI6DefaultVerificationManifest(): FrozenVerificationManifest {
+  return PRE_I6_ENGINE_DEFAULT_MANIFEST;
 }
 
 function rawByteDigest(bytes: Uint8Array): ArtifactDigest {

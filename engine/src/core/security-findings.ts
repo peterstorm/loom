@@ -14,6 +14,11 @@
  * - `rejected` is retained with its reason so a later run must bring changed
  *   evidence rather than re-report a disproved claim.
  *
+ * The schemas below are the one statement of each shape: the types are derived
+ * from them, the key sets are theirs, and the cross-field rules (trace order,
+ * severity-vs-impact, a plan to validate, fingerprint order) are refinements
+ * attached to the smallest shape they constrain.
+ *
  * Provenance: this is a port of `report-schema.json` and
  * `validate-findings.cjs` from `cloudflare/security-audit-skill@c1c8a8c`.
  * `engine/tests/security/security-oracle.test.ts` runs both parsers over one
@@ -22,19 +27,20 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import { match } from "ts-pattern";
+import { z } from "zod/v4";
 import { compareStrings } from "./ordering";
-import { failure, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
+import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import {
   SECURITY_AUDIT_LIMITS,
-  deepFrozenCopy,
+  expecting,
+  fingerprintSchema,
   hasVisibleProse,
-  isSafeSourcePath,
-  isSecurityFingerprint,
-  isOneOf,
-  isPositiveInteger,
   isWireRecord,
-  wireViolation,
+  listOf,
+  nonEmptyListOf,
+  parseWire,
+  positiveIntegerSchema,
+  sourcePathSchema,
   type WireViolation,
 } from "./security-audit-contract";
 
@@ -70,86 +76,6 @@ export type ConditionKind = (typeof CONDITION_KINDS)[number];
 export const TRACE_KINDS = ["entrypoint", "propagation", "sink"] as const;
 export type TraceKind = (typeof TRACE_KINDS)[number];
 
-export type TraceStep = Readonly<{
-  kind: TraceKind;
-  file: string;
-  line: number;
-  scope: string;
-  description: string;
-}>;
-
-export type EvidenceEntry = Readonly<{ file: string; line: number; description: string }>;
-export type Condition = Readonly<{ kind: ConditionKind; description: string }>;
-
-export type Execution = Readonly<{
-  attacker_perspective: string;
-  payloads: NonEmpty<string>;
-  instructions: NonEmpty<string>;
-  observed_result: string;
-}>;
-
-export type CodeChange = Readonly<{ file_name: string; fixed_code: string }>;
-export type Remediation = Readonly<{ strategy: string; code_changes?: readonly CodeChange[] }>;
-export type ScoredReason = Readonly<{ score: SeverityScore; reason: string }>;
-export type Severity = Readonly<{
-  likelihood: ScoredReason;
-  impact: ScoredReason;
-  overall_severity: SeverityScore;
-}>;
-export type Confidence = Readonly<{ score: ConfidenceScore; reason: string }>;
-
-export type ConfirmedFinding = Readonly<{
-  verdict: "confirmed";
-  fingerprint: string;
-  title: string;
-  description: string;
-  root_cause: string;
-  intended_behavior: string;
-  trace: NonEmpty<TraceStep>;
-  evidence: NonEmpty<EvidenceEntry>;
-  conditions: readonly Condition[];
-  execution: Execution;
-  remediation: Remediation;
-  severity: Severity;
-  confidence: Confidence;
-}>;
-
-export type ValidationPlan = Readonly<{ local?: string; deployment?: string }>;
-
-export type NeedsValidationFinding = Readonly<{
-  verdict: "needs_validation";
-  fingerprint: string;
-  title: string;
-  description: string;
-  claimed_root_cause: string;
-  trace: NonEmpty<TraceStep>;
-  evidence: NonEmpty<EvidenceEntry>;
-  blockers: NonEmpty<string>;
-  validation_plan: ValidationPlan;
-}>;
-
-export type RejectedFinding = Readonly<{
-  verdict: "rejected";
-  fingerprint: string;
-  title: string;
-  description: string;
-  claimed_root_cause: string;
-  trace: NonEmpty<TraceStep>;
-  evidence: NonEmpty<EvidenceEntry>;
-  reason: string;
-}>;
-
-export type SecurityFinding = ConfirmedFinding | NeedsValidationFinding | RejectedFinding;
-
-/** The findings volume's name for the shared wire diagnostic. */
-export type FindingViolation = WireViolation;
-export type FindingsError = Readonly<{ kind: "invalid-security-findings"; violations: readonly FindingViolation[] }>;
-
-const invalid = (violations: readonly FindingViolation[]): FindingsError => ({
-  kind: "invalid-security-findings",
-  violations,
-});
-
 /** Stable canonical key for structural uniqueness: sorted keys, typed leaves. */
 function canonicalKey(value: unknown): string {
   if (value === null) return "null";
@@ -164,340 +90,195 @@ function canonicalKey(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** Upstream's `visibleContent`: at least one character a reader can see. */
-const isVisible = (value: unknown): value is string =>
-  typeof value === "string" && value.length > 0 && hasVisibleProse(value);
+// --- Field schemas ---
 
+/** Upstream's `visibleContent`: at least one character a reader can see. Not
+ *  trimmed and not length-bounded — upstream's report schema bounds neither. */
+const proseSchema = z.custom<string>(
+  (value) => typeof value === "string" && value.length > 0 && hasVisibleProse(value),
+  expecting("expected visible prose"),
+);
 
-function checkKeys(
-  record: Readonly<Record<string, unknown>>,
-  allowed: readonly string[],
-  required: readonly string[],
-  path: string,
-  violations: FindingViolation[],
-): void {
-  for (const key of required) {
-    if (!(key in record)) violations.push(wireViolation(`${path}.${key}`, "required"));
-  }
-  for (const key of Object.keys(record)) {
-    if (!allowed.includes(key)) violations.push(wireViolation(`${path}.${key}`, "unexpected property"));
-  }
-}
+const enumOf = <const Values extends readonly [string, ...string[]]>(values: Values) =>
+  z.enum(values, expecting(`expected one of ${values.join(", ")}`));
 
-function checkVisible(record: Readonly<Record<string, unknown>>, key: string, path: string, violations: FindingViolation[]): void {
-  if (key in record && !isVisible(record[key])) violations.push(wireViolation(`${path}.${key}`, "expected visible prose"));
-}
+/** Upstream's unique array: within the collection limit, no two entries
+ *  structurally equal — and, for every list but `conditions`, never empty. */
+const uniqueList = <Entry extends z.ZodType>(entry: Entry) => listOf(entry, canonicalKey);
+const uniqueNonEmptyList = <Entry extends z.ZodType>(entry: Entry) => nonEmptyListOf(entry, canonicalKey);
 
-function checkUniqueArray(value: unknown, path: string, violations: FindingViolation[], minimum = 0): void {
-  if (!Array.isArray(value)) {
-    violations.push(wireViolation(path, "expected an array"));
-    return;
-  }
-  if (value.length > SECURITY_AUDIT_LIMITS.collectionItems) violations.push(wireViolation(path, "too many entries"));
-  if (value.length < minimum) violations.push(wireViolation(path, `expected at least ${minimum} entry(ies)`));
-  const seen = new Set<string>();
-  for (const entry of value) {
-    const key = canonicalKey(entry);
-    if (seen.has(key)) violations.push(wireViolation(path, "duplicate entry"));
-    seen.add(key);
-  }
-}
+const traceStepSchema = z
+  .strictObject({
+    kind: z.enum(TRACE_KINDS, expecting("expected entrypoint, propagation or sink")),
+    file: sourcePathSchema,
+    line: positiveIntegerSchema,
+    scope: proseSchema,
+    description: proseSchema,
+  })
+  .readonly();
+export type TraceStep = z.output<typeof traceStepSchema>;
 
-/** A unique array whose every entry must also pass `valid`: the array rule
- *  first, then one violation per failing entry, at its own index. */
-function checkUniqueEntries(
-  value: unknown,
-  path: string,
-  violations: FindingViolation[],
-  entry: Readonly<{ minimum: number; valid: (item: unknown) => boolean; message: string }>,
-): void {
-  checkUniqueArray(value, path, violations, entry.minimum);
-  if (!Array.isArray(value)) return;
-  value.forEach((item, index) => {
-    if (!entry.valid(item)) violations.push(wireViolation(`${path}[${index}]`, entry.message));
-  });
-}
-
-function checkTrace(value: unknown, path: string, violations: FindingViolation[]): void {
-  checkUniqueArray(value, path, violations, 1);
-  if (!Array.isArray(value)) return;
-  value.forEach((entry, index) => {
-    const base = `${path}[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return;
-    }
-    checkKeys(entry, ["kind", "file", "line", "scope", "description"], ["kind", "file", "line", "scope", "description"], base, violations);
-    if (!isOneOf(TRACE_KINDS, entry.kind)) violations.push(wireViolation(`${base}.kind`, "expected entrypoint, propagation or sink"));
-    if (!isSafeSourcePath(entry.file)) violations.push(wireViolation(`${base}.file`, "expected a repository-relative source path"));
-    if (!isPositiveInteger(entry.line)) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
-    checkVisible(entry, "scope", base, violations);
-    checkVisible(entry, "description", base, violations);
-  });
-
-  const steps = value.filter(isWireRecord);
+/** A trace runs entrypoint → propagation… → sink. A one-step trace is the
+ *  entrypoint or the sink itself. */
+const traceSchema = uniqueNonEmptyList(traceStepSchema).superRefine((steps, ctx) => {
   if (steps.length === 1) {
-    const only = steps[0].kind;
-    if (only !== "entrypoint" && only !== "sink") {
-      violations.push(wireViolation(`${path}[0].kind`, "a one-step trace must be entrypoint or sink"));
+    if (steps[0].kind === "propagation") {
+      ctx.addIssue({ code: "custom", path: [0, "kind"], message: "a one-step trace must be entrypoint or sink" });
     }
     return;
   }
-  if (steps.length > 1) {
-    if (steps[0].kind !== "entrypoint") violations.push(wireViolation(`${path}[0].kind`, "must be entrypoint"));
-    steps.slice(1).forEach((step, offset) => {
-      if (offset === steps.length - 2) {
-        if (step.kind !== "sink") violations.push(wireViolation(`${path}[${offset + 1}].kind`, "must be sink"));
-      } else if (step.kind !== "propagation") {
-        violations.push(wireViolation(`${path}[${offset + 1}].kind`, "must be propagation"));
-      }
-    });
-  }
-}
-
-function checkEvidence(value: unknown, path: string, violations: FindingViolation[]): void {
-  checkUniqueArray(value, path, violations, 1);
-  if (!Array.isArray(value)) return;
-  value.forEach((entry, index) => {
-    const base = `${path}[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return;
-    }
-    checkKeys(entry, ["file", "line", "description"], ["file", "line", "description"], base, violations);
-    if (!isSafeSourcePath(entry.file)) violations.push(wireViolation(`${base}.file`, "expected a repository-relative source path"));
-    if (!isPositiveInteger(entry.line)) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
-    checkVisible(entry, "description", base, violations);
+  steps.forEach((step, index) => {
+    const expected: TraceKind = index === 0 ? "entrypoint" : index === steps.length - 1 ? "sink" : "propagation";
+    if (step.kind !== expected) ctx.addIssue({ code: "custom", path: [index, "kind"], message: `must be ${expected}` });
   });
-}
+});
 
-function checkConditions(value: unknown, path: string, violations: FindingViolation[]): void {
-  checkUniqueArray(value, path, violations);
-  if (!Array.isArray(value)) return;
-  value.forEach((entry, index) => {
-    const base = `${path}[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return;
-    }
-    checkKeys(entry, ["kind", "description"], ["kind", "description"], base, violations);
-    if (!isOneOf(CONDITION_KINDS, entry.kind)) violations.push(wireViolation(`${base}.kind`, "unknown condition kind"));
-    checkVisible(entry, "description", base, violations);
-  });
-}
+const evidenceEntrySchema = z.strictObject({ file: sourcePathSchema, line: positiveIntegerSchema, description: proseSchema }).readonly();
+export type EvidenceEntry = z.output<typeof evidenceEntrySchema>;
 
-function checkScoredReason(value: unknown, path: string, scores: readonly string[], violations: FindingViolation[]): void {
-  if (!isWireRecord(value)) {
-    violations.push(wireViolation(path, "expected an object"));
-    return;
-  }
-  checkKeys(value, ["score", "reason"], ["score", "reason"], path, violations);
-  if (!isOneOf(scores, value.score)) violations.push(wireViolation(`${path}.score`, `expected one of ${scores.join(", ")}`));
-  checkVisible(value, "reason", path, violations);
-}
-
-function checkConfirmed(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
-  for (const key of ["title", "description", "root_cause", "intended_behavior"]) {
-    checkVisible(record, key, path, violations);
-  }
-  checkTrace(record.trace, `${path}.trace`, violations);
-  checkEvidence(record.evidence, `${path}.evidence`, violations);
-  checkConditions(record.conditions, `${path}.conditions`, violations);
-  checkExecution(record.execution, `${path}.execution`, violations);
-  checkRemediation(record.remediation, `${path}.remediation`, violations);
-  checkSeverity(record.severity, `${path}.severity`, violations);
-  checkScoredReason(record.confidence, `${path}.confidence`, CONFIDENCE_SCORES, violations);
-}
+const conditionSchema = z.strictObject({ kind: enumOf(CONDITION_KINDS), description: proseSchema }).readonly();
+export type Condition = z.output<typeof conditionSchema>;
 
 /** The bounded run that demonstrated the result: who attacked, with what, how,
  *  and what was observed. */
-function checkExecution(execution: unknown, path: string, violations: FindingViolation[]): void {
-  if (!isWireRecord(execution)) {
-    violations.push(wireViolation(path, "expected an object"));
-    return;
-  }
-  const keys = ["attacker_perspective", "payloads", "instructions", "observed_result"];
-  checkKeys(execution, keys, keys, path, violations);
-  checkVisible(execution, "attacker_perspective", path, violations);
-  checkVisible(execution, "observed_result", path, violations);
-  checkUniqueEntries(execution.payloads, `${path}.payloads`, violations,
-    { minimum: 1, valid: (payload) => typeof payload === "string", message: "expected a string" });
-  checkUniqueEntries(execution.instructions, `${path}.instructions`, violations,
-    { minimum: 1, valid: isVisible, message: "expected visible prose" });
-}
+const executionSchema = z
+  .strictObject({
+    attacker_perspective: proseSchema,
+    payloads: uniqueNonEmptyList(z.string(expecting("expected a string"))),
+    instructions: uniqueNonEmptyList(proseSchema),
+    observed_result: proseSchema,
+  })
+  .readonly();
+export type Execution = z.output<typeof executionSchema>;
+
+const codeChangeSchema = z.strictObject({ file_name: sourcePathSchema, fixed_code: z.string(expecting("expected a string")) }).readonly();
+export type CodeChange = z.output<typeof codeChangeSchema>;
 
 /** The fix strategy, with optional code changes that each name a safe file. */
-function checkRemediation(remediation: unknown, path: string, violations: FindingViolation[]): void {
-  if (!isWireRecord(remediation)) {
-    violations.push(wireViolation(path, "expected an object"));
-    return;
-  }
-  checkKeys(remediation, ["strategy", "code_changes"], ["strategy"], path, violations);
-  checkVisible(remediation, "strategy", path, violations);
-  if (!("code_changes" in remediation)) return;
-  const changes = remediation.code_changes;
-  if (!Array.isArray(changes)) {
-    violations.push(wireViolation(`${path}.code_changes`, "expected an array"));
-    return;
-  }
-  changes.forEach((change, index) => {
-    const base = `${path}.code_changes[${index}]`;
-    if (!isWireRecord(change)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return;
-    }
-    checkKeys(change, ["file_name", "fixed_code"], ["file_name", "fixed_code"], base, violations);
-    if (!isSafeSourcePath(change.file_name)) violations.push(wireViolation(`${base}.file_name`, "expected a repository-relative source path"));
-    if (typeof change.fixed_code !== "string") violations.push(wireViolation(`${base}.fixed_code`, "expected a string"));
-  });
-}
+const remediationSchema = z
+  .strictObject({ strategy: proseSchema, code_changes: z.array(codeChangeSchema).readonly().optional() })
+  .readonly();
+export type Remediation = z.output<typeof remediationSchema>;
+
+const scoredReason = <const Scores extends readonly [string, ...string[]]>(scores: Scores) =>
+  z.strictObject({ score: enumOf(scores), reason: proseSchema }).readonly();
+export type ScoredReason = z.output<ReturnType<typeof scoredReason<typeof SEVERITY_SCORES>>>;
 
 /** Likelihood and impact with reasons, and an overall severity that never
  *  exceeds the demonstrated impact. */
-function checkSeverity(severity: unknown, path: string, violations: FindingViolation[]): void {
-  if (!isWireRecord(severity)) {
-    violations.push(wireViolation(path, "expected an object"));
-    return;
-  }
-  checkKeys(severity, ["likelihood", "impact", "overall_severity"], ["likelihood", "impact", "overall_severity"], path, violations);
-  checkScoredReason(severity.likelihood, `${path}.likelihood`, SEVERITY_SCORES, violations);
-  checkScoredReason(severity.impact, `${path}.impact`, SEVERITY_SCORES, violations);
-  if (!isOneOf(SEVERITY_SCORES, severity.overall_severity)) {
-    violations.push(wireViolation(`${path}.overall_severity`, `expected one of ${SEVERITY_SCORES.join(", ")}`));
-    return;
-  }
-  const impact = isWireRecord(severity.impact) && isOneOf(SEVERITY_SCORES, severity.impact.score) ? severity.impact.score : null;
-  if (impact !== null && SEVERITY_RANK[severity.overall_severity] > SEVERITY_RANK[impact]) {
-    violations.push(wireViolation(`${path}.overall_severity`, `cannot exceed demonstrated impact ${impact}`));
-  }
-}
+const severitySchema = z
+  .strictObject({
+    likelihood: scoredReason(SEVERITY_SCORES),
+    impact: scoredReason(SEVERITY_SCORES),
+    overall_severity: enumOf(SEVERITY_SCORES),
+  })
+  .superRefine((severity, ctx) => {
+    if (SEVERITY_RANK[severity.overall_severity] > SEVERITY_RANK[severity.impact.score]) {
+      ctx.addIssue({ code: "custom", path: ["overall_severity"], message: `cannot exceed demonstrated impact ${severity.impact.score}` });
+    }
+  })
+  .readonly();
+export type Severity = z.output<typeof severitySchema>;
 
-function checkNeedsValidation(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
-  for (const key of ["title", "description", "claimed_root_cause"]) checkVisible(record, key, path, violations);
-  checkTrace(record.trace, `${path}.trace`, violations);
-  checkEvidence(record.evidence, `${path}.evidence`, violations);
-  checkUniqueEntries(record.blockers, `${path}.blockers`, violations,
-    { minimum: 1, valid: isVisible, message: "expected visible prose" });
-  const plan = record.validation_plan;
-  if (!isWireRecord(plan)) {
-    violations.push(wireViolation(`${path}.validation_plan`, "expected an object"));
-    return;
-  }
-  checkKeys(plan, ["local", "deployment"], [], `${path}.validation_plan`, violations);
-  const hasLocal = isVisible(plan.local);
-  const hasDeployment = isVisible(plan.deployment);
-  for (const key of ["local", "deployment"]) {
-    if (key in plan && !isVisible(plan[key])) violations.push(wireViolation(`${path}.validation_plan.${key}`, "expected visible prose"));
-  }
-  if (!hasLocal && !hasDeployment) {
-    violations.push(wireViolation(`${path}.validation_plan`, "requires at least one local or deployment plan"));
-  }
-}
+const confidenceSchema = scoredReason(CONFIDENCE_SCORES);
+export type Confidence = z.output<typeof confidenceSchema>;
 
-function checkRejected(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
-  for (const key of ["title", "description", "claimed_root_cause", "reason"]) checkVisible(record, key, path, violations);
-  checkTrace(record.trace, `${path}.trace`, violations);
-  checkEvidence(record.evidence, `${path}.evidence`, violations);
-}
+/** At least one way to settle the lead: locally, or in a deployment. */
+const validationPlanSchema = z
+  .strictObject({ local: proseSchema.optional(), deployment: proseSchema.optional() })
+  .superRefine((plan, ctx) => {
+    if (plan.local === undefined && plan.deployment === undefined) {
+      ctx.addIssue({ code: "custom", message: "requires at least one local or deployment plan" });
+    }
+  })
+  .readonly();
+export type ValidationPlan = z.output<typeof validationPlanSchema>;
 
-/** Each verdict's exact key set: every key is required and no other is allowed,
- *  so one list serves as both. */
-const VERDICT_KEYS: Readonly<Record<SecurityFinding["verdict"], readonly string[]>> = {
-  confirmed: [
-    "verdict", "fingerprint", "title", "description", "root_cause", "intended_behavior", "trace", "evidence",
-    "conditions", "execution", "remediation", "severity", "confidence",
-  ],
-  needs_validation: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "blockers", "validation_plan"],
-  rejected: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "reason"],
-};
+// --- The three verdicts ---
 
-/** Membership in the verdict vocabulary, read from `VERDICT_KEYS` — the one
- *  owner of which verdicts exist, so a verdict cannot be added to the key table
- *  and missed by the guard. */
-const isVerdict = (value: unknown): value is SecurityFinding["verdict"] =>
-  typeof value === "string" && Object.hasOwn(VERDICT_KEYS, value);
+/** Each verdict's exact key set: every key required, no other allowed. A key
+ *  another verdict carries (a lead with a `severity`) is refused by name: "not
+ *  a field of a needs_validation finding". */
+const verdictShape = <const Verdict extends string, const Shape extends z.ZodRawShape>(verdict: Verdict, shape: Shape) =>
+  z.strictObject(
+    { verdict: z.literal(verdict), fingerprint: fingerprintSchema, title: proseSchema, description: proseSchema, ...shape },
+    { error: (issue) => (issue.code === "unrecognized_keys" ? `not a field of a ${verdict} finding` : undefined) },
+  );
 
-/** Every key some verdict carries.
- *  A stray key found among them belongs to ANOTHER verdict — the more useful diagnostic. */
-const ANY_VERDICT_KEYS: ReadonlySet<string> = new Set(Object.values(VERDICT_KEYS).flat());
+const confirmedFindingShape = verdictShape("confirmed", {
+  root_cause: proseSchema,
+  intended_behavior: proseSchema,
+  trace: traceSchema,
+  evidence: uniqueNonEmptyList(evidenceEntrySchema),
+  conditions: uniqueList(conditionSchema),
+  execution: executionSchema,
+  remediation: remediationSchema,
+  severity: severitySchema,
+  confidence: confidenceSchema,
+});
 
-/** A finding's keys against its verdict's one closed set (`VERDICT_KEYS`):
- *  every key required, no other allowed. A stray key that another verdict
- *  carries (a lead with a `severity`) is named as such — the one source of
- *  truth for which fields a verdict may carry, and one violation per key. */
-function checkVerdictKeys(
-  record: Readonly<Record<string, unknown>>,
-  verdict: SecurityFinding["verdict"],
-  path: string,
-  violations: FindingViolation[],
-): void {
-  const allowed = VERDICT_KEYS[verdict];
-  for (const key of allowed) {
-    if (!(key in record)) violations.push(wireViolation(`${path}.${key}`, "required"));
-  }
-  for (const key of Object.keys(record)) {
-    if (allowed.includes(key)) continue;
-    violations.push(wireViolation(`${path}.${key}`, ANY_VERDICT_KEYS.has(key) ? `${verdict} findings must not carry this field` : "unexpected property"));
-  }
-}
+const needsValidationFindingShape = verdictShape("needs_validation", {
+  claimed_root_cause: proseSchema,
+  trace: traceSchema,
+  evidence: uniqueNonEmptyList(evidenceEntrySchema),
+  blockers: uniqueNonEmptyList(proseSchema),
+  validation_plan: validationPlanSchema,
+});
+
+const rejectedFindingShape = verdictShape("rejected", {
+  claimed_root_cause: proseSchema,
+  trace: traceSchema,
+  evidence: uniqueNonEmptyList(evidenceEntrySchema),
+  reason: proseSchema,
+});
+
+const securityFindingSchema = z
+  .discriminatedUnion("verdict", [confirmedFindingShape, needsValidationFindingShape, rejectedFindingShape], {
+    error: (issue) => (isWireRecord(issue.input) ? "expected one of confirmed, needs_validation, rejected" : "expected an object"),
+  })
+  .readonly();
+
+export type SecurityFinding = z.output<typeof securityFindingSchema>;
+export type ConfirmedFinding = Extract<SecurityFinding, Readonly<{ verdict: "confirmed" }>>;
+export type NeedsValidationFinding = Extract<SecurityFinding, Readonly<{ verdict: "needs_validation" }>>;
+export type RejectedFinding = Extract<SecurityFinding, Readonly<{ verdict: "rejected" }>>;
+
+/**
+ * A `security-findings.json` document: at most `findings` records, each
+ * fingerprint once, in lexicographic fingerprint order.
+ */
+export const securityFindingsSchema = z
+  .array(securityFindingSchema, expecting("expected a top-level array"))
+  .max(SECURITY_AUDIT_LIMITS.findings, `exceeds ${SECURITY_AUDIT_LIMITS.findings} findings`)
+  .superRefine((findings, ctx) => {
+    const first = new Map<string, number>();
+    findings.forEach((finding, index) => {
+      const previous = first.get(finding.fingerprint);
+      if (previous === undefined) first.set(finding.fingerprint, index);
+      else ctx.addIssue({ code: "custom", path: [index, "fingerprint"], message: `duplicate of the fingerprint at index ${previous}` });
+      const before = findings[index - 1];
+      if (before !== undefined && compareStrings(before.fingerprint, finding.fingerprint) > 0) {
+        ctx.addIssue({ code: "custom", path: [index, "fingerprint"], message: "findings must be sorted lexicographically" });
+      }
+    });
+  })
+  .readonly();
+
+/** The findings volume's name for the shared wire diagnostic. */
+export type FindingViolation = WireViolation;
+export type FindingsError = Readonly<{ kind: "invalid-security-findings"; violations: readonly FindingViolation[] }>;
 
 /**
  * Parse and fully validate a `security-findings.json` document. Validity here
  * is exactly the document contract: shape, field semantics, trace ordering,
  * severity-vs-impact, per-verdict exclusion, sort and uniqueness. It says
  * nothing about whether the claims are true — that is what the refutation panel
- * is for.
+ * is for. The value returned is the parser's own deep-frozen copy, never the
+ * caller's document.
  */
 export function parseSecurityFindings(raw: unknown): DomainResult<readonly SecurityFinding[], FindingsError> {
-  const violations: FindingViolation[] = [];
-  if (!Array.isArray(raw)) {
-    violations.push(wireViolation("$", "expected a top-level array"));
-    return failure(invalid(violations));
-  }
-  if (raw.length > SECURITY_AUDIT_LIMITS.findings) {
-    violations.push(wireViolation("$", `exceeds ${SECURITY_AUDIT_LIMITS.findings} findings`));
-    return failure(invalid(violations));
-  }
-
-  const fingerprints = new Map<string, number>();
-  let previousFingerprint: string | null = null;
-
-  raw.forEach((entry, index) => {
-    const path = `$[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push(wireViolation(path, "expected an object"));
-      return;
-    }
-    if (!isVerdict(entry.verdict)) {
-      violations.push(wireViolation(`${path}.verdict`, `expected one of ${Object.keys(VERDICT_KEYS).join(", ")}`));
-      return;
-    }
-    checkVerdictKeys(entry, entry.verdict, path, violations);
-
-    if (!isSecurityFingerprint(entry.fingerprint)) {
-      violations.push(wireViolation(`${path}.fingerprint`, "expected a stable source-derived fingerprint"));
-    } else {
-      const previous = fingerprints.get(entry.fingerprint);
-      if (previous !== undefined) violations.push(wireViolation(`${path}.fingerprint`, `duplicate of $[${previous}].fingerprint`));
-      else fingerprints.set(entry.fingerprint, index);
-      if (previousFingerprint !== null && compareStrings(previousFingerprint, entry.fingerprint) > 0) {
-        violations.push(wireViolation(`${path}.fingerprint`, "findings must be sorted lexicographically"));
-      }
-      previousFingerprint = entry.fingerprint;
-    }
-
-    match(entry.verdict)
-      .with("confirmed", () => checkConfirmed(entry, path, violations))
-      .with("needs_validation", () => checkNeedsValidation(entry, path, violations))
-      .with("rejected", () => checkRejected(entry, path, violations))
-      .exhaustive();
-  });
-
-  // Every key, field and ordering rule of the union was checked above, so the
-  // copy IS a `SecurityFinding[]` — the validator is the proof the cast names.
-  return violations.length === 0
-    ? success(deepFrozenCopy(raw) as readonly SecurityFinding[])
-    : failure(invalid(violations));
+  const parsed = parseWire(securityFindingsSchema, raw);
+  return parsed.ok ? parsed : failure({ kind: "invalid-security-findings", violations: parsed.error });
 }
 
 /** Records in canonical order: lexicographic by fingerprint. The one ordering
@@ -689,14 +470,4 @@ export function fileCandidates(
   const consolidated = consolidateCandidates(sortByFingerprint([...existing, ...fresh]), new Set(held.keys()));
   const findings = parseSecurityFindings(consolidated.kept);
   return findings.ok ? success({ findings: findings.value, absorbed: consolidated.absorbed }) : findings;
-}
-
-/** The adjudication ballot: loom's two levels, with the five-level ladder kept
- *  as recorded context. `null` means "no severity recorded" (needs_validation). */
-export function overallSeverity(finding: SecurityFinding): SeverityScore | null {
-  return finding.verdict === "confirmed" ? finding.severity.overall_severity : null;
-}
-
-export function severityAtLeast(score: SeverityScore, floor: SeverityScore): boolean {
-  return SEVERITY_RANK[score] >= SEVERITY_RANK[floor];
 }

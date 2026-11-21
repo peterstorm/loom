@@ -23,7 +23,13 @@ import { match, P } from "ts-pattern";
 import type { TaskGraph, Task, TaskStatus } from "../types";
 import { redThenGreenDuty } from "./implementation-application";
 import type { NonEmpty } from "./orchestration-contract";
-import { redThenGreenScope, writtenContract, type ProofFailure, type ProofObligationResult } from "./proof-obligations";
+import {
+  redThenGreenOwing,
+  redThenGreenScope,
+  type ProofFailure,
+  type ProofObligationResult,
+  type RedThenGreenExemption,
+} from "./proof-obligations";
 import { judgeRedThenGreen, redThenGreenFailureKind } from "./red-then-green";
 import type { Evidence } from "../machine/types";
 import type {
@@ -35,7 +41,7 @@ import type {
 import { UNKNOWN_TASK_PREFIX } from "./stop-check-plan-types";
 import { classifyTaskFiles } from "./test-file-classification";
 import type { TestEvidencePolicy } from "./test-evidence-policy";
-import { COVERED_BY_ACCEPTANCE_CONTRACT, taskVerificationPolicy, type NewTestWaiverReason } from "./verification-policy";
+import { taskVerificationPolicy } from "./verification-policy";
 
 // --- Inputs ---
 
@@ -63,20 +69,21 @@ export type RedThenGreenStatusInput = Readonly<{
 
 // --- The view ---
 
-/** Why a `not-owed` duty is not owed: the first that applies, in this order. */
+/**
+ * Why a `not-owed` duty is not owed: the duty rule's exemption
+ * (`redThenGreenOwing`), or `no-obligation-in-proof` when the rule owes I6 but
+ * the frozen Proof carries none. INV-6's load check leaves that only to a
+ * tests-only reopening (ADR-0093), whose Proof replaces I6 with its own
+ * obligations.
+ */
 export type NotOwedReason =
-  | Readonly<{ kind: "predates-i6" }>
-  /** The Task writes this Acceptance Contract (its id, from `writtenContract`), so `taskRedThenGreenEra` exempts it. */
-  | Readonly<{ kind: "contract-writer"; contract: string }>
-  | Readonly<{ kind: "claimant" }>
-  | Readonly<{ kind: "new-tests-waived"; reason: NewTestWaiverReason }>
-  /** For totality only: INV-6's load check makes it unreachable for a parsed graph. */
+  | RedThenGreenExemption
   | Readonly<{ kind: "no-obligation-in-proof" }>;
 
 export type DutyView =
   | Readonly<{ kind: "owed"; classification: TestFileClassification }>
   | Readonly<{ kind: "not-owed"; reason: NotOwedReason }>
-  /** `redThenGreenDuty`'s `classification-unfrozen` and `proof-unfrozen`, with their reason. */
+  /** `redThenGreenDuty`'s `classification-unfrozen`, with its reason. */
   | Readonly<{ kind: "undeterminable"; reason: string }>;
 
 export type LiveView =
@@ -89,8 +96,6 @@ export type LiveView =
   | Readonly<{ kind: "judged"; observation: RedThenGreenObservation }>;
 
 export type StoredView =
-  /** `legacy_missing_proof`: the Task carries no frozen Proof. */
-  | Readonly<{ kind: "no-proof" }>
   /** The frozen Proof owes no red-then-green. */
   | Readonly<{ kind: "no-obligation" }>
   | Readonly<{ kind: "pending" }>
@@ -142,7 +147,6 @@ export const LIVE_UNREADABLE = "unreadable";
 export const LIVE_NOT_JUDGED = "not judged (no I6 obligation to judge it by)";
 
 export const STORED_PREFIX = "stored:";
-export const STORED_NO_PROOF = "no proof (legacy)";
 export const STORED_NO_OBLIGATION = "no red-then-green obligation";
 export const STORED_PENDING = "pending";
 
@@ -160,25 +164,16 @@ const INDENT = "  ";
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 
-const PREDATES_I6: NotOwedReason = freeze({ kind: "predates-i6" });
-const CLAIMANT: NotOwedReason = freeze({ kind: "claimant" });
 const NO_OBLIGATION_IN_PROOF: NotOwedReason = freeze({ kind: "no-obligation-in-proof" });
 const NOT_JUDGED: LiveView = freeze({ kind: "not-judged" });
-const NO_PROOF: StoredView = freeze({ kind: "no-proof" });
 const NO_OBLIGATION: StoredView = freeze({ kind: "no-obligation" });
 const STORED_PENDING_VIEW: StoredView = freeze({ kind: "pending" });
 
+/** The duty rule's exemption: it explains a `not-owed` duty and never decides one. */
 function notOwedReason(task: Task, graph: TaskGraph): NotOwedReason {
   const scope = redThenGreenScope(graph.verification_manifest, graph.acceptance_contracts ?? []);
-  if (scope.era === "not-owed") return PREDATES_I6;
-  const contract = writtenContract(scope, task.id);
-  if (contract !== undefined) return freeze({ kind: "contract-writer", contract });
-  return match(taskVerificationPolicy(task).newTests)
-    .returnType<NotOwedReason>()
-    .with({ kind: "waived", reason: COVERED_BY_ACCEPTANCE_CONTRACT }, () => CLAIMANT)
-    .with({ kind: "waived" }, ({ reason }) => freeze({ kind: "new-tests-waived", reason }))
-    .with({ kind: "required" }, () => NO_OBLIGATION_IN_PROOF)
-    .exhaustive();
+  const owing = redThenGreenOwing(scope, task.id, taskVerificationPolicy(task));
+  return owing.kind === "not-owed" ? owing.exemption : NO_OBLIGATION_IN_PROOF;
 }
 
 function dutyView(task: Task, graph: TaskGraph): DutyView {
@@ -188,7 +183,7 @@ function dutyView(task: Task, graph: TaskGraph): DutyView {
       // The same arguments settlement classifies by, so a Task that creates its module is judged by FR-007a.
       freeze({ kind: "owed", classification: classifyTaskFiles(task.file_list ?? [], owed.testFiles, task.artifact_baseline) }))
     .with({ kind: "not-owed" }, () => freeze({ kind: "not-owed", reason: notOwedReason(task, graph) }))
-    .with({ kind: P.union("classification-unfrozen", "proof-unfrozen") }, ({ reason }) =>
+    .with({ kind: "classification-unfrozen" }, ({ reason }) =>
       freeze({ kind: "undeterminable", reason }))
     .exhaustive();
 }
@@ -223,8 +218,6 @@ const redThenGreenResult = (result: ProofObligationResult): StoredView | undefin
 /** The Proof's `results` hold each obligation's latest evaluation, so a
  *  retry-pending Task (pending with a failed Proof) shows its latest gap. */
 function storedView(task: Task): StoredView {
-  // Only the `legacy_missing_proof` lifecycle arm carries no Proof.
-  if (task.proof === undefined) return NO_PROOF;
   return task.proof.results.map(redThenGreenResult).find((view) => view !== undefined) ?? NO_OBLIGATION;
 }
 
@@ -305,7 +298,6 @@ const liveLines = (live: LiveView): readonly string[] =>
 const storedLines = (stored: StoredView): readonly string[] =>
   match(stored)
     .returnType<readonly string[]>()
-    .with({ kind: "no-proof" }, () => [`${STORED_PREFIX} ${STORED_NO_PROOF}`])
     .with({ kind: "no-obligation" }, () => [`${STORED_PREFIX} ${STORED_NO_OBLIGATION}`])
     .with({ kind: "pending" }, () => [`${STORED_PREFIX} ${STORED_PENDING}`])
     .with({ kind: "satisfied" }, (satisfied) => shownLines(STORED_PREFIX, satisfied))

@@ -45,9 +45,9 @@ import {
   assignUnits,
   parseCoverageSeeds,
   recordUnitResult,
-  validateLedger,
   type CoverageLedger,
   type CoverageSeed,
+  type LocalCheck,
   type TerminalDisposition,
 } from "../../src/core/security-coverage";
 import { SEVERITY_SCORES, parseSecurityFindings, type SecurityFinding, type SeverityScore } from "../../src/core/security-findings";
@@ -56,7 +56,7 @@ import { selectSecurityLenses, type StackSignals } from "../../src/core/security
 import { SECURITY_LENSES, type SecurityLens } from "../../src/core/security-lenses";
 import { securityDisposition } from "../../src/core/security-disposition";
 import { derivePublication } from "../../src/core/security-reports";
-import { BOOLEAN_SIGNALS, HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
+import { BOOLEAN_SIGNALS, HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ledgerViolations, ok } from "./fixtures";
 
 const CALIBRATION_ROOT = resolve(__dirname, "../fixtures/security/calibration");
 
@@ -164,7 +164,7 @@ const coverageIdOf = (defect: PlantedDefect): string => canonicalCoverageId(refs
 /** The one source check a hunter settles `defect`'s unit with. The golden
  *  ledger and the helper-driven run both settle with exactly this, so the two
  *  runs stay comparable by construction. */
-const checkFor = (defect: PlantedDefect) => ({
+const checkFor = (defect: PlantedDefect): LocalCheck => ({
   agent_id: HUNTER_AGENT,
   reviewed_paths: [defect.file],
   invariant: `No untrusted input reaches the sink in ${defect.subsystem}.`,
@@ -194,7 +194,7 @@ const unreachedDefects = (ledger: CoverageLedger): readonly string[] =>
 
 /** Drive every seeded unit through the ledger's own transitions — assigned to
  *  the catalog hunter, then settled with one source check over the defect's
- *  file — so the settled ledger is one `validateLedger` accepts, not a forged
+ *  file — so the settled ledger is one `parseLedger` accepts, not a forged
  *  spread of planned units. `candidate` files the defect's fingerprint. */
 const settledLedger = (status: Extract<TerminalDisposition, "covered" | "candidate">): CoverageLedger => {
   const planned = ledgerOf();
@@ -352,7 +352,7 @@ const recordedRun = () => {
 describe("a recorded run reaches every planted defect", () => {
   it("settles a ledger the state machine itself accepts", () => {
     const { ledger } = recordedRun();
-    expect(validateLedger(ledger)).toEqual([]);
+    expect(ledgerViolations(ledger)).toEqual([]);
     expect(ledger.every((unit) => unit.status === "candidate")).toBe(true);
   });
 
@@ -440,7 +440,7 @@ describe("the fixture is not a happy-path prop", () => {
     const { findings } = recordedRun();
     const metadata = aRunMetadata({ ...METADATA, selectedCompanions: ["ATTACK-CLASSES.md"] });
     const ledger = settledLedger("covered");
-    expect(validateLedger(ledger)).toEqual([]);
+    expect(ledgerViolations(ledger)).toEqual([]);
     const sqli = findings.filter((finding) => finding.fingerprint === "calibration/cal-sqli-01");
     expect(sqli).toHaveLength(1);
     const report = ok(derivePublication({ metadata, ledger, findings: sqli, locator: "/calibration", commands: loomCommandsAt("/loom") })).documents["REPORT.md"];

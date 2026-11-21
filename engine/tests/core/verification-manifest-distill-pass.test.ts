@@ -11,7 +11,7 @@ import {
   defaultVerificationManifest,
   distillPassSetting,
   freezeVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   parseFrozenVerificationManifest,
   parseVerificationManifest,
   type FrozenVerificationManifest,
@@ -66,7 +66,7 @@ describe("distillPass in the source manifest", () => {
     expect("distillPass" in manifest).toBe(false);
     expect(distillPassSetting(manifest)).toBe("on");
     expect(distillPassSetting(defaultVerificationManifest())).toBe("on");
-    expect(distillPassSetting(legacyDefaultVerificationManifest())).toBe("on");
+    expect(distillPassSetting(preI6DefaultVerificationManifest())).toBe("on");
     expect(distillPassSetting(undefined)).toBe("on");
   });
 
@@ -90,7 +90,7 @@ describe("distillPass in the source manifest", () => {
 describe("distillPass and the manifest digest", () => {
   it("leaves the engine defaults' digests where they were", () => {
     expect(defaultVerificationManifest().manifestDigest).toBe(PRE_FEATURE_DEFAULT_DIGEST);
-    expect(legacyDefaultVerificationManifest().manifestDigest).toBe(PRE_FEATURE_LEGACY_DIGEST);
+    expect(preI6DefaultVerificationManifest().manifestDigest).toBe(PRE_FEATURE_LEGACY_DIGEST);
     expect("distillPass" in defaultVerificationManifest()).toBe(false);
   });
 

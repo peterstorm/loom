@@ -21,6 +21,7 @@ import {
 } from "../../../src/handlers/helpers/exact-implementation-settlement";
 import type { TaskGraph, TaskTestResult } from "../../../src/types";
 import { taskFixture } from "../../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 function authority(reservationId = "shared-exact"): ImplementationAttemptAuthority {
   const parsed = createImplementationAttemptAuthority({
@@ -56,6 +57,7 @@ function graph(attempt: ImplementationAttemptAuthority, newTestsRequired = false
   });
   return {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -79,8 +81,7 @@ function facts(
     parserModifiedPaths: [],
     parserPathLabel: `${transport} fixture paths`,
     taskCompleted: true,
-    testResult,
-    testEvidence: `${transport} evidence`,
+    test: { result: testResult, evidence: `${transport} evidence` },
     proofEvaluationPolicy: transport === "Claude"
       ? TRUSTED_LEDGER_ONLY_POLICY
       : PI_STRUCTURED_EVIDENCE_POLICY,
@@ -90,7 +91,6 @@ function facts(
 }
 
 function ports(
-  attempt: ImplementationAttemptAuthority,
   newTests = parseNewTestEvidence(false, "verification waived"),
 ): ExactImplementationSettlementPorts {
   return {
@@ -98,7 +98,6 @@ function ports(
       root: "/fixture",
       authoritativeStatePath: "/fixture/.claude/state/active_task_graph.json",
       observeTaskLocal: () => buildTaskLocalByteObservation({
-        authority: attempt,
         attemptBaseline: [],
         currentAttemptScope: [],
         proofBaseline: [],
@@ -132,14 +131,13 @@ describe("shared exact implementation settlement shell", () => {
     });
     let observedSiblingPaths: readonly string[] = [];
     const observingPorts: ExactImplementationSettlementPorts = {
-      ...ports(attempt),
+      ...ports(),
       repository: {
         root: "/fixture",
         authoritativeStatePath: "/fixture/.claude/state/active_task_graph.json",
         observeTaskLocal: (args) => {
           observedSiblingPaths = args.siblingOwnedPaths;
           return buildTaskLocalByteObservation({
-            authority: attempt,
             attemptBaseline: [],
             currentAttemptScope: [],
             proofBaseline: [],
@@ -164,7 +162,7 @@ describe("shared exact implementation settlement shell", () => {
 
   it.each(TRANSPORTS)("settles accepted %s facts through the same operation", (transport) => {
     const attempt = authority(`accepted-${transport}`);
-    const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), ports(attempt));
+    const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), ports());
     expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
   });
 
@@ -173,7 +171,7 @@ describe("shared exact implementation settlement shell", () => {
     const settled = settleExactImplementation(
       graph(attempt, true),
       facts(transport, attempt),
-      ports(attempt, parseNewTestEvidence(false, "no attributed tests")),
+      ports(parseNewTestEvidence(false, "no attributed tests")),
     );
     expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "retry-required" } });
     expect(settled).not.toHaveProperty("infrastructureReason");
@@ -182,11 +180,11 @@ describe("shared exact implementation settlement shell", () => {
   it.each(TRANSPORTS)("settles %s repository uncertainty as infrastructure", (transport) => {
     const attempt = authority(`infrastructure-${transport}`);
     const unavailablePorts: ExactImplementationSettlementPorts = {
-      ...ports(attempt),
+      ...ports(),
       repository: {
         root: "/fixture",
         authoritativeStatePath: "/fixture/.claude/state/active_task_graph.json",
-        observeTaskLocal: () => unavailableTaskLocalByteObservation(attempt, "HEAD drift"),
+        observeTaskLocal: () => unavailableTaskLocalByteObservation("HEAD drift"),
       },
     };
     const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), unavailablePorts);
@@ -197,7 +195,7 @@ describe("shared exact implementation settlement shell", () => {
   it.each(TRANSPORTS)("archives thrown %s task-local observation failures as infrastructure", (transport) => {
     const attempt = authority(`task-local-defect-${transport}`);
     const defectPorts: ExactImplementationSettlementPorts = {
-      ...ports(attempt),
+      ...ports(),
       repository: {
         root: "/fixture",
         authoritativeStatePath: "/fixture/.claude/state/active_task_graph.json",
@@ -217,22 +215,22 @@ describe("shared exact implementation settlement shell", () => {
   it.each(TRANSPORTS)("keeps stale %s authority non-positive", (transport) => {
     const attempt = authority(`stale-${transport}`);
     const replacement = authority(`replacement-${transport}`);
-    const settled = settleExactImplementation(graph(replacement), facts(transport, attempt), ports(attempt));
+    const settled = settleExactImplementation(graph(replacement), facts(transport, attempt), ports());
     expect(settled.application).toMatchObject({ kind: "ignored", reason: "stale" });
   });
 
   it.each(TRANSPORTS)("keeps duplicate %s delivery idempotent", (transport) => {
     const attempt = authority(`duplicate-${transport}`);
-    const first = settleExactImplementation(graph(attempt), facts(transport, attempt), ports(attempt));
+    const first = settleExactImplementation(graph(attempt), facts(transport, attempt), ports());
     if (first.application.kind !== "applied") throw new Error("fixture must settle once");
-    const duplicate = settleExactImplementation(first.application.state, facts(transport, attempt), ports(attempt));
+    const duplicate = settleExactImplementation(first.application.state, facts(transport, attempt), ports());
     expect(duplicate.application).toMatchObject({ kind: "ignored", reason: "duplicate" });
   });
 
   it.each(TRANSPORTS)("settles typed unavailable %s new-test observations as infrastructure", (transport) => {
     const attempt = authority(`new-test-unavailable-${transport}`);
     const failingPorts: ExactImplementationSettlementPorts = {
-      ...ports(attempt),
+      ...ports(),
       newTests: { collect: () => ({
         ok: false,
         error: { kind: "git-observation-failed", operation: "diff-worktree", message: "index unreadable" },
@@ -247,7 +245,7 @@ describe("shared exact implementation settlement shell", () => {
   it.each(TRANSPORTS)("archives thrown %s new-test observation failures as infrastructure", (transport) => {
     const attempt = authority(`new-test-defect-${transport}`);
     const defectPorts: ExactImplementationSettlementPorts = {
-      ...ports(attempt),
+      ...ports(),
       newTests: { collect: () => { throw new TypeError("collector invariant broke"); } },
     };
     const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), defectPorts);
@@ -296,7 +294,7 @@ describe("shared exact implementation settlement shell", () => {
         proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] }),
       })),
     };
-    const settled = settleExactImplementation(provenanceGraph, facts("Pi", attempt, untrusted), ports(attempt));
+    const settled = settleExactImplementation(provenanceGraph, facts("Pi", attempt, untrusted), ports());
     expect(settled.application.kind).toBe("applied");
     if (settled.application.kind !== "applied") return;
     expect(settled.application.state.tasks[0]?.proof).toMatchObject({

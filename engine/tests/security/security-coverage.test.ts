@@ -40,19 +40,21 @@ import {
   seedCoverageUnit,
   sortLedger,
   summarizeCoverage,
-  validateLedger,
   type Assignment,
   type CoverageCriticResult,
   type CoverageError,
   type CoverageLedger,
   type CoverageSeed,
+  type CoverageAttempt,
   type CoverageUnit,
   type CriticError,
+  type LocalCheck,
+  type UnitResult,
 } from "../../src/core/security-coverage";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import { AGENT_POLICIES } from "../../src/core/model-profiles";
 import { isSecurityAgentId, SECURITY_AUDIT_LIMITS, type SecurityAgentId } from "../../src/core/security-audit-contract";
-import { HUNTER_AGENT as HUNTER, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
+import { HUNTER_AGENT as HUNTER, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ledgerViolations, ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const FIXTURES = join(import.meta.dirname, "..", "fixtures", "security", "upstream");
@@ -63,7 +65,7 @@ type UpstreamLedgerValidator = {
 
 const upstream = require(join(FIXTURES, "validate-coverage-ledger.cjs")) as UpstreamLedgerValidator;
 const upstreamValid = (ledger: unknown): boolean => upstream.validateDocument(ledger).length === 0;
-const oursValid = (ledger: unknown): boolean => validateLedger(ledger as CoverageLedger).length === 0;
+const oursValid = (ledger: unknown): boolean => ledgerViolations(ledger).length === 0;
 
 /** Mutations of a valid ledger that the vendored validator ACCEPTS and this port
  *  rejects — the places this port is deliberately stricter. Enumerated by name,
@@ -95,7 +97,7 @@ const seed = (overrides: Partial<Parameters<typeof seedCoverageUnit>[0]> = {}) =
     ...overrides,
   }));
 
-const evidence = (agentId: SecurityAgentId, fingerprint: string) => ({
+const evidence = (agentId: SecurityAgentId, fingerprint: string): Omit<UnitResult, "coverageId" | "wave"> => ({
   agentId,
   status: "candidate" as const,
   reviewedPaths: ["src/reports/controller.ts"],
@@ -196,7 +198,7 @@ describe("coverage ledger: TS port vs upstream validator", () => {
       }
       if (upstreamAnswer) acceptedByUpstream.push(mutation.name);
     }
-    // Every mutation in the table is a defect `validateLedger` must name. This
+    // Every mutation in the table is a defect `parseLedger` must name. This
     // is the assertion the previous loop only appeared to make: its second
     // expectation compared `upstreamAnswer` against `ourAnswer || upstreamAnswer`,
     // which fails only when `ourAnswer && !upstreamAnswer` — the exact condition
@@ -271,18 +273,18 @@ describe("coverage ledger: state machine", () => {
     const stale = recordUnitResult(reassigned.ledger, { coverageId: unit.coverage_id, ...evidence(HUNTER, "tenant-scope/cache-key"), wave: 2 });
     expect(stale.ok).toBe(false);
     const rehunted = settled(reassigned.ledger, unit.coverage_id, HUNTER_2, "tenant-scope/cache-key", 2);
-    expect(validateLedger(rehunted)).toEqual([]);
+    expect(ledgerViolations(rehunted)).toEqual([]);
     expect(upstreamValid(rehunted)).toBe(true);
   });
 
   it("mints the lowest owner id no archived attempt has spent", () => {
     const unit = seed();
-    const archived = (wave: number, agent_id: SecurityAgentId) => ({
+    const archived = (wave: number, agent_id: SecurityAgentId): CoverageAttempt => ({
       wave,
       status: "covered" as const,
       agent_id,
       reviewed_paths: ["src/reports/controller.ts"],
-      local_checks: [{ ...evidence(agent_id, "x").checks[0] }],
+      local_checks: evidence(agent_id, "x").checks,
       result_fingerprints: [],
       unresolved: [],
       reassignment_reason: "critic: walk it again",
@@ -290,7 +292,7 @@ describe("coverage ledger: state machine", () => {
     // Attempts spent the bare name and `--3` (an operator-chosen gap): the next
     // fresh owner is `--4`, never a name an attempt already used.
     const third = { ...unit, wave: 3, attempts: [archived(1, HUNTER), archived(2, anAgentId(`${HUNTER}--3`))] };
-    expect(validateLedger([third])).toEqual([]);
+    expect(ledgerViolations([third])).toEqual([]);
     const result = ok(assignUnits([third], [{ coverageId: unit.coverage_id, agentId: HUNTER }]));
     expect(result.assigned[0].ownerId).toBe(`${HUNTER}--4`);
   });
@@ -362,7 +364,7 @@ describe("coverage ledger: state machine", () => {
     expect(coverageSettled(deferred)).toBe(true);
     expect(coverageComplete(deferred)).toBe(false);
     expect(summarizeCoverage(deferred).deferred).toHaveLength(2);
-    expect(validateLedger(deferred)).toEqual([]);
+    expect(ledgerViolations(deferred)).toEqual([]);
     expect(upstreamValid(deferred)).toBe(true);
   });
 
@@ -370,7 +372,7 @@ describe("coverage ledger: state machine", () => {
     const a = seed({ refs: aRefs({ surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" }) });
     const b = seed({ refs: aRefs({ surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" }) });
     expect(sortLedger([b, a]).map((unit) => unit.coverage_id)).toEqual(sortLedger([a, b]).map((unit) => unit.coverage_id));
-    expect(validateLedger(sortLedger([b, a]))).toEqual([]);
+    expect(ledgerViolations(sortLedger([b, a]))).toEqual([]);
   });
 });
 
@@ -412,12 +414,29 @@ describe("mergeCritic fails closed rather than dropping a lead or erasing an att
       { kind: "missing-reassignment-reason", coverageId: unit.coverage_id }],
     ["a reassignment whose reason is blank", candidate, critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: { [unit.coverage_id]: "  " } },
       { kind: "missing-reassignment-reason", coverageId: unit.coverage_id }],
-    ["a settled unit with no recorded owner", () => [{ ...candidate()[0]!, agent_id: null }], critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: REASON },
-      { kind: "terminal-unit-has-no-owner", coverageId: unit.coverage_id, status: "candidate" }],
   ])("refuses %s, naming it", (_case, ledger, result, maps, expected) => {
     const refused = mergeCritic(ledger(), result, { wave: 2, ...maps });
     expect(refused.ok).toBe(false);
     expect(refused.ok ? null : refused.error).toEqual(expected);
+  });
+
+  it("cannot be handed a settled unit with no owner: the type refuses to build one, and the parser to read one", () => {
+    const [settledUnit] = candidate();
+    // @ts-expect-error — a candidate unit's owner is a SecurityAgentId, never null.
+    const ownerless: CoverageLedger = [{ ...settledUnit!, agent_id: null }];
+    expect(refusedPaths(parseLedger(JSON.parse(JSON.stringify(ownerless))))).toEqual(["$[0].agent_id"]);
+  });
+
+  it("refuses a resolution that would leave a blocked unit without the fact its status requires", () => {
+    const blockedOnLead = ok(recordUnitResult(assigned([unit], unit.coverage_id, HUNTER), {
+      coverageId: unit.coverage_id, ...evidence(HUNTER, "unused"), status: "blocked", fingerprints: [], unresolved: ["prior/lead-1"], wave: 1,
+    }));
+    const refused = mergeCritic(blockedOnLead, critic({ resolvedPriorLeads: ["prior/lead-1"] }),
+      { wave: 2, reassignmentReasons: {}, priorLeadOwners: { "prior/lead-1": unit.coverage_id } });
+    expect(refused.ok ? null : refused.error).toEqual({
+      kind: "invalid-coverage-operation",
+      violations: [{ path: "$[0].unresolved", message: "status blocked requires unresolved facts" }],
+    });
   });
 
   it("refuses a reassignment of an unknown coverage id as a named violation", () => {
@@ -459,11 +478,11 @@ describe("parseLedger returns its own proof, never the caller's array", () => {
     const unit = seed();
     const parsed = ok(parseLedger(JSON.parse(JSON.stringify([unit]))));
     const inFlight = assigned(parsed, unit.coverage_id, HUNTER);
-    expect(validateLedger(settled(inFlight, unit.coverage_id, HUNTER, "tenant-scope/cache-key"))).toEqual([]);
+    expect(ledgerViolations(settled(inFlight, unit.coverage_id, HUNTER, "tenant-scope/cache-key"))).toEqual([]);
   });
 
   it("returns only branded owner ids: a stored owner the grammar refuses is named, at every owner site the ledger type declares", () => {
-    // `parseLedger` narrows to `CoverageLedger` once `validateLedger` is silent.
+    // `parseLedger` narrows to `CoverageLedger` once `parseLedger` is silent.
     // `OWNER_SITES` is keyed by every path whose type is a SecurityAgentId, so
     // a new owner field fails to compile here until it is proved refused.
     const unit = seed();
@@ -484,9 +503,10 @@ describe("parseLedger returns its own proof, never the caller's array", () => {
 });
 
 /** Every path of `T` whose value the type claims is a SecurityAgentId (null
- *  allowed), spelled as `validateLedger` names it: `[0]` for an element. */
+ *  allowed), spelled as `parseLedger` names it: `[0]` for an element. */
 type OwnerPaths<T, At extends string> =
-  [NonNullable<T>] extends [SecurityAgentId] ? At
+  [NonNullable<T>] extends [never] ? never
+    : [NonNullable<T>] extends [SecurityAgentId] ? At
     : T extends readonly (infer Element)[] ? OwnerPaths<Element, `${At}[0]`>
       : T extends object ? { [Key in keyof T & string]-?: OwnerPaths<T[Key], `${At}.${Key}`> }[keyof T & string]
         : never;
@@ -518,8 +538,8 @@ describe("coverage ledger: construction enforces the ledger's own state rule", (
       ["out of scope without a reason", { status: "out_of_scope", unresolved: [] }, "unresolved"],
       ["not applicable without a reason", { status: "not_applicable" }, "unresolved"],
       ["planned with something unresolved", { unresolved: ["why"] }, "unresolved"],
-      ["an invisible reason", { status: "deferred", unresolved: ["​"] }, "unresolved"],
-      ["a duplicated reason", { status: "deferred", unresolved: ["why", "why"] }, "unresolved"],
+      ["an invisible reason", { status: "deferred", unresolved: ["​"] }, "unresolved[0]"],
+      ["a duplicated reason", { status: "deferred", unresolved: ["why", "why"] }, "unresolved[1]"],
       ["wave zero", { wave: 0 }, "wave"],
       ["a fractional wave", { wave: 1.5 }, "wave"],
       ["a negative wave", { wave: -2 }, "wave"],
@@ -530,7 +550,7 @@ describe("coverage ledger: construction enforces the ledger's own state rule", (
     }
   });
 
-  it("builds only units `validateLedger` accepts, for every start it admits", () => {
+  it("builds only units `parseLedger` accepts, for every start it admits", () => {
     const starts = fc.record({
       status: fc.constantFrom(...COVERAGE_STATUSES),
       unresolved: fc.array(fc.constantFrom("budget_cannot_reserve_critics_and_validation", "no browser surface", " ", "​"), { maxLength: 3 }),
@@ -542,7 +562,7 @@ describe("coverage ledger: construction enforces the ledger's own state rule", (
         // Construction and validation are ONE rule: whatever the constructor
         // admits is a legal ledger, so no caller can seed a unit `start` would
         // later refuse as a ledger.
-        if (built.ok) expect(validateLedger([built.value])).toEqual([]);
+        if (built.ok) expect(ledgerViolations([built.value])).toEqual([]);
       }),
       { numRuns: 300 },
     );
@@ -563,10 +583,11 @@ describe("coverage ledger: present-but-malformed wire fields are named, never dr
       ["a numeric lifecycle", { lifecycle: 5 }, "units[0].lifecycle"],
       ["a string wave", { wave: "2" }, "units[0].wave"],
       ["a scalar unresolved", { status: "deferred", unresolved: "budget" }, "units[0].unresolved"],
-      ["a non-string companion block", { selected_companion_blocks: [7] }, "units[0].selected_companion_blocks"],
+      ["a non-string companion block", { selected_companion_blocks: [7] }, "units[0].selected_companion_blocks[0]"],
       ["an object for excluded blocks", { excluded_blocks: {} }, "units[0].excluded_blocks"],
-      ["an exclusion with no reason", { excluded_blocks: [{ block: "CLIENT-SIDE.md#dom" }] }, "units[0].excluded_blocks[0]"],
-      ["refs that are not a canonical tuple", { refs: { surface: "s" } }, "units[0].canonical_refs"],
+      ["an exclusion with no reason", { excluded_blocks: [{ block: "CLIENT-SIDE.md#dom" }] }, "units[0].excluded_blocks[0].reason"],
+      ["refs that are not a canonical tuple", { refs: { surface: "s" } }, "units[0].refs"],
+      ["an unsafe starting path", { starting_paths: ["/etc/passwd"] }, "units[0].starting_paths[0]"],
     ];
     for (const [name, overrides, path] of cases) {
       expect(refusedPaths(parseCoverageSeeds([{ ...aSeed(), ...overrides }])), name).toContain(path);
@@ -575,7 +596,7 @@ describe("coverage ledger: present-but-malformed wire fields are named, never dr
 
   it("refuses a unit result whose optional lists are malformed, and keeps well-formed ones", () => {
     expect(refusedPaths(parseUnitResults([aUnitResult({ fingerprints: "api/login:sqli-email" })]))).toContain("units[0].fingerprints");
-    expect(refusedPaths(parseUnitResults([aUnitResult({ fingerprints: [42] })]))).toContain("units[0].fingerprints");
+    expect(refusedPaths(parseUnitResults([aUnitResult({ fingerprints: [42] })]))).toContain("units[0].fingerprints[0]");
     expect(refusedPaths(parseUnitResults([aUnitResult({ unresolved: { why: "x" } })]))).toContain("units[0].unresolved");
 
     const absent = ok(parseUnitResults([aUnitResult()]))[0];
@@ -596,8 +617,8 @@ describe("coverage ledger: present-but-malformed wire fields are named, never dr
       reassignIds: [],
       resolvedPriorLeads: [],
     }));
-    expect(fromSeed).toContain("units[0].excluded_blocks[0]");
-    expect(fromCritic).toContain("critic.missingUnits[0].excludedBlocks[0]");
+    expect(fromSeed).toEqual(["units[0].excluded_blocks[0].reason"]);
+    expect(fromCritic).toEqual(["critic.missingUnits[0].excludedBlocks[0].reason"]);
   });
 });
 
@@ -650,7 +671,7 @@ describe("admitArtifactNonce", () => {
 
   it("refuses an artifact an archived attempt already cited, even for a live owner", () => {
     const [first, second] = [seed(), other()];
-    const localCheck = {
+    const localCheck: LocalCheck = {
       agent_id: HUNTER,
       reviewed_paths: ["src/reports/controller.ts"],
       invariant: "the cache key includes the tenant",
@@ -697,7 +718,7 @@ describe("parseHunterResult", () => {
 
   it.each([
     ["the borrowed reviewer label", { schemaVersion: 2, kind: "standalone-review", units: [aUnitResult()] }, ["kind", "schemaVersion"]],
-    ["an unknown top-level key", { ...HUNTER_ENVELOPE, units: [aUnitResult()], extra: true }, ["$.extra"]],
+    ["an unknown top-level key", { ...HUNTER_ENVELOPE, units: [aUnitResult()], extra: true }, ["extra"]],
     ["a missing units list", { ...HUNTER_ENVELOPE, findings: [] }, ["units"]],
     ["units that are not a list", { ...HUNTER_ENVELOPE, units: "all" }, ["units"]],
     ["a non-object", "units", ["$"]],
@@ -757,10 +778,11 @@ describe("a defect is reported once, wherever it sits", () => {
         reassignment_reason: "critic: walk it again",
       }],
     };
-    const liveViolations = violationsAt(validateLedger([live]), "$[0].reviewed_paths");
-    const archivedViolations = violationsAt(validateLedger([archived]), "$[0].attempts[0].reviewed_paths");
-    expect(liveViolations).toEqual([{ path: "$[0].reviewed_paths", message: "unsafe source path" }]);
-    expect(archivedViolations).toEqual([{ path: "$[0].attempts[0].reviewed_paths", message: "unsafe source path" }]);
+    const unsafe = "expected a repository-relative source path";
+    const liveViolations = violationsAt(ledgerViolations([live]), "$[0].reviewed_paths[0]");
+    const archivedViolations = violationsAt(ledgerViolations([archived]), "$[0].attempts[0].reviewed_paths[0]");
+    expect(liveViolations).toEqual([{ path: "$[0].reviewed_paths[0]", message: unsafe }]);
+    expect(archivedViolations).toEqual([{ path: "$[0].attempts[0].reviewed_paths[0]", message: unsafe }]);
   });
 
   const CRITIC: Readonly<Record<string, unknown>> = { schemaVersion: 1, kind: "security-coverage-critic", missingUnits: [], reassignIds: [], resolvedPriorLeads: [] };
@@ -777,7 +799,7 @@ describe("a defect is reported once, wherever it sits", () => {
   it.each(["missingUnits", "reassignIds", "resolvedPriorLeads"])("names a missing critic %s once, as required", (key) => {
     const { [key]: _omitted, ...rest } = CRITIC;
     const refused = parseCriticResult(rest);
-    expect(refused.ok ? [] : refused.error.violations).toEqual([{ path: `critic.${key}`, message: "required: expected an array" }]);
+    expect(refused.ok ? [] : refused.error.violations).toEqual([{ path: `critic.${key}`, message: "required" }]);
   });
 });
 
@@ -792,7 +814,7 @@ describe("a local check is parsed by one contract, on the hunter wire and in a s
     return [{ ...settledUnit!, local_checks: [localCheck] }];
   };
   const ledgerMessages = (localCheck: Record<string, unknown>) =>
-    validateLedger(settledWith(localCheck) as CoverageLedger).filter((entry) => entry.path.startsWith("$[0].local_checks[0]"));
+    ledgerViolations(settledWith(localCheck)).filter((entry) => entry.path.startsWith("$[0].local_checks[0]"));
   const wireMessages = (localCheck: Record<string, unknown>) => {
     const parsed = parseUnitResults([aUnitResult({ checks: [localCheck] })]);
     return parsed.ok ? [] : parsed.error.violations.filter((entry) => entry.path.startsWith("units[0].checks[0]"));
@@ -885,7 +907,7 @@ describe("an archived attempt's local artifacts are spent as they are read", () 
       wave: 1, status: "covered" as const, agent_id: HUNTER, reviewed_paths: ["src/reports/controller.ts"],
       local_checks: [local, local], result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
     };
-    const violations = validateLedger([{ ...unit, wave: 2, attempts: [attempt] }]);
+    const violations = ledgerViolations([{ ...unit, wave: 2, attempts: [attempt] }]);
     expect(violations).toContainEqual({ path: "$[0].attempts[0].local_checks[1].artifact", message: "an archived artifact cannot be reused" });
   });
 });

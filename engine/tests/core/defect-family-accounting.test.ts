@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { legacyStandaloneContext, legacyFixtureReviewerProtocols } from "../fixtures/standalone-reviewer-protocol";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../../src/core/structured-test-report";
+import { MAX_STRUCTURED_REPORT_BYTES, parseReportCounts, readTestReport, reportCounts } from "../../src/core/structured-test-report";
 import { remediationCheckObservedEvent, replayRemediationCheckObservedEvent } from "../../src/handlers/helpers/programs/remediation-events";
 import {
   authorizeRemediationChecks,
@@ -22,7 +22,6 @@ import {
   type EngineObservedRepairedCheck,
   type InstallableDefectFamilyAssessment,
 } from "../../src/core/defect-family-accounting";
-import { parseReportCounts } from "../../src/machine/test-report";
 import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
 import {
   VERIFICATION_MANIFEST_KIND,
@@ -52,7 +51,7 @@ import {
   startStandaloneReviewMachine,
   type AuthoritativeStandaloneReviewResult,
 } from "../../src/core/standalone-review";
-import { capturedReviewerResultFromText } from "../../src/core/standalone-reviewer-capture";
+import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
 import { prepareStandaloneReview } from "../../src/core/standalone-review-preparation";
 import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review-records";
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from "../../src/core/standalone-refutation-completion";
@@ -332,7 +331,7 @@ function sourceWithEveryFindingClass(): AuthoritativeStandaloneReviewResult {
     byteLength: bytes.byteLength,
   });
   if (!artifact.ok) throw new Error(artifact.error.message);
-  const captured = capturedReviewerResultFromText(artifact.value, transcript);
+  const captured = capturedReviewerResultFromBytes(artifact.value, Buffer.from(transcript, "utf-8"));
   if (!captured.ok) throw new Error(captured.error.message);
   const accepted = acceptedAgentResult(issued, captured.value);
   if (!accepted.ok) throw new Error(accepted.error.message);
@@ -688,7 +687,7 @@ describe("report observation resource limits", () => {
       process: { kind: "observed" as const, exitCode: 0, timedOut: false, signal: null },
       report: {
         outcome: { kind: "produced" as const, path: check.command.reportPolicy.path, digest: value(parseArtifactDigest(createHash("sha256").update(bytes).digest("hex"))), byteLength: bytes.byteLength },
-        bytes, mode: 33_188, parsedReportFacts: parseStructuredTestReportBytes(bytes),
+        bytes, mode: 33_188, parsedReportFacts: reportCounts(readTestReport(bytes)),
       },
       diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
     };

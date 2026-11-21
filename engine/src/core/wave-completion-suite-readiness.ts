@@ -31,7 +31,7 @@ import {
   type CompletionInfrastructureFailure,
 } from "./completion-suite";
 import { compareStrings } from "./ordering";
-import { legacyDefaultVerificationManifest, deriveProjectVerificationCoverage } from "./verification-manifest";
+import { deriveProjectVerificationCoverage } from "./verification-manifest";
 import { canonicalRecord, canonicalStructuralEquals, isNonEmpty, type DomainResult, type NonEmpty } from "./orchestration-contract";
 import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "./acceptance-contract";
 import { authorizeGraphCompletionSuite } from "./owner-verification/suite-authority";
@@ -51,8 +51,7 @@ function exactCompletionSuiteError(
   ) {
     return "accepted suite does not match the active Wave Gate run/Wave/revision/authority";
   }
-  const manifest = graph.verification_manifest ?? legacyDefaultVerificationManifest();
-  if (parsed.value.manifestDigest !== manifest.manifestDigest) {
+  if (parsed.value.manifestDigest !== graph.verification_manifest?.manifestDigest) {
     return "accepted suite manifest digest does not match protected verification_manifest";
   }
   const authorized = authorizeGraphCompletionSuite(graph, parsed.value.workspaceDigest);
@@ -84,7 +83,6 @@ function exactCompletionSuiteError(
 type CompletionSuiteReadinessSource = Readonly<{
   receipt: AcceptedWaveCompletionReceipt | undefined;
   registration: ActiveWaveGateRegistration | CompletedWaveGateRegistration | undefined;
-  legacyHistory: boolean;
   terminal: boolean;
 }>;
 
@@ -96,19 +94,13 @@ function completionSuiteReadinessSource(
     return canonicalRecord({
       receipt: graph.active_wave_completion_suite,
       registration: graph.active_wave_gate,
-      legacyHistory: false,
       terminal: false,
     });
   }
   const terminal = wave === null ? undefined : (graph.wave_gate_history ?? []).find((entry) => entry.wave === wave);
-  return terminal?.schemaVersion === 2
-    ? canonicalRecord({ receipt: terminal.completionSuite, registration: terminal, legacyHistory: false, terminal: true })
-    : canonicalRecord({
-        receipt: undefined,
-        registration: terminal,
-        legacyHistory: terminal?.schemaVersion === 1,
-        terminal: terminal !== undefined,
-      });
+  return terminal === undefined
+    ? canonicalRecord({ receipt: undefined, registration: undefined, terminal: false })
+    : canonicalRecord({ receipt: terminal.completionSuite, registration: terminal, terminal: true });
 }
 
 function sortedUniqueNonEmpty<T extends string>(head: T, tail: readonly T[]): NonEmpty<T> {
@@ -183,7 +175,7 @@ function deriveCompletionSuiteOutcome(
   const manifest = graph.verification_manifest;
   const manifestDigest = manifest?.manifestDigest ?? null;
   if (source.receipt === undefined) {
-    if ((manifestDigest === null && graph.active_wave_completion_suite === undefined) || source.legacyHistory) {
+    if (manifestDigest === null && graph.active_wave_completion_suite === undefined) {
       return canonicalRecord({ kind: "legacy-unavailable", verificationManifestDigest: null });
     }
     if (source.registration?.kind !== "active-wave-gate" || manifest === undefined) {
@@ -326,6 +318,7 @@ export function deriveWaveCompletionSuiteReadiness(
   if (outcome.kind === "legacy-unavailable") return outcome;
   const authority = source.terminal && source.receipt !== undefined
     ? source.receipt
-    : graph.verification_manifest ?? legacyDefaultVerificationManifest();
+    : graph.verification_manifest;
+  if (authority === undefined) return canonicalRecord({ kind: "legacy-unavailable", verificationManifestDigest: null });
   return canonicalRecord({ ...outcome, projectVerificationCoverage: deriveProjectVerificationCoverage(authority) });
 }

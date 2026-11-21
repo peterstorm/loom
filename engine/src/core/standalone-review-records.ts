@@ -166,17 +166,6 @@ export function serializeAdjudicatedStandaloneReview(result: AdjudicatedStandalo
   return JSON.stringify(adjudicatedStandaloneReviewRecord(result), null, 2);
 }
 
-/** Legacy helper output stays explicitly unversioned and never claims v1 authority. */
-export function serializeHistoricalAdjudicatedStandaloneReview(result: Extract<AdjudicatedStandaloneReview, { schemaVersion: 1 }>): string {
-  const {
-    schema_version: _schemaVersion,
-    subject_id: _subjectId,
-    reviewer_evidence: _reviewerEvidence,
-    ...historical
-  } = adjudicatedStandaloneReviewRecord(result);
-  return JSON.stringify(historical, null, 2);
-}
-
 function summaryData(value: unknown): string {
   return JSON.stringify(value).replace(/[&<>|`]/g, (character) => `&#${character.codePointAt(0)};`)
     .replace(/[\p{Cc}\p{Cf}]/gu, (character) => `\\u{${character.codePointAt(0)?.toString(16) ?? ""}}`)

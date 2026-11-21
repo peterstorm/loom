@@ -14,7 +14,6 @@ import {
   currentProfileBindings,
   recordedProfileBindings,
   parseAgentFrontmatter,
-  parseLlmProfile,
   parseLlmProfileId,
   parseRecordedLlmProfileId,
   piCatalogAsOf,
@@ -23,7 +22,6 @@ import {
   profileBindingsUnder,
   resolveAgentPolicy,
   resolveAgentProfile,
-  resolveHarnessBinding,
   resolveModelProfile,
   validateAgentPolicyCatalog,
   validateAgentPolicyFrontmatter,
@@ -79,23 +77,15 @@ describe("semantic model profiles", () => {
     expect(AGENT_POLICIES.every(Object.isFrozen)).toBe(true);
   });
 
-  it("parses only exact known ids and exact complete profile objects", () => {
+  it("parses only exact known ids", () => {
     expect(parseLlmProfileId("implementation")).toEqual({ ok: true, value: "implementation" });
     expect(parseLlmProfileId(" implementation ").ok).toBe(false);
     expect(parseLlmProfileId("current").ok).toBe(false);
-
-    const implementation = LLM_PROFILES.find(({ id }) => id === "implementation")!;
-    expect(parseLlmProfile(implementation)).toEqual({ ok: true, value: implementation });
-    expect(parseLlmProfile({
-      ...implementation,
-      pi: { ...implementation.pi, model: "parent-session-model" },
-    }).ok).toBe(false);
   });
 
   it("is total for arbitrary unknown parser inputs", () => {
     fc.assert(fc.property(fc.anything(), (raw) => {
       expect(() => parseLlmProfileId(raw)).not.toThrow();
-      expect(() => parseLlmProfile(raw)).not.toThrow();
       expect(() => parseAgentFrontmatter(raw)).not.toThrow();
     }));
   });
@@ -467,7 +457,7 @@ describe("exhaustive Loom agent policy", () => {
       ok: false,
       error: { kind: "invalid-profile" },
     });
-    expect(resolveHarnessBinding("external-agent", "pi")).toMatchObject({
+    expect(resolveAgentProfile("external-agent")).toMatchObject({
       ok: false,
       error: { kind: "unknown-agent" },
     });
@@ -498,15 +488,11 @@ describe("typed harness lowering", () => {
 
   it("lowers Pi to exact provider/model/thinking fields", () => {
     for (const agent of ["review-verifier-agent", "comment-analyzer", "spec-check-invoker"]) {
-      expect(resolveHarnessBinding(agent, "pi")).toEqual({ ok: true, value: { harness: "pi", ...LOCAL } });
+      const selected = resolveAgentProfile(agent);
+      expect(selected.ok).toBe(true);
+      if (!selected.ok) return;
+      expect(lowerModelProfile(selected.value, "pi")).toEqual({ harness: "pi", ...LOCAL });
     }
-  });
-
-  it("rejects an unknown harness rather than returning a partial binding", () => {
-    expect(resolveHarnessBinding("code-reviewer", "current")).toMatchObject({
-      ok: false,
-      error: { kind: "invalid-harness" },
-    });
   });
 });
 

@@ -6,6 +6,8 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { ownerObligation } from "../fixtures/owner-obligation";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { satisfiedProof } from "../fixtures/task-lifecycle";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -31,7 +33,7 @@ function graphWith(
   if (typeof plan === "string") writeFileSync(join(root, ".claude", "plans", "plan.md"), plan);
   const path = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(path, JSON.stringify({
-    current_phase: "execute", current_wave: 2, phase_artifacts: {}, skipped_phases: [],
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 2, phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: plan === undefined ? null : ".claude/plans/plan.md", wave_gates: {},
     ...(stamp === undefined ? {} : { owner_obligations: stamp }),
     // A same-Wave edge is legal only as an audited add-dependency edit (ADR-0081).
@@ -42,7 +44,7 @@ function graphWith(
       {
         id: "T1", description: "Build the seam", agent: "code-implementer-agent", wave: t1Wave, depends_on: [],
         file_list: ["src/seam.ts", "src/seam-types.ts"], files_modified: ["src/seam.ts", "src/extra.ts"],
-        status: t1Status, legacy_missing_proof: true,
+        status: t1Status, proof: satisfiedProof(["src/seam.ts", "src/seam-types.ts"]),
       },
       {
         id: "T2", description: "Use the seam", agent: "code-implementer-agent", wave: 2, depends_on: ["T1"],

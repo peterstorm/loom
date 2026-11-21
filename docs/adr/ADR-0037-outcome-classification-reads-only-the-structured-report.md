@@ -75,7 +75,7 @@ ambiguous observation is infrastructure, never a kill.**
   mutants when the owner did not change in the Wave, and it refuses generated mutants that are all
   invalid (`no-valid-mutants`): such a run carries no mutation evidence, so it can never be a verified
   run, whether the gate tallied it or a persisted result is read back.
-- Report parsing goes through `parseJunitTestcases` in `engine/src/core/structured-test-report.ts`. A
+- Report parsing goes through parseJunitTestcases in `engine/src/core/structured-test-report.ts`. A
   report must first pass the strict structured-report parser. A Vitest JSON report is refused by name,
   because it carries no per-testcase file attribution, and a testcase without a name or classname is also
   refused. Either refusal is `report-unreadable`.

@@ -24,7 +24,6 @@ import {
   clearCurrentReservedAuthority,
   observeImplementationTranscript,
   outcome,
-  pendingMalformedTranscriptState,
   processingFailure,
   reduceLockedPiPhaseResult,
   reduceLockedReviewEvidence,
@@ -32,10 +31,8 @@ import {
   renderExactPiSettlement,
   renderFailedReviewEvidence,
   renderReviewEvidence,
-  resolveImplementationTaskId,
-  retireCompletedOrMissingImplementation,
+  retireCompletedImplementation,
   transcriptTextOf,
-  unprovenAttribution,
   type LockedReviewEvidenceApplication,
 } from "../../../pi/subagent-settlement";
 import {
@@ -74,7 +71,10 @@ function attemptAuthority(taskId: string, reservation: string): ImplementationAt
 }
 
 /** One executing Task holding `authority` as its active attempt, beside an untouched T2. */
-const attemptGraph = (authority: ImplementationAttemptAuthority, status: "pending" | "implemented" = "pending"): TaskGraph => ({
+const attemptGraph = (
+  authority: ImplementationAttemptAuthority,
+  status: "pending" | "implemented" | "completed" = "pending",
+): TaskGraph => ({
   ...graphFixture([
     {
       ...taskFixture({
@@ -96,95 +96,42 @@ const ATTEMPT_FIELDS = [
   "attempt_artifact_baseline", "attempt_repository_baseline", "reserved_at",
 ] as const;
 
-describe("resolveImplementationTaskId", () => {
-  const base = {
-    agentType: "code-implementer-agent",
-    reservedAuthority: null,
-    resultPrompt: "",
-    parentPrompt: "",
-    executingTasks: [],
+describe("retireCompletedImplementation", () => {
+  const authority = attemptAuthority("T1", "pi-t1");
+  const completedGraph = (): TaskGraph => {
+    const state = attemptGraph(authority, "completed");
+    return { ...state, tasks: state.tasks.map((task) => task.id === "T1" ? { ...task, repository_baseline: [] } : task) };
   };
 
-  it("prefers the reservation over either prompt", () => {
-    expect(resolveImplementationTaskId({
-      ...base,
-      reservedTaskId: "T9",
-      resultPrompt: "Task ID: T1",
-      parentPrompt: "Task ID: T2",
-    })).toEqual({ kind: "bound", taskId: "T9", attribution: "named" });
-  });
-
-  it("falls back to the result prompt, then the parent prompt, which is only a guess", () => {
-    const named = resolveImplementationTaskId({ ...base, reservedTaskId: null, resultPrompt: "Task ID: T1" });
-    expect(named).toEqual({ kind: "bound", taskId: "T1", attribution: "named" });
-    if (named.kind === "bound") expect(unprovenAttribution("code-implementer-agent", named)).toBeNull();
-    // A batch's parent spawn call carries every brief, so its first id may be a sibling's.
-    const fromParent = resolveImplementationTaskId({ ...base, reservedTaskId: null, parentPrompt: "Task ID: T2" });
-    expect(fromParent).toEqual({ kind: "bound", taskId: "T2", attribution: "parent-prompt" });
-    if (fromParent.kind === "bound") {
-      expect(unprovenAttribution("code-implementer-agent", fromParent)).toContain("parent's spawn prompt");
-    }
-  });
-
-  it("infers a single executing task, and refuses an ambiguous or empty set", () => {
-    const inferred = resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: ["T5"] });
-    expect(inferred).toEqual({ kind: "bound", taskId: "T5", attribution: "sole-executing" });
-    if (inferred.kind === "bound") {
-      expect(unprovenAttribution("code-implementer-agent", inferred)).toContain("executing_tasks holds exactly one");
-    }
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: ["T5", "T6"] }))
-      .toMatchObject({ kind: "unbound", reason: expect.stringContaining("ambiguous") });
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: [] }))
-      .toMatchObject({ kind: "unbound", reason: expect.stringContaining("executing_tasks is empty") });
-  });
-});
-
-describe("retireCompletedOrMissingImplementation", () => {
-  const graph = (status: "pending" | "completed"): TaskGraph => ({
-    current_phase: "execute",
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    current_wave: 1,
-    executing_tasks: ["T1"],
-    tasks: [taskFixture({
-      id: "T1", description: "implementation", agent: "code-implementer-agent",
-      wave: 1, status, depends_on: [], file_list: [],
-    })],
-    wave_gates: {},
-  });
-
-  it("retires a legacy reservation for a completed or missing Task without touching its input", () => {
-    const completed = graph("completed");
-    const retired = retireCompletedOrMissingImplementation(completed, "T1", null);
+  it("retires a completed Task's reservation under its current authority without touching its input", () => {
+    const completed = completedGraph();
+    const retired = retireCompletedImplementation(completed, "T1", authority);
     expect(retired.retired).toBe(true);
-    expect(retired.state.executing_tasks).toEqual([]);
-    expect(completed.executing_tasks).toEqual(["T1"]);
-
-    const missing = retireCompletedOrMissingImplementation(graph("pending"), "T9", null);
-    expect(missing.retired).toBe(true);
-    expect(missing.state.executing_tasks).toEqual(["T1"]);
+    expect(retired.state.executing_tasks).toEqual(["T2"]);
+    for (const field of ATTEMPT_FIELDS) expect(retired.state.tasks[0]?.[field]).toBeUndefined();
+    expect(retired.state.tasks[0]?.repository_baseline).toBeUndefined();
+    expect(retired.state.tasks[1]).toBe(completed.tasks[1]);
+    expect(completed.executing_tasks).toEqual(["T1", "T2"]);
+    expect(completed.tasks[0]?.active_implementation_attempt).toBe(authority);
   });
 
-  it("keeps a still-pending Task's reservation", () => {
-    const pending = graph("pending");
-    expect(retireCompletedOrMissingImplementation(pending, "T1", null))
-      .toEqual({ state: pending, retired: false });
+  it.each<readonly [string, () => TaskGraph, string, ImplementationAttemptAuthority]>([
+    ["a still-pending Task", () => attemptGraph(authority), "T1", authority],
+    ["a completed Task whose current attempt is another authority", completedGraph, "T1", attemptAuthority("T1", "pi-other")],
+    ["a missing Task", completedGraph, "T9", authority],
+  ])("keeps the reservation of %s", (_name, build, taskId, expected) => {
+    const state = build();
+    expect(retireCompletedImplementation(state, taskId, expected)).toEqual({ state, retired: false });
   });
 });
 
 describe("clearCurrentReservedAuthority", () => {
   const authority = attemptAuthority("T1", "pi-t1");
 
-  it.each<readonly [string, ImplementationAttemptAuthority | null]>([
-    ["a legacy reservation (no authority)", null],
-    ["an authority whose digest is not the Task's current attempt", attemptAuthority("T1", "pi-other")],
-  ])("leaves every attempt field in place for %s", (_name, expected) => {
+  it("leaves every attempt field in place for an authority whose digest is not the Task's current attempt", () => {
     const state = attemptGraph(authority);
-    const cleared = clearCurrentReservedAuthority(state, "T1", expected);
+    const cleared = clearCurrentReservedAuthority(state, "T1", attemptAuthority("T1", "pi-other"));
     expect(cleared.tasks[0]).toEqual(state.tasks[0]);
-    if (expected === null) expect(cleared).toBe(state);
   });
 
   it("releases exactly the matching Task's attempt state without touching its input or other Tasks", () => {
@@ -194,24 +141,6 @@ describe("clearCurrentReservedAuthority", () => {
     expect(cleared.tasks[1]).toBe(state.tasks[1]);
     expect(state.tasks[0]?.active_implementation_attempt).toBe(authority);
     expect(cleared.executing_tasks).toEqual(["T1", "T2"]);
-  });
-});
-
-describe("pendingMalformedTranscriptState", () => {
-  const authority = attemptAuthority("T1", "pi-t1");
-
-  it.each<readonly [string, "pending" | "implemented", ImplementationAttemptAuthority | null, string | undefined, boolean]>([
-    ["a pending Task under its current authority", "pending", authority, "transcript malformed", true],
-    ["a pending Task under a legacy reservation", "pending", null, "transcript malformed", false],
-    ["a non-pending Task, whose reason is not overwritten", "implemented", authority, undefined, true],
-  ])("releases execution for %s", (_name, status, expected, failureReason, released) => {
-    const state = attemptGraph(authority, status);
-    const next = pendingMalformedTranscriptState({ state, taskId: "T1", expected, failureReason: "transcript malformed" });
-    expect(next.executing_tasks).toEqual(["T2"]);
-    expect(next.tasks[0]?.failure_reason).toBe(failureReason);
-    expect(next.tasks[0]?.active_implementation_attempt).toBe(released ? undefined : authority);
-    expect(next.tasks[1]).toBe(state.tasks[1]);
-    expect(state.executing_tasks).toEqual(["T1", "T2"]);
   });
 });
 
@@ -226,7 +155,6 @@ describe("renderExactPiSettlement", () => {
     { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
     TRUSTED_LEDGER_ONLY_POLICY,
     buildTaskLocalByteObservation({
-      authority,
       attemptBaseline: [],
       currentAttemptScope: [],
       proofBaseline: [],
@@ -272,27 +200,43 @@ describe("observeImplementationTranscript", () => {
   const BUN_PASS = "bun test v1.3.0\n 1 pass\n 0 fail\n 1 expect() calls\nRan 1 test across 1 file.\n";
 
   it("names a transcript that is not a Pi message array as malformed, with no log", () => {
-    const observed = observeImplementationTranscript("not messages", "T1");
+    const observed = observeImplementationTranscript("not messages", "T1", "/repo");
     expect(observed).toMatchObject({ kind: "malformed", log: [] });
     if (observed.kind === "malformed") {
       expect(observed.failureReason).toMatch(/^Pi transcript evidence capture failed: \S/);
     }
   });
 
-  it("accepts structured test evidence from a classified test run, with no fallback log", () => {
+  it("accepts structured test evidence from a classified test run, with no missing-evidence log", () => {
     const messages = bashCall("bun test engine/tests/pi/subagent-settlement.test.ts", BUN_PASS);
-    const observed = observeImplementationTranscript(messages, "T1");
-    expect(observed).toMatchObject({ kind: "accepted", log: [], test: { kind: "structured", evidence: { passed: true } } });
-    if (observed.kind === "accepted") expect(observed.resultMessages).toHaveLength(2);
+    const observed = observeImplementationTranscript(messages, "T1", "/repo");
+    expect(observed).toEqual({
+      kind: "accepted",
+      log: [],
+      writeTargets: [],
+      test: { kind: "structured", evidence: { passed: true, evidence: expect.stringContaining("1 pass") } },
+    });
   });
 
-  it("falls back to the transcript and logs why when no Bash call was a test run", () => {
-    const observed = observeImplementationTranscript(bashCall("ls", "file.ts\n"), "T1");
-    expect(observed).toMatchObject({ kind: "accepted", test: { kind: "fallback", evidence: { passed: false } } });
+  it("records no test result, and logs why, when no Bash call was a test run", () => {
+    const observed = observeImplementationTranscript(bashCall("ls", "file.ts\n"), "T1", "/repo");
+    expect(observed).toMatchObject({ kind: "accepted", test: { kind: "missing" } });
     expect(observed.log).toEqual([
       "loom(pi): T1 produced no structured test evidence (no Bash call was classified as a test run) — " +
-        "transcript fallback used; the wave gate will reject it",
+        "no test result recorded (test-result-missing); the wave gate will reject it",
     ]);
+  });
+
+  it("folds write targets from the same projection: every write, edit and multi-edit call, whatever its result", () => {
+    const observed = observeImplementationTranscript([
+      { role: "assistant", content: [
+        { type: "toolCall", id: "w", name: "write", arguments: { path: "src/a.ts" } },
+        { type: "toolCall", id: "e", name: "edit", arguments: { file_path: "src/b.ts" } },
+        { type: "toolCall", id: "m", name: "multi_edit", arguments: { edits: [{ path: "src/c.ts" }] } },
+      ] },
+      { role: "toolResult", toolCallId: "e", toolName: "edit", isError: true, content: [{ type: "text", text: "no match" }] },
+    ], "T1", "/repo");
+    expect(observed).toMatchObject({ kind: "accepted", writeTargets: ["src/a.ts", "src/b.ts", "src/c.ts"] });
   });
 });
 

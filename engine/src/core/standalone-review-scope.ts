@@ -149,7 +149,7 @@ export function exactKeys(raw: Record<string, unknown>, allowed: readonly string
   ];
 }
 
-export function uniqueNonEmpty(values: readonly string[], label: string): readonly string[] {
+function uniqueNonEmpty(values: readonly string[], label: string): readonly string[] {
   const errors: string[] = [];
   if (values.length === 0) errors.push(`${label} must be non-empty`);
   if (values.some((value) => value.trim() === "")) errors.push(`${label} must not contain empty values`);

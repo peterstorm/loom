@@ -4,69 +4,36 @@
 export * from "./types";
 export { parseMachine, parseMachineJson } from "./parse-machine";
 export {
-  advance,
   foldEvidence,
-  currentPhase,
   isToolAllowed,
-  isTerminal,
   missingRequirements,
-  MACHINE_INVARIANT_VIOLATED,
   blockExplanation,
-  satisfied,
-  tokensFor,
-  judgeRunFacts,
-  type TestRunJudge,
 } from "./advance";
+export { judgeTestRun } from "./test-report";
 export {
-  parseVitestJson,
-  parseJunitXml,
-  mergeSummaries,
-  judgeTestRun,
-  type TestVerdict,
-  type TrustedTestVerdict,
-} from "./test-report";
-export {
-  extractEvidence,
   attributeExit,
-  classifyTestCommand,
   classifyTestCommandDetailed,
   type ClassifiedTestCommand,
 } from "./extract-evidence";
-export { extractShellWriteTargets } from "../core/shell-write-targets";
 export type {
-  EvidenceTarget,
-  HarnessToolCall,
   PiEvidenceNoRecordReason,
   PiEvidenceTargetDecision,
-  RecordToolEvidenceFn,
   ToolEvidencePorts,
 } from "./harness-tool-call-types";
 export {
   parseEvidenceLine,
-  type EvidenceLineParse,
   eventsForEpoch,
   epochOf,
   parseEpoch,
   parseAgentId,
   parseAgentType,
-  parseGrantedAgentId,
   parseReportedAgentId,
   WRITE_GRANT_AGENT_NAMESPACE,
-  type GrantedAgentId,
   parseSessionId,
-  parseBindingLine,
-  formatBindingLine,
-  isBindingFresh,
-  resolveSoleActiveBinding,
   attributeEvidence,
   parseCallerIdentity,
   phaseGateTarget,
   type EvidenceAttribution,
-  type PhaseGateTarget,
-  parseCallStartEntries,
-  pruneCallStarts,
-  callStartOf,
-  type CallStartEntry,
   SESSION_SUFFIXES,
   STOP_CHECK_NOTE_SUFFIX,
   sidecarKey,
@@ -79,20 +46,13 @@ export {
   TASK_GRAPH_POINTER_BINDING_SUFFIX,
   TASK_GRAPH_POINTER_LEASES_SUFFIX,
   TASK_GRAPH_POINTER_SUFFIX,
-  CALL_START_CAP,
   type AgentId,
   type AgentType,
-  type SessionFileSuffix,
   type SessionId,
-  type MachineBinding,
-  type MachineBindingAuthority,
-  type PersistedBinding,
   type SessionRegistry,
 } from "./evidence";
-export { machineToMermaid } from "./mermaid";
 
 // Imperative shell
-export { findReport, outputFileFromCommand, CALL_START_SLACK_MS } from "./report-discovery";
 export {
   ledgerPath,
   machineBindingPath,
@@ -100,8 +60,6 @@ export {
   appendEvidence,
   readEvidence,
   readEvidenceLedger,
-  type EvidenceLedgerRead,
-  recordCallStart,
   callStartFor,
   readBindings,
   readBindingAuthority,
@@ -111,8 +69,6 @@ export {
   observeAnyActiveSubagent,
   readActiveAgentRoles,
   type ActiveAgent,
-  type ActiveSubagentObservation,
-  refreshBindingActivity,
   rosterAgentId,
   reportedRosterAgentId,
   markAgentActive,
@@ -120,7 +76,6 @@ export {
   removeActiveAgentStrict,
   bindMachineAgent,
   unbindMachineAgent,
-  machineDefPath,
   loadMachine,
   observeMachinePins,
   type LoadedMachine,
@@ -134,15 +89,6 @@ export {
   releasePersistedSessionTaskGraphPointerBinding,
   rollbackSessionTaskGraphPointer,
   parseCanonicalTaskGraphPointer,
-  parsePersistedSessionTaskGraphPointerBinding,
   parseSessionTaskGraphPointerLeaseRegistry,
-  type CanonicalTaskGraphPointer,
-  type CanonicalTaskGraphPointerParse,
-  type PersistedSessionTaskGraphPointerBinding,
-  type PersistedSessionTaskGraphPointerClaim,
-  type PersistedSessionTaskGraphPointerRelease,
   type SessionTaskGraphPointerBinding,
-  type SessionTaskGraphPointerLeaseRegistry,
-  type SessionTaskGraphPointerLeaseRegistryParse,
-  type SessionTaskGraphPointerRollback,
 } from "./task-graph-pointer";

@@ -34,12 +34,10 @@ export {
   CONTRACT_ID,
   COVERABLE_ANCHOR,
   type AcceptanceContract,
-  type AcceptanceFreeze,
   type AcceptanceTestcase,
   type ContractAcceptanceFile,
   type ContractDeclaration,
   type ContractProblem,
-  type RuntimeSeam,
   type ContractRevision,
   type ContractTaskView,
   type ContractTypes,
@@ -57,7 +55,6 @@ export {
   dueWaves,
   frozenPaths,
   redWindowTaskIds,
-  type ContractRole,
   type ContractWriterProblem,
 } from "./tasks";
 export {
@@ -77,13 +74,9 @@ export {
   unprojectableFacts,
   type AcceptanceExpectation,
   type AcceptanceFailure,
-  type AcceptanceJudgment,
   type AcceptanceObservation,
   type AcceptanceReportFacts,
-  type ContractGateExpectation,
   type FailedReportTestcase,
-  type ObservedAcceptanceTestcase,
-  type RecordedAcceptanceVerdict,
 } from "./gate";
 export {
   frozenPathDigests,
@@ -94,11 +87,8 @@ export {
   renderRuntimeSeamGaps,
   runtimeSeamGaps,
   stampAcceptanceFreezes,
-  type RuntimeSeamGap,
-  type FrozenPathDrift,
   type FrozenPathObservation,
   type FrozenPathObservations,
-  type FrozenPathProblem,
 } from "./freeze";
 export { parseAcceptanceContracts, parseAcceptanceExpectation, parseAcceptanceReportFacts } from "./wire";
 export { contractBindingErrors, type ContractBindingTask } from "./binding";
@@ -106,14 +96,10 @@ export {
   judgeStopCheck,
   renderStopCheckBlock,
   stopCheckExpectation,
-  type FailingAcceptanceTestcase,
   type OwedAcceptance,
   type OwedStopCheck,
-  type StopCheckExpectation,
-  type StopCheckVerdict,
 } from "./stop-check";
 export {
   pendingFreezeAdvisories,
   renderPendingFreezeAdvisories,
-  type PendingFreezeAdvisory,
 } from "./freeze-notice";

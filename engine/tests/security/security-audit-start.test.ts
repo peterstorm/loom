@@ -51,14 +51,14 @@ describe("parseSecurityAuditStart", () => {
       error: {
         kind: "invalid-security-audit-start",
         violations: [
-          { path: "$.extra", message: "unknown field" },
           { path: "units", message: "start input requires a `units` array" },
-          { path: "scope.extra", message: "unknown field" },
           { path: "scope.kind", message: "expected tree or diff" },
           { path: "scope.baseRef", message: "expected a string or null" },
-          { path: "signals.servesHTTP", message: "unknown field" },
-          { path: "signals.manifests", message: "expected an array of strings" },
+          { path: "scope.extra", message: "unknown field" },
+          { path: "signals.manifests[0]", message: "expected a string" },
           { path: "signals.servesHttp", message: "expected a boolean" },
+          { path: "signals.servesHTTP", message: "unknown field" },
+          { path: "extra", message: "unknown field" },
         ],
       },
     });

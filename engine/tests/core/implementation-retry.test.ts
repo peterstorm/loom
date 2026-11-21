@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   createEscalationRemediationReceipt,
   parseImplementationAttemptSettlementReceipt,
   settleImplementationAttempt,
@@ -54,21 +52,6 @@ const proof = () => derivePendingTaskProof({
   declaredArtifacts: [],
 });
 
-function suite(attempt: ImplementationAttemptAuthority) {
-  const authorized = value(createTaskCompletionSuiteAuthority(attempt));
-  return {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: authorized.implementationAuthorityDigest,
-    suiteDigest: authorized.suiteDigest,
-    checks: [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "accepted", changedPaths: [] },
-    }],
-  };
-}
-
 function observation(observedAt: string, taskCompleted: boolean) {
   return {
     schemaVersion: 1,
@@ -105,7 +88,7 @@ function settle(
     proof: proof(),
     active_implementation_attempt: attempt,
     implementation_attempt_history: history,
-  }, attempt, attempt, observed, suite(attempt));
+  }, attempt, attempt, observed, { kind: "accepted" });
   if (!result.ok || result.value.kind === "ignored") throw new Error("settlement fixture failed");
   return result.value.receipt;
 }
@@ -331,7 +314,7 @@ describe("bounded implementation retry admission", () => {
     }, attempt, attempt, {
       ...observation("2026-09-01T00:12:00.000Z", true),
       evidence: trustedPassEvidence(["src/extra.ts"], { newTestsWritten: false }),
-    }, suite(attempt));
+    }, { kind: "accepted" });
     if (!result.ok || result.value.kind !== "retry-required") throw new Error("attestation drift fixture failed");
     const terminalTask = {
       ...retryTask([result.value.receipt]),

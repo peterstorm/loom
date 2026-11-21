@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { taskFixture, graphFixture, type TaskFixtureInput } from "../../fixtures/task-lifecycle";
-import type { Task } from "../../../src/types";
+import { parseNewTestEvidence, type Task } from "../../../src/types";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -70,8 +70,7 @@ describe("mark-tests-passed — error polarity", () => {
         graphFixture([
           task("T1", {
             test_result: { verdict: "trusted-pass" },
-            new_tests_written: true,
-            new_test_evidence: "fixture new-test evidence",
+            new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
           }),
           task("T2", { test_result: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)", provenance: "unverified" }, new_tests_required: false }),
         ]),
@@ -93,8 +92,7 @@ describe("mark-tests-passed — error polarity", () => {
             regression: { kind: "waived", reason: "documentation-only" },
             new_tests: { kind: "required" },
           },
-          new_tests_written: true,
-          new_test_evidence: "fixture new-test evidence",
+          new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
         }),
         task("T2", {
           verification_policy: {
@@ -108,7 +106,7 @@ describe("mark-tests-passed — error polarity", () => {
 
     const { status, stderr } = runHelper(statePath);
 
-    expect(status).toBe(0);
+    expect(status, stderr).toBe(0);
     expect(stderr).toContain("T1: tests=N/A (documentation-only) new=YES");
     expect(stderr).toContain("T2: tests=PASS new=N/A (existing-tests-sufficient)");
   });
@@ -120,8 +118,7 @@ describe("mark-tests-passed — error polarity", () => {
       statePath,
       JSON.stringify(graphFixture([task("T1", {
         test_result: { verdict: "trusted-fail" },
-        new_tests_written: true,
-        new_test_evidence: "fixture new-test evidence",
+        new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
       })])),
     );
     const { status, stderr } = runHelper(statePath);
@@ -165,8 +162,7 @@ describe("mark-tests-passed — error polarity", () => {
       statePath,
       JSON.stringify(graphFixture([task("T1", {
         test_result: { verdict: "trusted-pass" },
-        new_tests_written: true,
-        new_test_evidence: "fixture new-test evidence",
+        new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
       })])),
     );
     const { status, stderr } = runHelper(statePath, ["--wave", "banana"]);
@@ -181,8 +177,7 @@ describe("mark-tests-passed — error polarity", () => {
       statePath,
       JSON.stringify(graphFixture([task("T1", {
         test_result: { verdict: "trusted-pass" },
-        new_tests_written: true,
-        new_test_evidence: "fixture new-test evidence",
+        new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
       })])),
     );
     const { status, stderr } = runHelper(statePath, ["--wave", "7"]);

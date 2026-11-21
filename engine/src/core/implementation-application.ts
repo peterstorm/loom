@@ -17,7 +17,6 @@ import {
 } from "./artifact-baseline";
 import { artifactCovers } from "./path-coverage";
 import {
-  createTaskCompletionSuiteResult,
   parseCanonicalArtifactBaseline,
   parseImplementationObservation,
   settleImplementationAttempt,
@@ -27,27 +26,23 @@ import {
   type ImplementationCompletionTransition,
   type ImplementationInfrastructureFailure,
   type IsoInstant,
-  type TaskCompletionSuiteResult,
+  type TaskByteScopeOutcome,
 } from "./implementation-completion";
 import { compareStrings } from "./ordering";
 import { samePlanPath } from "./plan-path-match";
 import {
-  deriveProofObligations,
   derivePendingTaskProof,
-  evaluateTaskProof,
   frozenRedThenGreenEra,
-  PI_STRUCTURED_EVIDENCE_POLICY,
   redThenGreenScope,
   taskRedThenGreenEra,
   type ProofEvaluationPolicy,
-  type ProofObligation,
   type RedThenGreenEra,
 } from "./proof-obligations";
 import type { RedThenGreenObservation } from "./red-then-green-types";
 import { invalidateTaskReview } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
 import { isUntouchedSkeleton } from "./skeleton/outcomes";
-import { CONFORMANCE_NOT_OWED, type ContractConformance } from "./skeleton/conformance-verdict";
+import type { ContractConformance } from "./skeleton/conformance-verdict";
 import type { SkeletonRecord } from "./skeleton/types";
 import { proofArtifactChanges, taskArtifactScope } from "./task-artifact-expectation";
 import type { FrozenTestFiles } from "./test-file-classification";
@@ -59,7 +54,8 @@ const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(
 const frozenArray = <T>(values: readonly T[]): readonly T[] => Object.freeze([...values]);
 
 export type TaskLocalByteObservation = Readonly<{
-  suite: TaskCompletionSuiteResult;
+  /** The attempt's bytes against its allowed scope, as the oracle settles them. */
+  byteScope: TaskByteScopeOutcome;
   /** Parser-proven paths whose bytes changed during this exact attempt. */
   attributedAttemptChangedPaths: readonly ReviewPath[];
   /** EVERY task-scope path whose bytes changed vs the attempt baseline —
@@ -86,7 +82,6 @@ export type TaskLocalByteObservation = Readonly<{
 }>;
 
 export type TaskLocalObservationInput = Readonly<{
-  authority: ImplementationAttemptAuthority;
   attemptBaseline: unknown;
   currentAttemptScope: unknown;
   proofBaseline: unknown;
@@ -201,7 +196,7 @@ function withoutEngineSkeletonBytes(
 }
 
 /**
- * Build the one engine-owned Task suite from already-observed snapshots.
+ * Build the attempt's byte observation and its byte-scope outcome from already-observed snapshots.
  * Repository movement is classified against locked Wave ownership. It never
  * grants attribution: allowed paths stay Task-local, sibling paths are inert,
  * and every remaining changed path is semantic out-of-scope evidence.
@@ -243,7 +238,6 @@ export function buildTaskLocalByteObservation(
       !repositoryPaths.ok || !siblingPaths.ok) {
     const reason = unavailableReason(errors);
     return unavailableTaskLocalByteObservation(
-      input.authority,
       reason,
       priorPaths.ok ? priorPaths.value : frozenArray([]),
     );
@@ -290,15 +284,12 @@ export function buildTaskLocalByteObservation(
   const cumulative = frozenArray(
     [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proofChanged])].sort(compareStrings),
   );
-  const suite = createTaskCompletionSuiteResult(
-    input.authority,
-    outside.length > 0
-      ? { kind: "out-of-scope-writes", paths: outside }
-      : { kind: "accepted", changedPaths: attributedAttempt },
-  );
-  if (!suite.ok) throw new Error(suite.error.errors.join("; "));
+  const [firstOutside, ...restOutside] = outside;
+  const byteScope: TaskByteScopeOutcome = firstOutside === undefined
+    ? freeze({ kind: "accepted" })
+    : freeze({ kind: "out-of-scope-writes", paths: nonEmptyOf(firstOutside, ...restOutside) });
   return freeze({
-    suite: suite.value,
+    byteScope,
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     attemptScopeChangedPaths: attempt.changed,
     cumulativeModifiedPaths: cumulative,
@@ -314,17 +305,11 @@ export function buildTaskLocalByteObservation(
 const NO_REOPEN_SCOPE: Readonly<{ ok: true; changed: readonly ReviewPath[] }> = freeze({ ok: true, changed: frozenArray([]) });
 
 export function unavailableTaskLocalByteObservation(
-  authority: ImplementationAttemptAuthority,
   reason: string,
   cumulativeModifiedPaths: readonly ReviewPath[] = frozenArray([]),
 ): TaskLocalByteObservation {
-  const suite = createTaskCompletionSuiteResult(authority, {
-    kind: "observation-unavailable",
-    reason: unavailableReason([reason]),
-  });
-  if (!suite.ok) throw new Error(suite.error.errors.join("; "));
   return freeze({
-    suite: suite.value,
+    byteScope: freeze({ kind: "observation-unavailable", reason: unavailableReason([reason]) }),
     attributedAttemptChangedPaths: frozenArray([]),
     attemptScopeChangedPaths: frozenArray([]),
     cumulativeModifiedPaths: frozenArray(cumulativeModifiedPaths),
@@ -335,27 +320,6 @@ export function unavailableTaskLocalByteObservation(
     invalidationBytesChanged: true,
   });
 }
-
-/** What an authority-free Stop resolution observed. It can preserve diagnostic
- * evidence and release only a proven legacy reservation; it never mints modern
- * completion authority. */
-export type UntrustedStopResolution = Readonly<{
-  taskCompleted: boolean;
-  testResult: TaskTestResult;
-  testEvidence: string;
-  filesModified: readonly string[];
-  changedDeclaredArtifacts: readonly string[];
-  bytesChangedSinceAttempt: boolean;
-  /** One parsed ADT, produced once at the transport boundary; core never
-   *  re-coerces a boolean/string pair into evidence (type-design-analyzer-1). */
-  newTests: NewTestEvidence;
-}>;
-
-export type AppliedStopResolution = Readonly<{
-  state: TaskGraph;
-  /** true means the target was absent/completed or lacked legacy authority. */
-  skipped: boolean;
-}>;
 
 export function cumulativeModifiedPaths(
   previous: readonly string[] | undefined,
@@ -373,152 +337,12 @@ export function isWaveComplete(state: TaskGraph, wave: number): boolean {
   return tasksAreImplementationComplete(state.tasks.filter((task) => task.wave === wave));
 }
 
-function applyResolvedTask(
-  state: TaskGraph,
-  taskId: string,
-  wave: number,
-  codeChanged: boolean,
-  clearedExecuting: readonly string[],
-  resolveTask: (task: Task) => Task,
-): TaskGraph {
-  const resolved: TaskGraph = {
-    ...state,
-    tasks: state.tasks.map((task) => {
-      if (task.id !== taskId) return task;
-      const updated = resolveTask(task);
-      return codeChanged ? invalidateTaskReview(updated) : updated;
-    }),
-    executing_tasks: [...clearedExecuting],
-  };
-  const specCheckCleared = codeChanged && resolved.spec_check?.wave === wave;
-  return {
-    ...resolved,
-    ...(specCheckCleared ? { spec_check: undefined } : {}),
-    wave_gates: {
-      ...resolved.wave_gates,
-      [String(wave)]: {
-        ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
-        impl_complete: isWaveComplete(resolved, wave),
-        ...(codeChanged
-          ? {
-              tests_passed: null,
-              reviews_complete: false,
-              ...(specCheckCleared ? { blocked: false } : {}),
-            }
-          : {}),
-      },
-    },
-  };
-}
-
-/** Legacy-only infrastructure cleanup. Modern attempts require an exact
- * Oracle receipt and are deliberately left untouched by this capability-free
- * path. */
-export function applyCompletionInfrastructureFailure(
-  state: TaskGraph,
-  taskId: string,
-  bytesChangedSinceAttempt: boolean,
-  expectedAuthority?: ImplementationAttemptAuthority,
-): TaskGraph {
-  const target = state.tasks.find((task) => task.id === taskId);
-  if (target?.active_implementation_attempt !== undefined || expectedAuthority !== undefined) return state;
-  const clearedExecuting = (state.executing_tasks ?? []).filter((id) => id !== taskId);
-  if (target === undefined || target.status === "completed" || target.legacy_missing_proof === true) {
-    return {
-      ...state,
-      executing_tasks: clearedExecuting,
-      tasks: state.tasks.map((task) => task.id === taskId
-        ? { ...task, reserved_at: undefined, legacy_execution_reservation: undefined }
-        : task),
-    };
-  }
-  return applyResolvedTask(
-    state,
-    taskId,
-    target.wave,
-    bytesChangedSinceAttempt,
-    clearedExecuting,
-    (task) => task.proof === undefined ? task : ({
-      ...clearAttempt(task),
-      status: "pending",
-      proof: task.proof,
-      revalidation_required: true,
-      legacy_missing_proof: undefined,
-    }),
-  );
-}
-
-/**
- * The authority-free legacy Stop's conformance decision: `not-owed`. It reads
- * no repository and can never mint completion (its observation is always
- * `taskCompleted: false`, so its Proof always fails); the Task's conformance is
- * judged by the exact settlement or the reconcile that can complete it.
- */
-const LEGACY_STOP_CONFORMANCE: ContractConformance = CONFORMANCE_NOT_OWED;
-
-/** Apply one authority-free legacy Stop observation against locked state. */
-export function applyUntrustedStopResolution(
-  state: TaskGraph,
-  taskId: string,
-  resolution: UntrustedStopResolution,
-  proofPolicy: ProofEvaluationPolicy = PI_STRUCTURED_EVIDENCE_POLICY,
-): AppliedStopResolution {
-  const executing = state.executing_tasks ?? [];
-  const target = state.tasks.find((task) => task.id === taskId);
-  if (!executing.includes(taskId) || target?.active_implementation_attempt !== undefined) {
-    return { state, skipped: true };
-  }
-  const clearedExecuting = executing.filter((id) => id !== taskId);
-  if (target === undefined || target.status === "completed") {
-    return { state: { ...state, executing_tasks: clearedExecuting }, skipped: true };
-  }
-  const codeChanged = resolution.bytesChangedSinceAttempt;
-  const preserveExistingTrusted = shouldPreserveTrustedEvidence(
-    target,
-    resolution.testResult,
-    codeChanged,
-  );
-  const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
-  const currentNewTests = resolution.newTests;
-  const proofTestResult = preserveExistingTrusted ? target.test_result : resolution.testResult;
-  const proofArtifactsChanged = attributedChangedArtifacts(
-    resolution.changedDeclaredArtifacts,
-    cumulativeFiles,
-  );
-  const proof = evaluateTaskProof(
-    {
-      verificationPolicy: taskVerificationPolicy(target),
-      declaredArtifacts: target.file_list ?? [],
-      ...taskArtifactScope(target),
-    },
-    {
-      taskCompleted: false,
-      testResult: proofTestResult,
-      filesModified: proofArtifactsChanged,
-      newTestsWritten: currentNewTests.written,
-      newTestEvidence: currentNewTests.evidence,
-      contractConformance: LEGACY_STOP_CONFORMANCE,
-    },
-    proofPolicy,
-  );
-  return {
-    skipped: false,
-    state: applyResolvedTask(state, taskId, target.wave, codeChanged, clearedExecuting, (task): Task => ({
-      ...task,
-      status: "pending",
-      proof,
-      revalidation_required: true,
-      legacy_missing_proof: undefined,
-      test_result: proofTestResult,
-      test_evidence: preserveExistingTrusted ? task.test_evidence : resolution.testEvidence,
-      files_modified: cumulativeFiles,
-      ...storedNewTestEvidence(currentNewTests),
-    })),
-  };
-}
 
 export type IncomingImplementationEvidence = Readonly<{
   taskCompleted: boolean;
+  /** The attempt's test result and its evidence; absent when the transport
+   *  observed none (a Pi transcript without a structured verdict), which the
+   *  regression proof judges as `test-result-missing`. */
   testResult?: TaskTestResult;
   testEvidence?: string;
   /** One parsed ADT when the transport carried one; absent reads as the
@@ -542,53 +366,32 @@ export type IncomingImplementationEvidence = Readonly<{
  * Whether a Task owes I6 (`red-then-green`), answered once for settlement,
  * reconcile and the brief.
  *
- * The frozen Proof is authoritative: population derived its obligations from
- * the Task's era (`taskRedThenGreenEra`: the TaskGraph's frozen-manifest era,
- * or `not-owed` for an Acceptance Contract writer), and the State File load
- * refuses a Task whose stored obligations disagree with that era (INV-6), so a
- * loaded Task's obligations already carry its era. The graph era
- * (`frozenRedThenGreenEra`) decides only for a Task carrying no frozen Proof —
- * never a contract writer, whose graph froze every Proof — and otherwise supplies
- * the classification an owed Proof is judged by. Every way the two
- * could still disagree is its own named arm, never a silent "not owed":
+ * The frozen Proof is authoritative: population froze the one duty rule's
+ * answer (`redThenGreenOwing`) into its obligations, and the State File load
+ * refuses a Task whose stored obligations disagree with that rule (INV-6), so
+ * a loaded Task's obligations already carry its duty; this only reads them.
+ * The Red-Then-Green Status asks the rule for a not-owed duty's exemption. The graph era
+ * (`frozenRedThenGreenEra`) only supplies the classification an owed Proof is
+ * judged by. Their one possible disagreement is its own named arm, never a
+ * silent "not owed":
  * - `owed` carries the frozen test-file classification the judge and the
  *   brief split the Task's `file_list` with (INV-2);
  * - `classification-unfrozen`: the Proof owes I6 but the manifest froze no
- *   classification to judge it by — an infrastructure fault, never a retry;
- * - `proof-unfrozen`: no frozen Proof, yet the era obligates this Task —
- *   nothing to settle against, so it is refused.
+ *   classification to judge it by — an infrastructure fault, never a retry.
  */
 export type RedThenGreenDuty =
   | Readonly<{ kind: "not-owed" }>
   | Readonly<{ kind: "owed"; testFiles: FrozenTestFiles }>
-  | Readonly<{ kind: "classification-unfrozen"; reason: string }>
-  | Readonly<{ kind: "proof-unfrozen"; reason: string }>;
+  | Readonly<{ kind: "classification-unfrozen"; reason: string }>;
 
 const NOT_OWED: RedThenGreenDuty = freeze({ kind: "not-owed" });
-
-const owesRedThenGreen = (obligations: readonly ProofObligation[]): boolean =>
-  obligations.some(({ kind }) => kind === "red-then-green");
 
 export function redThenGreenDuty(
   task: Task,
   manifest: FrozenVerificationManifest | undefined,
 ): RedThenGreenDuty {
+  if (!task.proof.obligations.some(({ kind }) => kind === "red-then-green")) return NOT_OWED;
   const era = frozenRedThenGreenEra(manifest);
-  if (task.proof === undefined) {
-    const eraObligations = deriveProofObligations({
-      verificationPolicy: taskVerificationPolicy(task),
-      declaredArtifacts: task.file_list ?? [],
-      ...taskArtifactScope(task),
-      redThenGreen: era.kind,
-    });
-    return owesRedThenGreen(eraObligations)
-      ? freeze({
-          kind: "proof-unfrozen",
-          reason: `${task.id} carries no frozen Proof, but its TaskGraph's I6 era owes red-then-green for a Task that requires new tests`,
-        })
-      : NOT_OWED;
-  }
-  if (!owesRedThenGreen(task.proof.obligations)) return NOT_OWED;
   // The frozen Proof has decided the duty; the era supplies the classification
   // it is judged by, and a pre-I6 era is the `classification-unfrozen` disagreement.
   return era.kind === "owed-if-new-tests"
@@ -606,18 +409,23 @@ export type NormalizedImplementationEvidence = Readonly<{
   newTests: NewTestEvidence;
 }>;
 
+/** A trusted stored verdict survives an incoming result that is untrusted or
+ *  absent (no test result observed): neither may replace it. */
 function shouldPreserveTrustedEvidence(
   task: Task,
   incoming: TaskTestResult | undefined,
   bytesChangedOrUnobservable: boolean,
 ): boolean {
-  return task.revalidation_required !== true && incoming?.verdict === "untrusted" && (
+  return task.revalidation_required !== true && (incoming === undefined || incoming.verdict === "untrusted") && (
     task.test_result?.verdict === "trusted-fail" ||
     (task.test_result?.verdict === "trusted-pass" && !bytesChangedOrUnobservable)
   );
 }
 
-/** One preservation rule shared by Claude and Pi, without provenance relabeling. */
+/** One preservation rule shared by Claude and Pi, without provenance relabeling.
+ *  The result is the Task's test evidence after this attempt: an absent field
+ *  means the attempt left none, and the settled Task records none (an earlier
+ *  attempt's result is never carried past an attempt that observed none). */
 export function normalizeImplementationEvidence(
   task: Task,
   incoming: IncomingImplementationEvidence,
@@ -713,14 +521,15 @@ function clearAttempt(task: Task): Task {
     attempt_artifact_baseline: undefined,
     attempt_repository_baseline: undefined,
     reserved_at: undefined,
-    legacy_execution_reservation: undefined,
   };
 }
 
+/** The settled Task's evidence fields. Test evidence is written even when
+ *  absent, so an attempt that observed none clears its predecessor's. */
 function evidenceFields(evidence: NormalizedImplementationEvidence) {
   return {
-    ...(evidence.testResult === undefined ? {} : { test_result: evidence.testResult }),
-    ...(evidence.testEvidence === undefined ? {} : { test_evidence: evidence.testEvidence }),
+    test_result: evidence.testResult,
+    test_evidence: evidence.testEvidence,
     files_modified: evidence.cumulativeModifiedPaths,
     ...storedNewTestEvidence(evidence.newTests),
   };
@@ -761,7 +570,6 @@ function withoutReopenScope(task: Task, era: RedThenGreenEra): Task {
       redThenGreen: era,
     }),
     revalidation_required: true,
-    legacy_missing_proof: undefined,
   };
 }
 
@@ -798,7 +606,6 @@ function settledTask(
       status: "implemented",
       proof: transition.proof,
       revalidation_required: undefined,
-      legacy_missing_proof: undefined,
       failure_reason: undefined,
       retry_count: undefined,
       ...evidenceFields(facts.normalizedEvidence),
@@ -809,7 +616,6 @@ function settledTask(
     const pending = {
       ...common,
       status: "pending" as const,
-      legacy_missing_proof: undefined,
       failure_reason: describeSettlement(transition),
       retry_count: transition.kind === "retry-required" ? 1 : 2,
       ...evidenceFields(facts.normalizedEvidence),
@@ -818,13 +624,11 @@ function settledTask(
       ? { ...pending, proof: transition.proof, revalidation_required: true }
       : { ...pending, proof: transition.proof, revalidation_required: undefined };
   }
-  if (task.proof === undefined) throw new Error("infrastructure settlement requires historical Proof audit data");
   return {
     ...common,
     status: "pending",
     proof: task.proof,
     revalidation_required: true,
-    legacy_missing_proof: undefined,
     failure_reason: describeSettlement(transition),
   };
 }
@@ -909,7 +713,7 @@ function settleAndApply(
   const task = state.tasks.find((candidate) => candidate.id === authority.taskId);
   if (task === undefined) return freeze({ kind: "ignored", state, reason: "stale" });
   const current = task.active_implementation_attempt ?? authority;
-  const settled = settleImplementationAttempt(task, current, authority, observation, bytes.suite);
+  const settled = settleImplementationAttempt(task, current, authority, observation, bytes.byteScope);
   if (!settled.ok) return freeze({ kind: "error", state, error: settled.error });
   return applyImplementationCompletionTransition(
     state,
@@ -971,7 +775,7 @@ export function settleUnavailableImplementation(
   authority: ImplementationAttemptAuthority,
   observedAt: IsoInstant,
   reason: string,
-  bytes: TaskLocalByteObservation = unavailableTaskLocalByteObservation(authority, reason),
+  bytes: TaskLocalByteObservation = unavailableTaskLocalByteObservation(reason),
 ): ImplementationSettlementApplicationResult {
   const observation = parseImplementationObservation({
     schemaVersion: 1,

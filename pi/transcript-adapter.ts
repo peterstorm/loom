@@ -1,22 +1,23 @@
-/** Pi subagent messages adapted to the Claude-compatible JSONL parsers. */
+/**
+ * The Pi subagent transcript, read once: `parsePiMessages` proves the
+ * harness's message list, `piTranscriptToolCalls` projects it onto the
+ * harness-neutral `HarnessToolCall` vocabulary (each call paired with its
+ * result), and every reading of what the child did — its write targets, its
+ * structured test verdict — is a fold over that one projection. The emission
+ * scan and the final-payload candidates read the raw transcript by their own
+ * documented postures.
+ */
 
+import { match } from "ts-pattern";
 import { attributeExit, classifyTestCommandDetailed, type ClassifiedTestCommand } from "../engine/src/machine";
 import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../engine/src/core/shell-command";
-import { extractTestEvidence } from "../engine/src/core/test-evidence";
+import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
 import { boundedThrownCause, describeUnknown } from "../engine/src/core/orchestration-contract/identity";
 import { emissionToolFamily, type IssuedEmissionBinding } from "../engine/src/core/emission-tool";
 import type { EmissionCallFrame } from "../engine/src/core/emission-observation";
 import { isRecord } from "../engine/src/core/plain-record";
-
-const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({
-  bash: "Bash",
-  write: "Write",
-  edit: "Edit",
-  read: "Read",
-  find: "Find",
-  grep: "Grep",
-  ls: "Ls",
-});
+import { piTranscriptTool, piTranscriptToolCall, piWriteTargetPaths } from "../engine/src/core/harness-tool-call";
+import type { BashToolOutcome, HarnessTool, HarnessToolCall } from "../engine/src/machine/harness-tool-call-types";
 
 export type PiContentBlock =
   | Readonly<{ type: "text"; text: string }>
@@ -230,41 +231,93 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
     : { ok: true, value: Object.freeze(parsedMessages) };
 }
 
-/**
- * The tool-call argument keys that may name a write target, in probe order.
- * Both harnesses spell the same target three ways; ONE ordered vocabulary here
- * keeps the transcript scanner (`writtenPathsOf`) and the extension's write
- * guard (`piWriteTargetPaths`/`writeTarget`) from drifting apart.
- */
-export const WRITE_TARGET_KEYS: readonly string[] = ["path", "file_path", "filePath"];
+// ---------------------------------------------------------------------------
+// The projection: every assistant tool call, paired with its result
+// ---------------------------------------------------------------------------
 
 /**
- * The first NON-NULLISH value among `WRITE_TARGET_KEYS` as a non-empty string,
- * or `null` when no key proves one. The `??=`-assignment defers only nullish
- * values (`undefined`/`null`) to a later key; the first non-nullish value WINS
- * the probe, and a winner that is not a non-empty string fails the string test
- * — it does not defer to a later key either.
+ * One tool call a Pi transcript's assistant made, read through the shared Pi
+ * vocabulary (`core/harness-tool-call.ts`):
+ * - `finished`: the transcript carries its result, so its outcome is the one
+ *   `piToolCall` reads from a live `tool_result` event;
+ * - `unfinished`: no result follows it (the child stopped mid-call). Its tool
+ *   and input are still the call's — a write it may have made is still named —
+ *   but it has no outcome, never a fabricated one.
  */
-export function writeTargetPathOf(args: unknown): string | null {
-  if (typeof args !== "object" || args === null) return null;
-  const record = args as Record<string, unknown>;
-  let value: unknown;
-  for (const key of WRITE_TARGET_KEYS) value ??= record[key];
-  return typeof value === "string" && value.length > 0 ? value : null;
+export type PiTranscriptToolCall =
+  | Readonly<{ kind: "finished"; call: HarnessToolCall }>
+  | Readonly<{ kind: "unfinished"; tool: HarnessTool; input: Readonly<Record<string, unknown>> }>;
+
+type PiToolCallBlock = Extract<PiContentBlock, { type: "toolCall" }>;
+type PiToolResultMessage = Extract<PiMessage, { role: "toolResult" }>;
+
+/**
+ * Project a parsed transcript onto its tool calls, in call order. A call's
+ * result is the first `toolResult` after it naming its id; a later call that
+ * reuses an id takes the results after it, and a result no earlier call
+ * names is nobody's. Only assistant messages carry calls. `cwd` is the
+ * directory the caller reads the calls' relative paths against.
+ *
+ * Pi appends one result per call, in call order, even for calls it ran in
+ * parallel (probed in @earendil-works/pi-agent-core's agent loop), so call
+ * order is result order for every transcript Pi writes.
+ */
+export function piTranscriptToolCalls(
+  messages: readonly PiMessage[],
+  cwd: string,
+): readonly PiTranscriptToolCall[] {
+  type PendingCall = { block: PiToolCallBlock; result: PiToolResultMessage | null };
+  const calls: PendingCall[] = [];
+  const awaitingResult = new Map<string, PendingCall>();
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      for (const block of message.content) {
+        if (block.type !== "toolCall") continue;
+        const call: PendingCall = { block, result: null };
+        awaitingResult.set(block.id, call);
+        calls.push(call);
+      }
+      continue;
+    }
+    if (message.role !== "toolResult") continue;
+    const call = awaitingResult.get(message.toolCallId);
+    if (call === undefined) continue;
+    call.result = message;
+    awaitingResult.delete(message.toolCallId);
+  }
+  return Object.freeze(calls.map(({ block, result }): PiTranscriptToolCall => result === null
+    ? Object.freeze({ kind: "unfinished", tool: piTranscriptTool(block.name), input: block.arguments })
+    : Object.freeze({
+        kind: "finished",
+        call: piTranscriptToolCall({
+          toolName: block.name,
+          toolCallId: block.id,
+          input: block.arguments,
+          content: result.content,
+          isError: result.isError,
+        }, cwd),
+      })));
 }
 
-/** Every path a transcript's `write`/`Write` tool calls targeted, in order. */
-export function writtenPathsOf(messages: readonly PiMessage[]): readonly string[] {
-  const paths: string[] = [];
-  for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    for (const block of message.content) {
-      if (block.type !== "toolCall" || (block.name !== "write" && block.name !== "Write")) continue;
-      const path = writeTargetPathOf(block.arguments);
-      if (path !== null) paths.push(path);
-    }
-  }
-  return Object.freeze(paths);
+/** The tool and input a projected call names, finished or not. */
+const requestOf = (entry: PiTranscriptToolCall): Readonly<{ tool: HarnessTool; input: Readonly<Record<string, unknown>> }> =>
+  entry.kind === "finished" ? entry.call : entry;
+
+/**
+ * Every path the transcript's Write, Edit and MultiEdit calls targeted, in
+ * call order: each call's targets as the write guard reads them
+ * (`piWriteTargetPaths`, so an `edits[]`-only multi-edit names each edit's
+ * path). A call counts whether it finished, failed or never got a result —
+ * the transcript is read for every file the child may have written; a call
+ * whose input names no provable target names nothing.
+ */
+export function piWriteTargets(calls: readonly PiTranscriptToolCall[]): readonly string[] {
+  return Object.freeze(calls.flatMap((entry) => {
+    const { tool, input } = requestOf(entry);
+    if (tool !== "Write" && tool !== "Edit" && tool !== "MultiEdit") return [];
+    const targets = piWriteTargetPaths(input);
+    return targets.ok ? targets.value : [];
+  }));
 }
 
 /** An explicit zero-failure marker from the common runner summaries. The
@@ -354,9 +407,9 @@ function attributeExitForStructuredEvidence(
 
 /**
  * Diagnosable structured-capture trace: what the pairing saw, and why the
- * last classified test pair did not mint structured evidence. Logged by the
- * extension whenever the transcript fallback is used, so a future "why is
- * the wave gate blocked" stops being a forensic mystery.
+ * last classified test pair did not mint structured evidence. Logged whenever
+ * a transcript yields no structured verdict, so a future "why is the wave
+ * gate blocked" stops being a forensic mystery.
  */
 export interface PiStructuredTestDiagnostics {
   readonly classifiedCommands: readonly string[];
@@ -365,8 +418,8 @@ export interface PiStructuredTestDiagnostics {
 }
 
 /**
- * One walk over Pi's messages that pairs each classified test toolCall with
- * its toolResult and attributes an exit code to it.
+ * One walk over the projected tool calls that classifies each Bash test
+ * command and attributes an exit code to its result.
  *
  * Diagnostics and verdicts consume this same event stream, so both describe
  * the same tool-call pairing and exit attribution. It is emitted as events
@@ -382,55 +435,49 @@ type TestPairEvent =
       text: string;
     }>;
 
+/**
+ * The exit attribution reads and the output the verdict parses, from a
+ * finished Bash call's outcome. A killed run is a failed one (exit 1, as Pi's
+ * `isError` reports it), and its partial output is no evidence.
+ */
+const testRunOf = (outcome: BashToolOutcome): Readonly<{ exit: number | null; text: string }> =>
+  match(outcome)
+    .with({ kind: "exited" }, ({ exit, stdout }) => ({ exit, text: stdout }))
+    .with({ kind: "exit-unknown" }, ({ stdout }) => ({ exit: null, text: stdout }))
+    .with({ kind: "interrupted" }, () => ({ exit: 1, text: "" }))
+    .exhaustive();
+
 /** Pair only parser-proven test commands with their exact Pi tool result.
  * Standard pairs require the test segment to own the Bash exit status; the
  * narrow structured-output relaxation instead derives the verdict from the
  * runner's uncontaminated summary and explicit zero-failure marker. */
-function* structuredTestPairs(messages: readonly PiMessage[]): Generator<TestPairEvent> {
-  const testCalls = new Map<string, Readonly<{ command: string; classified: ClassifiedTestCommand }>>();
-  for (const message of messages) {
-    if (message.role === "assistant") {
-      for (const block of message.content ?? []) {
-        if (block.type !== "toolCall" || block.name?.toLowerCase() !== "bash" || !block.id) continue;
-        const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
-        const classified = classifyTestCommandDetailed(command);
-        if (classified === null) continue;
-        testCalls.set(block.id, { command, classified });
-        yield { kind: "classified", command };
-      }
-      continue;
-    }
-    if (message.role !== "toolResult") continue;
-    const entry = testCalls.get(message.toolCallId);
-    if (entry === undefined) continue;
-    const attributed = attributeExitForStructuredEvidence(
-      message.isError ? 1 : 0,
-      entry.classified,
-      entry.command,
-    );
+function* structuredTestPairs(calls: readonly PiTranscriptToolCall[]): Generator<TestPairEvent> {
+  for (const entry of calls) {
+    const { tool, input } = requestOf(entry);
+    if (tool !== "Bash") continue;
+    const command = typeof input.command === "string" ? input.command : "";
+    const classified = classifyTestCommandDetailed(command);
+    if (classified === null) continue;
+    yield { kind: "classified", command };
+    if (entry.kind !== "finished" || entry.call.tool !== "Bash") continue;
+    const run = testRunOf(entry.call.outcome);
+    const attributed = attributeExitForStructuredEvidence(run.exit, classified, command);
     if (attributed.attributed === null) {
       yield { kind: "attribution-refused" };
       continue;
     }
-    const text = (message.content ?? [])
-      .filter((block) => block.type === "text")
-      .map((block) => block.text ?? "")
-      .join("\n");
-    yield { kind: "paired", attributed, text };
+    yield { kind: "paired", attributed, text: run.text };
   }
 }
 
-export function piStructuredTestDiagnostics(
-  input: unknown,
-): PiTranscriptResult<PiStructuredTestDiagnostics> {
-  const parsed = parsePiMessages(input);
-  if (!parsed.ok) return parsed;
+/** Why the projected calls did, or did not, mint a structured test verdict. */
+export function piStructuredTestDiagnostics(calls: readonly PiTranscriptToolCall[]): PiStructuredTestDiagnostics {
   const classifiedCommands: string[] = [];
   let attributedPairs = 0;
   let verdict: PiStructuredTestDiagnostics["verdict"] = "no-test-command";
   let sawClassified = false;
   let sawAttributionRefusal = false;
-  for (const event of structuredTestPairs(parsed.value)) {
+  for (const event of structuredTestPairs(calls)) {
     if (event.kind === "classified") {
       sawClassified = true;
       if (!classifiedCommands.includes(event.command)) classifiedCommands.push(event.command);
@@ -462,93 +509,27 @@ export function piStructuredTestDiagnostics(
   } else {
     finalVerdict = "no-paired-result";
   }
-  return {
-    ok: true,
-    value: Object.freeze({
-      classifiedCommands: Object.freeze(classifiedCommands),
-      attributedPairs,
-      verdict: finalVerdict,
-    }),
-  };
+  return Object.freeze({
+    classifiedCommands: Object.freeze(classifiedCommands),
+    attributedPairs,
+    verdict: finalVerdict,
+  });
 }
 
-export function piStructuredTestResult(
-  input: unknown,
-): PiTranscriptResult<{ passed: boolean; evidence: string } | null> {
-  const parsed = parsePiMessages(input);
-  if (!parsed.ok) return parsed;
-  let latest: { passed: boolean; evidence: string } | null = null;
-  for (const event of structuredTestPairs(parsed.value)) {
+/** The structured verdict of a transcript's latest attributable test run, or
+ *  `null` when no run proves one. */
+export function piStructuredTestResult(calls: readonly PiTranscriptToolCall[]): TestEvidence | null {
+  let latest: TestEvidence | null = null;
+  for (const event of structuredTestPairs(calls)) {
     if (event.kind !== "paired") continue;
     const parsedEvidence = extractTestEvidence(event.text);
     // A relaxed (non-attributable) composition may only mint a GREEN verdict
     // when the output still carries the runner's explicit zero-failure line;
     // a structured FAIL is always taken (the gate rejects it either way).
     if (parsedEvidence.passed && event.attributed.relaxed && !ZERO_FAILURE_MARKER.test(event.text)) continue;
-    latest = {
-      passed: event.attributed.attributed === 0 && parsedEvidence.passed,
-      evidence: parsedEvidence.evidence,
-    };
+    latest = testEvidenceOf(event.attributed.attributed === 0 && parsedEvidence.passed, parsedEvidence.evidence);
   }
-  return { ok: true, value: latest };
-}
-
-/**
- * Convert Pi's toolCall/toolResult message shape into the JSONL shape consumed
- * by Loom's transcript parsers. Tool-call IDs are preserved so anti-spoofing
- * parsers can pair a real command with its exact result.
- */
-/** Text blocks normalised to a defined `text`; every other block passes through
- *  untouched so user and tool-result projections share one mapping policy. */
-function normalizedTextBlocks(content: readonly PiContentBlock[]): readonly unknown[] {
-  return content.map((block) => block.type === "text" ? { type: "text", text: block.text ?? "" } : block);
-}
-
-export function messagesToClaudeJsonl(input: unknown): PiTranscriptResult<string> {
-  const parsed = parsePiMessages(input);
-  if (!parsed.ok) return parsed;
-  const lines: string[] = [];
-
-  for (const msg of parsed.value) {
-    if (msg.role === "assistant") {
-      const content = msg.content.map((block) => {
-        if (block.type === "toolCall") {
-          if (!block.name || !block.id) throw new Error("validated Pi tool call lost its identity");
-          return {
-            type: "tool_use",
-            name: TOOL_NAME_MAP[block.name] ?? block.name,
-            id: block.id,
-            input: block.arguments ?? {},
-          };
-        }
-        if (block.type === "text") return { type: "text", text: block.text ?? "" };
-        return block;
-      });
-      lines.push(JSON.stringify({ message: { role: "assistant", content } }));
-      continue;
-    }
-
-    if (msg.role === "toolResult") {
-      const resultContent = normalizedTextBlocks(msg.content);
-      lines.push(JSON.stringify({
-        message: {
-          role: "user",
-          content: [{
-            type: "tool_result",
-            tool_use_id: msg.toolCallId,
-            content: resultContent,
-          }],
-        },
-      }));
-      continue;
-    }
-
-    if (msg.role === "user") {
-      lines.push(JSON.stringify({ message: { role: "user", content: normalizedTextBlocks(msg.content) } }));
-    }
-  }
-
-  return { ok: true, value: lines.length === 0 ? "" : `${lines.join("\n")}\n` };
+  return latest;
 }
 
 /**

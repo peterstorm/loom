@@ -36,13 +36,21 @@ import {
   publishedReviewerRequest,
   renderSpawnTask,
 } from "../engine/src/handlers/helpers/programs";
-import { canonicalSpawnTaskText, REVIEWER_RESULT_INSTRUCTION } from "../engine/src/core/spawn-task-text";
 import {
+  canonicalSpawnTaskText,
+  parseIssuedTaskIdentity,
+  REVIEWER_RESULT_INSTRUCTION,
+  type TaskIdentity,
+} from "../engine/src/core/spawn-task-text";
+import {
+  explicitRun,
+  readIssuedIdentities,
   readSessionRunBindings,
+  resolveIssuingRun,
+  type RunLocation,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey } from "../engine/src/core/harness-capture";
-import { isRecord } from "../engine/src/core/plain-record";
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
 import type {
   AgentRequestAuthority,
@@ -52,29 +60,28 @@ import type {
 import { piSpawnRosterId, replacePiSpawnTask } from "./tool-input";
 import { describeChildLaunchRouteRefusal, routedChildLaunchRoute } from "../engine/src/utils/child-launch-route";
 
-export type PiOrchestrationMarkers = Readonly<{
-  requestId: string;
-  contextDigest: string;
-}>;
-
-export function orchestrationMarkers(task: string, item: string): PiOrchestrationMarkers | null {
-  const requestIds = [...task.matchAll(/^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]);
-  const contextDigests = [...task.matchAll(/^LOOM_CONTEXT_DIGEST:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]);
-  if (requestIds.length === 0 && contextDigests.length === 0) return null;
-  if (requestIds.length !== 1 || contextDigests.length !== 1) {
-    throw new Error(`${item} must carry exactly one LOOM_REQUEST_ID and one LOOM_CONTEXT_DIGEST authority marker`);
-  }
-  return Object.freeze({ requestId: requestIds[0], contextDigest: contextDigests[0] });
+/**
+ * The issued request identity a Pi task's authority markers name, or `null`
+ * when it carries none. Pi's spawn and result boundaries fail by throwing, so
+ * malformed markers throw here, naming the item.
+ */
+export function piTaskIdentity(task: string, item: string): TaskIdentity | null {
+  const identity = parseIssuedTaskIdentity(task);
+  if (identity.kind === "unbound") return null;
+  if (identity.kind === "malformed") throw new Error(`${item} carries unusable authority markers: ${identity.reason}`);
+  return Object.freeze({ requestId: identity.requestId, contextDigest: identity.contextDigest });
 }
 
-function environmentRunBinding(): SessionRunBinding | null {
-  const runsRoot = process.env[RUNS_ROOT_ENV];
-  const runDirectory = process.env[RUN_DIR_ENV];
-  if (runsRoot === undefined && runDirectory === undefined) return null;
-  if (runsRoot === undefined || runDirectory === undefined) {
-    throw new Error("Pi orchestration requires both run-root and run-directory authority");
-  }
-  const opened = openRegisteredRunDirectory(runsRoot, runDirectory);
+/** The explicit run the Pi process environment names, or `null`; half of one throws. */
+function piExplicitRun(): RunLocation | null {
+  const explicit = explicitRun({ runsRoot: process.env[RUNS_ROOT_ENV], runDirectory: process.env[RUN_DIR_ENV] }, "pi");
+  if (!explicit.ok) throw new Error(explicit.message);
+  return explicit.value;
+}
+
+/** An explicit run as the session binding Pi's capture path carries: every request it issued. */
+function explicitRunBinding(run: RunLocation): SessionRunBinding {
+  const opened = openRegisteredRunDirectory(run.runsRoot, run.runDirectory);
   if (!opened.ok) throw new Error(opened.error.message);
   const issued = opened.value.readIssuedRequests();
   if (!issued.ok) throw new Error(issued.error.message);
@@ -85,33 +92,22 @@ function environmentRunBinding(): SessionRunBinding | null {
   });
 }
 
-export function sessionRunBinding(
+/**
+ * The run binding that issued every one of `identities`, through the shared
+ * `resolveIssuingRun`: `explicit` when set, otherwise exactly one of this Pi
+ * session's bindings. Throws on any refusal (Pi's fail-spawn boundary).
+ */
+export function piIssuingRunBinding(
   rawSessionId: string,
-  markers: readonly PiOrchestrationMarkers[],
+  explicit: RunLocation | null,
+  identities: readonly TaskIdentity[],
 ): SessionRunBinding {
-  const bindings = readSessionRunBindings(subagentDir(), rawSessionId, "pi");
-  if (!bindings.ok) throw new Error(bindings.message);
-  const requestIds = new Set(markers.map(({ requestId }) => requestId));
-  const candidates = bindings.value.filter((binding) =>
-    [...requestIds].every((requestId) => binding.requestIds.some((candidate) => candidate === requestId))
-  );
-  const matches = candidates.filter((binding) => {
-    const opened = openRegisteredRunDirectory(binding.runsRoot, binding.runDirectory);
-    if (!opened.ok) throw new Error(opened.error.message);
-    const issued = opened.value.readIssuedRequests();
-    if (!issued.ok) throw new Error(issued.error.message);
-    return markers.every((marker) => issued.value.some((request) =>
-      request.requestId === marker.requestId && request.contextDigest === marker.contextDigest));
-  });
-  if (matches.length !== 1) {
-    const identities = markers.map(({ requestId, contextDigest }) => `${requestId}@${contextDigest}`).join(", ");
-    throw new Error(
-      matches.length === 0
-        ? `no Pi session run binding contains issued request/context authority ${identities}`
-        : `multiple Pi session run bindings contain issued request/context authority ${identities}`,
-    );
-  }
-  return matches[0];
+  const resolved = resolveIssuingRun(explicit, {
+    bindings: () => readSessionRunBindings(subagentDir(), rawSessionId, "pi"),
+    issuedIdentities: readIssuedIdentities,
+  }, identities, "pi");
+  if (!resolved.ok) throw new Error(resolved.message);
+  return resolved.value.kind === "explicit" ? explicitRunBinding(resolved.value.run) : resolved.value.binding;
 }
 
 type PiRegisteredReviewProgram =
@@ -317,7 +313,7 @@ export function readPiIssuedSpawnRequest(
 ): ReturnType<SpawnAdmissionPorts["readIssuedRequest"]> {
   if (sessionId === null) return failure({ message: "Pi session identity is unavailable" });
   try {
-    const binding = environmentRunBinding() ?? sessionRunBinding(sessionId, [{ requestId, contextDigest }]);
+    const binding = piIssuingRunBinding(sessionId, piExplicitRun(), [{ requestId, contextDigest }]);
     const opened = openRegisteredRunDirectory(binding.runsRoot, binding.runDirectory);
     if (!opened.ok) return failure({ message: opened.error.message });
     const issued = opened.value.readIssuedRequests();
@@ -389,14 +385,14 @@ export async function recordPiSpawnCorrelators(
 ): Promise<SessionRunBinding | null> {
   if (itemAdmissions.length !== rosterIds.length) throw new Error("Pi correlator roster length does not match spawn batch");
   const parsedMarkers = itemAdmissions.map(({ item }, index) =>
-    orchestrationMarkers(item.task, `Pi spawn item ${index + 1}/${item.agent}`));
-  const marked = parsedMarkers.filter((markers): markers is PiOrchestrationMarkers => markers !== null);
-  const explicit = environmentRunBinding();
+    piTaskIdentity(item.task, `Pi spawn item ${index + 1}/${item.agent}`));
+  const marked = parsedMarkers.filter((identity): identity is TaskIdentity => identity !== null);
+  const explicit = piExplicitRun();
   if (marked.length === 0 && explicit === null) return null;
   if (marked.length !== itemAdmissions.length) {
     throw new Error("Pi orchestration spawn batch must not mix request-bound and unbound items");
   }
-  const runBinding = explicit ?? sessionRunBinding(rawSessionId, marked);
+  const runBinding = piIssuingRunBinding(rawSessionId, explicit, marked);
   const opened = openRegisteredRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
   if (!opened.ok) throw new Error(opened.error.message);
   const issued = opened.value.readIssuedRequests();
@@ -560,7 +556,7 @@ export function piResultAuthorityProblem(
   toolCallId: unknown,
   resultIndex: number,
   agentType: string,
-  markers: PiOrchestrationMarkers,
+  markers: TaskIdentity,
 ): string | null {
   const correlation = piRequestCorrelation(runBinding, toolCallId, resultIndex, agentType);
   if (!correlation.ok) {
@@ -582,13 +578,4 @@ export function piResultAuthorityProblem(
   return request.contextDigest === markers.contextDigest
     ? null
     : `result context marker does not match correlated request ${request.requestId}`;
-}
-
-export function standaloneCompletionCheckpointProblem(checkpoint: string): string | null {
-  try {
-    const parsed: unknown = JSON.parse(checkpoint);
-    return isRecord(parsed) && parsed.kind === "done" ? null : "review is not done";
-  } catch (error) {
-    return `completion checkpoint is invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
-  }
 }

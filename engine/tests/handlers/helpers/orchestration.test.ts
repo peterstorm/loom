@@ -12,20 +12,7 @@ import {
   observedAdvisoryApproval,
   renderStatus,
 } from "../../../src/handlers/helpers/orchestration";
-import {
-  panelSubmissionProblem,
-  parseRegisteredPanelProgram,
-} from "../../../src/core/legacy-panel-decisions";
-import {
-  resolvePanelAttemptVerdictSource,
-  settlePanelAttemptSubmission,
-} from "../../../src/handlers/helpers/programs/legacy-panel";
-import { candidateFilename, type PanelLens } from "../../../src/core/panel-contract";
-import { panelVerdictSourceProvenance, panelVerdictSourceRecord } from "../../../src/core/panel-verdict-source";
-import { selectVerdictSource } from "../../../src/core/emission-ingestion";
-import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../../src/core/emission-tool";
 import { captureKey } from "../../../src/core/harness-capture";
-import { observeEmissionCalls } from "../../../src/core/emission-observation";
 import {
   REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4, parseWaveReviewerProtocolDescriptor, type ReviewerDraftV2,
 } from "../../../src/core/reviewer-contract";
@@ -35,7 +22,7 @@ import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { i6PlanTask } from "../../fixtures/i6-plan-task";
 import { i6RunnerManifest } from "../../fixtures/i6-runner-manifest";
-import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../fixtures/pi-session";
 import { facadeParentEnvironment, parentAnnouncement, type FacadeParent } from "../../fixtures/facade-parent";
@@ -51,7 +38,8 @@ import {
   resumeStandaloneFacade,
   type StandaloneCaptureWitness,
 } from "../../../src/handlers/helpers/programs/standalone";
-import { StateManager } from "../../../src/state-manager";
+import { parseActiveWaveGateRegistration, registerActiveWaveGate, StateManager } from "../../../src/state-manager";
+import { value } from "../../fixtures/parse-result";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
 import { publicationFile, refutationBatchEffectId } from "../../../src/handlers/helpers/programs/durable-requests";
@@ -71,8 +59,9 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
-import { satisfiedProof, trustedPassEvidence } from "../../fixtures/task-lifecycle";
+import { executingGraphFixture, protectedGraphFixture, satisfiedProof, trustedPassEvidence } from "../../fixtures/task-lifecycle";
 import { issuedDescriptorWavePayload } from "../../fixtures/wave-reviewer-payload";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -152,9 +141,36 @@ const FACT_CATEGORIES = [
   "waveGateCompletionEligibility",
 ] as const;
 
+/** An implemented Task over src/x.ts with passing tests, whose review is blocked on one critical `finding`. */
+function blockedReviewTarget(
+  id: string,
+  proof: unknown,
+  finding: Readonly<{ claim: string }>,
+  trace: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id, description: "review target", agent: "code-implementer-agent", wave: 1,
+    status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], ...trace,
+    test_result: { verdict: "trusted-pass" }, test_evidence: "passed",
+    new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "blocked", review_generation: 0,
+    findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
+  };
+}
+
+/** Wave 1's review epoch for `runId` and the passing spec-check it settled, over `planFile`. */
+function passedSpecCheckEpoch(runId: string, batchEpoch: string, planFile: string | null): Record<string, unknown> {
+  return {
+    wave_review_epoch: { runId, wave: 1, batchEpoch, specCheckDocuments: specCheckDocuments(null, planFile) },
+    spec_check: {
+      wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
+      critical_findings: [], high_findings: [], medium_findings: [],
+    },
+  };
+}
+
 function executeGraph(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    current_phase: "execute",
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     spec_dir: ".claude/specs/x",
     phase_artifacts: {},
@@ -162,7 +178,7 @@ function executeGraph(overrides: Record<string, unknown> = {}): Record<string, u
     plan_file: "plan.md",
     wave_gates: {},
     tasks: [
-      { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [] },
+      { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", proof: satisfiedProof([]), depends_on: [] },
       { id: "T2", description: "d", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [] },
     ],
     ...overrides,
@@ -239,8 +255,7 @@ function reviewReadyTask(
     files_modified: ["src/x.ts"],
     test_result: { verdict: "trusted-pass" },
     test_evidence: "passed",
-    new_tests_written: true,
-    new_test_evidence: "present",
+    new_test_observation: { kind: "written", written: true, evidence: "present" },
     review_status: "passed",
     review_generation: 0,
     findings: [],
@@ -382,16 +397,7 @@ describe("orchestration status", () => {
     mkdirSync(rosterDir);
     writeFileSync(join(rosterDir, "session.active"), "agent\tcode-implementer-agent\n");
     writeFileSync(join(rosterDir, "session.task_graph"), "not a canonical pointer\n");
-    writeFileSync(statePath, JSON.stringify(executeGraph({
-      executing_tasks: ["T2"],
-      tasks: [
-        { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [] },
-        {
-          id: "T2", description: "d", agent: "code-implementer-agent", wave: 1,
-          status: "pending", depends_on: [], reserved_at: "2026-09-01T00:00:00.000Z",
-        },
-      ],
-    })));
+    writeFileSync(statePath, JSON.stringify(executingGraphFixture(protectedGraphFixture(executeGraph()), ["T2"])));
     const previous = process.env.LOOM_SUBAGENT_DIR;
     process.env.LOOM_SUBAGENT_DIR = rosterDir;
     try {
@@ -547,7 +553,7 @@ describe("prepareOrphanedWaveGateRecovery", () => {
 
   function graph(): TaskGraph {
     return {
-      current_phase: "execute",
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       spec_dir: ".claude/specs/x",
       phase_artifacts: {},
@@ -562,7 +568,7 @@ describe("prepareOrphanedWaveGateRecovery", () => {
       tasks: [
         {
           id: "T1", description: "wave-1 with review run", agent: "code-implementer-agent",
-          wave: 1, status: "implemented", depends_on: [],
+          wave: 1, status: "implemented", proof: satisfiedProof([]), depends_on: [],
           review_run: {
             packet_id: "d".repeat(64), generation: 2, expected_agents: ["code-reviewer"],
             evidence: [{
@@ -575,11 +581,11 @@ describe("prepareOrphanedWaveGateRecovery", () => {
         } as unknown as Task,
         {
           id: "T2", description: "wave-1 without review run", agent: "code-implementer-agent",
-          wave: 1, status: "implemented", depends_on: [],
+          wave: 1, status: "implemented", proof: satisfiedProof([]), depends_on: [],
         } as unknown as Task,
         {
           id: "T3", description: "wave-2 with review run", agent: "architecture-tech-lead",
-          wave: 2, status: "implemented", depends_on: [],
+          wave: 2, status: "implemented", proof: satisfiedProof([]), depends_on: [],
           review_run: {
             packet_id: "e".repeat(64), generation: 4, expected_agents: ["architecture-tech-lead"],
             evidence: [], prior_finding_ids: [],
@@ -730,7 +736,9 @@ describe("orchestration CLI", () => {
     git(root, ["config", "user.email", "loom@example.test"]);
     git(root, ["config", "user.name", "Loom Test"]);
     writeFileSync(join(root, "README.md"), "fixture\n");
-    git(root, ["add", "README.md"]);
+    // The in-repository runs root the CLI tests pass is engine output, never Wave workspace.
+    writeFileSync(join(root, ".gitignore"), "runs/\n");
+    git(root, ["add", "README.md", ".gitignore"]);
     git(root, ["commit", "-qm", "initial"]);
     return root;
   }
@@ -776,8 +784,8 @@ describe("orchestration CLI", () => {
       authorityDigest: waveGateAuthorityDigest(1, taskIds, graph) };
     const stored = await handle.value.registerProgram(registration);
     if (!stored.ok) throw new Error(stored.error.message);
-    await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.value.runId,
-      wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null, runsRoot }, { taskIds });
+    await registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.value.runId,
+      wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null, runsRoot })), { taskIds });
     await withFixturePiSession(root, async () => {
       const batch = waveRequests(
         handle.value,
@@ -943,521 +951,6 @@ describe("orchestration CLI", () => {
     expect(JSON.parse(result.stdout).next.action.kind).toBe("blocked");
   });
 
-  it("retries a malformed-but-JSON architecture candidate instead of minting success", async () => {
-    const root = project();
-    const runsRoot = join(root, "runs");
-    const runDir = join(runsRoot, "run.architecture-malformed");
-    mkdirSync(runDir, { recursive: true });
-    const started = (await runCli([
-      "start", "architecture", "--runs-root", runsRoot, "--run", runDir,
-    ], JSON.stringify({ input: { candidateLenses: ["simplicity-first"], judgeCriteria: ["codebase fit + effort"] }, events: [] }), root));
-    expect(started.status).toBe(0);
-    const request = (JSON.parse(started.stdout) as {
-      requests: readonly Readonly<{ authority: AgentRequestAuthority }>[];
-    }).requests[0]!.authority;
-
-    const submitted = (await runCli([
-      "submit", "--runs-root", runsRoot, "--run", runDir,
-      "--request", request.requestId, "--slot", request.slotId, "--attempt", "1",
-    ], "{}", root));
-
-    expect(submitted.status).toBe(0);
-    const action = JSON.parse(submitted.stdout) as { kind: string; requests: readonly { attempt: number }[] };
-    expect(action.kind).toBe("spawn-batch");
-    expect(action.requests).toHaveLength(1);
-    expect(action.requests[0]?.attempt).toBe(2);
-  });
-
-  it("starts, submits to, and idempotently resumes a registered refutation reducer", async () => {
-    const root = project();
-    const runsRoot = join(root, "runs");
-    const runDir = join(runsRoot, "run.refutation-facade");
-    mkdirSync(runDir, { recursive: true });
-    const program = JSON.stringify({
-      input: {
-        criticalFindingIds: ["T1:finding-1"],
-        lenses: ["reproduction", "intent"],
-      },
-      events: [],
-    });
-
-    const started = (await runCli([
-      "start", "refutation", "--runs-root", runsRoot, "--run", runDir,
-    ], program, root));
-    expect(started.status).toBe(0);
-    expect(JSON.parse(started.stdout).kind, JSON.stringify(JSON.parse(started.stdout))).toBe("spawn-batch");
-    expect(JSON.parse(started.stdout).requests).toHaveLength(2);
-
-    const startedAction = JSON.parse(started.stdout) as {
-      requests: readonly Readonly<{ authority: AgentRequestAuthority }>[];
-    };
-    const firstRequest = startedAction.requests[0]!.authority;
-    const secondRequest = startedAction.requests[1]!.authority;
-    const opened = openRunDirectory(runsRoot, runDir);
-    if (!opened.ok) throw new Error(opened.error.message);
-    const issued = opened.value.readIssuedRequests();
-    expect(issued.ok && issued.value).toHaveLength(2);
-    const firstSubmitted = (await runCli([
-      "submit", "--runs-root", runsRoot, "--run", runDir,
-      "--request", firstRequest.requestId, "--slot", firstRequest.slotId, "--attempt", "1",
-    ], JSON.stringify({
-      criterion: "reproduction",
-      verdicts: [{ finding_id: "T1:finding-1", verdict: "upheld", reasoning: "trigger remains reachable" }],
-    }), root));
-    expect(firstSubmitted.status).toBe(0);
-    expect(JSON.parse(firstSubmitted.stdout).kind, JSON.stringify(JSON.parse(firstSubmitted.stdout))).toBe("spawn-batch");
-
-    const secondSubmitted = (await runCli([
-      "submit", "--runs-root", runsRoot, "--run", runDir,
-      "--request", secondRequest.requestId, "--slot", secondRequest.slotId, "--attempt", "1",
-    ], JSON.stringify({
-      criterion: "intent",
-      verdicts: [{ finding_id: "T1:finding-1", verdict: "upheld", reasoning: "no documented exception" }],
-    }), root));
-    expect(secondSubmitted.status).toBe(0);
-    const engineAction = JSON.parse(secondSubmitted.stdout);
-    expect(engineAction).toEqual({ kind: "done", panel: "refutation", outcome: "completed" });
-
-    // Historical complete remains an idempotent compatibility adapter; new
-    // callers never attest deterministic outcomes.
-    const completed = (await runCli([
-      "complete", "--runs-root", runsRoot, "--run", runDir,
-      "--operation", "refutation-tally",
-    ], "", root));
-    const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-    expect(completed.status).toBe(0);
-    expect(resumed.status).toBe(0);
-    expect(JSON.parse(completed.stdout)).toEqual(JSON.parse(resumed.stdout));
-    expect(JSON.parse(completed.stdout)).toEqual({
-      kind: "done",
-      panel: "refutation",
-      outcome: "completed",
-    });
-    const result = JSON.parse(readFileSync(join(runDir, "artifacts", "result.json"), "utf-8")) as {
-      kind: string;
-      outcomes: readonly { finding_id: string; survives: boolean }[];
-    };
-    expect(result.kind).toBe("refutation-panel-result");
-    expect(result.outcomes).toEqual([{ finding_id: "T1:finding-1", survives: true, refuted_by: [], votes: expect.any(Array) }]);
-  }, 15_000);
-
-  // ---------------------------------------------------------------------------
-  // The legacy panel verdict fold (T8, AD-8/AD-9): the SAME selection policy the
-  // persistent submissions run, wired through the legacy panel path's
-  // submission boundary and its per-attempt scans, with the durable
-  // panel-verdict-source record as the replay authority.
-  // ---------------------------------------------------------------------------
-
-  describe("the legacy panel verdict fold", () => {
-    const artifactDigestOf = (hex: string) => {
-      const parsedDigest = parseArtifactDigest(hex);
-      if (!parsedDigest.ok) throw new Error(parsedDigest.error.message);
-      return parsedDigest.value;
-    };
-    type RefutationVerdict = "upheld" | "refuted";
-    const refutationProgram = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
-
-    /** A started LEGACY refutation run, opened, with its first verifier attempt's authority. */
-    async function startedRefutationRun(runName: string) {
-      const root = project();
-      const runsRoot = join(root, "runs");
-      const runDir = join(runsRoot, runName);
-      mkdirSync(runDir, { recursive: true });
-      const started = await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], refutationProgram, root);
-      expect(started.status, started.stderr).toBe(0);
-      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
-      const opened = openRunDirectory(runsRoot, runDir);
-      if (!opened.ok) throw new Error(opened.error.message);
-      return { root, runsRoot, runDir, opened: opened.value, request };
-    }
-
-    /** A refutation verdict for every critical finding under the run's first lens, read from the
-     *  `panel-authority` section materializePanelRequest publishes into a LEGACY panel context. */
-    function refutationVerdictArguments(handle: RunDirHandle, authority: AgentRequestAuthority, verdict: RefutationVerdict) {
-      const context = handle.readContext(authority.contextDigest);
-      if (!context.ok) throw new Error(context.error.message);
-      const section = context.value.fixedContext.find(({ label }) => label === "panel-authority");
-      if (section === undefined) throw new Error("refutation context lacks semantic authority");
-      const semantic = JSON.parse(Buffer.from(section.bytes).toString("utf8")) as {
-        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
-      };
-      return {
-        criterion: semantic.input.lenses[0],
-        verdicts: semantic.input.criticalFindingIds.map((id) => ({
-          finding_id: id,
-          verdict,
-          reasoning: verdict === "upheld" ? "the current packet still exhibits the finding" : "the current packet does not exhibit the finding",
-        })),
-      };
-    }
-
-    /** The complete refutation-verdict emission call of one attempt. */
-    function refutationEmissionCall(handle: RunDirHandle, request: AgentRequestAuthority, toolCallId: string, verdict: RefutationVerdict) {
-      return Object.freeze({
-        requestId: request.requestId,
-        toolCallId,
-        kind: Object.freeze({ kind: "refutation-verdict" as const }),
-        version: "v1" as const,
-        arguments: refutationVerdictArguments(handle, request, verdict),
-      });
-    }
-    const judgeRegistration = () => {
-      const input = { candidateLenses: ["type-driven-fp"], judgeCriteria: ["simplicity", "pure functional core"] };
-      const registration = parseRegisteredPanelProgram({ schemaVersion: 1, kind: "architecture", input });
-      if (registration === null) throw new Error("fixture judge registration refused");
-      return registration;
-    };
-    const refutationRegistration = () => {
-      const input = { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] };
-      const registration = parseRegisteredPanelProgram({ schemaVersion: 1, kind: "refutation", input });
-      if (registration === null) throw new Error("fixture refutation registration refused");
-      return registration;
-    };
-
-    function mintJudgeSelection(requestId: string, args: unknown, toolCallId = "legacy-call-1") {
-      const minted = issueEmissionBinding({ requestId, kind: "judge-verdict", version: "v1" });
-      if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.message}`);
-      const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({
-        kind: "complete" as const,
-        call: Object.freeze({ requestId, toolCallId, kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args }),
-      })]), "the raw final text");
-      if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
-      return { binding: minted.value, selection };
-    }
-
-    it("selects an emission judge verdict before the authoritative parse and keeps the criterion join", () => {
-      const registration = judgeRegistration();
-      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
-      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
-      const args = {
-        criterion: input.judgeCriteria[0],
-        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
-      };
-      const { selection } = mintJudgeSelection("architecture:judge:1", args);
-      // Emission wins over the (parseable) final text; the emitted bytes
-      // satisfy the SAME criterion/candidate joins the extraction parse uses.
-      expect(panelSubmissionProblem(registration, "architecture:judge:1",
-        JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 3 + index, fatal_flaw: null, strongest_idea: `x ${index}` })) }),
-        { kind: "selected", selection, record: null })).toBeNull();
-
-      // A schema-valid payload with a FOREIGN criterion refuses at the
-      // authoritative parse, and the diagnostic names the accepted call.
-      const foreign = mintJudgeSelection("architecture:judge:1", {
-        criterion: "my own taste",
-        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
-      }, "legacy-call-foreign");
-      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
-        { kind: "selected", selection: foreign.selection, record: null }))
-        .toContain("emission tool call legacy-call-foreign produced a judge verdict that refuses its authoritative parse");
-    });
-
-    it("rejects duplicate and misbound legacy emission observations and never falls back", () => {
-      const registration = judgeRegistration();
-      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
-      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
-      const args = { criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) };
-      const binding = issueEmissionBinding({ requestId: "architecture:judge:1", kind: "judge-verdict", version: "v1" });
-      if (!binding.ok) throw new Error(binding.error.message);
-      const call = Object.freeze({ requestId: "architecture:judge:1", toolCallId: "call-a", kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args });
-      const duplicated = selectVerdictSource(binding.value, observeEmissionCalls([
-        Object.freeze({ kind: "complete" as const, call }),
-        Object.freeze({ kind: "complete" as const, call: { ...call, toolCallId: "call-b" } }),
-      ]), "the raw final text");
-      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
-        { kind: "selected", selection: duplicated, record: null }))
-        .toContain("2 distinct emission tool calls (call-a, call-b)");
-
-      const misbound = selectVerdictSource(binding.value, observeEmissionCalls([Object.freeze({
-        kind: "complete" as const,
-        call: Object.freeze({ requestId: "some-other-request", toolCallId: "call-c", kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args }),
-      })]), "the raw final text");
-      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
-        { kind: "selected", selection: misbound, record: null }))
-        .toContain("wrong-request");
-    });
-
-    it("accepts extraction over a refused legacy call with the refusal retained in the problem", () => {
-      const registration = judgeRegistration();
-      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
-      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
-      const binding = issueEmissionBinding({ requestId: "architecture:judge:1", kind: "judge-verdict", version: "v1" });
-      if (!binding.ok) throw new Error(binding.error.message);
-      const refused = selectVerdictSource(binding.value, observeEmissionCalls([Object.freeze({
-        kind: "complete" as const,
-        call: Object.freeze({
-          requestId: "architecture:judge:1",
-          toolCallId: "call-refused",
-          kind: Object.freeze({ kind: "judge-verdict" as const }),
-          version: "v1" as const,
-          arguments: { criterion: input.judgeCriteria[0], rankings: [{ candidate: candidates[0], score: 9.5, fatal_flaw: null, strongest_idea: "x" }] },
-        }),
-      })]), JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) }));
-      expect(refused.kind).toBe("extraction-over-refused-call");
-      // The extraction parse of the caller's raw bytes is usable: accepted, and
-      // the retained refusal rides the settle seam's source (asserted by the
-      // record round-trip test below), not silently dropped.
-      expect(panelSubmissionProblem(registration, "architecture:judge:1",
-        JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) }),
-        { kind: "selected", selection: refused, record: null })).toBeNull();
-
-      // Refused call + unusable extraction: ONE problem carrying BOTH causes.
-      expect(panelSubmissionProblem(registration, "architecture:judge:1", "not json at all",
-        { kind: "selected", selection: refused, record: null }))
-        .toMatch(/emission arguments were refused \[invalid-schema\].*authoritative verdict parse was refused: judge verdict is not valid JSON/s);
-    });
-
-    it("refuses an observed emission call under a candidate or finalize slot", () => {
-      const registration = judgeRegistration();
-      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
-      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
-      const { selection } = mintJudgeSelection("architecture:judge:1", {
-        criterion: input.judgeCriteria[0],
-        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
-      });
-      expect(panelSubmissionProblem(registration, "architecture:candidate:1", "raw",
-        { kind: "selected", selection, record: null }))
-        .toContain("extraction-only panel slot that advertises no emission tool");
-      expect(panelSubmissionProblem(registration, "architecture:finalize", "raw",
-        { kind: "selected", selection, record: null }))
-        .toContain("extraction-only panel slot that advertises no emission tool");
-    });
-
-    it("refuses a misbound emission binding before it reads the attempt's durable record", async () => {
-      const { opened, request } = await startedRefutationRun("run.legacy-fold-join-order");
-      // An unparseable durable record for this attempt: a shell that read the
-      // record before the issuance join would refuse with the record's parse
-      // failure instead of the join's caller-defect refusal.
-      const published = await opened.publishArtifactSet([{
-        relativePath: `panel-verdict-sources/${request.requestId}.json`,
-        bytes: [...Buffer.from("not json", "utf-8")],
-      }]);
-      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
-      const resolve = (binding: IssuedEmissionBindingOf<"judge-verdict" | "refutation-verdict">) => resolvePanelAttemptVerdictSource({
-        handle: opened,
-        request,
-        raw: "raw",
-        emission: { binding, observation: { kind: "absent" } },
-      });
-      const minted = <K extends "judge-verdict" | "refutation-verdict">(requestId: string, kind: K): IssuedEmissionBindingOf<K> => {
-        const binding = issueEmissionBinding({ requestId, kind, version: "v1" });
-        if (!binding.ok) throw new Error(binding.error.message);
-        return binding.value;
-      };
-
-      const foreignRequest = resolve(minted("refutation:verifier:other", "refutation-verdict"));
-      expect(foreignRequest.ok).toBe(false);
-      if (foreignRequest.ok) throw new Error("unreachable");
-      expect(foreignRequest.error).toContain(`issued emission binding certifies request refutation:verifier:other, not the submitted request ${request.requestId}`);
-
-      const wrongKind = resolve(minted(request.requestId, "judge-verdict"));
-      expect(wrongKind.ok).toBe(false);
-      if (wrongKind.ok) throw new Error("unreachable");
-      expect(wrongKind.error).toContain(`issued emission binding certifies producer kind judge-verdict, not the refutation-verdict kind the refutation-panel attempt ${request.requestId} belongs to`);
-
-      // Control: with no live emission input the join holds, the record IS
-      // read, and its malformed bytes refuse closed.
-      const read = resolvePanelAttemptVerdictSource({ handle: opened, request, raw: "raw" });
-      expect(read.ok).toBe(false);
-      if (read.ok) throw new Error("unreachable");
-      expect(read.error).toContain(`the durable panel verdict source for request ${request.requestId} is not valid JSON`);
-    }, 30_000);
-
-    /** Mint the issued refutation-verdict binding for the attempt, select a
-     *  refuting emission verdict, and publish the durable source record through
-     *  the settle seam's own constructor/serializer — the same seam
-     *  production's capture-side caller runs. */
-    async function publishRefutationRecord(handle: RunDirHandle, request: AgentRequestAuthority, toolCallId: string, payloadDigestOverride?: string) {
-      const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
-      if (!minted.ok) throw new Error(minted.error.message);
-      const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({
-        kind: "complete" as const,
-        call: refutationEmissionCall(handle, request, toolCallId, "refuted"),
-      })]), "prose, not a verdict");
-      if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
-      const acceptedBytes = new TextEncoder().encode(selection.rawJson);
-      const record = panelVerdictSourceRecord({
-        requestId: request.requestId,
-        slotId: request.slotId,
-        attempt: request.attempt,
-        source: panelVerdictSourceProvenance(minted.value, selection),
-        acceptedCall: selection.call,
-        payloadDigest: artifactDigestOf(payloadDigestOverride ?? createHash("sha256").update(acceptedBytes).digest("hex")),
-        payloadByteLength: acceptedBytes.length,
-      });
-      if (!record.ok) throw new Error(record.error);
-      const published = await handle.publishArtifactSet([{
-        relativePath: `panel-verdict-sources/${request.requestId}.json`,
-        bytes: [...Buffer.from(`${JSON.stringify(record.value, null, 2)}\n`, "utf-8")],
-      }]);
-      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
-      return { binding: minted.value, record: record.value };
-    }
-
-    /** A started refutation run whose verifier attempt already has a durable
-     *  source record — the shared fixture of the precedence and fail-closed unit tests below. */
-    async function publishedRefutationRecord(runName: string, payloadDigestOverride?: string) {
-      const { opened, request } = await startedRefutationRun(runName);
-      return { opened, request, ...await publishRefutationRecord(opened, request, "precedence-call", payloadDigestOverride) };
-    }
-
-    it("replays the durable record over a contradicting live emission input, and refuses a record whose payload digest does not certify the attempt bytes", async () => {
-      const good = await publishedRefutationRecord("run.record-precedence");
-      const resolved = resolvePanelAttemptVerdictSource({
-        handle: good.opened,
-        request: good.request,
-        raw: "prose, not a verdict",
-        // A LIVE emission input whose observation CONTRADICTS the record (an
-        // absent observation would otherwise select the extraction baseline):
-        // the durable record is authoritative when present (FR-009) — the
-        // returned selection is the record's accepted call, never the live
-        // input's arm, and the record rides beside it.
-        emission: { binding: good.binding, observation: { kind: "absent" } },
-      });
-      expect(resolved.ok, resolved.ok ? "" : resolved.error).toBe(true);
-      if (!resolved.ok) throw new Error("unreachable");
-      expect(resolved.value.kind).toBe("selected");
-      if (resolved.value.kind !== "selected") throw new Error("unreachable");
-      expect(resolved.value.record).not.toBeNull();
-      expect(resolved.value.selection).toMatchObject({
-        kind: "emission-tool-arguments",
-        source: "emission-tool",
-        call: { toolCallId: "precedence-call" },
-      });
-
-      // A record whose payload digest does not certify THESE attempt bytes is
-      // stale/unavailable evidence and refuses closed — never a silent
-      // extraction baseline over a record that says otherwise.
-      const stale = await publishedRefutationRecord("run.record-stale-bytes", createHash("sha256").update("different bytes entirely").digest("hex"));
-      const refused = resolvePanelAttemptVerdictSource({
-        handle: stale.opened,
-        request: stale.request,
-        raw: "prose, not a verdict",
-        emission: { binding: stale.binding, observation: { kind: "absent" } },
-      });
-      expect(refused.ok).toBe(false);
-      if (refused.ok) throw new Error("unreachable");
-      expect(refused.error).toContain(`the durable panel verdict source for request ${stale.request.requestId} does not describe the accepted attempt bytes`);
-    }, 30_000);
-
-    it("replays a durable panel verdict source record through the legacy refutation panel", async () => {
-      const { root, runsRoot, runDir, opened, request } = await startedRefutationRun("run.refutation-emission-record");
-
-      // The raw attempt bytes are PROSE — without the record, the legacy scan
-      // would refuse them ("not valid JSON") and the run would consume its
-      // attempt on a parse failure.
-      const raw = "the verifier answered in prose, never emitting a verdict";
-      expect((await captureReviewedTranscript(opened, request, [...Buffer.from(raw)])).ok).toBe(true);
-
-      // Mint the ISSUED refutation-verdict binding for THIS attempt's request,
-      // select the emission verdict, and publish the durable source record.
-      await publishRefutationRecord(opened, request, "legacy-record-call");
-
-      // Resume: the reconciliation replays the record through the ONE selection
-      // seam, accepts the emission verdict, and drives the panel to done — the
-      // deterministic tally consumes the SELECTED bytes, not the prose.
-      const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-      expect(resumed.status, resumed.stderr).toBe(0);
-      const action = JSON.parse(resumed.stdout) as { kind: string };
-      expect(action.kind).toBe("done");
-      const result = JSON.parse(readFileSync(join(runDir, "artifacts", "result.json"), "utf-8")) as {
-        outcomes: readonly { finding_id: string; survives: boolean }[];
-      };
-      expect(result.outcomes).toEqual([{ finding_id: "T1:finding-1", survives: false, refuted_by: ["reproduction"], votes: expect.any(Array) }]);
-      // The accepted source is durably bound: the record the settle seam
-      // replayed is the only provenance for this attempt, and a resubmission
-      // of the same attempt reproduces the same decision idempotently.
-      const idempotent = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-      expect(idempotent.status, idempotent.stderr).toBe(0);
-      expect(JSON.parse(idempotent.stdout).kind).toBe("done");
-    }, 30_000);
-
-    it("fails closed when a durable record cannot be replayed, and keeps the no-record baseline byte-identical", async () => {
-      const { root, runsRoot, runDir, opened, request } = await startedRefutationRun("run.refutation-record-failclosed");
-      expect((await captureReviewedTranscript(opened, request, [...Buffer.from("prose, not a verdict")])).ok).toBe(true);
-
-      // A record whose schema digest does NOT certify the frozen schema is
-      // unavailable evidence, never a silent extraction baseline: the scan
-      // fails closed and the run does not advance.
-      const corrupted = {
-        schemaVersion: 1,
-        kind: "panel-verdict-source",
-        requestId: request.requestId,
-        slotId: request.slotId,
-        attempt: request.attempt,
-        source: {
-          source: "emission-tool",
-          toolCallId: "corrupt-call",
-          producerKind: "refutation-verdict",
-          emissionSchemaVersion: "v1",
-          schemaDigest: createHash("sha256").update("not the frozen schema bytes").digest("hex"),
-        },
-        acceptedCall: {
-          requestId: request.requestId,
-          toolCallId: "corrupt-call",
-          kind: { kind: "refutation-verdict" },
-          version: "v1",
-          arguments: { criterion: "reproduction", verdicts: [] },
-        },
-        payloadDigest: createHash("sha256").update(Buffer.from("prose, not a verdict")).digest("hex"),
-        payloadByteLength: Buffer.byteLength("prose, not a verdict"),
-      };
-      const published = await opened.publishArtifactSet([{
-        relativePath: `panel-verdict-sources/${request.requestId}.json`,
-        bytes: [...Buffer.from(`${JSON.stringify(corrupted, null, 2)}\n`, "utf-8")],
-      }]);
-      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
-      const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-      expect(resumed.status).not.toBe(0);
-      expect(resumed.stderr).toContain("could not be replayed");
-      const events = await opened.readEvents();
-      expect(events.filter(({ event }) => (event as { type?: string }).type === "spawn-outcome")).toHaveLength(0);
-
-      // The no-record baseline is unchanged: a VALID verdict under the same
-      // slot without any record is accepted exactly as today, and no source
-      // record is written for it.
-      const baseline = await startedRefutationRun("run.refutation-record-baseline");
-      const verdict = JSON.stringify(refutationVerdictArguments(baseline.opened, baseline.request, "upheld"));
-      expect((await captureReviewedTranscript(baseline.opened, baseline.request, [...Buffer.from(verdict)])).ok).toBe(true);
-      const baselineResumed = (await runCli(["resume", "--runs-root", baseline.runsRoot, "--run", baseline.runDir], "", baseline.root));
-      expect(baselineResumed.status, baselineResumed.stderr).toBe(0);
-      expect(JSON.parse(baselineResumed.stdout).kind).toBe("done");
-      expect(existsSync(join(baseline.runDir, "artifacts", "panel-verdict-sources"))).toBe(false);
-    }, 30_000);
-
-    it("settles a live emission selection with the write-ahead record through the production seam", async () => {
-      const { opened, request } = await startedRefutationRun("run.refutation-live-settle");
-      const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
-      if (!minted.ok) throw new Error(minted.error.message);
-      const emissionCall = refutationEmissionCall(opened, request, "live-settle-call", "upheld");
-      const settled = await settlePanelAttemptSubmission({
-        handle: opened,
-        registration: refutationRegistration(),
-        request,
-        logicalRequestId: request.requestId,
-        raw: "prose, not a verdict",
-        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]) },
-      });
-      expect(settled.ok, settled.ok ? "" : settled.error).toBe(true);
-      if (!settled.ok) throw new Error("unreachable");
-      expect(settled.value.problem).toBeNull();
-      expect(settled.value.source).toMatchObject({ source: "emission-tool", toolCallId: "live-settle-call" });
-      // The record is durable BEFORE any outcome is declared, and it replays.
-      const stored = await opened.readArtifactBytes(`panel-verdict-sources/${request.requestId}.json`, 65_536);
-      expect(stored.ok && stored.value !== null).toBe(true);
-      const republished = await settlePanelAttemptSubmission({
-        handle: opened,
-        registration: refutationRegistration(),
-        request,
-        logicalRequestId: request.requestId,
-        raw: "prose, not a verdict",
-        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]) },
-      });
-      expect(republished.ok, republished.ok ? "" : republished.error).toBe(true);
-      if (!republished.ok) throw new Error("unreachable");
-      expect(republished.value.source).toMatchObject({ source: "emission-tool", toolCallId: "live-settle-call" });
-    }, 30_000);
-  });
-
   it("resumes an anchored run idempotently without spawning anything", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
@@ -1579,9 +1072,9 @@ describe("orchestration CLI", () => {
     };
     writeFileSync(statePath, JSON.stringify(executeGraph({
       tasks: [
-        { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [],
+        { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", proof: satisfiedProof([]), depends_on: [],
           findings: [advisory], critical_findings: [], advisory_findings: [advisory.claim] },
-        { id: "T2", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [] },
+        { id: "T2", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", proof: satisfiedProof([]), depends_on: [] },
       ],
       active_wave_gate: {
         schemaVersion: 1, kind: "active-wave-gate", runId: "run.abandoned", wave: 1,
@@ -2203,8 +1696,8 @@ describe("orchestration CLI", () => {
     });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = canonicalTempDir("loom-wave-missing-task-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-missing-task");
     mkdirSync(runDir);
     const started = (await runCli([
@@ -2237,8 +1730,8 @@ describe("orchestration CLI", () => {
       plan_file: null,
       tasks: [reviewReadyTask(proof)],
     })));
-    const runsRoot = canonicalTempDir("loom-wave-stale-request-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-stale-request");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2277,16 +1770,16 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
       tasks: [{
         id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1, status: "implemented", proof,
         depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], test_result: { verdict: "trusted-pass" },
-        test_evidence: "passed", new_tests_written: true, new_test_evidence: "present", review_status: "passed",
+        test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed",
         review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-fresh-generation-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-fresh-generation");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2335,16 +1828,16 @@ describe("orchestration CLI", () => {
     const task = (id: string) => ({
       id, description: `review ${id}`, agent: "code-implementer-agent", wave: 1, status: "implemented", proof,
       depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], test_result: { verdict: "trusted-pass" },
-      test_evidence: "passed", new_tests_written: true, new_test_evidence: "present", review_status: "passed",
+      test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed",
       review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
     });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [task("T1"), task("T2")],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-sibling-stability-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-sibling-stability");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2389,21 +1882,14 @@ describe("orchestration CLI", () => {
     };
     const graph = {
       spec_trace_version: 2,
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: canonicalSpec(root), plan_file: null, wave_gates: {},
-      tasks: [{
-        id: "T10", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        spec_anchors: ["FR-001", "AS-001"], spec_contributions: [],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
-        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
-      }],
+      tasks: [blockedReviewTarget("T10", proof, finding, { spec_anchors: ["FR-001", "AS-001"], spec_contributions: [] })],
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = canonicalTempDir("loom-wave-review-recovery-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-review-recovery");
     mkdirSync(runDir);
     const started = (await runCli([
@@ -2571,18 +2057,17 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       spec_trace_version: 2,
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {}, tasks: [{
         id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
         spec_anchors: ["FR-001", "AS-001"], spec_contributions: [],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "pending", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "pending", review_generation: 0,
         findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-spec-retry-epoch-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-spec-retry-epoch");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2740,17 +2225,16 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "pending", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "pending", review_generation: 0,
         findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-spec-retry-lost-context-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-spec-retry-lost-context");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2819,18 +2303,17 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       spec_trace_version: 2,
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: specPath, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "claims an undefined Requirement", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
         spec_anchors: ["FR-404"], spec_contributions: [],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-facade-floor-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-facade-floor");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2886,17 +2369,16 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "attempt-one rejection", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-attempt-one-rejection-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-attempt-one-rejection");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2956,17 +2438,16 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "mixed retry target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-mixed-retry-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-mixed-retry");
     mkdirSync(runDir);
     const started = (await runCli([
@@ -3037,12 +2518,11 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "orphan recovery target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "blocked", review_generation: 7,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "blocked", review_generation: 7,
         findings: [activeFinding], critical_findings: [activeFinding.claim], advisory_findings: [],
         refuted_findings: [{
           finding: refutedFinding,
@@ -3061,8 +2541,8 @@ describe("orchestration CLI", () => {
         }],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-orphan-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const oldRun = join(runsRoot, "run.wave-orphaned");
     mkdirSync(oldRun);
     const started = (await runCli([
@@ -3251,18 +2731,17 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {},
       tasks: [{
         id: "T1", description: "restart target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-restart-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const previousRun = join(runsRoot, "run.wave-exhausted");
     mkdirSync(previousRun);
     const started = await legacyWaveStart(root, runsRoot, previousRun);
@@ -3442,7 +2921,8 @@ describe("orchestration CLI", () => {
       }[];
     };
     expect(restartedGraph.active_wave_gate).toMatchObject({ runId: "run.wave-replacement", wave: 1 });
-    expect((restartedGraph as TaskGraph).active_wave_completion_suite).toBeUndefined();
+    // The previous run's suite is retired; the replacement earns its own before issuing reviews.
+    expect((restartedGraph as TaskGraph).active_wave_completion_suite).toMatchObject({ runId: "run.wave-replacement" });
     expect(restartedGraph.wave_review_epoch).toMatchObject({ runId: "run.wave-replacement" });
     expect(restartedGraph.tasks[0]).toMatchObject({
       review_generation: 0,
@@ -3511,17 +2991,16 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "partial restart", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-partial-restart-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const previousRun = join(runsRoot, "run.wave-partial-exhausted");
     mkdirSync(previousRun);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", previousRun], JSON.stringify({ wave: 1 }), root));
@@ -3598,17 +3077,16 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "valid retry", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-valid-retry-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const previousRun = join(runsRoot, "run.wave-valid-retry");
     mkdirSync(previousRun);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", previousRun], JSON.stringify({ wave: 1 }), root));
@@ -3647,33 +3125,35 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "completion crash window", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-crash-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-crash-window");
     mkdirSync(runDir);
     const started = (await runCli([
       "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir,
     ], JSON.stringify({ wave: 1 }), root));
     expect(started.status, started.stderr).toBe(0);
-    const active = (JSON.parse(readFileSync(statePath, "utf8")) as {
+    const registered = JSON.parse(readFileSync(statePath, "utf8")) as {
       active_wave_gate: { runId: string; wave: number; authorityDigest: string };
-    }).active_wave_gate;
+      active_wave_completion_suite: unknown;
+    };
+    const active = registered.active_wave_gate;
     expect(active).toMatchObject({ runId: "run.wave-crash-window", wave: 1 });
+    expect(registered.active_wave_completion_suite).toMatchObject({ runId: "run.wave-crash-window" });
 
     // Simulate the exact completion crash window: commitActiveWaveGateCompletion
     // durably wrote the retired graph with completion history, but the terminal
     // checkpoint write never happened. The run directory has NO checkpoint.
     const crashGraph = {
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null,
       wave_gates: {
         "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
@@ -3681,12 +3161,11 @@ describe("orchestration CLI", () => {
       tasks: [{
         id: "T1", description: "completion crash window", agent: "code-implementer-agent", wave: 1,
         status: "completed", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
       wave_gate_history: [{
-        schemaVersion: 1,
+        schemaVersion: 2,
         kind: "completed-wave-gate",
         runId: active.runId,
         wave: 1,
@@ -3699,6 +3178,7 @@ describe("orchestration CLI", () => {
           committedRevision: 1,
           stateDigest: "a".repeat(64),
         },
+        completionSuite: registered.active_wave_completion_suite,
       }],
     };
     chmodSync(statePath, 0o644);
@@ -3736,28 +3216,15 @@ describe("orchestration CLI", () => {
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
     const graph = {
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {},
-      wave_review_epoch: {
-        runId: "run.wave-upheld-tally", wave: 1, batchEpoch: "a".repeat(64),
-        specCheckDocuments: specCheckDocuments(null, null),
-      },
-      spec_check: {
-        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
-      tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
-        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
-      }],
+      ...passedSpecCheckEpoch("run.wave-upheld-tally", "a".repeat(64), null),
+      tasks: [blockedReviewTarget("T1", proof, finding)],
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = canonicalTempDir("loom-wave-upheld-tally-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-upheld-tally");
     mkdirSync(runDir);
 
@@ -3818,28 +3285,15 @@ describe("orchestration CLI", () => {
     };
     const planFile = modelFreePlan(root);
     const graph = {
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: planFile, wave_gates: {},
-      wave_review_epoch: {
-        runId: "run.wave-refuted-tally", wave: 1, batchEpoch: "b".repeat(64),
-        specCheckDocuments: specCheckDocuments(null, planFile),
-      },
-      spec_check: {
-        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
-      tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
-        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
-      }],
+      ...passedSpecCheckEpoch("run.wave-refuted-tally", "b".repeat(64), planFile),
+      tasks: [blockedReviewTarget("T1", proof, finding)],
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = canonicalTempDir("loom-wave-refuted-tally-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-refuted-tally");
     mkdirSync(runDir);
 
@@ -3875,7 +3329,7 @@ describe("orchestration CLI", () => {
     expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
 
-  it("blocks protected completion when automatic full-tier lint fails", async () => {
+  it("blocks a Wave Gate start, and so protected completion, when automatic full-tier lint fails", async () => {
     const root = repository();
     const proof = passingWaveTaskProof();
     mkdirSync(join(root, "src"));
@@ -3883,33 +3337,26 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     const planFile = modelFreePlan(root);
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: planFile, wave_gates: {},
-      wave_review_epoch: {
-        runId: "run.wave-lint-block", wave: 1, batchEpoch: "b".repeat(64),
-        specCheckDocuments: specCheckDocuments(null, planFile),
-      },
-      spec_check: {
-        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
+      ...passedSpecCheckEpoch("run.wave-lint-block", "b".repeat(64), planFile),
       tasks: [{
         id: "T1", description: "lint target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-lint-block-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-lint-block");
     mkdirSync(runDir);
 
-    const action = await reviewedWave(root, runsRoot, runDir) as { kind: string; diagnostic: { message: string } };
-    expect(action.kind).toBe("blocked");
-    expect(action.diagnostic.message).toContain("WAVE-GATE LINT");
-    expect(action.diagnostic.message).toContain("no-console");
+    // The completion suite runs full-tier lint before the gate registers, so the violation refuses the start.
+    const started = await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root);
+    expect(started.status).not.toBe(0);
+    expect(started.stderr).toContain("WAVE-GATE LINT");
+    expect(started.stderr).toContain("no-console");
     const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
       tasks: readonly { status: string }[];
       wave_gate_history?: readonly unknown[];
@@ -4295,26 +3742,13 @@ describe("orchestration CLI", () => {
     };
     const planFile = modelFreePlan(root);
     writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: planFile, wave_gates: {},
-      wave_review_epoch: {
-        runId: "run.wave-retired-refutation", wave: 1, batchEpoch: "c".repeat(64),
-        specCheckDocuments: specCheckDocuments(null, planFile),
-      },
-      spec_check: {
-        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
-      tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
-        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
-      }],
+      ...passedSpecCheckEpoch("run.wave-retired-refutation", "c".repeat(64), planFile),
+      tasks: [blockedReviewTarget("T1", proof, finding)],
     }));
-    const runsRoot = canonicalTempDir("loom-wave-retired-refutation-runs-");
-    cleanup.push(runsRoot);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
     const runDir = join(runsRoot, "run.wave-retired-refutation");
     mkdirSync(runDir);
 
@@ -4815,8 +4249,8 @@ describe("orchestration CLI", () => {
    * follow-up submit merely confirms it. The confirmation used to arrive as a
    * bare sentence on stderr with a failing exit code — byte-identical to a real
    * error — because the short-circuit that reads stored bytes covered only the
-   * legacy panel registration, and a façade run fell through to a capture whose
-   * exclusive write could then only fail.
+   * since-retired registered panel driver, and a façade run fell through to a
+   * capture whose exclusive write could then only fail.
    */
   describe("idempotent submit", () => {
     it("re-emits the run's action instead of failing on an already-captured attempt", async () => {
@@ -4917,18 +4351,17 @@ describe("orchestration CLI", () => {
       writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
       writeFileSync(statePath, JSON.stringify({
-        current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
         spec_trace_version: 2, spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {},
         tasks: [{
           id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
           status: "implemented", proof, depends_on: [], spec_anchors: ["FR-001", "AS-001"], spec_contributions: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-          new_test_evidence: "present", review_status: "passed", review_generation: 0,
+          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
           findings: [], critical_findings: [], advisory_findings: [],
         }],
       }));
-      const runsRoot = canonicalTempDir(`loom-${label}-runs-`);
-      cleanup.push(runsRoot);
+      const runsRoot = join(root, "runs");
+      mkdirSync(runsRoot, { recursive: true });
       const runDir = join(runsRoot, `run.${label}`);
       mkdirSync(runDir);
       const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -5050,8 +4483,9 @@ describe("orchestration CLI", () => {
 
     it("refuses a decision when the protected Wave authority no longer describes this run", async () => {
       const { root, runsRoot, runDir, statePath } = (await startedWaveRun("decide-authority-drift"));
-      // The graph's active Wave Gate is re-pointed at another run: an approval
-      // recorded here would advance a gate this run does not own.
+      // The graph's active Wave Gate is re-pointed at another run, which has
+      // not earned its completion suite yet: an approval recorded here would
+      // advance a gate this run does not own.
       const graph = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
       const active = graph["active_wave_gate"] as Record<string, unknown>;
       const epoch = graph["wave_review_epoch"] as Record<string, unknown>;
@@ -5060,6 +4494,7 @@ describe("orchestration CLI", () => {
         ...graph,
         active_wave_gate: { ...active, runId: "run.some-other-wave" },
         wave_review_epoch: { ...epoch, runId: "run.some-other-wave" },
+        active_wave_completion_suite: undefined,
       }));
 
       const result = (await runCli(
@@ -5150,53 +4585,6 @@ describe("orchestration CLI", () => {
 
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain("--request");
-    });
-
-    it("refuses a caller-attested outcome on `complete`", async () => {
-      const { root, runsRoot, runDir } = (await startedWaveRun("complete-forged-outcome"));
-
-      for (const forged of [["--outcome", "succeeded"], ["--error", "it failed"]]) {
-        const result = (await runCli(
-          ["complete", "--runs-root", runsRoot, "--run", runDir, "--operation", "refutation-tally", ...forged],
-          "",
-          root,
-        ));
-
-        expect(result.status, forged.join(" ")).not.toBe(0);
-        expect(result.stderr).toContain("do not accept caller-attested outcomes");
-      }
-    });
-
-    it("refuses `complete` without a registered panel program", async () => {
-      const root = project();
-      const runsRoot = join(root, "runs");
-      const runDir = join(runsRoot, "run.complete-unregistered");
-      mkdirSync(runDir, { recursive: true });
-
-      const result = (await runCli(
-        ["complete", "--runs-root", runsRoot, "--run", runDir, "--operation", "refutation-tally"],
-        "",
-        root,
-      ));
-
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain("registered panel program");
-    });
-
-    it("refuses `complete` with no --operation", async () => {
-      const root = project();
-      const runsRoot = join(root, "runs");
-      const runDir = join(runsRoot, "run.complete-no-operation");
-      mkdirSync(runDir, { recursive: true });
-
-      const result = (await runCli(
-        ["complete", "--runs-root", runsRoot, "--run", runDir],
-        "",
-        root,
-      ));
-
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain("--operation is required");
     });
   });
 
@@ -5344,7 +4732,6 @@ describe("orchestration CLI", () => {
          "--request", "request:whatever", "--slot", "slot:whatever", "--attempt", "1"],
         ["correlate", "--runs-root", runsRoot, "--run", "run.abandon-corrupt",
          "--request", "request:whatever", "--harness", "claude", "--native-id", "x", "--agent", "code-reviewer"],
-        ["complete", "--runs-root", runsRoot, "--run", "run.abandon-corrupt", "--operation", "op"],
         ["decide", "--runs-root", runsRoot, "--run", "run.abandon-corrupt", "--request", "decision:x"],
       ]) {
         const refused = (await runCli(operation, "", root));
@@ -5355,7 +4742,7 @@ describe("orchestration CLI", () => {
       // retaining a retired run at all.
       const inspected = (await runCli(["inspect", "--runs-root", runsRoot, "--run", "run.abandon-corrupt"], "", root));
       expect(inspected.status, inspected.stderr).toBe(0);
-      // Seven cold bun CLI children (the fixture's start, five refusals, one
+      // Six cold bun CLI children (the fixture's start, four refusals, one
       // inspect): the 15s default expired on a loaded darwin runner while
       // every step ran its bounded course — the same head room the other
       // cold-CLI rows carry.
@@ -5428,12 +4815,11 @@ describe("orchestration CLI", () => {
       writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
       writeFileSync(statePath, JSON.stringify({
-        current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
         spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
           id: "T1", description: "abandon stamp target", agent: "code-implementer-agent", wave: 1,
           status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-          new_test_evidence: "present", review_status: "passed", review_generation: 0,
+          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
           findings: [], critical_findings: [], advisory_findings: [],
         }],
       }));

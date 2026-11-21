@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { analyzeRegex, assertDurationWithin, createDeadlineChecker } from "../../src/linter/safety";
+import { analyzeRegex, createDeadlineChecker } from "../../src/linter/safety";
 
 describe("analyzeRegex", () => {
   describe("safe patterns", () => {
@@ -151,38 +151,6 @@ describe("analyzeRegex", () => {
         expect(result.reason).toContain("Invalid regex");
       }
     });
-  });
-});
-
-describe("assertDurationWithin", () => {
-  it("returns result of fast function", () => {
-    const result = assertDurationWithin(() => 42, 100);
-    expect(result).toBe(42);
-  });
-
-  it("returns complex result types", () => {
-    const result = assertDurationWithin(() => ({ a: 1, b: "hi" }), 100);
-    expect(result).toEqual({ a: 1, b: "hi" });
-  });
-
-  it("propagates exceptions from the function", () => {
-    expect(() =>
-      assertDurationWithin(() => {
-        throw new Error("inner error");
-      }, 100)
-    ).toThrow("inner error");
-  });
-
-  it("throws on timeout for slow function", () => {
-    // Simulate a slow synchronous operation
-    const slowFn = () => {
-      const start = performance.now();
-      while (performance.now() - start < 60) {
-        // busy wait
-      }
-      return "done";
-    };
-    expect(() => assertDurationWithin(slowFn, 10)).toThrow(/exceeded timeout/);
   });
 });
 

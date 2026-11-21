@@ -1,3 +1,4 @@
+import { satisfiedProof } from "../fixtures/task-lifecycle";
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { applyReviewResolution, resolveReviewFindings, reviewResolutionLog } from "../../src/core/review-output";
@@ -386,7 +387,7 @@ describe("mergeFindings (pure)", () => {
     agent: "test",
     wave: 1,
     status: "implemented",
-    legacy_missing_proof: true,
+    proof: satisfiedProof([]),
     depends_on: [],
   };
 
@@ -541,7 +542,7 @@ const partialTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
-  legacy_missing_proof: true,
+  proof: satisfiedProof([]),
   depends_on: [],
 };
 

@@ -16,6 +16,7 @@ import { parseTaskGraph } from "../../../../src/state-manager";
 import { parseRegisteredFacadeProgram, parseRegistration } from "../../../../src/handlers/helpers/programs/registration";
 import { startStandaloneFacade, resumeStandaloneFacade, replayStandaloneResultFromEvidence } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
+import { parseNewTestEvidence } from "../../../../src/types";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
 import { value } from "../../../fixtures/parse-result";
 import { issuedWaveReviewerPayload } from "../../../fixtures/wave-reviewer-payload";
@@ -31,8 +32,11 @@ function fixture() {
   mkdirSync(join(root, "src")); mkdirSync(join(root, "runs"));
   writeFileSync(join(root, "src/a.ts"), "export const fixture = 1;\n");
   writeFileSync(join(root, "README.md"), "# Scripted fixture\n");
+  // The Run Directory lives in the repository: the Wave completion suite's
+  // workspace digest must not see it change.
+  writeFileSync(join(root, ".gitignore"), "runs/\n");
   for (const args of [["init", "-q"], ["config", "user.name", "Fixture"], ["config", "user.email", "fixture@example.invalid"],
-    ["add", "src/a.ts", "README.md"], ["commit", "-qm", "fixture baseline"]]) {
+    ["add", ".gitignore", "src/a.ts", "README.md"], ["commit", "-qm", "fixture baseline"]]) {
     const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
     if (result.status !== 0) throw new Error(result.stderr);
   }
@@ -228,8 +232,7 @@ async function waveFixture() {
   const graph = value(parseTaskGraph({ ...graphFixture([taskFixture({ id: "T1", description: "scripted native fixture",
     agent: "code-implementer-agent", wave: 1, depends_on: [], status: "implemented", proof,
     file_list: ["src/a.ts"], files_modified: ["src/a.ts"], spec_anchors: ["FR-001", "AS-001"], spec_contributions: [],
-    test_result: { verdict: "trusted-pass" }, test_evidence: "scripted fixture evidence", new_tests_written: true,
-    new_test_evidence: "scripted fixture evidence", review_generation: 0, review_status: "pending", findings: [],
+    test_result: { verdict: "trusted-pass" }, test_evidence: "scripted fixture evidence", new_test_observation: parseNewTestEvidence(true, "scripted fixture evidence"), review_generation: 0, review_status: "pending", findings: [],
     critical_findings: [], advisory_findings: [] })]), spec_file: join(root, "spec.md"), plan_file: join(root, "plan.md"), spec_trace_version: 2 }));
   const statePath = join(root, ".claude/state/active_task_graph.json");
   writeFileSync(statePath, JSON.stringify(graph));

@@ -27,7 +27,7 @@ import {
   sessionScopedPath,
   TASK_GRAPH_POINTER_SUFFIX,
 } from "./machine";
-import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
+import type { ActiveWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
 import {
@@ -37,6 +37,7 @@ import {
   type RuntimeWriteBoundary,
 } from "./runtime-compatibility";
 import { installWaveGateRegistration, type WaveGateInstallProgram } from "./core/wave-gate-registration";
+import { lockedWaveGateCompletion } from "./core/wave-gate-machine";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
@@ -52,20 +53,9 @@ import {
   type AnchoredDirectoryIdentity,
 } from "./utils/no-follow-fs";
 import {
-  findLegacyWaveGateCompletionReplay,
-  deriveLegacyWaveGateCompatibilityAuthority,
-  type LegacyWaveGateCompatibilityAuthority,
-  type LegacyWaveGateCompletionReplayError,
-} from "./core/legacy-archive";
-import {
-  parseActiveWaveGateRegistration,
-  parseActiveWaveGateTerminalOutcome,
-  parseLegacyWaveGateMigrationAuthority,
   parseTaskGraph,
   type ParsedTaskGraph,
 } from "./state-file-wire";
-
-export { TASK_ID_PATTERN } from "./core/task-id";
 
 // The State File wire grammar is re-exported here so every historical importer
 // of `state-manager` keeps its exact import surface; only the dependency arrow
@@ -78,12 +68,11 @@ export {
   taskDependencyErrors,
   taskGraphLifecycleErrors,
   taskIdError,
-  taskUnionError,
+  parseStoredTask,
+  storedTaskErrors,
   orphanExecutionReservationError,
-  parseLegacyWaveGateMigrationAuthority,
 } from "./state-file-wire";
 export type {
-  ParsedLegacyWaveGateMigrationAuthority,
   ParsedTask,
   ParsedTaskGraph,
 } from "./state-file-wire";
@@ -273,59 +262,6 @@ function resolveLocalSessionTaskGraphAuthority(sessionId: string): TaskGraphFile
   return pointedTaskGraphAuthority(pointedPath, sessionFile);
 }
 
-export type RegisteredWaveGateCompletionReplayError = Readonly<{
-  kind: "registered-wave-gate-completion-replay-rejected";
-  message: string;
-}>;
-
-type AbandonedWaveGateRegistration = Extract<
-  ActiveWaveGateRegistration,
-  { terminalOutcome: { kind: "terminal-abandoned" } }
->;
-
-export type ActiveWaveGateAbandonmentResult =
-  | Readonly<{ kind: "stamped"; registration: AbandonedWaveGateRegistration }>
-  | Readonly<{ kind: "replayed"; registration: AbandonedWaveGateRegistration }>
-  | Readonly<{
-      kind: "not-targeted";
-      reason: "registration-absent" | "authority-mismatch" | "terminal-conflict";
-    }>;
-
-export function findRegisteredWaveGateCompletionReplay(
-  graph: TaskGraph,
-  authority: ActiveWaveGateRegistration,
-): DomainResult<CompletedWaveGateRegistration | null, RegisteredWaveGateCompletionReplayError> {
-  const reject = (message: string): DomainResult<never, RegisteredWaveGateCompletionReplayError> =>
-    Object.freeze({
-      ok: false,
-      error: Object.freeze({ kind: "registered-wave-gate-completion-replay-rejected", message }),
-    });
-  if (authority.terminalOutcome !== null) {
-    return reject(`Pre-read Wave Gate run ${authority.runId} was already terminal rather than active`);
-  }
-  const history = graph.wave_gate_history ?? [];
-  const sameRun = history.find((entry) => entry.runId === authority.runId);
-  const sameWave = history.find((entry) => entry.wave === authority.wave);
-  const candidate = sameRun ?? sameWave;
-  if (candidate === undefined) return Object.freeze({ ok: true, value: null });
-  if (
-    candidate.runId !== authority.runId || candidate.wave !== authority.wave ||
-    candidate.authorityDigest !== authority.authorityDigest || candidate.revision !== authority.revision + 1
-  ) {
-    return reject(
-      `Wave ${authority.wave} terminal history conflicts with pre-read active run ${authority.runId} ` +
-      `(expected digest ${authority.authorityDigest} and revision ${authority.revision + 1})`,
-    );
-  }
-  if (
-    candidate.completionReceipt.runId !== authority.runId ||
-    candidate.completionReceipt.committedRevision !== candidate.revision
-  ) {
-    return reject(`Wave ${authority.wave} terminal history carries a contradictory completion receipt`);
-  }
-  return Object.freeze({ ok: true, value: candidate });
-}
-
 export class StateManager {
   private readonly path: string;
   private readonly authority: TaskGraphFileAuthority;
@@ -437,157 +373,6 @@ export class StateManager {
   }
 
   /**
-   * Install one fresh protected active-run anchor, idempotently for exact
-   * replay. `program` is the run's program registration (or the part the
-   * install reads): its published Tasks, and the succession (ADR-0091) and
-   * narrowed reviews (ADR-0094) it froze, which the install checks against
-   * protected state.
-   */
-  async registerActiveWaveGate(
-    rawRegistration: unknown,
-    program: WaveGateInstallProgram,
-  ): Promise<ActiveWaveGateRegistration> {
-    const parsed = parseActiveWaveGateRegistration(rawRegistration);
-    if (!parsed.ok) throw new Error(`Invalid active Wave Gate registration: ${parsed.error}`);
-    return this.updateAndReturn((state) => {
-      const decision = installWaveGateRegistration(state, parsed.value, program);
-      if (decision.kind === "refused") throw new Error(decision.message);
-      return decision.kind === "replayed"
-        ? { state, value: decision.registration }
-        : { state: decision.state, value: decision.registration };
-    });
-  }
-
-  /**
-   * Stamp the operator's terminal abandonment onto the protected registration.
-   *
-   * `helper orchestration abandon` writes an immutable marker inside the Run
-   * Directory; this stamps the SAME terminal decision onto the active
-   * registration under the TaskGraph lock, so a tombstoned registration stops
-   * being active authority and a fresh `start` can supersede it. The outcome
-   * is re-proven through `parseActiveWaveGateTerminalOutcome` rather than
-   * constructed directly: the stored form is parser-proven, and the state
-   * boundary refuses to persist what its own parser would reject.
-   *
-   * A non-targeted result names why no protected registration changed. Exact
-   * repeat is a distinct replay result, not another apparent write.
-   */
-  async abandonActiveWaveGateRegistration(
-    abandonment: Readonly<{
-      runsRoot: string;
-      runId: ActiveWaveGateRegistration["runId"];
-      reason: string;
-      supersededBy: ActiveWaveGateRegistration["runId"] | null;
-    }>,
-  ): Promise<ActiveWaveGateAbandonmentResult> {
-    return this.updateAndReturn<ActiveWaveGateAbandonmentResult>((state) => {
-      const active = state.active_wave_gate;
-      if (active === undefined) {
-        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "registration-absent" as const }) };
-      }
-      if (active.runsRoot !== abandonment.runsRoot || active.runId !== abandonment.runId) {
-        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "authority-mismatch" as const }) };
-      }
-      if (active.terminalOutcome !== null) {
-        if (active.terminalOutcome.kind === "terminal-abandoned" &&
-            active.terminalOutcome.reason === abandonment.reason &&
-            active.terminalOutcome.supersededBy === abandonment.supersededBy) {
-          const registration: AbandonedWaveGateRegistration = Object.freeze({
-            ...active,
-            terminalOutcome: active.terminalOutcome,
-          });
-          return { state, value: Object.freeze({ kind: "replayed" as const, registration }) };
-        }
-        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "terminal-conflict" as const }) };
-      }
-      const outcome = parseActiveWaveGateTerminalOutcome(
-        { kind: "terminal-abandoned", reason: abandonment.reason, supersededBy: abandonment.supersededBy },
-        active.runId,
-      );
-      if (!outcome.ok || outcome.value?.kind !== "terminal-abandoned") {
-        throw new Error(`Invalid Wave Gate abandonment stamp: ${outcome.ok ? "unexpected outcome" : outcome.error}`);
-      }
-      const stamped = Object.freeze({ ...active, terminalOutcome: outcome.value });
-      return {
-        // Terminalizing the gate retires its correlated live-suite authority in
-        // the same locked transition. Retaining it would make the produced
-        // graph unparseable: live suites require a nonterminal active gate.
-        state: { ...state, active_wave_gate: stamped, active_wave_completion_suite: undefined },
-        value: Object.freeze({ kind: "stamped" as const, registration: stamped }),
-      };
-    });
-  }
-
-  /** Explicit anti-corruption migration for a historical graph that predates
-   * active registrations. No run id, Wave, or digest is invented implicitly. */
-  async migrateLegacyWaveGateRegistration(raw: unknown): Promise<ActiveWaveGateRegistration> {
-    const parsed = parseLegacyWaveGateMigrationAuthority(raw);
-    if (!parsed.ok) throw new Error(parsed.error);
-    const { registration, compatibility } = parsed.value;
-    return this.updateAndReturn((state) => {
-      const terminalReplay = findLegacyWaveGateCompletionReplay(state, compatibility);
-      if (!terminalReplay.ok) throw new Error(terminalReplay.error.message);
-      if (terminalReplay.value !== null) {
-        throw new Error(`Legacy Wave ${registration.wave} is already completed by run ${terminalReplay.value.runId}`);
-      }
-      const existing = state.active_wave_gate;
-      if (existing !== undefined) {
-        const exactReplay = existing.runId === registration.runId &&
-          existing.wave === registration.wave &&
-          existing.authorityDigest === registration.authorityDigest &&
-          existing.revision === 0 && existing.terminalOutcome === null;
-        if (exactReplay) return { state, value: existing };
-        throw new Error("Legacy migration is allowed only when active Wave Gate authority is absent");
-      }
-      if (state.current_phase !== "execute" || state.current_wave !== registration.wave) {
-        throw new Error("Legacy migration must exactly match protected execute/current_wave authority");
-      }
-      if (state.tasks.every((task) => task.wave !== registration.wave)) {
-        throw new Error(`Legacy migration wave ${registration.wave} has no protected Tasks`);
-      }
-      return { state: { ...state, active_wave_gate: registration }, value: registration };
-    });
-  }
-
-  /** Lock, re-derive completion through the caller's pure domain function,
-   * persist terminal history + advancement together, and return its receipt. */
-  async commitActiveWaveGateCompletion(
-    derive: (lockedState: TaskGraph) => DomainResult<WaveCompletionCommit, WaveCompletionCommitError>,
-  ): Promise<WaveCompletionCommit> {
-    return this.updateAndReturn((state) => {
-      const active = state.active_wave_gate;
-      if (state.current_phase !== "execute" || state.current_wave === undefined || active === undefined) {
-        throw new Error("Protected execute/current Wave Gate authority is missing");
-      }
-      if (active.wave !== state.current_wave || active.terminalOutcome !== null) {
-        throw new Error("Protected active/current Wave Gate authority is contradictory or terminal");
-      }
-      const committed = derive(state);
-      if (!committed.ok) throw new Error(committed.error.message);
-      const terminal = committed.value.completedRegistration;
-      if (
-        terminal.runId !== active.runId || terminal.wave !== active.wave ||
-        terminal.authorityDigest !== active.authorityDigest || terminal.revision !== active.revision + 1 ||
-        committed.value.receipt !== terminal.completionReceipt
-      ) {
-        throw new Error("Completion result does not terminalize the exact locked active registration");
-      }
-      const activeSuite = state.active_wave_completion_suite;
-      const suiteArchivedExactly = activeSuite === undefined
-        ? terminal.schemaVersion === 1
-        : terminal.schemaVersion === 2 && terminal.completionSuite === activeSuite;
-      if (!suiteArchivedExactly) {
-        throw new Error("Completion must archive the exact active Wave completion suite using the matching history schema");
-      }
-      if (committed.value.graph.active_wave_gate !== undefined ||
-          committed.value.graph.active_wave_completion_suite !== undefined) {
-        throw new Error("Completion must retire active gate and completion-suite authority before the next Wave can register");
-      }
-      return { state: committed.value.graph, value: committed.value };
-    });
-  }
-
-  /**
    * Replace state entirely (used by populate-task-graph and repair-task-graph).
    * A full replacement never reads the outgoing graph, so it deliberately does
    * not route through `updateAndReturn`: recovering a graph the load boundary
@@ -667,16 +452,35 @@ export class StateManager {
   }
 }
 
-/** @deprecated Legacy wave-gate compatibility migration — archived in
- *  ./core/legacy-archive (Section C). New completions use the registered
- *  Wave Gate authority (active_wave_gate); this type + derive path survive
- *  only for graphs that predate registration. Deprecation horizon: retire
- *  once no pre-registration graph can still be completed. */
-export {
-  deriveLegacyWaveGateCompatibilityAuthority,
-  findLegacyWaveGateCompletionReplay,
-};
-export type {
-  LegacyWaveGateCompatibilityAuthority,
-  LegacyWaveGateCompletionReplayError,
-};
+/**
+ * Install one fresh protected active-run anchor under the TaskGraph lock,
+ * idempotently for exact replay (`installWaveGateRegistration`). `program` is
+ * the run's program registration (or the part the install reads): its
+ * published Tasks, and the succession (ADR-0091) and narrowed reviews
+ * (ADR-0094) it froze, which the install checks against protected state.
+ */
+export async function registerActiveWaveGate(
+  manager: StateManager,
+  registration: ActiveWaveGateRegistration,
+  program: WaveGateInstallProgram,
+): Promise<ActiveWaveGateRegistration> {
+  return manager.updateAndReturn((state) => {
+    const decision = installWaveGateRegistration(state, registration, program);
+    if (decision.kind === "refused") throw new Error(decision.message);
+    return { state: decision.kind === "installed" ? decision.state : state, value: decision.registration };
+  });
+}
+
+/** Lock, re-derive completion through the caller's pure domain function
+ * (`lockedWaveGateCompletion`), persist terminal history + advancement
+ * together, and return its receipt. */
+export async function commitActiveWaveGateCompletion(
+  manager: StateManager,
+  derive: (lockedState: TaskGraph) => DomainResult<WaveCompletionCommit, WaveCompletionCommitError>,
+): Promise<WaveCompletionCommit> {
+  return manager.updateAndReturn((state) => {
+    const committed = lockedWaveGateCompletion(state, derive);
+    if (!committed.ok) throw new Error(committed.error);
+    return { state: committed.value.graph, value: committed.value };
+  });
+}

@@ -20,7 +20,7 @@ import {
   defaultVerificationManifest,
   deriveProjectVerificationCoverage,
   freezeVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   parseFrozenVerificationManifest,
   parseVerificationManifest,
   type AcceptanceRunner,
@@ -77,17 +77,17 @@ const stored = (manifest: FrozenVerificationManifest): Record<string, unknown> =
 const DIGEST_MISMATCH = "frozenVerificationManifest.manifestDigest does not match its canonical authority";
 
 describe("the legacy engine default keeps today's bytes", () => {
-  it("FR-017: legacyDefaultVerificationManifest().manifestDigest equals the pre-feature default digest", () => {
-    expect(legacyDefaultVerificationManifest().manifestDigest).toBe(PRE_FEATURE_DEFAULT_DIGEST);
-    expect(stored(legacyDefaultVerificationManifest())).toEqual({
+  it("FR-017: preI6DefaultVerificationManifest().manifestDigest equals the pre-feature default digest", () => {
+    expect(preI6DefaultVerificationManifest().manifestDigest).toBe(PRE_FEATURE_DEFAULT_DIGEST);
+    expect(stored(preI6DefaultVerificationManifest())).toEqual({
       schemaVersion: 1,
       kind: "frozen-verification-manifest",
       source: { kind: "engine-default" },
       manifestDigest: PRE_FEATURE_DEFAULT_DIGEST,
       projectChecks: [],
     });
-    expect(parseFrozenVerificationManifest(stored(legacyDefaultVerificationManifest())))
-      .toEqual({ ok: true, value: legacyDefaultVerificationManifest() });
+    expect(parseFrozenVerificationManifest(stored(preI6DefaultVerificationManifest())))
+      .toEqual({ ok: true, value: preI6DefaultVerificationManifest() });
   });
 
   it("FR-014: the population default carries the engine-default testFiles, which enters its digest", () => {
@@ -154,7 +154,7 @@ describe("a frozen engine-default classification is provably the engine default"
   });
 });
 
-describe("wave-completion-suite-readiness falls back to the legacy default", () => {
+describe("wave-completion-suite-readiness under a graph frozen with the pre-feature default", () => {
   const registration: ActiveWaveGateRegistration = {
     schemaVersion: 1,
     kind: "active-wave-gate",
@@ -191,6 +191,7 @@ describe("wave-completion-suite-readiness falls back to the legacy default", () 
   const preFeatureGraph = (receipt: AcceptedWaveCompletionReceipt): TaskGraph => ({
     current_phase: "execute",
     current_wave: 1,
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -201,9 +202,9 @@ describe("wave-completion-suite-readiness falls back to the legacy default", () 
     active_wave_completion_suite: receipt,
   });
 
-  it("FR-017: a TaskGraph with no verification_manifest keeps its receipt stamped with the pre-feature default", () => {
+  it("FR-017: a TaskGraph frozen with the pre-feature default accepts its receipt stamped with that default", () => {
     const readiness = deriveWaveCompletionSuiteReadiness(
-      preFeatureGraph(receiptUnder(legacyDefaultVerificationManifest())),
+      preFeatureGraph(receiptUnder(preI6DefaultVerificationManifest())),
       1,
       { kind: "observed", workspaceDigest },
     );

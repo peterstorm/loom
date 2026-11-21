@@ -658,13 +658,3 @@ function driftedFields(
   return (["baseTreeDigest", "indexDigest", "worktreeDigest"] as const)
     .filter((field) => expected[field] !== current[field]);
 }
-
-/** Read a repository file's exact bytes, for byte-equality proofs in tests. */
-export function readRepositoryBytes(root: string, path: string): Buffer | null {
-  try {
-    return readFileSync(join(root, path));
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
-    throw error;
-  }
-}

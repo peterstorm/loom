@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import type { TaskGraph } from "../../../src/types";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -16,6 +17,7 @@ function makeTmpDir(): string {
 function minimalGraph(): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

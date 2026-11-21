@@ -12,9 +12,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
 import {
@@ -44,11 +42,11 @@ import {
 import { returnToRevalidation } from "../../src/core/task-revalidation";
 import {
   defaultVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { parseVerificationPolicy, type VerificationPolicy } from "../../src/core/verification-policy";
-import { parseTaskGraph, taskUnionError } from "../../src/state-file-wire";
+import { parseStoredTask, parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
 import { operatorManifest } from "../fixtures/i6-runner-manifest";
@@ -117,7 +115,7 @@ const ERA_ROWS: readonly EraRow[] = [
   { row: "(b) an operator schema-2 manifest without testFileSuffixes", manifest: () => fromSource({ schemaVersion: 2 }), era: "owed-if-new-tests" },
   { row: "(c) an operator schema-1 manifest", manifest: () => fromSource({ schemaVersion: 1 }), era: "owed-if-new-tests" },
   { row: "(d) no manifest file (defaultVerificationManifest())", manifest: () => defaultVerificationManifest(), era: "owed-if-new-tests" },
-  { row: "(e) a pre-feature frozen manifest", manifest: () => legacyDefaultVerificationManifest(), era: "not-owed" },
+  { row: "(e) a pre-feature frozen manifest", manifest: () => preI6DefaultVerificationManifest(), era: "not-owed" },
   { row: "(f) a pre-feature graph with no verification_manifest", manifest: () => undefined, era: "not-owed" },
 ];
 
@@ -128,6 +126,9 @@ const ERA_ROWS: readonly EraRow[] = [
  */
 const POPULATABLE_ERA_ROWS: readonly EraRow[] = ERA_ROWS.filter(({ manifest, era }) =>
   era === "not-owed" || manifest()?.affectedRunner !== undefined);
+
+/** The rows the State File loads: row (f)'s manifest-less execute graph is refused at load (ADR-0098). */
+const LOADABLE_ERA_ROWS: readonly EraRow[] = POPULATABLE_ERA_ROWS.filter(({ manifest }) => manifest() !== undefined);
 
 function authoredTask(id: string, newTests: "required" | "claimant" | "existing-tests-sufficient"): AuthoredTask {
   return {
@@ -168,7 +169,7 @@ function populated(manifest: FrozenVerificationManifest | undefined): TaskGraph 
       planTitle: "Era plan",
       validatedPlanFile: "plan.md",
       tasks: roster.value,
-      verificationManifest: manifest ?? legacyDefaultVerificationManifest(),
+      verificationManifest: manifest ?? preI6DefaultVerificationManifest(),
       specIndex: { kind: "unavailable", reason: { kind: "no-spec-file" } },
       observedSpecFile: null,
       force: false,
@@ -422,8 +423,6 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
       dirtySetBaseline: [],
     });
     if (!authority.ok) throw new Error(authority.error.errors.join("; "));
-    const suite = createTaskCompletionSuiteAuthority(authority.value);
-    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
     return settleImplementationAttempt({
       id: "T1",
       status: "pending",
@@ -441,13 +440,7 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
       observedAt: "2026-10-16T00:01:00.000Z",
       evidence: JSON.parse(JSON.stringify({ ...observed(redThenGreen), filesModified: [] })),
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-    }, {
-      schemaVersion: 1,
-      kind: "task-completion-suite-result",
-      implementationAuthorityDigest: suite.value.implementationAuthorityDigest,
-      suiteDigest: suite.value.suiteDigest,
-      checks: [{ checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } }],
-    });
+    }, { kind: "accepted" });
   }
 
   it.each(ALL_GAPS.filter(({ kind }) => kind !== "ledger-unavailable"))("FR-009: the $kind gap mints its own receipt failure kind and retries", (gap) => {
@@ -478,12 +471,19 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     }
   });
 
-  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File obligation-match check accepts the populated graph for $row", ({ manifest }) => {
+  it.each(LOADABLE_ERA_ROWS)("FR-005: the State File obligation-match check accepts the populated graph for $row", ({ manifest }) => {
     const parsed = parseTaskGraph(wire(populated(manifest())));
     expect(parsed.ok, parsed.ok ? "" : parsed.error).toBe(true);
   });
 
-  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File check refuses obligations of the other era for $row", ({ manifest, era }) => {
+  it("ADR-0098: the State File refuses row (f)'s manifest-less execute graph rather than defaulting its era", () => {
+    expect(parseTaskGraph(wire(populated(undefined)))).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("legacy State File refused (ADR-0098): an execute-phase TaskGraph without verification_manifest"),
+    });
+  });
+
+  it.each(LOADABLE_ERA_ROWS)("FR-005: the State File check refuses obligations of the other era for $row", ({ manifest, era }) => {
     const raw = wire(populated(manifest()));
     const tasks = raw.tasks as Array<Record<string, unknown>>;
     const t1 = tasks.find((task) => task.id === "T1")!;
@@ -500,7 +500,7 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     if (!parsed.ok) expect(parsed.error).toContain("proof obligations do not exactly match");
   });
 
-  describe("taskUnionError holds the exact era it is given", () => {
+  describe("parseStoredTask holds the exact era it is given", () => {
     const ERAS: readonly RedThenGreenEra[] = ["owed-if-new-tests", "not-owed"];
     const otherEra = (era: RedThenGreenEra): RedThenGreenEra => era === "owed-if-new-tests" ? "not-owed" : "owed-if-new-tests";
     /** No contracts: every Task takes the graph's era. */
@@ -513,17 +513,17 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     };
 
     it.each(ERAS)("FR-005: accepts a Task carrying exactly the %s obligations under that era", (era) => {
-      expect(taskUnionError(wiredT1(era), 0, scope(era))).toBeNull();
+      expect(parseStoredTask(wiredT1(era), 0, scope(era))).toMatchObject({ ok: true });
     });
 
     it.each(ERAS)("FR-005: refuses the %s obligations under the other era", (era) => {
-      expect(taskUnionError(wiredT1(era), 0, scope(otherEra(era)))).toContain("proof obligations do not exactly match");
+      expect(parseStoredTask(wiredT1(era), 0, scope(otherEra(era)))).toMatchObject({ ok: false, error: expect.stringContaining("proof obligations do not exactly match") });
     });
 
     it("refuses T1's I6-era obligations once T1 writes a contract, and accepts the writer era's", () => {
       const writerScope: RedThenGreenScope = { era: "owed-if-new-tests", contractWriters: new Map([["T1", "CT-1"]]) };
-      expect(taskUnionError(wiredT1("owed-if-new-tests"), 0, writerScope)).toContain("proof obligations do not exactly match");
-      expect(taskUnionError(wiredT1("not-owed"), 0, writerScope)).toBeNull();
+      expect(parseStoredTask(wiredT1("owed-if-new-tests"), 0, writerScope)).toMatchObject({ ok: false, error: expect.stringContaining("proof obligations do not exactly match") });
+      expect(parseStoredTask(wiredT1("not-owed"), 0, writerScope)).toMatchObject({ ok: true });
     });
 
     it.each(ERAS)("FR-005: refuses obligations that match neither era, under %s", (era) => {
@@ -532,11 +532,11 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
       // Without `new-tests` the set is neither era's derivation for a Task requiring new tests.
       proof.obligations = proof.obligations.filter(({ kind }) => kind !== "new-tests");
       proof.results = proof.results.filter(({ obligation }) => obligation.kind !== "new-tests");
-      expect(taskUnionError(task, 0, scope(era))).toContain("proof obligations do not exactly match");
+      expect(parseStoredTask(task, 0, scope(era))).toMatchObject({ ok: false, error: expect.stringContaining("proof obligations do not exactly match") });
     });
   });
 
-  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File migration derives a proof-less pending Task's obligations under $row's era", ({ manifest, era }) => {
+  it.each(LOADABLE_ERA_ROWS)("FR-005: the State File migration derives a proof-less pending Task's obligations under $row's era", ({ manifest, era }) => {
     const raw = wire(populated(manifest()));
     const tasks = raw.tasks as Array<Record<string, unknown>>;
     delete tasks.find((task) => task.id === "T1")!.proof;
@@ -547,16 +547,11 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     expect(kinds(migrated?.proof?.obligations ?? [])).toEqual(expectedObligationKinds(era).T1);
   });
 
-  it.each(POPULATABLE_ERA_ROWS)("FR-005: revalidation re-derives a proof-less Task's obligations under $row's era", ({ manifest, era }) => {
+  it.each(POPULATABLE_ERA_ROWS)("FR-005: revalidation keeps a Task's frozen Proof under $row's era", ({ manifest }) => {
     const frozen = manifest();
     const graph = populated(frozen);
-    for (const [id, expected] of Object.entries(expectedObligationKinds(era))) {
-      const { proof: _cleared, status: _status, revalidation_required: _marker, ...metadata } = taskOf(graph, id);
-      const legacy: Task = { ...metadata, status: "completed", legacy_missing_proof: true };
-      const revalidated = returnToRevalidation(legacy, frozen);
-      expect(kinds(revalidated.proof?.obligations ?? []), id).toEqual(expected);
-      // A Task that still holds its Proof keeps it exactly.
-      expect(returnToRevalidation(taskOf(graph, id), frozen).proof).toEqual(taskOf(graph, id).proof);
+    for (const id of Object.keys(expectedObligationKinds("not-owed"))) {
+      expect(returnToRevalidation(taskOf(graph, id), frozen).proof, id).toEqual(taskOf(graph, id).proof);
     }
   });
 });

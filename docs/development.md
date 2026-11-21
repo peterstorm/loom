@@ -28,17 +28,14 @@ The same **root `npm run verify`** runs locally, in `.github/workflows/ci.yml` f
 
 CI runs that command as parallel **Verify Slices** (`engine/src/core/verify-slice.ts`): each OS has one job per slice, selected by `LOOM_VERIFY_SLICE`. The slices are `static` (typecheck and lint), `unit:<i>/<n>` (Vitest file shard *i* of *n*) and `smoke`. The matrix lists every slice, and a contract test (`engine/tests/verification-ci.test.ts`) proves that together they run the whole command, so every tier still runs on both platforms. Locally and in the manifest the variable is unset, which is the whole command. A slice's JUnit report holds only its own shard's facts.
 
-Root `verify` delegates to engine `verify` (`engine/scripts/verify.ts`): prerequisites (`preverify`) → typecheck → lint → the Vitest suite (`test:unit`) → the smoke commands (`test:smoke`), stopping at the first failure. The two test tiers together are what `test` runs: the entire Vitest suite (including property/integration tests) followed by all six smoke commands, once each on success:
+Root `verify` delegates to engine `verify` (`engine/scripts/verify.ts`): prerequisites (`preverify`) → typecheck → lint → the Vitest suite (`test:unit`) → the smoke commands (`test:smoke`), stopping at the first failure. The two test tiers together are what `test` runs: the entire Vitest suite (including property/integration tests) followed by all four smoke commands, once each on success:
 
 1. `scripts/smoke-panel-mode.sh`
-2. `scripts/smoke-review-panel.sh`
-3. `scripts/smoke-standalone-review.sh`
-4. `scripts/smoke-orchestration-facades.ts`
-5. `scripts/smoke-pi-resources.sh`
-6. `artifacts/tests/test-validate-task-graph.sh`
+2. `scripts/smoke-orchestration-facades.ts`
+3. `scripts/smoke-pi-resources.sh`
+4. `artifacts/tests/test-validate-task-graph.sh`
 
-The review-panel and standalone helper smokes explicitly retain historical/manual
-coverage. The façade smoke covers current issued payloads, bounded scope retries,
+The façade smoke covers current issued payloads, bounded scope retries,
 refutation, advisory decisions, durable replay and actual disposable index
 installation; it supplies a matching runtime identity only to its CLI children.
 These scripted smokes do not spawn live Agents.

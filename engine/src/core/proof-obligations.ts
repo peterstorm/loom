@@ -9,10 +9,12 @@ import {
 import type { FrozenTestFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import {
+  COVERED_BY_ACCEPTANCE_CONTRACT,
   parseVerificationPolicy,
   requiresNewTests,
   requiresRegression,
   verificationPolicyFromLegacy,
+  type NewTestWaiverReason,
   type VerificationPolicy,
 } from "./verification-policy";
 
@@ -98,9 +100,10 @@ const PRE_I6_ERA: FrozenRedThenGreenEra = Object.freeze({ kind: "not-owed" });
  * carrying no manifest at all, reads `not-owed`. The INV-6 lint rule is the
  * backstop against a second reader. Population, the State File obligation-match
  * check and the operator validator ask per Task through `taskRedThenGreenEra`,
- * which exempts Acceptance Contract writers from this era; revalidation and
- * `redThenGreenDuty`'s no-Proof arm take the graph era alone through
- * `redThenGreenEra` (see `taskRedThenGreenEra` for why that is sound);
+ * which exempts Acceptance Contract writers from this era; the scope rules and
+ * the Red-Then-Green Status ask the whole duty rule, `redThenGreenOwing`;
+ * revalidation takes the graph era alone through `redThenGreenEra` (see
+ * `taskRedThenGreenEra` for why that is sound);
  * settlement, the stored-evidence reconcile and the brief ask through
  * `redThenGreenDuty`, which defers to a Task's frozen Proof and takes the
  * classification from here, so none of them can disagree.
@@ -159,15 +162,65 @@ export function writtenContract(scope: RedThenGreenScope, taskId: string): strin
  * testcases green owe no I6 either (FR-010's covered-by-acceptance-contract
  * waiver). The writer keeps its `new-tests` obligation.
  *
- * Population, the State File obligation-match check (`taskUnionError`, and
+ * Population, the State File obligation-match check (`parseStoredTask`, and
  * through it the operator validator) and the proof-less pending migration ask
- * here. Revalidation and `redThenGreenDuty`'s no-Proof arm take the graph era
- * alone: Acceptance Contracts exist only in TaskGraphs whose population froze
- * every Task's Proof, so a Task reaching those no-Proof paths is never a
- * contract writer.
+ * here, and `deriveProofObligations` applies the duty rule's new-test half to
+ * the answer. Revalidation takes the graph era alone: Acceptance Contracts
+ * exist only in TaskGraphs whose population froze every Task's Proof, so a
+ * Task revalidation re-derives is never a contract writer.
  */
 export function taskRedThenGreenEra(scope: RedThenGreenScope, taskId: string): RedThenGreenEra {
-  return writtenContract(scope, taskId) === undefined ? scope.era : "not-owed";
+  return eraExemption(scope, taskId) === null ? "owed-if-new-tests" : "not-owed";
+}
+
+/** Why a Task owes no red-then-green (I6), in the order `redThenGreenOwing` asks. */
+export type RedThenGreenExemption =
+  /** Its TaskGraph's frozen manifest carries no test-file classification. */
+  | Readonly<{ kind: "predates-i6" }>
+  /** It writes this Acceptance Contract (`writtenContract`): the contract gate's red window is its red evidence. */
+  | Readonly<{ kind: "contract-writer"; contract: string }>
+  /** It claims a Requirement an Acceptance Contract covers: the covered-by-acceptance-contract waiver. */
+  | Readonly<{ kind: "claimant" }>
+  | Readonly<{ kind: "new-tests-waived"; reason: NewTestWaiverReason }>;
+
+/** Whether one Task owes I6, and the first exemption when it does not. */
+export type RedThenGreenOwing =
+  | Readonly<{ kind: "owed" }>
+  | Readonly<{ kind: "not-owed"; exemption: RedThenGreenExemption }>;
+
+const OWED_RED_THEN_GREEN: RedThenGreenOwing = Object.freeze({ kind: "owed" });
+const PREDATES_I6: RedThenGreenExemption = Object.freeze({ kind: "predates-i6" });
+const CLAIMANT: RedThenGreenExemption = Object.freeze({ kind: "claimant" });
+
+/** The rule's era half: the TaskGraph predates I6, or the Task writes an Acceptance Contract. */
+function eraExemption(scope: RedThenGreenScope, taskId: string): RedThenGreenExemption | null {
+  if (scope.era === "not-owed") return PREDATES_I6;
+  const contract = writtenContract(scope, taskId);
+  return contract === undefined ? null : Object.freeze({ kind: "contract-writer", contract });
+}
+
+/** The rule's new-test half: a Task owes I6 only when it must write new tests. */
+function newTestExemption(policy: VerificationPolicy): RedThenGreenExemption | null {
+  return match(policy.newTests)
+    .returnType<RedThenGreenExemption | null>()
+    .with({ kind: "required" }, () => null)
+    .with({ kind: "waived", reason: COVERED_BY_ACCEPTANCE_CONTRACT }, () => CLAIMANT)
+    .with({ kind: "waived" }, ({ reason }) => Object.freeze({ kind: "new-tests-waived", reason }))
+    .exhaustive();
+}
+
+/**
+ * The one red-then-green duty rule (INV-6): a Task owes I6 exactly when its
+ * TaskGraph's era owes it, it writes no Acceptance Contract, and it must write
+ * new tests. Population freezes the answer into the Task's Proof
+ * (`deriveProofObligations`), the scope rules refuse a roster by it, and the
+ * Red-Then-Green Status explains a not-owed duty by its exemption. A loaded
+ * Task's frozen Proof is then authoritative (`redThenGreenDuty`), and the
+ * State File load refuses a Proof that disagrees with this rule.
+ */
+export function redThenGreenOwing(scope: RedThenGreenScope, taskId: string, policy: VerificationPolicy): RedThenGreenOwing {
+  const exemption = eraExemption(scope, taskId) ?? newTestExemption(policy);
+  return exemption === null ? OWED_RED_THEN_GREEN : Object.freeze({ kind: "not-owed", exemption });
 }
 
 /** Which byte comparison each declared artifact owes.
@@ -540,7 +593,8 @@ export function deriveProofObligations(input: ProofObligationInput): NonEmpty<Pr
     ...(requiresNewTests(policy)
       ? [Object.freeze({ kind: "new-tests" as const })]
       : []),
-    ...(requiresNewTests(policy) && input.redThenGreen === "owed-if-new-tests"
+    // The duty rule (`redThenGreenOwing`): `input.redThenGreen` is the Task's era half, already decided.
+    ...(input.redThenGreen === "owed-if-new-tests" && newTestExemption(policy) === null
       ? [Object.freeze({ kind: "red-then-green" as const })]
       : []),
     ...scopeObligations(expectation, artifacts),
@@ -959,15 +1013,6 @@ export function evaluateTaskProof(
   policy: ProofEvaluationPolicy = TRUSTED_LEDGER_ONLY_POLICY,
 ): FailedTaskProof | SatisfiedTaskProof {
   return evaluateProofObligations(deriveProofObligations(input), observed, policy);
-}
-
-/** Re-evaluation depends only on the authored obligations, not the prior state. */
-export function reevaluateTaskProof(
-  proof: TaskProof,
-  observed: ObservedProofEvidence,
-  policy: ProofEvaluationPolicy = TRUSTED_LEDGER_ONLY_POLICY,
-): FailedTaskProof | SatisfiedTaskProof {
-  return evaluateProofObligations(proof.obligations, observed, policy);
 }
 
 // ---------------------------------------------------------------------------

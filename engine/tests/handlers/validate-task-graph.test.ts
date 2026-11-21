@@ -11,9 +11,10 @@ import { authoredDistillTaskRefusal } from "../../src/core/distill-task";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { DISTILL_VERIFICATION_POLICY } from "../../src/core/verification-policy";
 import { distillTaskFixture } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const PERSISTED_LIFECYCLE = {
-  current_phase: "execute",
+  current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
 } as const;
@@ -222,7 +223,7 @@ describe("validateFull (pure)", () => {
       const graph = { plan_title: "x", plan_file: "x", spec_file: "x", tasks: [task] };
       expect(validateFull(graph).ok).toBe(false);
       expect(parseTaskGraph({
-        current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
         spec_file: null, plan_file: null, tasks: [task], wave_gates: {},
       }).ok).toBe(false);
     }
@@ -614,7 +615,7 @@ describe("handler routes — fixMinimal and the file-arg path (round-10 gap 23)"
     try {
       const result = await handler(
         JSON.stringify({
-          current_phase: "execute",       // valid → preserved
+          current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),       // valid → preserved
           phase_artifacts: ["not", "an", "object"], // invalid → {}
           skipped_phases: "nope",         // invalid → []
           spec_file: "spec.md",           // present → preserved
@@ -692,7 +693,7 @@ describe("fixFull repairs findings WITH their derived views", () => {
   };
 
   const graphOf = (task: Record<string, unknown>) => ({
-    current_phase: "execute",
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     tasks: [task],
   });
@@ -956,7 +957,7 @@ describe("fixFull repairs findings WITH their derived views", () => {
     // The point of the repair path: a graph parseTaskGraph refuses must become
     // one it accepts, or the operator is stuck with no way forward.
     const broken = {
-      current_phase: "execute",
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       tasks: [{
         id: "T1", description: "repair findings", agent: "code-implementer-agent",
@@ -978,7 +979,7 @@ describe("fixFull repairs findings WITH their derived views", () => {
     ];
     for (const task of rejected) {
       const graph = {
-        current_phase: "execute",
+        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
         phase_artifacts: {},
         tasks: [{
           description: "repair findings", agent: "code-implementer-agent",
@@ -1017,6 +1018,7 @@ describe("validateFull agrees with the load boundary about the findings aggregat
   const graph = (fields: Record<string, unknown>) => ({
     ...base,
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     wave_gates: {},
     tasks: [task(fields)],

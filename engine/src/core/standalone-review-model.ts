@@ -45,7 +45,7 @@ export interface StandaloneReviewerEvidence {
   readonly authorityKind: "request-bound" | "legacy-slot-bound";
   readonly agent: StandaloneReviewerRole;
   /** Branded like every other slot/request identity in this module: the value
-   *  comes from untrusted `aggregate.json`, so it is PARSED against
+   *  comes from an untrusted stored aggregate, so it is PARSED against
    *  `SAFE_AUTHORITY_ID`, not merely shape-checked for non-emptiness. */
   readonly slotId: SlotId;
   readonly requestId: RequestId;

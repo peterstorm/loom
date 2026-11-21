@@ -12,10 +12,12 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createValidateTaskExecutionHandler } from "../../../src/handlers/pre-tool-use/validate-task-execution";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 /** T1 is dispatchable in Wave 1, so an admitted spawn would reserve it. */
 const TASK_GRAPH = JSON.stringify({
   current_phase: "execute",
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,

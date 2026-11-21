@@ -2,8 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   isRegexRule,
   isProgrammaticRule,
-  isPass,
-  isViolations,
   isError,
   makeViolation,
   passResult,
@@ -59,37 +57,6 @@ describe("isProgrammaticRule", () => {
 
   it("returns false for RegexRule", () => {
     expect(isProgrammaticRule(regexRule)).toBe(false);
-  });
-});
-
-describe("isPass", () => {
-  it("returns true for pass result", () => {
-    expect(isPass({ kind: "pass" })).toBe(true);
-  });
-
-  it("returns false for violations result", () => {
-    expect(isPass({ kind: "violations", violations: [] })).toBe(false);
-  });
-
-  it("returns false for error result", () => {
-    expect(isPass({ kind: "error", message: "oops" })).toBe(false);
-  });
-});
-
-describe("isViolations", () => {
-  it("returns true for violations result", () => {
-    const v: Violation = {
-      rule: "test",
-      file: "/a.ts",
-      line: 1,
-      text: "x",
-      fixHint: "fix",
-    };
-    expect(isViolations({ kind: "violations", violations: [v] })).toBe(true);
-  });
-
-  it("returns false for pass result", () => {
-    expect(isViolations({ kind: "pass" })).toBe(false);
   });
 });
 

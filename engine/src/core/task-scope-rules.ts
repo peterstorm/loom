@@ -18,10 +18,10 @@
  */
 
 import { nonEmpty, type NonEmpty } from "./orchestration-contract";
-import { frozenRedThenGreenEra, redThenGreenScope, taskRedThenGreenEra } from "./proof-obligations";
+import { frozenRedThenGreenEra, redThenGreenOwing, redThenGreenScope } from "./proof-obligations";
 import { isTestFileBySuffixes } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
-import { requiresNewTests, type VerificationPolicy } from "./verification-policy";
+import type { VerificationPolicy } from "./verification-policy";
 
 /** The parts of a Task its evidence scope is judged from. */
 export type ScopedTask = Readonly<{ id: string; fileList: readonly string[]; policy: VerificationPolicy }>;
@@ -38,9 +38,9 @@ export type TaskScopeProblem =
   | Readonly<{ kind: "no-engine-runner"; taskIds: NonEmpty<string> }>
   | Readonly<{ kind: "unowned-requirements"; ids: NonEmpty<string> }>;
 
-/** Whether `task` owes I6 under `authority`: new tests required, and its era owes them a red-then-green. */
-export const owesRedThenGreen = (task: ScopedTask, { manifest, contracts }: ScopeAuthority): boolean =>
-  requiresNewTests(task.policy) && taskRedThenGreenEra(redThenGreenScope(manifest, contracts), task.id) === "owed-if-new-tests";
+/** Whether `task` owes I6 under `authority`: the one duty rule, `redThenGreenOwing`. */
+const owesRedThenGreen = (task: ScopedTask, { manifest, contracts }: ScopeAuthority): boolean =>
+  redThenGreenOwing(redThenGreenScope(manifest, contracts), task.id, task.policy).kind === "owed";
 
 /**
  * The files of `files` the frozen Test-File Classification does not call a

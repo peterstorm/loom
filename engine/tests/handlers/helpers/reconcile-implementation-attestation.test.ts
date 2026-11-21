@@ -24,6 +24,7 @@ import { armImplementationAttestation } from "../../../src/core/implementation-l
 import { derivePendingTaskProof } from "../../../src/core/proof-obligations";
 import { captureDeclaredArtifactBaseline } from "../../../src/utils/declared-artifact-snapshot";
 import { parseTaskGraph } from "../../../src/state-manager";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -72,6 +73,7 @@ function fixture(initialBytes: string): Fixture {
   const attested = armed.value.task;
   const graph = {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

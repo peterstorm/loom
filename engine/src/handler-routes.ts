@@ -26,12 +26,12 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "subagent-start": new Set(["mark-subagent-active"]),
   "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear", "lint-coverage"]),
   "helper": new Set([
-    "complete-wave-gate", "populate-task-graph", "write-verification-manifest", "upgrade-spec-trace", "amend-spec-trace", "amend-spec", "revise-contract", "contract-status", "stop-check-plan", "red-then-green-status", "validate-task-graph", "repair-task-graph",
+    "populate-task-graph", "write-verification-manifest", "upgrade-spec-trace", "amend-spec-trace", "amend-spec", "revise-contract", "contract-status", "stop-check-plan", "red-then-green-status", "validate-task-graph", "repair-task-graph",
     "store-review-findings", "store-spec-check", "mark-tests-passed",
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "complete-orchestration", "lint-wave-gate", "validate-lint-rules",
-    "panel-contract", "review-panel", "model-profiles", "review-packet", "reopen-completed-wave",
-    "model-calibration", "panel-program", "standalone-review", "orchestration", "family-sites",
+    "panel-contract", "model-profiles", "review-packet", "reopen-completed-wave",
+    "model-calibration", "panel-program", "orchestration", "family-sites",
     "security-audit", "accept-plan-design-review", "mutation-check", "owner-check", "lint-coverage", "run-tests", "suggest-affected-runner", "retro-facts", "record-retro",
   ]),
 };
@@ -89,7 +89,6 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "post-tool-use/record-orchestration-spawn",
   "subagent-start/mark-subagent-active",
   "session-start/cleanup-stale-subagents",
-  "helper/complete-wave-gate",
   "helper/populate-task-graph",
   "helper/write-verification-manifest",
   "helper/upgrade-spec-trace",
@@ -108,8 +107,6 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/complete-orchestration",
   "helper/review-packet",
   "helper/reopen-completed-wave",
-  "helper/review-panel",
-  "helper/standalone-review",
   "helper/orchestration",
   // A security-audit run owns a run directory and its coverage ledger; a
   // Pi-launched process must prove it matches the extension runtime before

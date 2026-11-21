@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  abandonWaveGateRegistration,
   admitWaveGateRegistration,
   installWaveGateRegistration,
   retireWaveReviewAuthority,
@@ -17,6 +18,7 @@ import {
   protectedGraphFixture,
   taskFixture,
 } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const base = graphFixture([
   taskFixture({ id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, depends_on: [] }),
@@ -176,6 +178,7 @@ describe("installWaveGateRegistration", () => {
     });
     const abandonedGraphRaw = {
       current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 8,
       phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
       tasks: [
@@ -314,5 +317,37 @@ describe("retireWaveReviewAuthority", () => {
 
   it("refuses to retire a live gate's authority: that is the caller's precondition", () => {
     expect(() => retireWaveReviewAuthority(withActive(active(base, "run.live")), 1)).toThrow("run.live");
+  });
+});
+
+describe("abandonWaveGateRegistration", () => {
+  const live = active(base, "run.live");
+  const abandonment = { runsRoot: "/runs", runId: live.runId, reason: "reviewed bytes changed", supersededBy: null };
+  const withSuite = { ...withActive(live), active_wave_completion_suite: acceptedWaveCompletionSuite(live) };
+
+  it("stamps the live registration terminal and retires its completion suite in the same graph", () => {
+    const { state, value } = abandonWaveGateRegistration(withSuite, abandonment);
+    const stamped = { ...live, terminalOutcome: abandoned(null) };
+    expect(value).toEqual({ kind: "stamped", registration: stamped });
+    expect(state).toEqual({ ...withSuite, active_wave_gate: stamped, active_wave_completion_suite: undefined });
+  });
+
+  it("replays the exact stamp and leaves the graph itself", () => {
+    const stamped = abandonWaveGateRegistration(withSuite, abandonment).state;
+    const replay = abandonWaveGateRegistration(stamped, abandonment);
+    expect(replay.state).toBe(stamped);
+    expect(replay.value).toEqual({ kind: "replayed", registration: stamped.active_wave_gate });
+  });
+
+  it.each<readonly [string, TaskGraph, Partial<typeof abandonment>, string]>([
+    ["no registration", base, {}, "registration-absent"],
+    ["another runs-root", withActive(live), { runsRoot: "/other" }, "authority-mismatch"],
+    ["another run", withActive(live), { runId: active(base, "run.other").runId }, "authority-mismatch"],
+    ["a different abandonment", withActive(active(base, "run.live", abandoned(null))), { reason: "another story" }, "terminal-conflict"],
+    ["another terminal outcome", withActive(active(base, "run.live", done("run.live"))), {}, "terminal-conflict"],
+  ])("targets nothing on %s, leaving the graph itself", (_, graph, overrides, reason) => {
+    const decision = abandonWaveGateRegistration(graph, { ...abandonment, ...overrides });
+    expect(decision.state).toBe(graph);
+    expect(decision.value).toEqual({ kind: "not-targeted", reason });
   });
 });

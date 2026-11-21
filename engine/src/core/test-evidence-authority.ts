@@ -18,7 +18,7 @@
  * Pure.
  */
 
-import { parseErr, parseOk, type ParseResult } from "../machine/types";
+import { parseErr, parseOk, type ParseResult } from "./parse-result";
 import type { TaskGraph } from "../types";
 import { hasExactKeys, isRecord, type UnknownRecord } from "./plain-record";
 import type { AffectedRunner, FrozenVerificationManifest } from "./verification-manifest";

@@ -27,7 +27,7 @@ import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-r
 import { renderReviewerPayloadDiagnostic } from '../../../core/reviewer-protocol';
 import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
-import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
+import { buildStandaloneFindingBrief, defaultRefutationThreshold, REVIEW_LENSES_DEFAULT, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
 import type { PersistentPanelResult, RefutationPanelAuthority } from '../../../core/panel-authority';
 import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
 import {
@@ -85,7 +85,7 @@ export function standaloneRefutationPreparation(
   catalog: PiCatalog,
 ) {
   const brief = buildStandaloneFindingBrief({ subjectId: aggregate.subjectId, findings: standaloneCurrentPanelCriticals(aggregate) });
-  const selected = selectReviewLenses(reviewSignals(brief.findings), 3);
+  const selected = selectReviewLenses(reviewSignals(brief.findings), REVIEW_LENSES_DEFAULT);
   if (!selected.ok) throw new Error(selected.errors.join("; "));
   const lenses = selected.value;
   const { findings } = brief;

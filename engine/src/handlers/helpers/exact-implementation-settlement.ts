@@ -1,4 +1,5 @@
-import type { Task, TaskGraph, TaskTestResult } from "../../types";
+import type { Task, TaskGraph } from "../../types";
+import type { ResolvedTestEvidence } from "../../core/implementation-evidence";
 import {
   describeDistillSnapshotFailure,
   distillSettlementOutcome,
@@ -50,8 +51,14 @@ export type ExactImplementationTransportFacts = Readonly<{
   parserModifiedPaths: readonly string[];
   parserPathLabel: string;
   taskCompleted: boolean;
-  testResult: TaskTestResult;
-  testEvidence: string;
+  /**
+   * The test result this transport observed, with the evidence stored beside
+   * it, or `null` when it observed none: a Pi transcript without a structured
+   * verdict. Absence clears an earlier attempt's untrusted result and fails
+   * the regression proof as `test-result-missing`; it never erases a trusted
+   * verdict an untrusted result could not have replaced either.
+   */
+  test: ResolvedTestEvidence | null;
   proofEvaluationPolicy: ProofEvaluationPolicy;
   /**
    * The attempt epoch's ledger as this transport read it: Claude Code's
@@ -157,12 +164,11 @@ type RedThenGreenJudgment =
  * carries and the Task's first artifact baseline (which names the files it
  * creates, FR-007a), handed ready to the pure judge. Only an `owed` Task
  * consults the ledger; the epoch it judges is the one this attempt's transport observed
- * (I6 is judged per attempt epoch). A `proof-unfrozen` duty never reaches
- * here: settlement refuses it before observing anything.
+ * (I6 is judged per attempt epoch).
  */
 function judgeAttemptRedThenGreen(
   task: Task,
-  duty: Exclude<RedThenGreenDuty, { kind: "proof-unfrozen" }>,
+  duty: RedThenGreenDuty,
   facts: ExactImplementationTransportFacts,
   repositoryRoot: string,
   testEvidence: TaskGraph["test_evidence"],
@@ -177,7 +183,8 @@ function judgeAttemptRedThenGreen(
       if (ledger.kind === "unreadable") {
         return { kind: "unavailable", reason: `${facts.transport} evidence ledger unreadable for ${task.id}: ${ledger.reason}` };
       }
-      const piStructured = facts.testResult.verdict === "untrusted" && facts.testResult.provenance === "pi-structured";
+      const result = facts.test?.result;
+      const piStructured = result?.verdict === "untrusted" && result.provenance === "pi-structured";
       const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline);
       return { kind: "judged", observation: judgeRedThenGreen(ledger.events, classification, repositoryRoot, piStructured, testEvidencePolicyAt(testEvidence, repositoryRoot)) };
     }
@@ -188,23 +195,11 @@ function judgeAttemptRedThenGreen(
   }
 }
 
-/** A settlement the Oracle cannot run at all: state unchanged, no receipt,
- *  the reservation left standing for the operator. */
-function refused(state: TaskGraph, reason: string): ExactImplementationSettlement {
-  return Object.freeze({
-    application: Object.freeze({
-      kind: "error",
-      state,
-      error: Object.freeze({ kind: "invalid-task", errors: Object.freeze<[string]>([reason]) }),
-    }),
-  });
-}
-
 /** One live attempt, proven current and owed a settlement: what every observation below reads. */
 type SettlementContext = Readonly<{
   state: TaskGraph;
   task: Task;
-  duty: Exclude<RedThenGreenDuty, { kind: "proof-unfrozen" }>;
+  duty: RedThenGreenDuty;
   facts: ExactImplementationTransportFacts;
   ports: ExactImplementationSettlementPorts;
 }>;
@@ -253,9 +248,8 @@ function observeAttemptBytes(context: SettlementContext): Observed<TaskLocalByte
   } catch (error) {
     return withheldBecause(context, "task-local observation", error);
   }
-  const suiteOutcome = bytes.suite.checks[0]?.outcome;
-  return suiteOutcome?.kind === "observation-unavailable"
-    ? withheld(unavailable(state, facts, suiteOutcome.reason, bytes))
+  return bytes.byteScope.kind === "observation-unavailable"
+    ? withheld(unavailable(state, facts, bytes.byteScope.reason, bytes))
     : observed(bytes);
 }
 
@@ -328,8 +322,7 @@ function observeAndSettle(context: SettlementContext, restoredAfter?: NonEmpty<s
         facts.observedAt,
         {
           taskCompleted: facts.taskCompleted,
-          testResult: facts.testResult,
-          testEvidence: facts.testEvidence,
+          ...(facts.test === null ? {} : { testResult: facts.test.result, testEvidence: facts.test.evidence }),
           ...evidence.value,
           ...(restoredAfter === undefined || scopeChanged.length > 0 ? {} : { restoredAfter }),
         },
@@ -436,11 +429,8 @@ export function settleExactImplementation(
   if (task?.active_implementation_attempt?.authorityDigest !== facts.authority.authorityDigest) {
     return unavailable(state, facts, `late ${facts.transport} result delivery`);
   }
-  // One answer to "does this Task owe I6" (the frozen Proof, INV-6). A Task
-  // with no frozen Proof that its era obligates is refused by name here,
-  // never settled as if it owed nothing.
+  // One answer to "does this Task owe I6" (the frozen Proof, INV-6).
   const duty = redThenGreenDuty(task, state.verification_manifest);
-  if (duty.kind === "proof-unfrozen") return refused(state, duty.reason);
   const context: SettlementContext = { state, task, duty, facts, ports };
   return isDistillTask(task) ? settleDistillAttempt(context, distillSnapshots) : observeAndSettle(context).settlement;
 }

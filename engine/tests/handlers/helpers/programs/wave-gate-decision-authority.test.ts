@@ -48,11 +48,13 @@ import type { WaveReviewRegistrationAuthority } from "../../../../src/core/wave-
 import { buildContextPacket, encodeByteSection } from "../../../../src/orchestration/context-packets";
 import { openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
-import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
+import { parseActiveWaveGateRegistration, parseTaskGraph, registerActiveWaveGate, StateManager } from "../../../../src/state-manager";
+import { value } from "../../../fixtures/parse-result";
 import { capturedSpecCheck } from "../../../../src/core/spec-check";
 import type { TaskGraph } from "../../../../src/types";
 import { findingId } from "../../../fixtures/finding-id";
-import { trustedPassEvidence } from "../../../fixtures/task-lifecycle";
+import { satisfiedProof, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../../../src/core/verification-manifest";
 
 const RUN_ID = "run.wave-decision";
 const DIGEST = "a".repeat(64);
@@ -67,6 +69,7 @@ const task = (id: string, claim: string): TaskGraph["tasks"][number] => ({
   agent: "code-implementer-agent",
   wave: 1,
   status: "completed",
+  proof: satisfiedProof([]),
   depends_on: [],
   findings: [{
     id: `${id}-1`,
@@ -84,6 +87,7 @@ const TASKS = [task("T1", "prefer a named predicate"), task("T2", "tighten the e
 
 const graph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
   current_phase: "execute",
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,
@@ -183,7 +187,7 @@ describe("Wave Gate start effect ordering", () => {
     writeFileSync(statePath, JSON.stringify({ ...initial, tasks: TASKS }));
     const before = readFileSync(statePath);
     try {
-      await expect(new StateManager(statePath).registerActiveWaveGate(active, { taskIds: taskIds }))
+      await expect(registerActiveWaveGate(new StateManager(statePath), value(parseActiveWaveGateRegistration(active)), { taskIds: taskIds }))
         .rejects.toThrow("changed after Run Directory publication");
       expect(readFileSync(statePath)).toEqual(before);
       expect(new StateManager(statePath).load().active_wave_gate).toBeUndefined();
@@ -631,6 +635,7 @@ describe("Wave review epoch installation", () => {
       };
       const beforeActive: TaskGraph = {
         current_phase: "execute",
+        verification_manifest: preI6DefaultVerificationManifest(),
         current_wave: 1,
         phase_artifacts: {},
         skipped_phases: [],

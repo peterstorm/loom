@@ -24,9 +24,8 @@
  * a verdict submission runs before its authoritative parse comes from
  * `panel-verdict-source`.
  *
- * Architecture panels do not run here: the registered architecture panel is
- * driven by `handlers/helpers/programs/legacy-panel.ts` over its Run Directory
- * journal (ADR-0029, ADR-0030).
+ * Architecture panels do not run here: `/loom --panel` replays the stateless
+ * dispatch program in `panel-program.ts` (ADR-0030, ADR-0096).
  *
  * Durable bytes are unchanged by the shared kernel: every state, event and
  * checkpoint is built with the key order its persisted form has
@@ -48,7 +47,6 @@ import {
   createPanelProofs,
   jsonEqual,
   panelProgramCheckpoint,
-  parsePanelProgramCheckpoint,
   parsePanelProgramCheckpointRecord,
   reduceParsedPanelEvent,
   reducePanelProgram,
@@ -972,10 +970,6 @@ export function refutationPanelCheckpoint(
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<RefutationPanelCheckpoint> {
   return panelProgramCheckpoint(REFUTATION_PROGRAM, state, events, resolver);
-}
-
-export function parseRefutationPanelCheckpoint(raw: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
-  return parsePanelProgramCheckpoint(REFUTATION_PROGRAM, raw, resolver);
 }
 
 /** A refutation checkpoint as its parse accepted it: the step and the record. */

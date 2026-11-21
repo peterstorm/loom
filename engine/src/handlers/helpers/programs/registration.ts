@@ -207,7 +207,7 @@ export function parseRemediationStartInput(raw: unknown): ProgramParse<Remediati
  * How a stored program registration parses against the facade programs.
  *
  * "unclaimed" — the record does not name a facade program at all (its `kind`
- * is absent or foreign), so a caller may hand it to the panel parser.
+ * is absent or foreign); no registered program reads it.
  * "invalid" — the record CLAIMS a facade kind but fails that variant's
  * validation; the message is the exact defect. Collapsing this case to null
  * used to launder "wave.wave must be a positive integer" into "registered

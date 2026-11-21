@@ -12,7 +12,7 @@ import {
   projectRequirementCoverage,
   recordedAnchorHashes,
   renderRequirementCoverage,
-  settledCriticalCount,
+  settledCriticalFindings,
   settledFloorOf,
   specIndexDigest,
   specIndexPath,
@@ -222,7 +222,7 @@ describe("settled floor", () => {
 
   it("counts every CRITICAL row plus every unclaimed Requirement and Scenario", () => {
     // 2 CRITICAL rows + FR-001/FR-002 unclaimed + AS-001/AS-002 unclaimed.
-    expect(settledCriticalCount(settled())).toBe(6);
+    expect(settledCriticalFindings(settled()).length).toBe(6);
   });
 
   it("keeps an altered Requirement hash as a required CRITICAL identity", () => {
@@ -259,7 +259,7 @@ describe("settled floor", () => {
       { kind: "unavailable", reason: unparsedReason() },
       [task()],
     );
-    expect(settledCriticalCount(unavailable)).toBe(0);
+    expect(settledCriticalFindings(unavailable).length).toBe(0);
     expect(settledFloorOf(unavailable).kind).toBe("unprojected");
     expect(reconcileSpecCheck(report(0), 1, RUN_AT, settledFloorOf(unavailable)))
       .toMatchObject({ kind: "evidence-failed", specCheck: { cause: "projection-unavailable" } });
@@ -379,7 +379,7 @@ describe("decision-record Waves", () => {
       task({ id: "T15", completionAnchors: [], decisionRecord: true, declaredFiles: ["docs/adr/0012.md"] }),
     ]);
     expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("decision-records");
-    expect(settledCriticalCount(coverage)).toBe(0);
+    expect(settledCriticalFindings(coverage).length).toBe(0);
     const rendered = renderRequirementCoverage(coverage);
     expect(rendered).toContain("record Architecture Decisions for work that already shipped");
     expect(rendered).not.toContain("| engine | CRITICAL |");
@@ -393,14 +393,14 @@ describe("decision-record Waves", () => {
       task({ id: "T15", completionAnchors: [], decisionRecord: false }),
     ]);
     expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("nowhere");
-    expect(settledCriticalCount(coverage)).toBe(1);
+    expect(settledCriticalFindings(coverage).length).toBe(1);
     expect(renderRequirementCoverage(coverage)).toContain("no work in this Wave traces to a Requirement");
   });
 
   it("still floors a current Wave with no Tasks at all", () => {
     const coverage = projectRequirementCoverage(indexed, [earlier]);
     expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("nowhere");
-    expect(settledCriticalCount(coverage)).toBe(1);
+    expect(settledCriticalFindings(coverage).length).toBe(1);
   });
 
   it("keeps a decision record's own Completion Claims as ordinary rows", () => {
@@ -432,7 +432,7 @@ describe("Requirements completed in earlier Waves", () => {
       change: { kind: "rewritten", entry: index.frs[1], recorded: STALE },
     }]);
     // Advisory: it never reaches the settled floor the current Wave must meet.
-    expect(settledCriticalCount(coverage)).toBe(0);
+    expect(settledCriticalFindings(coverage).length).toBe(0);
     const rendered = renderRequirementCoverage(coverage);
     expect(rendered).toContain("### Requirements completed in earlier Waves whose text changed since they passed");
     expect(rendered).toContain(`- W1 completed FR-002 — MEDIUM: its text changed since that Wave passed (verified ${STALE.slice(0, 12)}, now ${index.frs[1].contentHash.slice(0, 12)})`);
@@ -458,7 +458,7 @@ describe("Requirements completed in earlier Waves", () => {
       change: { kind: "unreadable-record", stored: "dead|beef\n- forged" },
     }]);
     // Advisory like every earlier-Wave fact: the current Wave cannot remedy it.
-    expect(settledCriticalCount(coverage)).toBe(0);
+    expect(settledCriticalFindings(coverage).length).toBe(0);
     const rendered = renderRequirementCoverage(coverage);
     expect(rendered).toContain("- W1 completed FR-002 — MEDIUM: its recorded hash is not a value this engine could have written");
     expect(rendered).toContain("have been altered");
@@ -626,7 +626,7 @@ describe("round-2 regressions", () => {
       task({ id: "W1", inCurrentWave: false, completionAnchors: ["FR-001", "FR-002", "AS-001", "AS-002"] }),
       task({ id: "W2", inCurrentWave: true, completionAnchors: [] }),
     ]);
-    expect(settledCriticalCount(coverage)).toBe(1);
+    expect(settledCriticalFindings(coverage).length).toBe(1);
     const rendered = renderRequirementCoverage(coverage);
     expect(rendered).toContain("| engine | CRITICAL |");
     expect(rendered).toContain("Settled CRITICAL findings: 1.");
@@ -641,7 +641,7 @@ describe("round-2 regressions", () => {
       task({ id: "W2", inCurrentWave: true, completionAnchors: [], contributions: ["FR-001"] }),
     ]);
     expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("contributions");
-    expect(settledCriticalCount(coverage)).toBe(0);
+    expect(settledCriticalFindings(coverage).length).toBe(0);
     const rendered = renderRequirementCoverage(coverage);
     expect(rendered).toContain("legitimate foundation Wave");
     expect(rendered).not.toContain("| engine | CRITICAL |");
@@ -657,7 +657,7 @@ describe("round-2 regressions", () => {
         task({ id: "W2", inCurrentWave: true, completionAnchors: [], contributions: [contribution] }),
       ]);
       expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("nowhere");
-      expect(settledCriticalCount(coverage)).toBe(1);
+      expect(settledCriticalFindings(coverage).length).toBe(1);
       expect(renderRequirementCoverage(coverage)).toContain("no work in this Wave traces to a Requirement");
     },
   );

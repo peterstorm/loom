@@ -101,9 +101,6 @@ export function parseSandboxLimits(raw: unknown): DomainResult<SandboxLimits, Sa
   return success(Object.freeze(limits as SandboxLimits));
 }
 
-/** The one machine-readable line the script prints last. */
-export const SANDBOX_RECEIPT_PREFIX = "LOOM-SANDBOX-RECEIPT ";
-
 /** The receipt prefix a caller-bound run uses: the caller's nonce is in the
  *  marker and never in the child's environment, so a command that prints a
  *  receipt line of its own cannot match it. */

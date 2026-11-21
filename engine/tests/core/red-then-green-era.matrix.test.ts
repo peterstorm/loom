@@ -31,7 +31,7 @@ import { ENGINE_DEFAULT_TEST_FILES } from "../../src/core/test-file-classificati
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   type FrozenVerificationManifest,
   type I6EraVerificationManifest,
 } from "../../src/core/verification-manifest";
@@ -188,7 +188,7 @@ describe("INV-6: freezes that declare no affectedRunner", () => {
 
 describe("INV-6: a TaskGraph frozen before the classification is the pre-I6 era", () => {
   it.each([
-    ["the pre-feature engine-default freeze", legacyDefaultVerificationManifest()],
+    ["the pre-feature engine-default freeze", preI6DefaultVerificationManifest()],
     ["no frozen manifest at all", undefined],
   ] as const)("FR-005: %s reads not-owed and carries no classification", (_label, manifest) => {
     expect(frozenRedThenGreenEra(manifest)).toEqual({ kind: "not-owed" });

@@ -115,13 +115,13 @@ shapes:
   selected architecture.
 - **Provenance.** Panel manifest:
   `.claude/specs/2026-09-16-grammar-constrained-decoding/panel-runs/run.zOVEfIJzSl/manifest.json`.
-  Recorded ranking (`ranking.json`): type-driven-fp 23 (8/9/6),
+  Recorded ranking (ranking.json): type-driven-fp 23 (8/9/6),
   risk-security-first 22 (7/7/8), simplicity-first 20 (5/8/7). These are
   historical panel scores of the uncorrected candidates, not feasibility evidence
   for the revised design. Feasibility evidence lives in
   `.claude/specs/2026-09-16-grammar-constrained-decoding/feasibility.md` and the
   `probes/` and `calibration/grammar-constrained-decoding/` artifacts. The
-  `candidates/`, `verdicts/`, `interview.*`, `ranking.json` and `manifest.json`
+  `candidates/`, `verdicts/`, `interview.*`, ranking.json and `manifest.json`
   files of the run are immutable and are not edited by this feature.
 - **Rejected shapes stay rejected:** no second provider serializer, no
   hand-authored schema mirror, no new generic orchestration/retry subsystem.

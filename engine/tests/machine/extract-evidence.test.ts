@@ -335,11 +335,13 @@ describe("exit-status ownership — the line's exit is attributed only when prov
 });
 
 describe("extractShellWriteTargets — Bash-authored writes are visible to the veto", () => {
-  it("collects >, >>, &> and fd-redirect targets, unquoted", () => {
+  it("collects >, >>, >|, &> and fd-redirect targets, unquoted", () => {
     expect(extractShellWriteTargets("cat > /tmp/r.json")).toEqual(["/tmp/r.json"]);
     expect(extractShellWriteTargets("echo x >> log.txt")).toEqual(["log.txt"]);
     expect(extractShellWriteTargets("cmd &> all.log")).toEqual(["all.log"]);
     expect(extractShellWriteTargets("cmd 2> err.log")).toEqual(["err.log"]);
+    expect(extractShellWriteTargets("echo x >| out.txt")).toEqual(["out.txt"]);
+    expect(extractShellWriteTargets("cmd 2>| err.log")).toEqual(["err.log"]);
     expect(extractShellWriteTargets('cat > "/tmp/my report.json"')).toEqual(["/tmp/my report.json"]);
   });
 

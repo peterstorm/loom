@@ -30,8 +30,3 @@ export function extractTaskId(prompt: string): TaskId | null {
   }
   return null;
 }
-
-export function isCanonicalFormat(prompt: string): boolean {
-  const match = prompt.match(/\*\*Task ID:\*\* ?(T\d+)/);
-  return match !== null && parseTaskId(match[1], "canonicalTaskId").ok;
-}

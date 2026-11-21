@@ -267,8 +267,9 @@ export function claudeToolCall(payload: ClaudeToolPayload): HarnessToolCall {
 
 // ─── Pi ───────────────────────────────────────────────────────────────────
 
-/** Pi's lowercase tool names, mapped onto the harness vocabulary. Every
- *  other Pi tool (`grep`, `find`, `ls`, `subagent`, custom tools) is `Other`. */
+/** Pi's lowercase tool names, mapped onto the harness vocabulary: the one Pi
+ *  tool table. Every other Pi tool (`grep`, `find`, `ls`, `subagent`, custom
+ *  tools) is `Other`. */
 const PI_TOOLS: Readonly<Record<string, HarnessToolCall["tool"]>> = Object.freeze({
   read: "Read",
   write: "Write",
@@ -276,6 +277,84 @@ const PI_TOOLS: Readonly<Record<string, HarnessToolCall["tool"]>> = Object.freez
   multi_edit: "MultiEdit",
   bash: "Bash",
 });
+
+/**
+ * A tool name read back from a Pi transcript, as the tool it spells in
+ * `PI_TOOLS`: case-folded, with `multiedit` (Claude's `MultiEdit`, folded)
+ * read as `multi_edit`. A live `tool_result` event carries the registered
+ * name exactly (`piToolCall`); a transcript is read after the fact for what
+ * the child may have written, so a spelling a live event would not carry
+ * still reads as the tool it names rather than as `Other`.
+ */
+export function piTranscriptTool(name: string): HarnessToolCall["tool"] {
+  const folded = name.toLowerCase();
+  return toolOf(PI_TOOLS, folded === "multiedit" ? "multi_edit" : folded);
+}
+
+/**
+ * The tool-input keys that may name a Pi write target, in probe order. One
+ * ordered vocabulary for the extension's write guard (`piWriteTargetPaths`)
+ * and the transcript's write targets (`pi/transcript-adapter.ts`), so the
+ * paths a guard verified and the paths a settlement attributes cannot drift.
+ */
+export const WRITE_TARGET_KEYS: readonly string[] = Object.freeze(["path", "file_path", "filePath"]);
+
+/**
+ * The first NON-NULLISH value among `WRITE_TARGET_KEYS` as a non-empty string,
+ * or `null` when no key proves one. The `??=`-assignment defers only nullish
+ * values (`undefined`/`null`) to a later key; the first non-nullish value WINS
+ * the probe, and a winner that is not a non-empty string fails the string test
+ * — it does not defer to a later key either.
+ */
+export function writeTargetPathOf(args: unknown): string | null {
+  if (!isRecord(args)) return null;
+  let value: unknown;
+  for (const key of WRITE_TARGET_KEYS) value ??= args[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+export type PiWriteTargetPathsResult =
+  | Readonly<{ ok: true; value: readonly [string, ...string[]] }>
+  | Readonly<{ ok: false; error: string }>;
+
+const writeTarget = (input: Readonly<Record<string, unknown>>, path: string): PiWriteTargetPathsResult => {
+  const target = writeTargetPathOf(input);
+  return target !== null
+    ? Object.freeze({ ok: true, value: Object.freeze([target]) as readonly [string] })
+    : Object.freeze({ ok: false, error: `${path} must name one non-empty path, file_path, or filePath target` });
+};
+
+const editTarget = (edit: unknown, index: number): PiWriteTargetPathsResult =>
+  isRecord(edit)
+    ? writeTarget(edit, `write input.edits[${index}]`)
+    : Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
+
+/**
+ * Every target one Pi write-tool input names: its own target, or else each of
+ * its `edits[]` targets (deduplicated, in order). All or nothing: one target
+ * that cannot be proven fails the whole input, so no partial batch exists.
+ */
+export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
+  if (!isRecord(raw)) {
+    return Object.freeze({ ok: false, error: "write input must be a plain object" });
+  }
+  if (WRITE_TARGET_KEYS.some((key) => key in raw)) return writeTarget(raw, "write input");
+  if (!Array.isArray(raw.edits) || raw.edits.length === 0) {
+    return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
+  }
+  // Head first: the first edit's target makes the list non-empty by type.
+  const [firstEdit, ...restEdits] = raw.edits as readonly unknown[];
+  const first = editTarget(firstEdit, 0);
+  if (!first.ok) return first;
+  const paths: [string, ...string[]] = [first.value[0]];
+  for (const [offset, edit] of restEdits.entries()) {
+    const parsed = editTarget(edit, offset + 1);
+    if (!parsed.ok) return parsed;
+    const target = parsed.value[0];
+    if (!paths.includes(target)) paths.push(target);
+  }
+  return Object.freeze({ ok: true, value: Object.freeze(paths) });
+}
 
 /** The `tool_result` event fields the adapter reads, all untrusted. */
 export type PiToolResultEvent = Readonly<{
@@ -317,13 +396,25 @@ function piBashOutcome(event: PiToolResultEvent): BashToolOutcome {
   return { kind: "exited", exit: failed ? 1 : 0, stdout };
 }
 
-/** Normalize a Pi child's `tool_result` event. Pi events carry no cwd: the
- *  shell passes the session's. */
-export function piToolCall(event: PiToolResultEvent, cwd: string): HarnessToolCall {
+/** One Pi tool call as `tool`, its outcome read from the result alone. */
+function piCallAs(tool: HarnessToolCall["tool"], event: PiToolResultEvent, cwd: string): HarnessToolCall {
   return normalized(
-    toolOf(PI_TOOLS, event.toolName),
+    tool,
     { input: recordOrEmpty(event.input), callId: parseToolCallId(event.toolCallId), cwd },
     () => (event.isError === true ? { kind: "failed" } : { kind: "succeeded" }),
     () => piBashOutcome(event),
   );
+}
+
+/** Normalize a Pi child's `tool_result` event. Pi events carry no cwd: the
+ *  shell passes the session's. */
+export function piToolCall(event: PiToolResultEvent, cwd: string): HarnessToolCall {
+  return piCallAs(toolOf(PI_TOOLS, event.toolName), event, cwd);
+}
+
+/** Normalize one tool call a Pi transcript recorded, paired with its result:
+ *  `piToolCall`'s outcome rules over the transcript's name reading
+ *  (`piTranscriptTool`). */
+export function piTranscriptToolCall(event: PiToolResultEvent, cwd: string): HarnessToolCall {
+  return piCallAs(piTranscriptTool(event.toolName), event, cwd);
 }
