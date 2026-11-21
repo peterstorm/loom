@@ -535,7 +535,6 @@ function settled(state: TaskGraph, attempt: ImplementationAttemptAuthority, befo
   const t1 = byId(state, "T1");
   const written = FILES.filter((file) => before[file] !== after[file]);
   return settle(state, attempt, buildTaskLocalByteObservation({
-    authority: attempt,
     attemptBaseline: snapshot(before),
     currentAttemptScope: snapshot(after),
     proofBaseline: t1.artifact_baseline,
@@ -684,7 +683,7 @@ describe("a tests-only attempt settled against a repository", () => {
     };
     writeFileSync(join(root, TEST), "it('totals', () => {});\nit('kills the boundary mutant', () => {});\n");
     const bytes = observe(root, uncaptured, attempt, [TEST]);
-    expect(bytes.suite.checks[0]?.outcome).toMatchObject({
+    expect(bytes.byteScope).toMatchObject({
       kind: "observation-unavailable",
       reason: expect.stringContaining("without capturing its reopen baseline"),
     });

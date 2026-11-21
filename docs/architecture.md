@@ -247,7 +247,7 @@ It is orchestration authority: an Agent that could edit it could forge phase com
 | `spec_file`, `plan_file` | `null` (`spec_file` is set at once with `--skip-specify`) | Recorded when the phase artifact appears |
 | `tasks`, `wave_gates` | `[]`, `{}` | Installed by `populate-task-graph` with `github_issue`, `current_wave` and `executing_tasks` |
 
-Task status moves `pending` → `implemented` (the exact attempt satisfies proof and the Task-local suite) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).
+Task status moves `pending` → `implemented` (the exact attempt satisfies proof within its byte scope) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).
 
 ### Immutable Run Directories
 

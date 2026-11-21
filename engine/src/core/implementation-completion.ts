@@ -10,9 +10,7 @@
 
 import { match, P } from "ts-pattern";
 import {
-  parseCompletionCheckId,
   parseWaveNumber,
-  type CompletionCheckId,
   type WaveNumber,
 } from "./completion-suite";
 import {
@@ -62,7 +60,6 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_REASON_LENGTH = 4_096;
 export const MAX_IMPLEMENTATION_FAILURE_KINDS = 64;
-export const TASK_BYTE_SCOPE_CHECK_ID_TEXT = "loom:task-byte-scope" as const;
 
 // Brands prevent adjacent authority fields with identical runtime primitives
 // from being transposed after parsing.
@@ -72,7 +69,6 @@ declare const GIT_SHA: unique symbol;
 declare const ISO_INSTANT: unique symbol;
 declare const BASELINE_DIGEST: unique symbol;
 declare const AUTHORITY_DIGEST: unique symbol;
-declare const TASK_SUITE_DIGEST: unique symbol;
 declare const SETTLEMENT_RECEIPT_ID: unique symbol;
 
 export type Wave = WaveNumber;
@@ -82,7 +78,6 @@ export type GitSha = string & { readonly [GIT_SHA]: true };
 export type IsoInstant = string & { readonly [ISO_INSTANT]: true };
 export type ArtifactBaselineDigest = string & { readonly [BASELINE_DIGEST]: true };
 export type ImplementationAuthorityDigest = string & { readonly [AUTHORITY_DIGEST]: true };
-export type TaskCompletionSuiteDigest = string & { readonly [TASK_SUITE_DIGEST]: true };
 export type ImplementationSettlementReceiptId = string & { readonly [SETTLEMENT_RECEIPT_ID]: true };
 
 export type ImplementationCompletionParseError = CanonicalTaskIdParseError;
@@ -196,10 +191,6 @@ export function parseImplementationAuthorityDigest(
   path = "authorityDigest",
 ): Parsed<ImplementationAuthorityDigest> {
   return total(() => parseSha256<ImplementationAuthorityDigest>(raw, path));
-}
-
-function parseTaskSuiteDigest(raw: unknown, path: string): Parsed<TaskCompletionSuiteDigest> {
-  return parseSha256<TaskCompletionSuiteDigest>(raw, path);
 }
 
 export function parseImplementationSettlementReceiptId(
@@ -388,431 +379,34 @@ export function parseImplementationAttemptAuthority(raw: unknown): Parsed<Implem
   });
 }
 
-export type TaskByteScopeCheckId = CompletionCheckId & typeof TASK_BYTE_SCOPE_CHECK_ID_TEXT;
-
-export type AuthorizedTaskCompletionCheck = Readonly<{
-  kind: "engine-task-byte-scope";
-  checkId: TaskByteScopeCheckId;
-  scope: "task";
-}>;
-
-export type TaskCompletionSuiteAuthority = Readonly<{
-  schemaVersion: 1;
-  kind: "task-completion-suite-authority";
-  implementationAuthorityDigest: ImplementationAuthorityDigest;
-  checks: readonly [AuthorizedTaskCompletionCheck];
-  suiteDigest: TaskCompletionSuiteDigest;
-}>;
-
-function taskByteScopeCheck(): AuthorizedTaskCompletionCheck {
-  // Parser proof site: this engine-owned literal is pinned to the shared check-id grammar.
-  const checkId = TASK_BYTE_SCOPE_CHECK_ID_TEXT as TaskByteScopeCheckId;
-  return freeze({ kind: "engine-task-byte-scope", checkId, scope: "task" });
-}
-
-function taskSuiteDigest(checks: readonly AuthorizedTaskCompletionCheck[]): TaskCompletionSuiteDigest {
-  // Parser proof site: sha256Hex is guaranteed to emit this exact grammar.
-  return sha256Hex(canonicalJson({ kind: "task-completion-suite-roster", checks })) as TaskCompletionSuiteDigest;
-}
-
-function parseAuthorizedTaskCheck(raw: unknown, path: string): Parsed<AuthorizedTaskCompletionCheck> {
-  const record = exactRecord(raw, ["kind", "checkId", "scope"], path);
-  if (!record.ok) return record;
-  const checkId = parseCompletionCheckId(record.value.checkId, `${path}.checkId`);
-  const errors = checkId.ok ? [] : [...checkId.error.errors];
-  if (record.value.kind !== "engine-task-byte-scope") errors.push(`${path}.kind must equal engine-task-byte-scope`);
-  if (record.value.checkId !== TASK_BYTE_SCOPE_CHECK_ID_TEXT) {
-    errors.push(`${path}.checkId must equal ${TASK_BYTE_SCOPE_CHECK_ID_TEXT}`);
-  }
-  if (record.value.scope !== "task") errors.push(`${path}.scope must equal task`);
-  return errors.length === 0 && checkId.ok
-    ? success(freeze({
-        kind: "engine-task-byte-scope",
-        checkId: checkId.value as TaskByteScopeCheckId,
-        scope: "task",
-      }))
-    : failure(errors);
-}
-
-function parseTaskRoster(raw: unknown, path: string): Parsed<readonly [AuthorizedTaskCompletionCheck]> {
-  const array = parseDenseArray(raw, path);
-  if (!array.ok) return array;
-  if (array.value.length === 0) return failure([`${path} must be non-empty`]);
-  const checks = collect(array.value, path, parseAuthorizedTaskCheck);
-  if (!checks.ok) return checks;
-  const counts = new Map<string, number>();
-  checks.value.forEach((check) => counts.set(check.checkId, (counts.get(check.checkId) ?? 0) + 1));
-  if (counts.get(TASK_BYTE_SCOPE_CHECK_ID_TEXT) !== 1 || counts.size !== 1) {
-    return failure([`${path} must contain exactly one engine-owned ${TASK_BYTE_SCOPE_CHECK_ID_TEXT} check`]);
-  }
-  return success(Object.freeze([checks.value[0]]));
-}
-
-/** Initial Task-local suite: one non-empty engine-owned byte-scope roster. */
-export function createTaskCompletionSuiteAuthority(
-  rawAuthority: unknown,
-): Parsed<TaskCompletionSuiteAuthority> {
-  return total(() => {
-    const authority = parseImplementationAttemptAuthority(rawAuthority);
-    if (!authority.ok) return authority;
-    const check = taskByteScopeCheck();
-    const checks: readonly [AuthorizedTaskCompletionCheck] = Object.freeze([check]);
-    return success(freeze({
-      schemaVersion: 1,
-      kind: "task-completion-suite-authority",
-      implementationAuthorityDigest: authority.value.authorityDigest,
-      checks,
-      suiteDigest: taskSuiteDigest(checks),
-    }));
-  });
-}
-
-export function parseTaskCompletionSuiteAuthority(raw: unknown): Parsed<TaskCompletionSuiteAuthority> {
-  return total(() => {
-    const record = exactRecord(raw, [
-      "schemaVersion", "kind", "implementationAuthorityDigest", "checks", "suiteDigest",
-    ], "taskSuiteAuthority");
-    if (!record.ok) return record;
-    const authorityDigestValue = parseImplementationAuthorityDigest(
-      record.value.implementationAuthorityDigest,
-      "taskSuiteAuthority.implementationAuthorityDigest",
-    );
-    const checks = parseTaskRoster(record.value.checks, "taskSuiteAuthority.checks");
-    const suiteDigestValue = parseTaskSuiteDigest(record.value.suiteDigest, "taskSuiteAuthority.suiteDigest");
-    const errors = [authorityDigestValue, checks, suiteDigestValue]
-      .flatMap((result) => result.ok ? [] : result.error.errors);
-    if (record.value.schemaVersion !== 1 || record.value.kind !== "task-completion-suite-authority") {
-      errors.push("taskSuiteAuthority must have schemaVersion 1 and kind task-completion-suite-authority");
-    }
-    if (errors.length > 0 || !authorityDigestValue.ok || !checks.ok || !suiteDigestValue.ok) return failure(errors);
-    const expected = taskSuiteDigest(checks.value);
-    return expected === suiteDigestValue.value
-      ? success(freeze({
-          schemaVersion: 1,
-          kind: "task-completion-suite-authority",
-          implementationAuthorityDigest: authorityDigestValue.value,
-          checks: checks.value,
-          suiteDigest: expected,
-        }))
-      : failure(["taskSuiteAuthority.suiteDigest does not match its canonical roster"]);
-  });
-}
-
+/**
+ * What the engine observed of one attempt's bytes against the Task's allowed
+ * scope (the current `attempt_artifact_baseline`, declared plus previously
+ * attributed): every changed path inside it, the paths written outside it, or
+ * no trustworthy observation at all. The shell mints it in process from the
+ * attempt's byte observation and the oracle settles it as given; it is never
+ * persisted.
+ */
 export type TaskByteScopeOutcome =
-  | Readonly<{ kind: "accepted"; changedPaths: readonly ReviewPath[] }>
+  | Readonly<{ kind: "accepted" }>
   | Readonly<{ kind: "out-of-scope-writes"; paths: readonly [ReviewPath, ...ReviewPath[]] }>
   | Readonly<{ kind: "observation-unavailable"; reason: string }>;
 
-type UncheckedTaskCompletionCheckResult = Readonly<{
-  checkId: CompletionCheckId;
-  scope: "task" | "wave";
-  outcome: TaskByteScopeOutcome;
-}>;
-
-type UncheckedTaskCompletionSuiteResult = Readonly<{
-  schemaVersion: 1;
-  kind: "task-completion-suite-result";
-  implementationAuthorityDigest: ImplementationAuthorityDigest;
-  suiteDigest: TaskCompletionSuiteDigest;
-  checks: readonly UncheckedTaskCompletionCheckResult[];
-}>;
-
-/** The only check a parsed Task-local suite can carry. */
-export type TaskCompletionCheckResult = Readonly<{
-  checkId: TaskByteScopeCheckId;
-  scope: "task";
-  outcome: TaskByteScopeOutcome;
-}>;
-
-/** Parser-proven exact Task-local suite; malformed rosters never inhabit it. */
-export type TaskCompletionSuiteResult = Readonly<{
-  schemaVersion: 1;
-  kind: "task-completion-suite-result";
-  implementationAuthorityDigest: ImplementationAuthorityDigest;
-  suiteDigest: TaskCompletionSuiteDigest;
-  checks: readonly [TaskCompletionCheckResult];
-}>;
-
-function parseCanonicalPaths(raw: unknown, path: string): Parsed<readonly ReviewPath[]> {
-  const array = parseDenseArray(raw, path);
-  if (!array.ok) return array;
-  const paths = collect<ReviewPath>(array.value, path, (value, valuePath) => {
-    const parsed = parseReviewPath(value, valuePath);
-    return parsed.ok ? success(parsed.value) : failure(parsed.errors);
-  });
-  if (!paths.ok) return paths;
-  const sorted = [...paths.value].sort(compareStrings);
-  if (new Set(sorted).size !== sorted.length) return failure([`${path} must contain unique paths`]);
-  return success(freezeArray(sorted));
-}
-
-function parseNonEmptyCanonicalPaths(
-  raw: unknown,
-  path: string,
-): Parsed<readonly [ReviewPath, ...ReviewPath[]]> {
-  const paths = parseCanonicalPaths(raw, path);
-  if (!paths.ok) return paths;
-  const [head, ...tail] = paths.value;
-  return head === undefined
-    ? failure([`${path} must be non-empty`])
-    : success(Object.freeze([head, ...tail]));
-}
-
-function parseTaskCheckOutcome(raw: unknown, path: string): Parsed<TaskByteScopeOutcome> {
-  if (!isPlainRecord(raw)) return failure([`${path} must be a plain object`]);
-  if (raw.kind === "accepted") {
-    const record = exactRecord(raw, ["kind", "changedPaths"], path);
-    if (!record.ok) return record;
-    const paths = parseCanonicalPaths(record.value.changedPaths, `${path}.changedPaths`);
-    return paths.ok ? success(freeze({ kind: "accepted", changedPaths: paths.value })) : paths;
-  }
-  if (raw.kind === "out-of-scope-writes") {
-    const record = exactRecord(raw, ["kind", "paths"], path);
-    if (!record.ok) return record;
-    const paths = parseNonEmptyCanonicalPaths(record.value.paths, `${path}.paths`);
-    return paths.ok
-      ? success(freeze({ kind: "out-of-scope-writes", paths: paths.value }))
-      : paths;
-  }
-  if (raw.kind === "observation-unavailable") {
-    const record = exactRecord(raw, ["kind", "reason"], path);
-    if (!record.ok) return record;
-    const reason = parseBoundedReason(record.value.reason, `${path}.reason`);
-    return reason.ok ? success(freeze({ kind: "observation-unavailable", reason: reason.value })) : reason;
-  }
-  return failure([`${path}.kind must be accepted, out-of-scope-writes, or observation-unavailable`]);
-}
-
-function parseTaskCheckResult(raw: unknown, path: string): Parsed<UncheckedTaskCompletionCheckResult> {
-  const record = exactRecord(raw, ["checkId", "scope", "outcome"], path);
-  if (!record.ok) return record;
-  const checkId = parseCompletionCheckId(record.value.checkId, `${path}.checkId`);
-  const outcome = parseTaskCheckOutcome(record.value.outcome, `${path}.outcome`);
-  const errors = [checkId, outcome].flatMap((result) => result.ok ? [] : result.error.errors);
-  if (record.value.scope !== "task" && record.value.scope !== "wave") {
-    errors.push(`${path}.scope must be task or wave`);
-  }
-  return errors.length === 0 && checkId.ok && outcome.ok
-    ? success(freeze({
-        checkId: checkId.value,
-        scope: record.value.scope as "task" | "wave",
-        outcome: outcome.value,
-      }))
-    : failure(errors);
-}
-
-/** Mint one exact Task-suite result from engine-owned authority and outcome. */
-export function createTaskCompletionSuiteResult(
-  rawAuthority: unknown,
-  rawOutcome: unknown,
-): Parsed<TaskCompletionSuiteResult> {
-  return total(() => {
-    const authority = createTaskCompletionSuiteAuthority(rawAuthority);
-    if (!authority.ok) return authority;
-    const outcome = parseTaskCheckOutcome(rawOutcome, "taskSuiteOutcome");
-    if (!outcome.ok) return outcome;
-    return success(freeze({
-      schemaVersion: 1,
-      kind: "task-completion-suite-result",
-      implementationAuthorityDigest: authority.value.implementationAuthorityDigest,
-      suiteDigest: authority.value.suiteDigest,
-      checks: Object.freeze([freeze({
-        checkId: authority.value.checks[0].checkId,
-        scope: "task",
-        outcome: outcome.value,
-      })]),
-    }));
-  });
-}
-
-function parseUncheckedTaskCompletionSuiteResult(raw: unknown): Parsed<UncheckedTaskCompletionSuiteResult> {
-  return total(() => {
-    const record = exactRecord(raw, [
-      "schemaVersion", "kind", "implementationAuthorityDigest", "suiteDigest", "checks",
-    ], "taskSuiteResult");
-    if (!record.ok) return record;
-    const authorityDigestValue = parseImplementationAuthorityDigest(
-      record.value.implementationAuthorityDigest,
-      "taskSuiteResult.implementationAuthorityDigest",
-    );
-    const suiteDigestValue = parseTaskSuiteDigest(record.value.suiteDigest, "taskSuiteResult.suiteDigest");
-    const rawChecks = parseDenseArray(record.value.checks, "taskSuiteResult.checks");
-    const checks = rawChecks.ok
-      ? collect(rawChecks.value, "taskSuiteResult.checks", parseTaskCheckResult)
-      : rawChecks;
-    const errors = [authorityDigestValue, suiteDigestValue, checks]
-      .flatMap((result) => result.ok ? [] : result.error.errors);
-    if (record.value.schemaVersion !== 1 || record.value.kind !== "task-completion-suite-result") {
-      errors.push("taskSuiteResult must have schemaVersion 1 and kind task-completion-suite-result");
-    }
-    return errors.length === 0 && authorityDigestValue.ok && suiteDigestValue.ok && checks.ok
-      ? success(freeze({
-          schemaVersion: 1,
-          kind: "task-completion-suite-result",
-          implementationAuthorityDigest: authorityDigestValue.value,
-          suiteDigest: suiteDigestValue.value,
-          checks: freezeArray([...checks.value].sort((left, right) => compareStrings(left.checkId, right.checkId))),
-        }))
-      : failure(errors);
-  });
-}
-
-function exactTaskCompletionSuiteResult(
-  unchecked: UncheckedTaskCompletionSuiteResult,
-): Parsed<TaskCompletionSuiteResult> {
-  const [check, ...surplus] = unchecked.checks;
-  if (check === undefined || surplus.length > 0 ||
-      check.checkId !== TASK_BYTE_SCOPE_CHECK_ID_TEXT || check.scope !== "task") {
-    return failure([
-      `taskSuiteResult.checks must contain exactly one task-scoped ${TASK_BYTE_SCOPE_CHECK_ID_TEXT} result`,
-    ]);
-  }
-  const canonicalSuiteDigest = taskSuiteDigest(Object.freeze([taskByteScopeCheck()]));
-  if (unchecked.suiteDigest !== canonicalSuiteDigest) {
-    return failure(["taskSuiteResult.suiteDigest does not match its canonical roster"]);
-  }
-  return success(freeze({
-    ...unchecked,
-    suiteDigest: canonicalSuiteDigest,
-    checks: Object.freeze([freeze({
-      checkId: check.checkId as TaskByteScopeCheckId,
-      scope: "task",
-      outcome: check.outcome,
-    })]),
-  }));
-}
-
-/** Parse untrusted Task-suite JSON into the exact one-check domain type. */
-export function parseTaskCompletionSuiteResult(raw: unknown): Parsed<TaskCompletionSuiteResult> {
-  const unchecked = parseUncheckedTaskCompletionSuiteResult(raw);
-  return unchecked.ok ? exactTaskCompletionSuiteResult(unchecked.value) : unchecked;
-}
-
-export type TaskSuiteAuthorityFailure =
-  | Readonly<{ kind: "invalid-task-suite-result"; errors: readonly [string, ...string[]] }>
-  | Readonly<{ kind: "stale-task-suite-result"; fields: readonly ["implementationAuthorityDigest" | "suiteDigest", ...( "implementationAuthorityDigest" | "suiteDigest")[]] }>
-  | Readonly<{ kind: "missing-task-check-results"; checkIds: readonly [CompletionCheckId, ...CompletionCheckId[]] }>
-  | Readonly<{ kind: "surplus-task-check-results"; checkIds: readonly [CompletionCheckId, ...CompletionCheckId[]] }>
-  | Readonly<{ kind: "duplicate-task-check-results"; checkIds: readonly [CompletionCheckId, ...CompletionCheckId[]] }>
-  | Readonly<{ kind: "wrong-task-check-scope"; checkId: CompletionCheckId; actualScope: "task" | "wave" }>;
-
-export type TaskSuiteSemanticFailure = Readonly<{
+/** A semantic failure: the attempt wrote outside the Task's allowed scope. */
+export type TaskByteScopeViolation = Readonly<{
   kind: "task-byte-scope-violation";
-  checkId: CompletionCheckId;
   paths: readonly [ReviewPath, ...ReviewPath[]];
 }>;
 
-export type TaskSuiteInfrastructureFailure = Readonly<{
+/** An infrastructure failure: the attempt's bytes could not be observed. */
+export type TaskByteScopeUnavailable = Readonly<{
   kind: "task-byte-scope-unavailable";
-  checkId: CompletionCheckId;
   reason: string;
 }>;
-
-export type TaskCompletionSuiteEvaluation =
-  | Readonly<{ kind: "accepted"; result: TaskCompletionSuiteResult }>
-  | Readonly<{
-      kind: "rejected";
-      authorityFailures: readonly TaskSuiteAuthorityFailure[];
-      semanticFailures: readonly TaskSuiteSemanticFailure[];
-      infrastructureFailures: readonly TaskSuiteInfrastructureFailure[];
-    }>;
 
 function nonEmptyValues<T>(values: readonly T[]): readonly [T, ...T[]] | null {
   const first = values[0];
   return first === undefined ? null : Object.freeze([first, ...values.slice(1)]);
-}
-
-function rejectedTaskCompletionSuite(
-  authorityFailures: readonly TaskSuiteAuthorityFailure[] = [],
-  semanticFailures: readonly TaskSuiteSemanticFailure[] = [],
-  infrastructureFailures: readonly TaskSuiteInfrastructureFailure[] = [],
-): Extract<TaskCompletionSuiteEvaluation, { kind: "rejected" }> {
-  return freeze({
-    kind: "rejected",
-    authorityFailures: freezeArray(authorityFailures),
-    semanticFailures: freezeArray(semanticFailures),
-    infrastructureFailures: freezeArray(infrastructureFailures),
-  });
-}
-
-/** Evaluate exact Task result coverage without running or authorizing commands. */
-export function evaluateTaskCompletionSuite(
-  rawAuthority: unknown,
-  rawResult: unknown,
-): TaskCompletionSuiteEvaluation {
-  const authority = parseTaskCompletionSuiteAuthority(rawAuthority);
-  // Keep the unchecked roster internal so evaluation can preserve its precise
-  // missing/surplus/duplicate/wrong-scope diagnostics. Only the accepted arm
-  // is lifted into TaskCompletionSuiteResult below.
-  const result = parseUncheckedTaskCompletionSuiteResult(rawResult);
-  if (!authority.ok || !result.ok) {
-    const errors = [
-      ...(authority.ok ? [] : authority.error.errors),
-      ...(result.ok ? [] : result.error.errors),
-    ];
-    const nonEmptyErrors = nonEmptyValues(errors) ?? ["Task suite input is invalid"];
-    return rejectedTaskCompletionSuite([
-      freeze({ kind: "invalid-task-suite-result", errors: nonEmptyErrors }),
-    ]);
-  }
-  const staleFields = (["implementationAuthorityDigest", "suiteDigest"] as const)
-    .filter((field) => authority.value[field] !== result.value[field]);
-  const stale = nonEmptyValues(staleFields);
-  if (stale !== null) {
-    return rejectedTaskCompletionSuite([
-      freeze({ kind: "stale-task-suite-result", fields: stale }),
-    ]);
-  }
-
-  const expectedIds: ReadonlySet<CompletionCheckId> = new Set<CompletionCheckId>(
-    authority.value.checks.map((check) => check.checkId),
-  );
-  const counts = new Map<CompletionCheckId, number>();
-  result.value.checks.forEach((check) => counts.set(check.checkId, (counts.get(check.checkId) ?? 0) + 1));
-  const missing = authority.value.checks.filter((check) => !counts.has(check.checkId)).map((check) => check.checkId);
-  const surplus = [...counts.keys()].filter((id) => !expectedIds.has(id)).sort(compareStrings);
-  const duplicate = [...counts.entries()].filter(([, count]) => count > 1).map(([id]) => id).sort(compareStrings);
-  const authorityFailures: TaskSuiteAuthorityFailure[] = [];
-  const missingValues = nonEmptyValues(missing);
-  const surplusValues = nonEmptyValues(surplus);
-  const duplicateValues = nonEmptyValues(duplicate);
-  if (missingValues !== null) authorityFailures.push(freeze({ kind: "missing-task-check-results", checkIds: missingValues }));
-  if (surplusValues !== null) authorityFailures.push(freeze({ kind: "surplus-task-check-results", checkIds: surplusValues }));
-  if (duplicateValues !== null) authorityFailures.push(freeze({ kind: "duplicate-task-check-results", checkIds: duplicateValues }));
-  result.value.checks.forEach((check) => {
-    if (expectedIds.has(check.checkId) && check.scope !== "task") {
-      authorityFailures.push(freeze({ kind: "wrong-task-check-scope", checkId: check.checkId, actualScope: check.scope }));
-    }
-  });
-
-  const semanticFailures: TaskSuiteSemanticFailure[] = [];
-  const infrastructureFailures: TaskSuiteInfrastructureFailure[] = [];
-  const exactResult = authorityFailures.length === 0
-    ? exactTaskCompletionSuiteResult(result.value)
-    : null;
-  if (exactResult !== null && !exactResult.ok) {
-    authorityFailures.push(freeze({
-      kind: "invalid-task-suite-result",
-      errors: exactResult.error.errors,
-    }));
-  }
-  if (exactResult?.ok) {
-    exactResult.value.checks.forEach((check) => {
-      if (check.outcome.kind === "out-of-scope-writes") {
-        semanticFailures.push(freeze({ kind: "task-byte-scope-violation", checkId: check.checkId, paths: check.outcome.paths }));
-      } else if (check.outcome.kind === "observation-unavailable") {
-        infrastructureFailures.push(freeze({
-          kind: "task-byte-scope-unavailable",
-          checkId: check.checkId,
-          reason: check.outcome.reason,
-        }));
-      }
-    });
-  }
-  return authorityFailures.length === 0 && semanticFailures.length === 0 &&
-      infrastructureFailures.length === 0 && exactResult?.ok
-    ? freeze({ kind: "accepted", result: exactResult.value })
-    : rejectedTaskCompletionSuite(authorityFailures, semanticFailures, infrastructureFailures);
 }
 
 export type ImplementationObservation =
@@ -1150,17 +744,16 @@ export type SettleableImplementationTask = Readonly<{
 
 export type ImplementationCompletionFailure =
   | Readonly<{ kind: "proof-obligation-failure"; failure: ProofFailure }>
-  | TaskSuiteSemanticFailure;
+  | TaskByteScopeViolation;
 
 export type ImplementationInfrastructureFailure =
-  | TaskSuiteInfrastructureFailure
+  | TaskByteScopeUnavailable
   | Readonly<{ kind: "implementation-observation-unavailable"; message: string }>;
 
 export type ImplementationCompletionTransition =
   | Readonly<{
       kind: "implemented";
       proof: SatisfiedTaskProof;
-      suite: TaskCompletionSuiteResult;
       receipt: ImplementedSettlementReceipt;
     }>
   | Readonly<{
@@ -1185,8 +778,7 @@ export type ImplementationCompletionTransition =
 
 export type ImplementationCompletionError =
   | Readonly<{ kind: "invalid-task"; errors: readonly [string, ...string[]] }>
-  | Readonly<{ kind: "current-authority-mismatch"; message: string }>
-  | Readonly<{ kind: "task-suite-authority-failure"; failures: readonly [TaskSuiteAuthorityFailure, ...TaskSuiteAuthorityFailure[]] }>;
+  | Readonly<{ kind: "current-authority-mismatch"; message: string }>;
 
 export type ImplementationCompletionResult =
   | Readonly<{ ok: true; value: ImplementationCompletionTransition }>
@@ -1380,14 +972,15 @@ function semanticTransition(
 
 /**
  * Pure Implementation Completion Oracle. The current authority comes from the
- * locked shell; the supplied authority is the harness correlation capability.
+ * locked shell; the supplied authority is the harness correlation capability;
+ * `byteScope` is the attempt's byte-scope outcome the shell observed.
  */
 export function settleImplementationAttempt(
   task: SettleableImplementationTask,
   rawCurrentAuthority: unknown,
   rawSuppliedAuthority: unknown,
   rawObservation: unknown,
-  rawSuite: unknown,
+  byteScope: TaskByteScopeOutcome,
 ): ImplementationCompletionResult {
   const current = parseImplementationAttemptAuthority(rawCurrentAuthority);
   const supplied = parseImplementationAttemptAuthority(rawSuppliedAuthority);
@@ -1423,16 +1016,6 @@ export function settleImplementationAttempt(
     return completionOk(freeze({ kind: "ignored", reason: "stale" }));
   }
 
-  const suiteAuthority = createTaskCompletionSuiteAuthority(current.value);
-  if (!suiteAuthority.ok) return completionError({ kind: "invalid-task", errors: suiteAuthority.error.errors });
-  const suite = evaluateTaskCompletionSuite(suiteAuthority.value, rawSuite);
-  if (suite.kind === "rejected") {
-    const authorityFailures = nonEmptyValues(suite.authorityFailures);
-    if (authorityFailures !== null) {
-      return completionError({ kind: "task-suite-authority-failure", failures: authorityFailures });
-    }
-  }
-
   const infrastructureFailures: ImplementationInfrastructureFailure[] = [
     ...(observation.value.kind === "implementation-observation-unavailable"
       ? [freeze({
@@ -1440,7 +1023,9 @@ export function settleImplementationAttempt(
           message: observation.value.failure.message,
         })]
       : []),
-    ...(suite.kind === "rejected" ? suite.infrastructureFailures : []),
+    ...(byteScope.kind === "observation-unavailable"
+      ? [freeze({ kind: "task-byte-scope-unavailable" as const, reason: byteScope.reason })]
+      : []),
   ];
   const nonEmptyInfrastructure = nonEmptyValues(infrastructureFailures);
   if (nonEmptyInfrastructure !== null) {
@@ -1464,19 +1049,20 @@ export function settleImplementationAttempt(
     ...(proof.state === "failed"
       ? proof.failures.map((proofFailure) => freeze({ kind: "proof-obligation-failure" as const, failure: proofFailure }))
       : []),
-    ...(suite.kind === "rejected" ? suite.semanticFailures : []),
+    ...(byteScope.kind === "out-of-scope-writes"
+      ? [freeze({ kind: "task-byte-scope-violation" as const, paths: byteScope.paths })]
+      : []),
   ];
   const nonEmptySemantic = nonEmptyValues(semanticFailures);
   if (nonEmptySemantic !== null) {
     return completionOk(semanticTransition(current.value, observation.value.observedAt, proof, nonEmptySemantic));
   }
-  if (proof.state !== "satisfied" || suite.kind !== "accepted") {
-    return completionError({ kind: "invalid-task", errors: ["implementation success lacked satisfied Proof or accepted Task suite"] });
+  if (proof.state !== "satisfied") {
+    return completionError({ kind: "invalid-task", errors: ["implementation success lacked a satisfied Proof"] });
   }
   return completionOk(freeze({
     kind: "implemented",
     proof,
-    suite: suite.result,
     receipt: makeReceipt(current.value, observation.value.observedAt, "implemented", []),
   }));
 }

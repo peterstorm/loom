@@ -21,8 +21,6 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  buildTaskLocalByteObservation,
-  NO_ENGINE_SKELETONS,
   parseNewTestEvidence,
   redThenGreenDuty,
 } from "../../src/core/implementation-application";
@@ -59,7 +57,6 @@ import {
 import {
   settleExactImplementation,
   type ExactImplementationSettlement,
-  type ExactImplementationSettlementPorts,
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import { reconcileTaskFromStoredEvidence } from "../../src/handlers/helpers/reconcile-implementation-proof";
 import {
@@ -98,6 +95,7 @@ import { mutationManifest } from "../fixtures/task-mutation";
 import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 import { agentCommandGraph, i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
+import { declaredFilesChangedPorts } from "../fixtures/declared-files-changed-ports";
 
 // --- Identities ---
 
@@ -268,43 +266,6 @@ function reserved(graph: TaskGraph, taskId: string): Readonly<{ graph: TaskGraph
   };
 }
 
-const snapshots = (paths: readonly string[], changed: boolean) =>
-  [...paths].sort().map((artifact) => ({
-    artifact,
-    snapshot: changed ? { kind: "sha256" as const, digest: "b".repeat(64) } : { kind: "missing" as const },
-  }));
-
-function ports(
-  attempt: ImplementationAttemptAuthority,
-  fileList: readonly string[],
-  newTestsWritten = true,
-): ExactImplementationSettlementPorts {
-  return {
-    repository: {
-      root: ROOT,
-      authoritativeStatePath: `${ROOT}/.claude/state/active_task_graph.json`,
-      observeTaskLocal: () => buildTaskLocalByteObservation({
-        authority: attempt,
-        attemptBaseline: snapshots(fileList, false),
-        currentAttemptScope: snapshots(fileList, true),
-        proofBaseline: snapshots(fileList, false),
-        currentProofScope: snapshots(fileList, true),
-        parserModifiedPaths: [],
-        priorAttributedPaths: [],
-        repositoryChangedPaths: [...fileList],
-        siblingOwnedPaths: [],
-        engineSkeletons: NO_ENGINE_SKELETONS,
-      }),
-    },
-    newTests: {
-      collect: () => ({
-        ok: true,
-        value: parseNewTestEvidence(newTestsWritten, newTestsWritten ? `new tests in ${fileList.join(", ")}` : undefined),
-      }),
-    },
-  };
-}
-
 type SettleOptions = Readonly<{
   transport?: "Claude" | "Pi";
   policy?: ProofEvaluationPolicy;
@@ -331,7 +292,7 @@ function settle(
     testEvidence: `${transport} test evidence`,
     proofEvaluationPolicy: options.policy ?? (transport === "Pi" ? PI_STRUCTURED_EVIDENCE_POLICY : TRUSTED_LEDGER_ONLY_POLICY),
     ledger,
-  }, ports(attempt, taskOf(state, taskId).file_list ?? [], options.newTestsWritten ?? true));
+  }, declaredFilesChangedPorts(taskOf(state, taskId).file_list ?? [], options.newTestsWritten ?? true));
 }
 
 /** A Task's persisted I6 result, or undefined when its proof owes none or is not yet evaluated. */

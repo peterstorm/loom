@@ -17,7 +17,6 @@ import {
 } from "./artifact-baseline";
 import { artifactCovers } from "./path-coverage";
 import {
-  createTaskCompletionSuiteResult,
   parseCanonicalArtifactBaseline,
   parseImplementationObservation,
   settleImplementationAttempt,
@@ -27,7 +26,7 @@ import {
   type ImplementationCompletionTransition,
   type ImplementationInfrastructureFailure,
   type IsoInstant,
-  type TaskCompletionSuiteResult,
+  type TaskByteScopeOutcome,
 } from "./implementation-completion";
 import { compareStrings } from "./ordering";
 import { samePlanPath } from "./plan-path-match";
@@ -56,7 +55,8 @@ const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(
 const frozenArray = <T>(values: readonly T[]): readonly T[] => Object.freeze([...values]);
 
 export type TaskLocalByteObservation = Readonly<{
-  suite: TaskCompletionSuiteResult;
+  /** The attempt's bytes against its allowed scope, as the oracle settles them. */
+  byteScope: TaskByteScopeOutcome;
   /** Parser-proven paths whose bytes changed during this exact attempt. */
   attributedAttemptChangedPaths: readonly ReviewPath[];
   /** EVERY task-scope path whose bytes changed vs the attempt baseline —
@@ -83,7 +83,6 @@ export type TaskLocalByteObservation = Readonly<{
 }>;
 
 export type TaskLocalObservationInput = Readonly<{
-  authority: ImplementationAttemptAuthority;
   attemptBaseline: unknown;
   currentAttemptScope: unknown;
   proofBaseline: unknown;
@@ -198,7 +197,7 @@ function withoutEngineSkeletonBytes(
 }
 
 /**
- * Build the one engine-owned Task suite from already-observed snapshots.
+ * Build the attempt's byte observation and its byte-scope outcome from already-observed snapshots.
  * Repository movement is classified against locked Wave ownership. It never
  * grants attribution: allowed paths stay Task-local, sibling paths are inert,
  * and every remaining changed path is semantic out-of-scope evidence.
@@ -240,7 +239,6 @@ export function buildTaskLocalByteObservation(
       !repositoryPaths.ok || !siblingPaths.ok) {
     const reason = unavailableReason(errors);
     return unavailableTaskLocalByteObservation(
-      input.authority,
       reason,
       priorPaths.ok ? priorPaths.value : frozenArray([]),
     );
@@ -287,15 +285,12 @@ export function buildTaskLocalByteObservation(
   const cumulative = frozenArray(
     [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proofChanged])].sort(compareStrings),
   );
-  const suite = createTaskCompletionSuiteResult(
-    input.authority,
-    outside.length > 0
-      ? { kind: "out-of-scope-writes", paths: outside }
-      : { kind: "accepted", changedPaths: attributedAttempt },
-  );
-  if (!suite.ok) throw new Error(suite.error.errors.join("; "));
+  const [firstOutside, ...restOutside] = outside;
+  const byteScope: TaskByteScopeOutcome = firstOutside === undefined
+    ? freeze({ kind: "accepted" })
+    : freeze({ kind: "out-of-scope-writes", paths: nonEmptyOf(firstOutside, ...restOutside) });
   return freeze({
-    suite: suite.value,
+    byteScope,
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     attemptScopeChangedPaths: attempt.changed,
     cumulativeModifiedPaths: cumulative,
@@ -311,17 +306,11 @@ export function buildTaskLocalByteObservation(
 const NO_REOPEN_SCOPE: Readonly<{ ok: true; changed: readonly ReviewPath[] }> = freeze({ ok: true, changed: frozenArray([]) });
 
 export function unavailableTaskLocalByteObservation(
-  authority: ImplementationAttemptAuthority,
   reason: string,
   cumulativeModifiedPaths: readonly ReviewPath[] = frozenArray([]),
 ): TaskLocalByteObservation {
-  const suite = createTaskCompletionSuiteResult(authority, {
-    kind: "observation-unavailable",
-    reason: unavailableReason([reason]),
-  });
-  if (!suite.ok) throw new Error(suite.error.errors.join("; "));
   return freeze({
-    suite: suite.value,
+    byteScope: freeze({ kind: "observation-unavailable", reason: unavailableReason([reason]) }),
     attributedAttemptChangedPaths: frozenArray([]),
     attemptScopeChangedPaths: frozenArray([]),
     cumulativeModifiedPaths: frozenArray(cumulativeModifiedPaths),
@@ -718,7 +707,7 @@ function settleAndApply(
   const task = state.tasks.find((candidate) => candidate.id === authority.taskId);
   if (task === undefined) return freeze({ kind: "ignored", state, reason: "stale" });
   const current = task.active_implementation_attempt ?? authority;
-  const settled = settleImplementationAttempt(task, current, authority, observation, bytes.suite);
+  const settled = settleImplementationAttempt(task, current, authority, observation, bytes.byteScope);
   if (!settled.ok) return freeze({ kind: "error", state, error: settled.error });
   return applyImplementationCompletionTransition(
     state,
@@ -780,7 +769,7 @@ export function settleUnavailableImplementation(
   authority: ImplementationAttemptAuthority,
   observedAt: IsoInstant,
   reason: string,
-  bytes: TaskLocalByteObservation = unavailableTaskLocalByteObservation(authority, reason),
+  bytes: TaskLocalByteObservation = unavailableTaskLocalByteObservation(reason),
 ): ImplementationSettlementApplicationResult {
   const observation = parseImplementationObservation({
     schemaVersion: 1,

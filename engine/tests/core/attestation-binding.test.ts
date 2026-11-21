@@ -21,7 +21,6 @@ import {
 } from "../../src/core/implementation-retry";
 import {
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
   type ImplementationAttemptSettlementReceipt,
@@ -66,11 +65,6 @@ const attestationAppendix = (): string => {
  * that fails its proof. */
 const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
   const attempt = attemptAuthority(1, "attest-retry-attempt");
-  const suite = (() => {
-    const built = createTaskCompletionSuiteAuthority(attempt);
-    if (!built.ok) throw new Error(built.error.errors.join("; "));
-    return built.value;
-  })();
   const result = settleImplementationAttempt({
     id: "T1",
     status: "pending",
@@ -83,13 +77,7 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
     observedAt: "2026-09-19T00:02:00.000Z",
     evidence: observedEvidence({ taskCompleted: false, testResult: { verdict: "trusted-pass" }, filesModified: [] }),
     proofEvaluationPolicy: { untrustedPass: "reject" },
-  }, {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: suite.implementationAuthorityDigest,
-    suiteDigest: suite.suiteDigest,
-    checks: [{ checkId: suite.checks[0].checkId, scope: "task", outcome: { kind: "accepted", changedPaths: [] } }],
-  });
+  }, { kind: "accepted" });
   if (!result.ok || result.value.kind !== "retry-required") throw new Error("retry receipt fixture failed");
   return result.value.receipt;
 };

@@ -1,8 +1,6 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   parseImplementationObservation,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
@@ -94,7 +92,6 @@ function errorOf(raw: Record<string, unknown>): string {
 }
 
 function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = true) {
-  const suite = value(createTaskCompletionSuiteAuthority(attempt));
   const observation = value(parseImplementationObservation({
     schemaVersion: 1,
     kind: "implementation-observed",
@@ -113,24 +110,13 @@ function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = tru
     attempt,
     attempt,
     observation,
-    {
-      schemaVersion: 1,
-      kind: "task-completion-suite-result",
-      implementationAuthorityDigest: suite.implementationAuthorityDigest,
-      suiteDigest: suite.suiteDigest,
-      checks: [{
-        checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-        scope: "task",
-        outcome: { kind: "accepted", changedPaths: ["engine/src/a.ts"] },
-      }],
-    },
+    { kind: "accepted" },
   );
   if (!settled.ok || settled.value.kind === "ignored") throw new Error("fixture must settle");
   return settled.value.receipt;
 }
 
 function infrastructureReceiptFor(attempt: ImplementationAttemptAuthority) {
-  const suite = value(createTaskCompletionSuiteAuthority(attempt));
   const settled = settleImplementationAttempt({
     id: "T1",
     status: "pending",
@@ -142,17 +128,7 @@ function infrastructureReceiptFor(attempt: ImplementationAttemptAuthority) {
     kind: "implementation-observation-unavailable",
     observedAt: "2026-08-23T00:02:00.000Z",
     failure: { kind: "observation-unavailable", message: "legacy transport failure" },
-  }, {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: suite.implementationAuthorityDigest,
-    suiteDigest: suite.suiteDigest,
-    checks: [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "accepted", changedPaths: [] },
-    }],
-  });
+  }, { kind: "accepted" });
   if (!settled.ok || settled.value.kind !== "infrastructure-blocked") {
     throw new Error("legacy infrastructure receipt fixture failed");
   }

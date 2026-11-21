@@ -174,7 +174,6 @@ function world(attempt: ImplementationAttemptAuthority, options: WorldOptions = 
       observeTaskLocal: (args) => {
         observations += 1;
         return buildTaskLocalByteObservation({
-          authority: attempt,
           attemptBaseline: ATTEMPT_BASELINE,
           currentAttemptScope: baselineOf(files, SCOPE),
           proofBaseline: ATTEMPT_BASELINE,

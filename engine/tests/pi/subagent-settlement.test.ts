@@ -155,7 +155,6 @@ describe("renderExactPiSettlement", () => {
     { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
     TRUSTED_LEDGER_ONLY_POLICY,
     buildTaskLocalByteObservation({
-      authority,
       attemptBaseline: [],
       currentAttemptScope: [],
       proofBaseline: [],

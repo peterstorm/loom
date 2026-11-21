@@ -20,9 +20,7 @@ import {
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import { StateManager } from "../../src/state-manager";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   parseIsoInstant,
   parseReservationId,
   settleImplementationAttempt,
@@ -333,8 +331,6 @@ describe("modern implementation attempt registration", () => {
     );
     if (!batch.ok) throw new Error(batch.error);
     const plannedAuthority = batch.plans[0]!.authority;
-    const suite = createTaskCompletionSuiteAuthority(plannedAuthority);
-    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
     const settled = settleImplementationAttempt(
       {
         ...state.tasks[0]!,
@@ -356,17 +352,7 @@ describe("modern implementation attempt registration", () => {
         }),
         proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
       },
-      {
-        schemaVersion: 1,
-        kind: "task-completion-suite-result",
-        implementationAuthorityDigest: suite.value.implementationAuthorityDigest,
-        suiteDigest: suite.value.suiteDigest,
-        checks: [{
-          checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-          scope: "task",
-          outcome: { kind: "accepted", changedPaths: [] },
-        }],
-      },
+      { kind: "accepted" },
     );
     if (!settled.ok || settled.value.kind !== "retry-required") {
       throw new Error("retry receipt fixture failed");

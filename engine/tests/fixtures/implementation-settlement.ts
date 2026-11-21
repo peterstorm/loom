@@ -1,8 +1,6 @@
 import { derivePendingTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   settleImplementationAttempt,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
@@ -29,7 +27,6 @@ export function semanticAttemptReceipt(
     taskScopeBaseline: [],
     dirtySetBaseline: [],
   }));
-  const suiteAuthority = labelledValue("implementation settlement", createTaskCompletionSuiteAuthority(authority));
   const result = settleImplementationAttempt({
     id: taskId,
     status: "pending",
@@ -48,17 +45,7 @@ export function semanticAttemptReceipt(
       newTestEvidence: "waived",
     }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-  }, {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: suiteAuthority.implementationAuthorityDigest,
-    suiteDigest: suiteAuthority.suiteDigest,
-    checks: [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "accepted", changedPaths: [] },
-    }],
-  });
+  }, { kind: "accepted" });
   if (!result.ok || result.value.kind === "ignored") throw new Error("implementation settlement fixture failed");
   return result.value.receipt;
 }

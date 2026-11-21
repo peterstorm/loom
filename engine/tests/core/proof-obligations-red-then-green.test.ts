@@ -12,9 +12,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
 import {
@@ -425,8 +423,6 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
       dirtySetBaseline: [],
     });
     if (!authority.ok) throw new Error(authority.error.errors.join("; "));
-    const suite = createTaskCompletionSuiteAuthority(authority.value);
-    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
     return settleImplementationAttempt({
       id: "T1",
       status: "pending",
@@ -444,13 +440,7 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
       observedAt: "2026-10-16T00:01:00.000Z",
       evidence: JSON.parse(JSON.stringify({ ...observed(redThenGreen), filesModified: [] })),
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-    }, {
-      schemaVersion: 1,
-      kind: "task-completion-suite-result",
-      implementationAuthorityDigest: suite.value.implementationAuthorityDigest,
-      suiteDigest: suite.value.suiteDigest,
-      checks: [{ checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } }],
-    });
+    }, { kind: "accepted" });
   }
 
   it.each(ALL_GAPS.filter(({ kind }) => kind !== "ledger-unavailable"))("FR-009: the $kind gap mints its own receipt failure kind and retries", (gap) => {

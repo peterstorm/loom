@@ -240,9 +240,8 @@ function observeAttemptBytes(context: SettlementContext): Observed<TaskLocalByte
   } catch (error) {
     return withheldBecause(context, "task-local observation", error);
   }
-  const suiteOutcome = bytes.suite.checks[0]?.outcome;
-  return suiteOutcome?.kind === "observation-unavailable"
-    ? withheld(unavailable(state, facts, suiteOutcome.reason, bytes))
+  return bytes.byteScope.kind === "observation-unavailable"
+    ? withheld(unavailable(state, facts, bytes.byteScope.reason, bytes))
     : observed(bytes);
 }
 
