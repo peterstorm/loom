@@ -496,7 +496,7 @@ const ACTIVE_WAVE_GATE_FIELDS = [
 ] as const;
 const ACTIVE_WAVE_GATE_OPTIONAL_FIELDS = ["runsRoot"] as const;
 
-export function parseActiveWaveGateTerminalOutcome(
+function parseActiveWaveGateTerminalOutcome(
   raw: unknown,
   runId: ActiveWaveGateRegistration["runId"],
 ): ParseResult<ActiveWaveGateRegistration["terminalOutcome"]> {

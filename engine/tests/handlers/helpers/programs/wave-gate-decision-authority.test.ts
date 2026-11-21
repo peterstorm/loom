@@ -48,7 +48,8 @@ import type { WaveReviewRegistrationAuthority } from "../../../../src/core/wave-
 import { buildContextPacket, encodeByteSection } from "../../../../src/orchestration/context-packets";
 import { openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
-import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
+import { parseActiveWaveGateRegistration, parseTaskGraph, registerActiveWaveGate, StateManager } from "../../../../src/state-manager";
+import { value } from "../../../fixtures/parse-result";
 import { capturedSpecCheck } from "../../../../src/core/spec-check";
 import type { TaskGraph } from "../../../../src/types";
 import { findingId } from "../../../fixtures/finding-id";
@@ -186,7 +187,7 @@ describe("Wave Gate start effect ordering", () => {
     writeFileSync(statePath, JSON.stringify({ ...initial, tasks: TASKS }));
     const before = readFileSync(statePath);
     try {
-      await expect(new StateManager(statePath).registerActiveWaveGate(active, { taskIds: taskIds }))
+      await expect(registerActiveWaveGate(new StateManager(statePath), value(parseActiveWaveGateRegistration(active)), { taskIds: taskIds }))
         .rejects.toThrow("changed after Run Directory publication");
       expect(readFileSync(statePath)).toEqual(before);
       expect(new StateManager(statePath).load().active_wave_gate).toBeUndefined();

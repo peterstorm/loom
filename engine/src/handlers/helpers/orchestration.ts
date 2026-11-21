@@ -121,7 +121,8 @@ import {
   skeletonsUnobserved,
   type SkeletonStatusReport,
 } from "../../core/skeleton/status";
-import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
+import { parseTaskGraph, StateManager } from "../../state-manager";
+import { abandonWaveGateRegistration, type ActiveWaveGateAbandonmentResult } from "../../core/wave-gate-registration";
 import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
@@ -1058,12 +1059,12 @@ async function stampAbandonedWaveGateRegistration(
   const manager = StateManager.fromPath(TASK_GRAPH_PATH);
   if (manager === null) return Object.freeze({ kind: "no-graph" });
   try {
-    return await manager.abandonActiveWaveGateRegistration({
+    return await manager.updateAndReturn((state) => abandonWaveGateRegistration(state, {
       runsRoot,
       runId: marker.runId,
       reason: marker.reason,
       supersededBy: marker.supersededBy,
-    });
+    }));
   } catch (error) {
     return Object.freeze({
       kind: "stamp-failed",

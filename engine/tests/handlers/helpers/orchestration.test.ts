@@ -38,7 +38,8 @@ import {
   resumeStandaloneFacade,
   type StandaloneCaptureWitness,
 } from "../../../src/handlers/helpers/programs/standalone";
-import { StateManager } from "../../../src/state-manager";
+import { parseActiveWaveGateRegistration, registerActiveWaveGate, StateManager } from "../../../src/state-manager";
+import { value } from "../../fixtures/parse-result";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
 import { publicationFile, refutationBatchEffectId } from "../../../src/handlers/helpers/programs/durable-requests";
@@ -783,8 +784,8 @@ describe("orchestration CLI", () => {
       authorityDigest: waveGateAuthorityDigest(1, taskIds, graph) };
     const stored = await handle.value.registerProgram(registration);
     if (!stored.ok) throw new Error(stored.error.message);
-    await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.value.runId,
-      wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null, runsRoot }, { taskIds });
+    await registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.value.runId,
+      wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null, runsRoot })), { taskIds });
     await withFixturePiSession(root, async () => {
       const batch = waveRequests(
         handle.value,

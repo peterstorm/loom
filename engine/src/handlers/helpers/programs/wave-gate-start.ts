@@ -10,7 +10,7 @@ import { WAVE_REVIEWER_PROTOCOL_V4 } from '../../../core/reviewer-contract';
 import { openRunDirectory, parseRunDirectoryReference, type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { admitWaveGateRegistration, successionPredecessorOf } from '../../../core/wave-gate-registration';
 import { TASK_GRAPH_PATH } from '../../../config';
-import { StateManager } from '../../../state-manager';
+import { parseActiveWaveGateRegistration, registerActiveWaveGate, StateManager } from '../../../state-manager';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
 import type { DomainResult } from '../../../core/orchestration-contract';
 import type { RegisteredWaveGateProgram, WaveGateSuccessionAudit } from '../../../core/wave-gate-program';
@@ -272,7 +272,8 @@ export async function startWaveGateFacade(
     // active_wave_gate can be stranded.
     const stored = await handle.registerProgram(registration);
     if (!stored.ok) return failed(stored.error.message);
-    await manager.registerActiveWaveGate({
+    // The registration enters protected state only in its parsed form.
+    const active = parseActiveWaveGateRegistration({
       schemaVersion: 1,
       kind: "active-wave-gate",
       runId: handle.runId,
@@ -281,7 +282,9 @@ export async function startWaveGateFacade(
       revision: 0,
       runsRoot: handle.identity.runsRoot,
       terminalOutcome: null,
-    }, registration);
+    });
+    if (!active.ok) throw new Error(`Invalid active Wave Gate registration: ${active.error}`);
+    await registerActiveWaveGate(manager, active.value, registration);
     reportNotCarried(handle.runId, prepared.notCarried);
     reportRosters(handle.runId, prepared.rosters);
     return resumeWaveGateFacade(handle, registration);

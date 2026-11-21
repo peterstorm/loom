@@ -37,7 +37,7 @@ import { captureKey } from "../../../../src/core/harness-capture";
 import { issuedWaveProtocol } from "../../../../src/handlers/helpers/programs/wave-review-context";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
-import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
+import { parseActiveWaveGateRegistration, parseTaskGraph, registerActiveWaveGate, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
 import { parseNewTestEvidence, type CurrentReviewRun, type DraftFinding, type Finding, type Task, type TaskGraph } from "../../../../src/types";
 import { supersedeAbandonedWaveGateReview } from "../../../../src/core/wave-gate-registration";
@@ -286,8 +286,8 @@ async function legacyPrefix(p: ReturnType<typeof project>) {
   const registered = { schemaVersion: 1 as const, kind: "wave-gate" as const, input: { wave: 1 }, taskIds: ["T1"],
     authorityDigest: waveGateAuthorityDigest(1, ["T1"], initial) };
   value(await handle.registerProgram(registered));
-  await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.runId, wave: 1,
-    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot }, { taskIds: ["T1"] });
+  await registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.runId, wave: 1,
+    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot })), { taskIds: ["T1"] });
   return withFixturePiSession(p.root, async () => {
     const batch = waveRequests(
       handle,
@@ -315,8 +315,8 @@ async function registeredPrefix(p: ReturnType<typeof project>, reviewerProtocol:
   const registered = { schemaVersion: 2 as const, reviewerProtocol, kind: "wave-gate" as const, input: { wave: 1 }, taskIds,
     authorityDigest: waveGateAuthorityDigest(1, taskIds, manager.load()) };
   value(await handle.registerProgram(registered));
-  await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.runId, wave: 1,
-    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot }, { taskIds: taskIds });
+  await registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.runId, wave: 1,
+    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot })), { taskIds: taskIds });
   const action = await resume(p, handle);
   expect(action.kind, JSON.stringify(action)).toBe("spawn-batch");
   return { handle, action };
@@ -1375,8 +1375,8 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
     const program: RegisteredWaveGateProgram = { schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4, kind: "wave-gate",
       input: { wave: 1 }, taskIds, authorityDigest: waveGateAuthorityDigest(1, taskIds, before), succession };
     value(await next.registerProgram(program));
-    await new StateManager(p.statePath).registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: next.runId, wave: 1,
-      authorityDigest: program.authorityDigest, revision: 0, runsRoot: next.identity.runsRoot, terminalOutcome: null }, { taskIds, succession });
+    await registerActiveWaveGate(new StateManager(p.statePath), value(parseActiveWaveGateRegistration({ schemaVersion: 1, kind: "active-wave-gate", runId: next.runId, wave: 1,
+      authorityDigest: program.authorityDigest, revision: 0, runsRoot: next.identity.runsRoot, terminalOutcome: null })), { taskIds, succession });
     writeFileSync(join(p.root, fileOfTask("T1")), "export const t1 = 'edited after the start';\n");
     const installed = readFileSync(p.statePath);
     expect(await resume(p, next)).toMatchObject({ kind: "blocked", diagnostic: { message:
