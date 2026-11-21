@@ -48,6 +48,7 @@ import {
   exactKeys,
   parseTaskRecord,
   recordedTask,
+  taskRecordAnswerLines,
   taskRecordDigest,
   taskRecordJson,
   type RecordedTask,
@@ -64,12 +65,6 @@ import { frozenRedThenGreenEra } from "./proof-obligations";
 import { isTestFileBySuffixes } from "./test-file-classification";
 import { taskMutationCheckSetting, type AffectedRunner } from "./verification-manifest";
 import type { TaskGraph } from "../types";
-
-/** The longest one `helper mutation-check` run may take; a run it cannot fit is `unavailable`. */
-export const TASK_MUTATION_DEADLINE_MS = 480_000;
-
-/** The tool-call timeout an implementer gives the helper: the deadline, plus room to open and remove its worktrees. */
-export const TASK_MUTATION_BASH_TIMEOUT_MS = 600_000;
 
 // ---------------------------------------------------------------------------
 // The duty
@@ -706,9 +701,6 @@ export function renderTaskMutationBlock(cause: TaskMutationBlockCause, command: 
   return [
     "LOOM TASK MUTATION CHECK: your Task's changed lines are not yet answered by its tests.",
     ...blockCauseLines(cause),
-    "",
-    `Run it as one Bash call with a timeout of ${TASK_MUTATION_BASH_TIMEOUT_MS} ms, then your final verification run:`,
-    `  ${command}`,
-    `This check blocks at most ${blocksRemaining} more time(s); after that your stop proceeds and the Wave Gate judges.`,
+    ...taskRecordAnswerLines(command, blocksRemaining),
   ].join("\n");
 }

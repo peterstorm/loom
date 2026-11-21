@@ -21,7 +21,6 @@ import {
   KILLING_TEST,
   mutantsByFile,
   recordedTaskMutation,
-  TASK_MUTATION_DEADLINE_MS,
   taskMutationDuty,
   taskMutationUnavailable,
   type FileMutants,
@@ -54,7 +53,7 @@ import {
   type TaskMutationRepo,
   type TaskMutationRepoOptions,
 } from "../fixtures/task-mutation-repo";
-import { TASK_RECORD_NOT_RUN } from "../../src/core/task-record";
+import { TASK_RECORD_CHECK_DEADLINE_MS, TASK_RECORD_NOT_RUN } from "../../src/core/task-record";
 
 const savedStatePath = process.env.LOOM_STATE_PATH;
 const temporary: string[] = [];
@@ -117,7 +116,7 @@ function scripted(answer: (variant: OwnerVariant, launch: number) => MatrixTestR
   return { run, variants, budget };
 }
 
-const AMPLE = (port: ReturnType<typeof scripted>): TaskMutationBudget => port.budget(TASK_MUTATION_DEADLINE_MS, 1_000);
+const AMPLE = (port: ReturnType<typeof scripted>): TaskMutationBudget => port.budget(TASK_RECORD_CHECK_DEADLINE_MS, 1_000);
 
 describe("runFileMutants", () => {
   it("runs the unmutated file first, then each mutant's text in plan order", async () => {

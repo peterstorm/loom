@@ -50,8 +50,9 @@ import type { EngineRunTestEvidence } from "./test-evidence-authority";
 import { samePlanPath } from "./plan-path-match";
 import { TASK_MUTATION_STOP_CHECK_MAX_BLOCKS, TASK_OWNER_STOP_CHECK_MAX_BLOCKS } from "./affected-stop-check-types";
 import { MUTANT_CAP_PER_INVARIANT, MUTANT_CAP_PER_TASK } from "./owner-verification/mutation-plan";
-import { TASK_MUTATION_BASH_TIMEOUT_MS, taskMutationDuty } from "./task-mutation-check";
-import { ANSWER_OWNER_FINDINGS, TASK_OWNER_CHECK_BASH_TIMEOUT_MS, taskOwnerCheckDuty, type StopObligation } from "./task-owner-check";
+import { taskMutationDuty } from "./task-mutation-check";
+import { ANSWER_OWNER_FINDINGS, taskOwnerCheckDuty, type StopObligation } from "./task-owner-check";
+import { TASK_RECORD_CHECK_BASH_TIMEOUT_MS } from "./task-record";
 import { renderSkeletonOutcome } from "./skeleton/outcomes";
 import { conformanceScope } from "./skeleton/scope";
 import { renderStaleSkeleton, staleSkeletons, taskSkeletonOutcomes, type UnresolvedSkeletonBinding } from "./skeleton/status";
@@ -974,7 +975,7 @@ function taskMutationSection(
   if (duty.kind === "off") return null;
   return [
     "**Task mutation check.** Once your tests pass and before your final verification run, run this as one Bash call " +
-      `with a timeout of ${TASK_MUTATION_BASH_TIMEOUT_MS} ms:`,
+      `with a timeout of ${TASK_RECORD_CHECK_BASH_TIMEOUT_MS} ms:`,
     `\`${commands.mutationCheck(task.id)}\``,
     `It mutates the lines you changed in the files below (at most ${MUTANT_CAP_PER_TASK} mutants), runs your affected tests against ` +
       "each one in an isolated copy of the workspace, and prints every mutant your tests did not kill, with the test that kills it. " +
@@ -1025,7 +1026,7 @@ function taskOwnerCheckSection(
   if (duty.kind === "off") return null;
   return [
     "**Task owner check.** Your Task writes the family of an owned Invariant the Wave Gate verifies. Once your tests pass and " +
-      `before your final verification run, run this as one Bash call with a timeout of ${TASK_OWNER_CHECK_BASH_TIMEOUT_MS} ms:`,
+      `before your final verification run, run this as one Bash call with a timeout of ${TASK_RECORD_CHECK_BASH_TIMEOUT_MS} ms:`,
     `\`${commands.ownerCheck(task.id)}\``,
     `It runs the Wave Gate's Owner Verification now, each mutant (at most ${MUTANT_CAP_PER_INVARIANT} per Invariant) in an isolated ` +
       "copy of the workspace, and prints what the matrix test misses or lets survive. It checks:",

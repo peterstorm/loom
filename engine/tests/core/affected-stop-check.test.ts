@@ -460,6 +460,25 @@ describe("blockAdmission", () => {
       .toEqual({ kind: "fails-open", note: "the acceptance stop check's block counter is unreadable: EIO" });
   });
 
+  it("pins every check's two fail-open notes verbatim, the affected check's equal to CT-2's note text", () => {
+    const notes = STOP_CHECK_NAMES.map((name) => [
+      blockAdmission(name, count(CAPS[name]), CAPS[name]),
+      blockAdmission(name, unreadable("EIO"), CAPS[name]),
+    ]);
+    expect(notes).toEqual([
+      [{ kind: "fails-open", note: `the acceptance stop check reached its ${CAPS.acceptance}-block cap` },
+        { kind: "fails-open", note: "the acceptance stop check's block counter is unreadable: EIO" }],
+      [{ kind: "fails-open", note: AFFECTED_NOTE_TEXT["cap-reached"] },
+        { kind: "fails-open", note: `${AFFECTED_NOTE_TEXT["counter-unreadable"]}: EIO` }],
+      [{ kind: "fails-open", note: "the Task mutation check reached its 2-block cap" },
+        { kind: "fails-open", note: "the Task mutation check's block counter is unreadable: EIO" }],
+      [{ kind: "fails-open", note: "the Task owner check reached its 2-block cap" },
+        { kind: "fails-open", note: "the Task owner check's block counter is unreadable: EIO" }],
+    ]);
+    expect(AFFECTED_NOTE_TEXT["cap-reached"]).toBe("the affected stop check reached its 3-block cap");
+    expect(AFFECTED_NOTE_TEXT["counter-unreadable"]).toBe("the affected stop check's block counter is unreadable");
+  });
+
   it("is the gate the decision applies: a check failing alone blocks exactly when it is admitted, at the count it names", () => {
     const issuedArb = fc.oneof(fc.integer({ min: 0, max: CAP + 2 }).map(count), fc.constant(unreadable("lost")));
     fc.assert(fc.property(fc.constantFrom(...STOP_CHECK_NAMES), issuedArb, (name, issued) => {

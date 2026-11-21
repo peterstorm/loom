@@ -16,10 +16,14 @@
  *   Task or of other bytes is stale.
  * - `TaskRecordObservation` and `TaskRecordStopVerdict`: what a stop shell
  *   observed for a record-reading arm, and what the arm decides from it.
+ * - `TASK_RECORD_CHECK_DEADLINE_MS`, `TASK_RECORD_CHECK_BASH_TIMEOUT_MS` and
+ *   `taskRecordAnswerLines`: the budget both helpers run under, and how both
+ *   arms end their part of a block message.
  *
  * Pure and total: no I/O, no clock, no throw.
  */
 
+import { blocksRemainingLine } from "./affected-stop-check";
 import { sha256Bytes, sha256Hex } from "./digest";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import { compareStrings } from "./ordering";
@@ -146,3 +150,17 @@ export type TaskRecordStopVerdict<Cause> =
   | Readonly<{ kind: "passed" }>
   | Readonly<{ kind: "note"; note: string }>
   | Readonly<{ kind: "failing"; cause: Cause; command: string }>;
+
+/** The longest one record check's helper run (`helper mutation-check`, `helper owner-check`) may take; a run it cannot fit is not judged. */
+export const TASK_RECORD_CHECK_DEADLINE_MS = 480_000;
+
+/** The tool-call timeout an implementer gives that helper: the deadline, plus room to open and remove its worktrees. */
+export const TASK_RECORD_CHECK_BASH_TIMEOUT_MS = 600_000;
+
+/** How a record arm's part of a block message ends: the one command that answers it, and how many more blocks it may issue. */
+export const taskRecordAnswerLines = (command: string, blocksRemaining: number): readonly string[] => [
+  "",
+  `Run it as one Bash call with a timeout of ${TASK_RECORD_CHECK_BASH_TIMEOUT_MS} ms, then your final verification run:`,
+  `  ${command}`,
+  blocksRemainingLine(blocksRemaining),
+];
