@@ -14,7 +14,7 @@
  */
 
 import { isAbsolute, join, resolve } from "node:path";
-import { parseErr, parseOk, type ParseResult } from "./machine";
+import { parseErr, parseOk, toParseResult, type ParseResult } from "./core/parse-result";
 import {
   isWaveReviewRunRetirement,
   parseStoredNewTestEvidence,
@@ -258,7 +258,7 @@ function parseSpecCheckField(v: unknown):
   | Readonly<{ ok: false; error: string }> {
   if (v === undefined) return { ok: true, value: undefined };
   const parsed = parseStoredSpecCheck(v);
-  return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, error: parsed.errors.join("; ") };
+  return toParseResult(parsed);
 }
 
 /**
@@ -423,7 +423,7 @@ function parseWaveSpecCheckSlotAuthority(
   if (fieldsError !== null) return parseErr(fieldsError);
   const slotId = parseSlotId(record.slot_id);
   if (!slotId.ok) {
-    return parseErr(`wave_review_epoch.specCheckSlotAuthority.slot_id: ${slotId.error.message}`);
+    return toParseResult(slotId, "wave_review_epoch.specCheckSlotAuthority.slot_id");
   }
   if (record.attempted !== 1 && record.attempted !== 2) {
     return parseErr("wave_review_epoch.specCheckSlotAuthority.attempted must be 1 or 2");
@@ -457,7 +457,7 @@ function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthorit
   );
   if (fieldsError !== null) return parseErr(fieldsError);
   const runId = parseOrchestrationRunId(record.runId);
-  if (!runId.ok) return parseErr(`wave_review_epoch.runId: ${runId.error.message}`);
+  if (!runId.ok) return toParseResult(runId, "wave_review_epoch.runId");
   const wave = parseIntegerBound(
     record.wave,
     "wave_review_epoch.wave",
@@ -466,7 +466,7 @@ function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthorit
   );
   if (!wave.ok) return parseErr(wave.error);
   const batchEpoch = parseArtifactDigest(record.batchEpoch);
-  if (!batchEpoch.ok) return parseErr(`wave_review_epoch.batchEpoch: ${batchEpoch.error.message}`);
+  if (!batchEpoch.ok) return toParseResult(batchEpoch, "wave_review_epoch.batchEpoch");
   const specCheckDocuments = parseWaveSpecCheckDocuments(record.specCheckDocuments);
   if (!specCheckDocuments.ok) return specCheckDocuments;
   const specCheckSlotAuthority = parseWaveSpecCheckSlotAuthority(record.specCheckSlotAuthority);
@@ -511,7 +511,7 @@ function parseActiveWaveGateTerminalOutcome(
       return parseErr("active_wave_gate.terminalOutcome done must contain exactly kind and outcome");
     }
     const outcome = parseArtifactRef(terminal.outcome);
-    if (!outcome.ok) return parseErr(`active_wave_gate.terminalOutcome.outcome: ${outcome.error.message}`);
+    if (!outcome.ok) return toParseResult(outcome, "active_wave_gate.terminalOutcome.outcome");
     if (outcome.value.runId !== runId) return parseErr("active_wave_gate done outcome belongs to a different run");
     return parseOk(Object.freeze({ kind: "done", outcome: outcome.value }));
   }
@@ -521,7 +521,7 @@ function parseActiveWaveGateTerminalOutcome(
       return parseErr("active_wave_gate.terminalOutcome terminal-blocked must contain exactly kind and diagnostic");
     }
     const diagnostic = parseBlockedDiagnostic(terminal.diagnostic);
-    if (!diagnostic.ok) return parseErr(`active_wave_gate.terminalOutcome.diagnostic: ${diagnostic.error.message}`);
+    if (!diagnostic.ok) return toParseResult(diagnostic, "active_wave_gate.terminalOutcome.diagnostic");
     if (diagnostic.value.kind !== "terminal-blocked") {
       return parseErr("active_wave_gate terminal-blocked outcome requires a terminal diagnostic");
     }
@@ -561,9 +561,9 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
   if (record.schemaVersion !== 1) return parseErr("active_wave_gate.schemaVersion must be 1");
   if (record.kind !== "active-wave-gate") return parseErr("active_wave_gate.kind must be active-wave-gate");
   const runId = parseOrchestrationRunId(record.runId);
-  if (!runId.ok) return parseErr(`active_wave_gate.runId: ${runId.error.message}`);
+  if (!runId.ok) return toParseResult(runId, "active_wave_gate.runId");
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
-  if (!authorityDigest.ok) return parseErr(`active_wave_gate.authorityDigest: ${authorityDigest.error.message}`);
+  if (!authorityDigest.ok) return toParseResult(authorityDigest, "active_wave_gate.authorityDigest");
   const wave = parseIntegerBound(
     record.wave,
     "active_wave_gate.wave",
@@ -618,9 +618,9 @@ function parseCompletedWaveGateReceipt(
   const effectId = parseEffectId(receipt.effectId);
   const receiptRunId = parseOrchestrationRunId(receipt.runId);
   const stateDigest = parseArtifactDigest(receipt.stateDigest);
-  if (!effectId.ok) return parseErr(`wave_gate_history.completionReceipt.effectId: ${effectId.error.message}`);
-  if (!receiptRunId.ok) return parseErr(`wave_gate_history.completionReceipt.runId: ${receiptRunId.error.message}`);
-  if (!stateDigest.ok) return parseErr(`wave_gate_history.completionReceipt.stateDigest: ${stateDigest.error.message}`);
+  if (!effectId.ok) return toParseResult(effectId, "wave_gate_history.completionReceipt.effectId");
+  if (!receiptRunId.ok) return toParseResult(receiptRunId, "wave_gate_history.completionReceipt.runId");
+  if (!stateDigest.ok) return toParseResult(stateDigest, "wave_gate_history.completionReceipt.stateDigest");
   if (receiptRunId.value !== runId) return parseErr("wave_gate_history completion receipt belongs to a different run");
   if (receipt.committedRevision !== revision) return parseErr("wave_gate_history completion receipt revision must equal terminal revision");
   return parseOk(Object.freeze({
@@ -638,8 +638,8 @@ function parseCompletedWaveGateCommon(record: Record<string, unknown>): ParseRes
   }
   const runId = parseOrchestrationRunId(record.runId);
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
-  if (!runId.ok) return parseErr(`wave_gate_history.runId: ${runId.error.message}`);
-  if (!authorityDigest.ok) return parseErr(`wave_gate_history.authorityDigest: ${authorityDigest.error.message}`);
+  if (!runId.ok) return toParseResult(runId, "wave_gate_history.runId");
+  if (!authorityDigest.ok) return toParseResult(authorityDigest, "wave_gate_history.authorityDigest");
   const wave = parseIntegerBound(
     record.wave,
     "wave_gate_history.wave",
@@ -667,7 +667,7 @@ function parseCompletedWaveGateSuite(
 ): ParseResult<AcceptedWaveCompletionReceipt> {
   const completionSuite = parseAcceptedWaveCompletionReceipt(record.completionSuite);
   if (!completionSuite.ok) {
-    return parseErr(`wave_gate_history.completionSuite: ${completionSuite.error.errors.join("; ")}`);
+    return toParseResult(completionSuite, "wave_gate_history.completionSuite");
   }
   const suite = completionSuite.value;
   if (suite.runId !== common.runId || suite.wave !== common.wave ||
@@ -726,14 +726,14 @@ function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<OrphanedWave
   const replacementRunId = parseOrchestrationRunId(record.replacementRunId);
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
   const replacementAuthorityDigest = parseArtifactDigest(record.replacementAuthorityDigest);
-  if (!runId.ok) return parseErr(`orphaned_wave_gate_history.runId: ${runId.error.message}`);
-  if (!replacementRunId.ok) return parseErr(`orphaned_wave_gate_history.replacementRunId: ${replacementRunId.error.message}`);
+  if (!runId.ok) return toParseResult(runId, "orphaned_wave_gate_history.runId");
+  if (!replacementRunId.ok) return toParseResult(replacementRunId, "orphaned_wave_gate_history.replacementRunId");
   if (runId.value === replacementRunId.value) {
     return parseErr("orphaned_wave_gate_history replacement run must differ from retired run");
   }
-  if (!authorityDigest.ok) return parseErr(`orphaned_wave_gate_history.authorityDigest: ${authorityDigest.error.message}`);
+  if (!authorityDigest.ok) return toParseResult(authorityDigest, "orphaned_wave_gate_history.authorityDigest");
   if (!replacementAuthorityDigest.ok) {
-    return parseErr(`orphaned_wave_gate_history.replacementAuthorityDigest: ${replacementAuthorityDigest.error.message}`);
+    return toParseResult(replacementAuthorityDigest, "orphaned_wave_gate_history.replacementAuthorityDigest");
   }
   const wave = parseIntegerBound(
     record.wave,
@@ -785,9 +785,9 @@ function parseRetiredWaveReviewRun(raw: unknown, label: string): ParseResult<Ret
     return parseErr(`${label} has an invalid schema, kind, or retirement`);
   }
   const runId = parseOrchestrationRunId(record.runId);
-  if (!runId.ok) return parseErr(`${label}.runId: ${runId.error.message}`);
+  if (!runId.ok) return toParseResult(runId, `${label}.runId`);
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
-  if (!authorityDigest.ok) return parseErr(`${label}.authorityDigest: ${authorityDigest.error.message}`);
+  if (!authorityDigest.ok) return toParseResult(authorityDigest, `${label}.authorityDigest`);
   const wave = parseIntegerBound(record.wave, `${label}.wave`, 1, "an integer >= 1 within the safe-integer range");
   if (!wave.ok) return parseErr(wave.error);
   return parseOk(Object.freeze({
@@ -828,7 +828,7 @@ function parseSpecTraceSupersededBy(
   if (raw === null) return parseOk(null);
   const parsedSupersededBy = parseOrchestrationRunId(raw);
   if (!parsedSupersededBy.ok) {
-    return parseErr(`${label}.supersededBy: ${parsedSupersededBy.error.message}`);
+    return toParseResult(parsedSupersededBy, `${label}.supersededBy`);
   }
   if (parsedSupersededBy.value === runId) {
     return parseErr(`${label} run cannot supersede itself`);
@@ -854,9 +854,9 @@ function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<SpecTraceWa
   }
   const runId = parseOrchestrationRunId(record.runId);
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
-  if (!runId.ok) return parseErr(`spec_trace_wave_gate_retirements.runId: ${runId.error.message}`);
+  if (!runId.ok) return toParseResult(runId, "spec_trace_wave_gate_retirements.runId");
   if (!authorityDigest.ok) {
-    return parseErr(`spec_trace_wave_gate_retirements.authorityDigest: ${authorityDigest.error.message}`);
+    return toParseResult(authorityDigest, "spec_trace_wave_gate_retirements.authorityDigest");
   }
   const wave = parseIntegerBound(
     record.wave,
@@ -953,7 +953,7 @@ function parseSpecTraceAmendment(raw: unknown): ParseResult<SpecTraceAmendment> 
   if (!wave.ok) return parseErr(wave.error);
   const retiredRunId = record.retiredRunId === null ? null : parseOrchestrationRunId(record.retiredRunId);
   if (retiredRunId !== null && !retiredRunId.ok) {
-    return parseErr(`spec_trace_amendments.retiredRunId: ${retiredRunId.error.message}`);
+    return toParseResult(retiredRunId, "spec_trace_amendments.retiredRunId");
   }
   if (!Array.isArray(record.changes) || record.changes.length === 0) {
     return parseErr("spec_trace_amendments.changes must be a non-empty array");
@@ -1175,7 +1175,7 @@ function parseTaskReopeningAudit(
   if (!reason.ok) return reason;
   const abandonedRunId = record.abandonedRunId === null ? null : parseOrchestrationRunId(record.abandonedRunId);
   if (abandonedRunId !== null && !abandonedRunId.ok) {
-    return parseErr(`${label}.abandonedRunId: ${abandonedRunId.error.message}`);
+    return toParseResult(abandonedRunId, `${label}.abandonedRunId`);
   }
   // Only a tests-only reopening records what it needed (ADR-0093): an absent
   // field is the default full re-implementation, never spelled out.
@@ -1447,7 +1447,7 @@ const FORWARD_FIX_AUDIT_FIELDS = [
 function parseNullableRunId(raw: unknown, label: string): ParseResult<OrchestrationRunId | null> {
   if (raw === null) return parseOk(null);
   const runId = parseOrchestrationRunId(raw);
-  return runId.ok ? parseOk(runId.value) : parseErr(`${label}: ${runId.error.message}`);
+  return runId.ok ? parseOk(runId.value) : toParseResult(runId, label);
 }
 
 /** The audit's sealed paths: non-empty, distinct and canonical. */
@@ -1456,7 +1456,7 @@ function parseForwardFixSealedPaths(raw: unknown, label: string): ParseResult<No
   const paths: string[] = [];
   for (const [index, entry] of raw.entries()) {
     const path = parseReviewPath(entry, `${label}[${index}]`);
-    if (!path.ok) return parseErr(path.errors.join("; "));
+    if (!path.ok) return toParseResult(path);
     if (paths.includes(path.value)) return parseErr(`${label} names '${path.value}' more than once`);
     paths.push(path.value);
   }
@@ -1690,20 +1690,6 @@ function present<K extends string, V>(field: K, value: V | undefined): Partial<R
   return value === undefined ? absent : { ...absent, [field]: value };
 }
 
-/** A leaf parser's diagnostics as this boundary's one error: every diagnostic, in order. */
-function fromErrors<T>(
-  result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; errors: readonly string[] }>,
-): ParseResult<T> {
-  return result.ok ? parseOk(result.value) : parseErr(result.errors.join("; "));
-}
-
-/** `fromErrors` for the leaf parsers that wrap their diagnostics in an error record. */
-function fromErrorList<T>(
-  result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: Readonly<{ errors: readonly string[] }> }>,
-): ParseResult<T> {
-  return result.ok ? parseOk(result.value) : parseErr(result.error.errors.join("; "));
-}
-
 /** A stored Task's id and its position, or why the entry is no Task. */
 function parseStoredTaskIdentity(
   raw: unknown,
@@ -1859,7 +1845,7 @@ function parseStoredFileList(raw: unknown, label: string): ParseResult<readonly 
 
 /** A stored artifact baseline field under `label`: absent, or the parsed baseline. */
 function parseStoredBaseline(raw: unknown, label: string): ParseResult<readonly DeclaredArtifactBaseline[] | undefined> {
-  return raw === undefined ? parseOk(undefined) : fromErrors(parseDeclaredArtifactBaseline(raw, label));
+  return raw === undefined ? parseOk(undefined) : toParseResult(parseDeclaredArtifactBaseline(raw, label));
 }
 
 /** Whether a baseline's artifacts are `fileList`, in order: exactly, or as its prefix. */
@@ -1939,7 +1925,7 @@ type StoredAttemptLineage = Readonly<{
 function parseStoredAttemptLineage(t: Readonly<Record<string, unknown>>, label: string, id: TaskId): ParseResult<StoredAttemptLineage> {
   const history = t.implementation_attempt_history === undefined
     ? parseOk(undefined)
-    : fromErrorList(parseImplementationAttemptHistory(t.implementation_attempt_history, `${label}: implementation_attempt_history`));
+    : toParseResult(parseImplementationAttemptHistory(t.implementation_attempt_history, `${label}: implementation_attempt_history`));
   if (!history.ok) return history;
   if (history.value?.some((receipt) => receipt.taskId !== id)) {
     return parseErr(`${label}: implementation_attempt_history receipt taskId must equal ${id}`);
@@ -1974,7 +1960,7 @@ function parseStoredRetryMarkers(
   }
   const markers = { implementation_retry_protocol: 2 as const, implementation_retry_history_start: start };
   if (predecessor === undefined) return parseOk(markers);
-  const receiptId = fromErrorList(
+  const receiptId = toParseResult(
     parseImplementationSettlementReceiptId(predecessor, `${label}: implementation_retry_predecessor_receipt_id`),
   );
   return receiptId.ok ? parseOk({ ...markers, implementation_retry_predecessor_receipt_id: receiptId.value }) : receiptId;
@@ -2011,7 +1997,7 @@ function parseStoredActiveAttempt(
   }
   if (t.proof === undefined) return parseErr(`${label}: active_implementation_attempt requires modern authored Proof`);
   const parsed = parseImplementationAttemptAuthority(t.active_implementation_attempt);
-  if (!parsed.ok) return parseErr(`${label}: invalid active_implementation_attempt: ${parsed.error.errors.join("; ")}`);
+  if (!parsed.ok) return toParseResult(parsed, `${label}: invalid active_implementation_attempt`);
   const authority = parsed.value;
   if (authority.taskId !== task.id || authority.wave !== task.wave) {
     return parseErr(`${label}: active_implementation_attempt must match Task id and Wave`);
@@ -2044,7 +2030,7 @@ function parseStoredAttemptContext(
     return parseErr(`${label}: protocol-2 active implementation requires active_implementation_context`);
   }
   if (t.active_implementation_context === undefined) return parseOk(undefined);
-  const context = fromErrors(parseImplementationAttemptContext(t.active_implementation_context, `${label}: active_implementation_context`));
+  const context = toParseResult(parseImplementationAttemptContext(t.active_implementation_context, `${label}: active_implementation_context`));
   if (!context.ok) return context;
   if (!implementationAttemptContextMatchesAuthority(context.value, authority)) {
     return parseErr(`${label}: active_implementation_context must match active_implementation_attempt`);
@@ -2263,7 +2249,7 @@ function issuedReviewPacketsError(raw: unknown, label: string, id: TaskId): stri
   const packetPaths = new Set<string>();
   for (const [packetIndex, entry] of raw.entries()) {
     const packetLabel = `${label}: issued_review_packets[${packetIndex}]`;
-    const registration = fromErrors(parseIssuedReviewPacketRegistration(entry, packetLabel));
+    const registration = toParseResult(parseIssuedReviewPacketRegistration(entry, packetLabel));
     if (!registration.ok) return registration.error;
     const { task_id: taskId, packet_id: packetId, packet_path: packetPath } = registration.value;
     if (taskId !== id) return `${packetLabel}.task_id must equal task id ${id}`;
@@ -2404,10 +2390,10 @@ function liveTestsOnlyScope(
   status: TaskStatus,
   fileList: readonly string[],
 ): ParseResult<TestsOnlyReading> {
-  const parsed = fromErrors(parseTestsOnlyScope(t.reopen_scope, fileList, "reopen_scope"));
+  const parsed = toParseResult(parseTestsOnlyScope(t.reopen_scope, fileList, "reopen_scope"));
   if (!parsed.ok) return parsed;
   if (status !== "pending") return parseErr("a tests-only reopen_scope requires pending status; its lineage's settlement ends it");
-  const baseline = t.reopen_baseline === undefined ? parseOk(undefined) : fromErrors(parseReopenBaseline(t.reopen_baseline, fileList));
+  const baseline = t.reopen_baseline === undefined ? parseOk(undefined) : toParseResult(parseReopenBaseline(t.reopen_baseline, fileList));
   if (!baseline.ok) return baseline;
   if (baseline.value === undefined && (t.active_implementation_attempt !== undefined || t.attempt_artifact_baseline !== undefined)) {
     return parseErr("a registered tests-only attempt requires its captured reopen_baseline");
@@ -2496,7 +2482,7 @@ function parseStoredLifecycle(
     });
     return parseOk({ lifecycle: revalidation ? { status, proof, revalidation_required: true } : { status, proof }, reopening: {} });
   }
-  const proof = fromErrors(parseTaskProof(t.proof));
+  const proof = toParseResult(parseTaskProof(t.proof));
   if (!proof.ok) return parseErr(`${label}: invalid proof: ${proof.error}`);
   const testsOnly = taskTestsOnlyScope(t, proof.value, { id, status, fileList }, verification, scope, label);
   if (!testsOnly.ok) return testsOnly;
@@ -2527,7 +2513,7 @@ function parseStoredTaskStatus(
 ): ParseResult<Readonly<{ status: TaskStatus; verification: ParsedTaskVerificationPolicy }>> {
   const { status, implementation_attestation: attestation } = t;
   if (!isTaskStatus(status)) return parseErr(`${label}: status ${JSON.stringify(status)} is not one of ${TASK_STATUSES.join(", ")}`);
-  const verification = fromErrors(parseTaskVerificationPolicy(t, label));
+  const verification = toParseResult(parseTaskVerificationPolicy(t, label));
   if (!verification.ok) return verification;
   if (attestation !== undefined && attestation !== true) return parseErr(`${label}: implementation_attestation must be true when present`);
   const distillError = taskDistillError(t, label, verification.value);
@@ -2715,7 +2701,7 @@ function parseAuthoritySlot(
   }
   if (raw.agent !== expectedAgent) return parseErr(`${label}.agent must match expected_agents in order`);
   const slotId = parseSlotId(raw.slot_id);
-  return slotId.ok ? parseOk({ slotId: slotId.value, attempted: raw.attempted }) : parseErr(`${label}.slot_id: ${slotId.error.message}`);
+  return slotId.ok ? parseOk({ slotId: slotId.value, attempted: raw.attempted }) : toParseResult(slotId, `${label}.slot_id`);
 }
 
 /**
@@ -3082,7 +3068,7 @@ function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerific
   const parsed = parseFrozenVerificationManifest(raw);
   return parsed.ok
     ? parseOk(parsed.value)
-    : parseErr(`verification_manifest: ${parsed.error.errors.join("; ")}`);
+    : toParseResult(parsed, "verification_manifest");
 }
 
 /**
@@ -3212,7 +3198,7 @@ function parseActiveWaveCompletionSuiteField(
   if (raw === undefined) return parseOk(undefined);
   const parsed = parseAcceptedWaveCompletionReceipt(raw);
   if (!parsed.ok) {
-    return parseErr(`active_wave_completion_suite: ${parsed.error.errors.join("; ")}`);
+    return toParseResult(parsed, "active_wave_completion_suite");
   }
   if (activeWaveGate === undefined || activeWaveGate.terminalOutcome !== null) {
     return parseErr("active_wave_completion_suite requires a nonterminal active_wave_gate");
@@ -3534,7 +3520,7 @@ function exactRecord(
 
 /** A repository path as every State File path is stored: canonical and relative. */
 function storedPath(raw: unknown, label: string): ParseResult<string> {
-  return fromErrors(parseReviewPath(raw, label));
+  return toParseResult(parseReviewPath(raw, label));
 }
 
 function parseIdentifierField(raw: unknown, label: string): ParseResult<Identifier> {
