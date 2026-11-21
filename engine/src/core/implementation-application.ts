@@ -36,7 +36,6 @@ import {
   redThenGreenScope,
   taskRedThenGreenEra,
   type ProofEvaluationPolicy,
-  type ProofObligation,
   type RedThenGreenEra,
 } from "./proof-obligations";
 import type { RedThenGreenObservation } from "./red-then-green-types";
@@ -364,11 +363,11 @@ export type IncomingImplementationEvidence = Readonly<{
  * Whether a Task owes I6 (`red-then-green`), answered once for settlement,
  * reconcile and the brief.
  *
- * The frozen Proof is authoritative: population derived its obligations from
- * the Task's era (`taskRedThenGreenEra`: the TaskGraph's frozen-manifest era,
- * or `not-owed` for an Acceptance Contract writer), and the State File load
- * refuses a Task whose stored obligations disagree with that era (INV-6), so a
- * loaded Task's obligations already carry its era. The graph era
+ * The frozen Proof is authoritative: population froze the one duty rule's
+ * answer (`redThenGreenOwing`) into its obligations, and the State File load
+ * refuses a Task whose stored obligations disagree with that rule (INV-6), so
+ * a loaded Task's obligations already carry its duty; this only reads them.
+ * The Red-Then-Green Status asks the rule for a not-owed duty's exemption. The graph era
  * (`frozenRedThenGreenEra`) only supplies the classification an owed Proof is
  * judged by. Their one possible disagreement is its own named arm, never a
  * silent "not owed":
@@ -384,14 +383,11 @@ export type RedThenGreenDuty =
 
 const NOT_OWED: RedThenGreenDuty = freeze({ kind: "not-owed" });
 
-const owesRedThenGreen = (obligations: readonly ProofObligation[]): boolean =>
-  obligations.some(({ kind }) => kind === "red-then-green");
-
 export function redThenGreenDuty(
   task: Task,
   manifest: FrozenVerificationManifest | undefined,
 ): RedThenGreenDuty {
-  if (!owesRedThenGreen(task.proof.obligations)) return NOT_OWED;
+  if (!task.proof.obligations.some(({ kind }) => kind === "red-then-green")) return NOT_OWED;
   const era = frozenRedThenGreenEra(manifest);
   // The frozen Proof has decided the duty; the era supplies the classification
   // it is judged by, and a pre-I6 era is the `classification-unfrozen` disagreement.

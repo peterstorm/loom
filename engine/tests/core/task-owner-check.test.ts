@@ -29,7 +29,6 @@ import {
   renderTaskOwnerCheckBlock,
   renderTaskOwnerCheckReport,
   sortTaskOwnerFindings,
-  TASK_OWNER_CHECK_BASH_TIMEOUT_MS,
   taskOwnerCheckDigest,
   taskOwnerCheckDuty,
   taskOwnerCheckRecordJson,
@@ -43,7 +42,13 @@ import {
   type TaskOwnerCheckObservation,
   type TaskOwnerCheckResult,
 } from "../../src/core/task-owner-check";
-import { TASK_RECORD_CHECK_OFF, TASK_RECORD_NOT_RUN, taskRecordStanding, type TaskRecordDigest } from "../../src/core/task-record";
+import {
+  TASK_RECORD_CHECK_BASH_TIMEOUT_MS,
+  TASK_RECORD_CHECK_OFF,
+  TASK_RECORD_NOT_RUN,
+  taskRecordStanding,
+  type TaskRecordDigest,
+} from "../../src/core/task-record";
 import type { Task } from "../../src/types";
 import { contract, task } from "../fixtures/contract-status-fixtures";
 import { ownerObligation } from "../fixtures/owner-obligation";
@@ -409,8 +414,9 @@ describe("what the implementer reads", () => {
   it("the block repeats the command with its timeout and the blocks left", () => {
     const block = renderTaskOwnerCheckBlock({ kind: "not-run" }, "CMD", 1);
     expect(block).toContain("The check has not run for this Task.");
-    expect(block).toContain(`timeout of ${TASK_OWNER_CHECK_BASH_TIMEOUT_MS} ms`);
+    expect(block).toContain(`timeout of ${TASK_RECORD_CHECK_BASH_TIMEOUT_MS} ms`);
     expect(block).toContain("\n  CMD\n");
     expect(block).toContain("blocks at most 1 more time(s)");
+    expect(block.endsWith("\n\nRun it as one Bash call with a timeout of 600000 ms, then your final verification run:\n  CMD\nThis check blocks at most 1 more time(s); after that your stop proceeds and the Wave Gate judges.")).toBe(true);
   });
 });

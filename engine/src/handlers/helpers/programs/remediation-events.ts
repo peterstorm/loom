@@ -7,7 +7,7 @@ import {
 } from "../../../core/defect-family-accounting";
 import type { ArtifactDigest, DomainResult } from "../../../core/orchestration-contract";
 import { sha256Bytes } from "../../../core/digest";
-import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../../../core/structured-test-report";
+import { MAX_STRUCTURED_REPORT_BYTES, readTestReport, reportCounts } from "../../../core/structured-test-report";
 import type {
   RemediationCheckExecution,
   RemediationReportObservation,
@@ -208,7 +208,7 @@ export function replayRemediationCheckObservedEvent(
       report.value.path !== authorized.command.reportPolicy.path) {
     return failure("produced remediation report path, byte length, digest, or mode is invalid");
   }
-  const parsed = parseStructuredTestReportBytes(bytes);
+  const parsed = reportCounts(readTestReport(bytes));
   if (!parsed.ok) return terminal(authorized.command.checkId, parsed.error.message);
   const observed = parseRegisteredRemediationCheckObservation(authorized, candidate, candidate, {
     kind: "remediation-check-observed",

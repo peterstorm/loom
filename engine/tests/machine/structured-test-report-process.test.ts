@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { parseStructuredTestReportBytes } from "../../src/core/structured-test-report";
+import { readTestReport, reportCounts } from "../../src/core/structured-test-report";
 import { ENGINE } from "../fixtures/repository-roots";
 
 // These reporter smokes use disposable directories only, never a Loom Run writer.
@@ -27,7 +27,7 @@ describe("real reporter bytes at the parser seam", () => {
       expect(child.error).toBeUndefined();
       expect(child.signal).toBeNull();
       expect(child.status).toBe(exit);
-      expect(parseStructuredTestReportBytes(child.stdout)).toEqual({ ok: true, value: { total, failed, source: "junit-xml" } });
+      expect(reportCounts(readTestReport(child.stdout))).toEqual({ ok: true, value: { total, failed, source: "junit-xml" } });
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -48,7 +48,7 @@ describe("real reporter bytes at the parser seam", () => {
       expect(child.error).toBeUndefined();
       expect(child.signal).toBeNull();
       expect(child.status, child.stderr.toString()).toBe(exit);
-      expect(parseStructuredTestReportBytes(readFileSync(report))).toEqual({ ok: true, value: { total, failed, source: "vitest-json" } });
+      expect(reportCounts(readTestReport(readFileSync(report)))).toEqual({ ok: true, value: { total, failed, source: "vitest-json" } });
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

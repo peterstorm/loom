@@ -28,8 +28,7 @@ import {
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
 import { DECISION_RECORD_AGENT, DISTILL_AGENT } from "../../src/core/model-profiles";
 import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
-import { TASK_MUTATION_BASH_TIMEOUT_MS } from "../../src/core/task-mutation-check";
-import { TASK_OWNER_CHECK_BASH_TIMEOUT_MS } from "../../src/core/task-owner-check";
+import { TASK_RECORD_CHECK_BASH_TIMEOUT_MS } from "../../src/core/task-record";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { IMPLEMENTATION_BRIEF_TEMPLATE, renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
@@ -321,7 +320,7 @@ describe("the Task mutation check in a brief (ADR-0071)", () => {
 
   it("tells an implementer that owes it the one command, its timeout, and the files it mutates", () => {
     const text = policy(pending());
-    expect(text).toContain(`${HEADING} Once your tests pass and before your final verification run, run this as one Bash call with a timeout of ${TASK_MUTATION_BASH_TIMEOUT_MS} ms:`);
+    expect(text).toContain(`${HEADING} Once your tests pass and before your final verification run, run this as one Bash call with a timeout of ${TASK_RECORD_CHECK_BASH_TIMEOUT_MS} ms:`);
     expect(text).toContain(`\n\`${loomCommandsAt("/loom").mutationCheck("T5")}\`\n`);
     expect(text).toContain("at most 8 mutants");
     expect(text).toContain("an equivalent mutant");
@@ -368,7 +367,7 @@ describe("the Task owner check in a brief (ADR-0092)", () => {
   it("tells a Task writing the owner and the matrix test the command, its timeout, what it checks and how to answer", () => {
     const text = policyOf(writer([OWNER, MATRIX]), [PRICING]);
     expect(text).toContain(`${HEADING} Your Task writes the family of an owned Invariant the Wave Gate verifies.`);
-    expect(text).toContain(`a timeout of ${TASK_OWNER_CHECK_BASH_TIMEOUT_MS} ms:\n\`${loomCommandsAt("/loom").ownerCheck("T5")}\`\n`);
+    expect(text).toContain(`a timeout of ${TASK_RECORD_CHECK_BASH_TIMEOUT_MS} ms:\n\`${loomCommandsAt("/loom").ownerCheck("T5")}\`\n`);
     expect(text).toContain("at most 24 per Invariant");
     // The sibling is a concurrent Task's work, so the stop asks for the owner only.
     expect(text).toContain(`- INV-4 (Prices come only from the pricing module): the matrix test \`${MATRIX}\` must import \`${OWNER}\`, and every mutant`);

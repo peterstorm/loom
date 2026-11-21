@@ -2,25 +2,6 @@
 
 import type { TestReportSummary } from "../core/structured-test-report";
 
-export {
-  bunRunSummary,
-  mergeSummaries,
-  parseBunConsoleCollectionErrors,
-  parseJunitXml,
-  parseReportSource,
-  parseReportCounts,
-  parseReportSummary,
-  parseStructuredTestReportBytes,
-  parseVitestJson,
-  readJunitReport,
-  type JunitReportRead,
-  type ReportCounts,
-  type StructuredReportError,
-  type StructuredReportErrorReason,
-  type StructuredReportParseResult,
-  type TestReportSummary,
-} from "../core/structured-test-report";
-
 // --- Pure judgment ---
 
 /**

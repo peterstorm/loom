@@ -32,8 +32,6 @@ import {
   recordedTaskMutation,
   renderTaskMutationBlock,
   renderTaskMutationReport,
-  TASK_MUTATION_BASH_TIMEOUT_MS,
-  TASK_MUTATION_DEADLINE_MS,
   TASK_MUTATION_OFF_TEXT,
   taskMutationDigest,
   taskMutationDuty,
@@ -56,7 +54,14 @@ import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { distillTaskFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { junitReport, mutationManifest, START_SHA, talliedResult, type JunitCase } from "../fixtures/task-mutation";
 import { mochaXunit, RUN_ROOT } from "../fixtures/mocha-report";
-import { TASK_RECORD_CHECK_OFF, TASK_RECORD_NOT_RUN, taskRecordStanding, type TaskFileBytes } from "../../src/core/task-record";
+import {
+  TASK_RECORD_CHECK_BASH_TIMEOUT_MS,
+  TASK_RECORD_CHECK_DEADLINE_MS,
+  TASK_RECORD_CHECK_OFF,
+  TASK_RECORD_NOT_RUN,
+  taskRecordStanding,
+  type TaskFileBytes,
+} from "../../src/core/task-record";
 
 type Graph = Pick<TaskGraph, "tasks" | "verification_manifest" | "acceptance_contracts">;
 
@@ -551,8 +556,9 @@ describe("what the implementer reads", () => {
     const block = renderTaskMutationBlock(cause, COMMAND, 1);
     expect(block).toContain(why);
     expect(block).toContain(`  ${COMMAND}`);
-    expect(block).toContain(`timeout of ${TASK_MUTATION_BASH_TIMEOUT_MS} ms`);
+    expect(block).toContain(`timeout of ${TASK_RECORD_CHECK_BASH_TIMEOUT_MS} ms`);
     expect(block).toContain("at most 1 more time(s)");
+    expect(block.endsWith(`\n\nRun it as one Bash call with a timeout of 600000 ms, then your final verification run:\n  ${COMMAND}\nThis check blocks at most 1 more time(s); after that your stop proceeds and the Wave Gate judges.`)).toBe(true);
   });
 
   it("a block for survivors lists them as the helper does", () => {
@@ -563,7 +569,7 @@ describe("what the implementer reads", () => {
   });
 
   it("leaves the tool call room beyond the run's own deadline", () => {
-    expect(TASK_MUTATION_DEADLINE_MS).toBe(480_000);
-    expect(TASK_MUTATION_BASH_TIMEOUT_MS).toBeGreaterThan(TASK_MUTATION_DEADLINE_MS);
+    expect(TASK_RECORD_CHECK_DEADLINE_MS).toBe(480_000);
+    expect(TASK_RECORD_CHECK_BASH_TIMEOUT_MS).toBeGreaterThan(TASK_RECORD_CHECK_DEADLINE_MS);
   });
 });

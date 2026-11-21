@@ -67,6 +67,10 @@ _Avoid_: Test run, CI result, lint result
 A read-only statement of which project checks are configured, independent of whether any passed. A Wave with only reserved checks may advance, but cannot claim that project verification passed.
 _Avoid_: Test coverage, project-check pass, verification waiver, persisted coverage flag
 
+**Test Report Read**:
+The one read of a structured test report's bytes (`readTestReport`), from which every reader projects what it needs: the declared count (every declared testcase, skipped included, with per-file results) a TestRun fact's summary carries; the executed count (only testcases that ran) a Completion Check Result's counts carry; and a JUnit report's testcases. The two counting rules accept different reports and can disagree, so neither is derived from the other.
+_Avoid_: Legacy parser, strict parser, report summary (alone — that is the declared-count projection)
+
 ### Test-first proof
 
 **Red-Then-Green Obligation**:

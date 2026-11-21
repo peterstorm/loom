@@ -21,10 +21,10 @@ import {
   bunRunSummary,
   mergeSummaries,
   parseBunConsoleCollectionErrors,
-  parseJunitXml,
-  parseVitestJson,
-  readJunitReport,
-} from "./test-report";
+  declaredSummary,
+  junitReportRead,
+  readTestReportText,
+} from "../core/structured-test-report";
 
 /** Extract an explicit report path from the command itself (vitest/jest --outputFile). */
 export function outputFileFromCommand(command: string): string | null {
@@ -305,7 +305,7 @@ function readJunitDir(dir: string, nowMs: number, callStartMs: number): DirRepor
       .filter((p) => isFresh(p, nowMs, callStartMs));
     for (const path of fresh) {
       // Exhaustive: a new read kind must decide here whether the dir can still vouch.
-      const refused = match(readJunitReport(readFileSync(path, "utf-8")))
+      const refused = match(junitReportRead(readTestReportText(readFileSync(path, "utf-8"))))
         .with({ kind: "parsed" }, ({ summary }) => {
           summaries.push(summary);
           return false;
@@ -438,7 +438,7 @@ export function findReport(
         process.stderr.write(`findReport: Bun JUnit report '${path}' does not exist\n`);
       } else if (presence === "present" && isFresh(path, nowMs, callStartMs)) {
         try {
-          const parsed = parseJunitXml(readFileSync(path, "utf-8"));
+          const parsed = declaredSummary(readTestReportText(readFileSync(path, "utf-8")), "junit-xml");
           if (parsed) {
             const errors = collectionErrors();
             if (errors.length > 0 && parsed.files.kind !== "recorded") {
@@ -473,7 +473,7 @@ export function findReport(
       noStamp(`--outputFile '${path}'`);
     } else if (explicitReportExists(path, "--outputFile report") && isFresh(path, nowMs, callStartMs)) {
       try {
-        const parsed = parseVitestJson(readFileSync(path, "utf-8"));
+        const parsed = declaredSummary(readTestReportText(readFileSync(path, "utf-8")), "vitest-json");
         if (parsed) return parsed;
         process.stderr.write(`findReport: malformed --outputFile report '${path}'\n`);
       } catch (e) {
@@ -486,7 +486,7 @@ export function findReport(
   }
 
   if (/--reporter[= ]json|--json\b/.test(segment)) {
-    const parsed = parseVitestJson(stdout.trim());
+    const parsed = declaredSummary(readTestReportText(stdout.trim()), "vitest-json");
     if (parsed) return parsed;
     process.stderr.write(
       "findReport: --reporter=json requested but stdout carried no parseable summary\n",

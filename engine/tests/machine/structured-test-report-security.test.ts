@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  mergeSummaries, parseJunitXml, parseReportCounts, parseReportSummary, parseStructuredTestReportBytes, parseVitestJson,
+  declaredSummary, mergeSummaries, parseReportCounts, parseReportSummary, readTestReport, readTestReportText, reportCounts,
 } from "../../src/core/structured-test-report";
 import { reportSummary } from "./report-summary";
 
-const parse = (xml: string) => parseStructuredTestReportBytes(new TextEncoder().encode(xml));
+const parse = (xml: string) => reportCounts(readTestReport(new TextEncoder().encode(xml)));
 const nodeCounts = (tests = 1, pass = 1, fail = 0, cancelled = 0, skipped = 0, todo = 0) =>
   `<!-- tests ${tests} --><!-- pass ${pass} --><!-- fail ${fail} --><!-- cancelled ${cancelled} --><!-- skipped ${skipped} --><!-- todo ${todo} -->`;
 const suite = '<testsuite tests="1" failures="0"><testcase name="real"/></testsuite>';
@@ -59,21 +59,21 @@ describe("structural JUnit authorization", () => {
     `${suite}junk`,
   ])("strict XML rejection also applies to zero-count reports: %s", (xml) => {
     expect(parse(xml).ok).toBe(false);
-    expect(parseJunitXml(xml)).toBeNull();
+    expect(declaredSummary(readTestReportText(xml), "junit-xml")).toBeNull();
   });
 
   it.each([
     `<!-- ${suite} -->`, '<testsuite tests="1">', `<!DOCTYPE testsuite>${suite}`,
   ])("legacy JUnit API also rejects non-report XML: %s", (xml) => {
-    expect(parseJunitXml(xml)).toBeNull();
+    expect(declaredSummary(readTestReportText(xml), "junit-xml")).toBeNull();
   });
 
   it("preserves declared-count legacy APIs without using them for executed P3 totals", () => {
     const xml = '<testsuite tests="3" skipped="2"/>';
-    expect(parseJunitXml(xml)).toEqual({ total: 3, failed: 0, source: "junit-xml" });
+    expect(declaredSummary(readTestReportText(xml), "junit-xml")).toEqual({ total: 3, failed: 0, source: "junit-xml" });
     expect(parse(xml)).toEqual({ ok: true, value: { total: 1, failed: 0, source: "junit-xml" } });
     const json = JSON.stringify({ numTotalTests: 3, numPassedTests: 1, numFailedTests: 0, numPendingTests: 2, numTodoTests: 0 });
-    expect(parseVitestJson(json)).toEqual({ total: 3, failed: 0, source: "vitest-json" });
+    expect(declaredSummary(readTestReportText(json), "vitest-json")).toEqual({ total: 3, failed: 0, source: "vitest-json" });
     expect(parse(json)).toEqual({ ok: true, value: { total: 1, failed: 0, source: "vitest-json" } });
   });
 
@@ -116,7 +116,7 @@ describe("structural JUnit authorization", () => {
 describe("summary minting invariants", () => {
   it("freezes every public summary producer at runtime", () => {
     const summary = reportSummary(1, 0, "junit-xml");
-    for (const value of [summary, parseReportCounts(1, 0, "junit-xml")!, parseJunitXml(suite)!, parseVitestJson('{"numTotalTests":1,"numFailedTests":0}')!, mergeSummaries([summary])!]) {
+    for (const value of [summary, parseReportCounts(1, 0, "junit-xml")!, declaredSummary(readTestReportText(suite), "junit-xml")!, declaredSummary(readTestReportText('{"numTotalTests":1,"numFailedTests":0}'), "vitest-json")!, mergeSummaries([summary])!]) {
       expect(Object.isFrozen(value)).toBe(true);
       expect(Reflect.set(value, "total", 99)).toBe(false);
       expect(Reflect.set(value, "failed", 99)).toBe(false);

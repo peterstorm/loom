@@ -24,13 +24,12 @@ import {
   ACCEPTANCE_BLOCK_HEADING,
   AFFECTED_BLOCK_HEADING,
   AFFECTED_EXCUSED_HEADING,
-  AFFECTED_NOTE_TEXT,
   MUTATION_BLOCK_HEADING,
   OWNER_BLOCK_HEADING,
   STOP_CHECK_NAMES,
-  TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
-  TASK_OWNER_STOP_CHECK_MAX_BLOCKS,
   type AFFECTED_STOP_CHECK_MAX_BLOCKS,
+  type TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
+  type TASK_OWNER_STOP_CHECK_MAX_BLOCKS,
   type AffectedRunVerdict,
   type ExcusedAcceptanceTestcase,
   type FailingAffectedTestcase,
@@ -112,10 +111,14 @@ declare const SOME_CHECKS: unique symbol;
  */
 export type SomeChecks<C extends StopCheckPayloads> = StopCheckSlots<C> & { readonly [SOME_CHECKS]: true };
 
-/** The slots, one per check in check order, each from `at`: the one place a slot record lists the check names. */
-function slotsOf<C extends StopCheckPayloads>(at: <K extends StopCheckName>(name: K) => C[K] | null): StopCheckSlots<C> {
+/** One entry per check, in check order, each from `at`: the one place a record is built by listing the check names. */
+function perCheck<C extends StopCheckPayloads>(at: <K extends StopCheckName>(name: K) => C[K]): { readonly [K in StopCheckName]: C[K] } {
   return freeze({ acceptance: at("acceptance"), affected: at("affected"), mutation: at("mutation"), owner: at("owner") });
 }
+
+/** The slots, one per check, each from `at`. */
+const slotsOf = <C extends StopCheckPayloads>(at: <K extends StopCheckName>(name: K) => C[K] | null): StopCheckSlots<C> =>
+  perCheck<StopCheckSlots<C>>(at);
 
 /** The slots as `SomeChecks`, or null when none is filled. The brand's minting point, reached only with a filled slot. */
 export function someChecks<C extends StopCheckPayloads>(slots: StopCheckSlots<C>): SomeChecks<C> | null {
@@ -152,19 +155,33 @@ export type StopCheckBlockDecision<C extends StopCheckPayloads> =
   | Readonly<{ outcome: "block"; blocking: BlockingChecks<C>; notes: readonly string[] }>
   | Readonly<{ outcome: "proceed"; notes: readonly string[] }>;
 
-const CAP_NOTE: { readonly [K in StopCheckName]: (cap: StopCheckBlockCaps[K]) => string } = freeze({
-  acceptance: (cap) => `the acceptance stop check reached its ${cap}-block cap`,
-  affected: () => AFFECTED_NOTE_TEXT["cap-reached"],
-  mutation: () => `the Task mutation check reached its ${TASK_MUTATION_STOP_CHECK_MAX_BLOCKS}-block cap`,
-  owner: () => `the Task owner check reached its ${TASK_OWNER_STOP_CHECK_MAX_BLOCKS}-block cap`,
+/**
+ * What a stop says of one check: the heading of its part of a block message,
+ * and the subject its fail-open notes name it by ("<subject> reached its
+ * N-block cap", "<subject>'s block counter is unreadable: <reason>"). The
+ * affected check's two notes are also CT-2's `AFFECTED_NOTE_TEXT` entries,
+ * which its tests pin equal.
+ */
+type StopCheckDescriptor = Readonly<{ heading: string; subject: string }>;
+
+/** One descriptor per stop check. */
+const STOP_CHECKS: { readonly [K in StopCheckName]: StopCheckDescriptor } = freeze({
+  acceptance: freeze({ heading: ACCEPTANCE_BLOCK_HEADING, subject: "the acceptance stop check" }),
+  affected: freeze({ heading: AFFECTED_BLOCK_HEADING, subject: "the affected stop check" }),
+  mutation: freeze({ heading: MUTATION_BLOCK_HEADING, subject: "the Task mutation check" }),
+  owner: freeze({ heading: OWNER_BLOCK_HEADING, subject: "the Task owner check" }),
 });
 
-const UNREADABLE_NOTE: Readonly<Record<StopCheckName, (reason: string) => string>> = freeze({
-  acceptance: (reason) => `the acceptance stop check's block counter is unreadable: ${reason}`,
-  affected: (reason) => `${AFFECTED_NOTE_TEXT["counter-unreadable"]}: ${reason}`,
-  mutation: (reason) => `the Task mutation check's block counter is unreadable: ${reason}`,
-  owner: (reason) => `the Task owner check's block counter is unreadable: ${reason}`,
-});
+/** A check's cap note, stating the cap it was given: each typed cap is the one its note may state. */
+const capNote = <K extends StopCheckName>(name: K, cap: StopCheckBlockCaps[K]): string =>
+  `${STOP_CHECKS[name].subject} reached its ${cap}-block cap`;
+
+const unreadableCounterNote = (name: StopCheckName, reason: string): string =>
+  `${STOP_CHECKS[name].subject}'s block counter is unreadable: ${reason}`;
+
+/** The last line of every runner and record check's part of a block message. */
+export const blocksRemainingLine = (blocksRemaining: number): string =>
+  `This check blocks at most ${blocksRemaining} more time(s); after that your stop proceeds and the Wave Gate judges.`;
 
 /** Whether one check may still block this agent, and the count its counter
  *  would then record, or why it fails open. */
@@ -180,8 +197,8 @@ export type BlockAdmission =
  */
 export function blockAdmission<K extends StopCheckName>(name: K, issued: StopCheckBlockCount, cap: StopCheckBlockCaps[K]): BlockAdmission {
   // Without a trustworthy count the cap cannot be enforced, so the check must not block.
-  if (issued.kind === "unreadable") return freeze({ kind: "fails-open", note: UNREADABLE_NOTE[name](issued.reason) });
-  if (issued.blocks >= cap) return freeze({ kind: "fails-open", note: CAP_NOTE[name](cap) });
+  if (issued.kind === "unreadable") return freeze({ kind: "fails-open", note: unreadableCounterNote(name, issued.reason) });
+  if (issued.blocks >= cap) return freeze({ kind: "fails-open", note: capNote(name, cap) });
   return freeze({ kind: "may-block", blocks: issued.blocks + 1 });
 }
 
@@ -209,9 +226,7 @@ export function stopCheckBlockDecision<C extends StopCheckPayloads>(
   caps: StopCheckBlockCaps,
 ): StopCheckBlockDecision<C> {
   const step = <K extends StopCheckName>(name: K): CheckStep<C[K]> => checkStep(name, issued[name], failures[name], caps[name]);
-  const steps: { readonly [K in StopCheckName]: CheckStep<C[K]> } = {
-    acceptance: step("acceptance"), affected: step("affected"), mutation: step("mutation"), owner: step("owner"),
-  };
+  const steps = perCheck<{ readonly [K in StopCheckName]: CheckStep<C[K]> }>(step);
   const notes = freeze(STOP_CHECK_NAMES.flatMap((name) => {
     const { note } = steps[name];
     return note === null ? [] : [note];
@@ -255,7 +270,7 @@ export function renderAffectedBlock(
     ...(excused.length === 0 ? [] : ["", AFFECTED_EXCUSED_HEADING, ...excused.map((testcase) => `- ${renderExcusedAcceptanceTestcase(testcase)}`)]),
     "",
     "Failures can also come from a sibling Task editing concurrently; if your own code is correct, say that and stop.",
-    `This check blocks at most ${blocksRemaining} more time(s); after that your stop proceeds and the Wave Gate judges.`,
+    blocksRemainingLine(blocksRemaining),
     ...(runnerOutput.trim() === "" ? [] : ["", "Runner output (tail):", runnerOutput.trimEnd()]),
   ].join("\n");
 }
@@ -263,18 +278,11 @@ export function renderAffectedBlock(
 /** The parts of one combined block message. At least one check contributes. */
 export type StopChecksBlockParts = SomeChecks<EveryCheck<string>>;
 
-const BLOCK_HEADING: Readonly<Record<StopCheckName, string>> = freeze({
-  acceptance: ACCEPTANCE_BLOCK_HEADING,
-  affected: AFFECTED_BLOCK_HEADING,
-  mutation: MUTATION_BLOCK_HEADING,
-  owner: OWNER_BLOCK_HEADING,
-});
-
 /** One combined block message: each contributing check's part under its own
  *  heading, in check order, acceptance first (AS-028). */
 export function renderStopChecksBlock(parts: StopChecksBlockParts): string {
   return STOP_CHECK_NAMES.flatMap((name) => {
     const body = parts[name];
-    return body === null ? [] : [`${BLOCK_HEADING[name]}\n\n${body}`];
+    return body === null ? [] : [`${STOP_CHECKS[name].heading}\n\n${body}`];
   }).join("\n\n");
 }
