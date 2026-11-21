@@ -63,11 +63,10 @@ describe("versioned panel Finding conservation", () => {
     const draft: CurrentDraftFinding = { protocolVersion: 2, severity: "advisory", file: null, line: null,
       claim: hostile, reason: hostile, ...(includeBasis ? { basis } : {}) };
     const findings = attributeFindings([draft], "comment-analyzer");
-    const loaded = buildFindingBrief(1, [taskOf(findings)], "advisory");
-    const entry = loaded.findings[0]!;
+    const entry = projectFindingForPanel("T1", findings[0]!);
     if (entry.severity !== "advisory") throw new Error("advisory expected");
     expect(entry.reason).toBe(hostile);
-    expect(Object.hasOwn(loaded.findings[0]!, "basis")).toBe(includeBasis);
+    expect(Object.hasOwn(entry, "basis")).toBe(includeBasis);
     expect(buildStandaloneFindingBrief({ subjectId: "standalone-review", findings }).findings).toEqual([]);
   });
 

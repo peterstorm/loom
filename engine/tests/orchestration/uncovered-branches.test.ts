@@ -378,8 +378,6 @@ describe("the panel reducer rejects undeclared state × event pairs", () => {
 
   /** The ONE event type each stage declares. Terminal stages declare none. */
   const architectureStages: Readonly<Record<string, EventType | null>> = {
-    "interview": "spawn-outcome",
-    "prepare-candidates": "engine-outcome",
     "candidates": "spawn-outcome",
     "prepare-judges": "engine-outcome",
     "judges": "spawn-outcome",

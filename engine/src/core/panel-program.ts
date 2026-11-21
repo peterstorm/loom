@@ -1,6 +1,6 @@
 /**
- * The architecture panel's dispatch program: the reducer that orders
- * interview, fan-out, engine operations and finalization over plain spawn
+ * The architecture panel's dispatch program: the reducer that orders the
+ * candidate and judge fan-outs, engine operations and finalization over plain spawn
  * outcomes, and the reader of the journal `/loom --panel` keeps
  * (its run's panel-program.json). `helper panel-program architecture` replays that
  * journal through the reducer and prints the next action (ADR-0096).
@@ -159,11 +159,6 @@ type HeadlessSlot = PendingSlot<HeadlessSpawnRequest>;
 type InteractiveSlot = PendingSlot<InteractiveSpawnRequest>;
 
 export type ArchitectureProgramState =
-  | Readonly<ArchitectureStateBase & { stage: "interview"; slot: InteractiveSlot }>
-  | Readonly<ArchitectureStateBase & {
-      stage: "prepare-candidates";
-      operation: "architecture-prepare-candidates";
-    }>
   | Readonly<ArchitectureStateBase & { stage: "candidates"; slots: NonEmpty<HeadlessSlot> }>
   | Readonly<ArchitectureStateBase & {
       stage: "prepare-judges";
@@ -201,15 +196,6 @@ const headlessRequest = (
   modelProfile,
   attempt,
   outputContract,
-});
-
-const interviewRequest = (attempt: 1 | 2): InteractiveSpawnRequest => ({
-  id: "architecture:interview",
-  agent: "arch-interviewer-agent",
-  interaction: "interactive",
-  modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architecture,
-  attempt,
-  outputContract: "validated architecture interview digest",
 });
 
 const finalizerRequest = (attempt: 1 | 2): InteractiveSpawnRequest => ({
@@ -279,21 +265,17 @@ function distinctNonEmpty<T extends string>(
   return first === undefined ? fail([`${label} failed its internal non-empty check`]) : ok([first, ...copy.slice(1)]);
 }
 
-/** Parse configuration and emit the first architecture action. */
-export function startArchitectureProgram(
-  input: ArchitectureProgramInput,
-): ParseResult<ProgramStep<ArchitectureProgramState>> {
+/** Parse the dispatch configuration: distinct, non-empty, closed-vocabulary lenses and criteria. */
+function parseArchitectureProgramInput(input: ArchitectureProgramInput): ParseResult<ArchitectureStateBase["input"]> {
   const lenses = distinctNonEmpty(input.candidateLenses, "candidate lenses");
   const criteria = distinctNonEmpty(input.judgeCriteria, "judge criteria");
   const unknownLenses = lenses.ok
     ? lenses.value.filter((lens) => !(PANEL_LENSES as readonly string[]).includes(lens))
     : [];
   // Criteria are checked against the CLOSED vocabulary, exactly as lenses are
-  // against `PANEL_LENSES`. Distinct-and-non-blank was the whole bar here while
-  // the v2 persistent path minted every criterion through `architectureCriterion`
-  // — and this entry point is not legacy-only: `startArchitectureDispatchProgram`
-  // calls it while rehydrating a persisted journal, which is untrusted input by
-  // the same argument `architectureCriterion`'s own doc gives for checkpoints.
+  // against `PANEL_LENSES`: `startArchitectureDispatchProgram` parses them while
+  // rehydrating a persisted journal, which is untrusted input by the same
+  // argument `architectureCriterion`'s own doc gives for checkpoints.
   const unknownCriteria = criteria.ok
     ? criteria.value.filter((criterion) => architectureCriterion(criterion) === null)
     : [];
@@ -306,37 +288,25 @@ export function startArchitectureProgram(
     ]);
   }
 
-  const parsedInput = {
-    candidateLenses: lenses.value,
-    judgeCriteria: criteria.value,
-  } as const;
-  const request = interviewRequest(1);
-  const state: ArchitectureProgramState = {
-    panel: "architecture",
-    stage: "interview",
-    input: parsedInput,
-    completedRequestIds: [],
-    completedOperationIds: [],
-    slot: { request, status: "pending" },
-  };
-  return ok({ state, action: awaitUser(request) });
+  return ok({ candidateLenses: lenses.value, judgeCriteria: criteria.value });
 }
 
 /**
- * Production entry after the interactive interview has been validated and the
- * exact lenses/criteria have been derived. This avoids re-running the interview
- * merely to obtain values the executable dispatch program already receives.
+ * The program's entry. `/loom --panel` runs the interactive interview and
+ * prepares the candidate manifest before the program starts, so the program
+ * begins at the candidate fan-out with both recorded as complete: a replayed
+ * outcome for either is a duplicate.
  */
 export function startArchitectureDispatchProgram(
   input: ArchitectureProgramInput,
 ): ParseResult<ProgramStep<ArchitectureProgramState>> {
-  const started = startArchitectureProgram(input);
-  if (!started.ok) return started;
-  const requests = candidateRequests(started.value.state.input.candidateLenses);
+  const parsed = parseArchitectureProgramInput(input);
+  if (!parsed.ok) return parsed;
+  const requests = candidateRequests(parsed.value.candidateLenses);
   const state: ArchitectureProgramState = {
     panel: "architecture",
     stage: "candidates",
-    input: started.value.state.input,
+    input: parsed.value,
     completedRequestIds: ["architecture:interview"],
     completedOperationIds: ["architecture-prepare-candidates"],
     slots: pendingSlots(requests),
@@ -450,55 +420,6 @@ export function reduceArchitectureProgram(
   }
 
   switch (state.stage) {
-    case "interview": {
-      if (event.type !== "spawn-outcome") return unexpected("architecture", state.stage);
-      const settled = settleSlots([state.slot], state.completedRequestIds, event);
-      if (!settled.ok) return settled;
-      const result = settled.value;
-      if (result.outcome === "retry") {
-        const retry = result.retry;
-        if (retry.interaction !== "interactive") return unexpected("architecture", state.stage);
-        return success({ state: { ...state, slot: result.slots[0] as InteractiveSlot }, action: awaitUser(retry) });
-      }
-      if (result.outcome === "blocked") {
-        const reason = result.reason;
-        return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", "interview", reason) });
-      }
-      if (result.outcome === "waiting") return success({ state, action: null });
-      const next: ArchitectureProgramState = {
-        panel: state.panel,
-        input: state.input,
-        stage: "prepare-candidates",
-        operation: "architecture-prepare-candidates",
-        completedRequestIds: [...state.completedRequestIds, state.slot.request.id],
-        completedOperationIds: state.completedOperationIds,
-      };
-      return success({
-        state: next,
-        action: operation("architecture-prepare-candidates", "validated interview and exact candidate manifest"),
-      });
-    }
-
-    case "prepare-candidates": {
-      if (event.type !== "engine-outcome") return unexpected("architecture", state.stage);
-      const outcome = operationOutcome(state.operation, state.completedOperationIds, event);
-      if (!outcome.ok) return outcome;
-      if (outcome.value !== "succeeded") {
-        const reason = outcome.value.failed;
-        return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", state.stage, reason) });
-      }
-      const requests = candidateRequests(state.input.candidateLenses);
-      const next: ArchitectureProgramState = {
-        panel: state.panel,
-        input: state.input,
-        stage: "candidates",
-        slots: pendingSlots(requests),
-        completedRequestIds: state.completedRequestIds,
-        completedOperationIds: [...state.completedOperationIds, state.operation],
-      };
-      return success({ state: next, action: batch(requests) });
-    }
-
     case "candidates": {
       if (event.type !== "spawn-outcome") return unexpected("architecture", state.stage);
       const settled = settleSlots(state.slots, state.completedRequestIds, event);

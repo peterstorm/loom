@@ -778,7 +778,6 @@
   ],
   "duplicateBlockBaseline": [
     "engine/src/core/panel-program.ts::engine/src/core/panel-program.ts@4e66f2f0",
-    "engine/src/core/panel-program.ts::engine/src/core/panel-program.ts@8055d7ab",
     "engine/src/handlers/helpers/programs/remediation-registration.ts::engine/src/handlers/helpers/programs/remediation-registration.ts@081d2ff1",
     "engine/src/handlers/helpers/red-then-green-status.ts::engine/src/handlers/helpers/stop-check-plan.ts@57aa1a8b",
     "engine/src/handlers/helpers/stop-check-plan.ts::engine/src/handlers/helpers/red-then-green-status.ts@57aa1a8b",

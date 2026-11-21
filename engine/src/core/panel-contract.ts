@@ -386,7 +386,7 @@ export function candidateFilename(lens: PanelLens): CandidateFilename {
 export function parsePanelManifest(
   raw: unknown,
   expectedRunDir: string,
-  layout: RunLayout<"architecture">,
+  layout: RunLayout,
   expectedLenses: readonly PanelLens[],
 ): ParseResult<PanelManifest> {
   const parsed = parseRunManifest(raw, expectedRunDir, layout, {
@@ -815,7 +815,7 @@ export type AdmittedPanelRun = Readonly<{
 export function admitPanelRun(
   artifacts: PanelRunArtifacts,
   runDir: string,
-  layout: RunLayout<"architecture">,
+  layout: RunLayout,
   designerCount: number,
 ): PanelContractResult<AdmittedPanelRun> {
   const interview = parseInterviewDigestJson(artifacts.interviewJson);

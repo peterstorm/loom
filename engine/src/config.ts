@@ -319,9 +319,6 @@ export const SHIPPED_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url))
  */
 export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? SHIPPED_MACHINES_DIR;
 
-/** Machines directory — resolved once at import (consumers that never re-point) */
-export const MACHINES_DIR = machinesDir();
-
 const shippedPins = parseMachinePins(SHIPPED_MACHINE_PINS);
 if (!shippedPins.ok) throw new Error(`loom config invariant violated: the generated machine pins do not parse: ${shippedPins.error}`);
 

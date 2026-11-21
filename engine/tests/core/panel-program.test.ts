@@ -4,10 +4,11 @@ import fc from "fast-check";
 import {
   PANEL_PROGRAM_MODEL_PROFILES,
   reduceArchitectureProgram,
-  startArchitectureProgram,
+  startArchitectureDispatchProgram,
   type ArchitectureEngineOperation,
   type ArchitectureProgramState,
   type HeadlessSpawnRequest,
+  type InteractiveSpawnRequest,
   type ProgramStep,
   type SpawnBatchAction,
 } from "../../src/core/panel-program";
@@ -55,10 +56,6 @@ const architectureInput = {
   judgeCriteria: ["simplicity", "pure functional core", "codebase fit + effort"] as const,
 };
 
-function architectureStart(): ProgramStep<ArchitectureProgramState> {
-  return value(startArchitectureProgram(architectureInput));
-}
-
 const spawnSucceeded = (requestId: string, attempt: 1 | 2 = 1) => ({
   type: "spawn-outcome" as const,
   requestId,
@@ -73,15 +70,7 @@ const engineSucceeded = (operationId: ArchitectureEngineOperation) => ({
 });
 
 function enterCandidates(): ProgramStep<ArchitectureProgramState> {
-  const start = architectureStart();
-  const prepared = value(reduceArchitectureProgram(
-    start.state,
-    spawnSucceeded("architecture:interview"),
-  ));
-  return value(reduceArchitectureProgram(
-    prepared.state,
-    engineSucceeded("architecture-prepare-candidates"),
-  ));
+  return value(startArchitectureDispatchProgram(architectureInput));
 }
 
 function enterJudges(): ProgramStep<ArchitectureProgramState> {
@@ -96,23 +85,23 @@ function enterJudges(): ProgramStep<ArchitectureProgramState> {
 }
 
 describe("architecture panel program", () => {
-  it("emits the exact interview → candidates → judges → aggregate → finalize ordering", () => {
-    let step = architectureStart();
-    expect(step.action).toMatchObject({
-      type: "await-user",
-      request: {
-        id: "architecture:interview",
-        agent: "arch-interviewer-agent",
-        interaction: "interactive",
-        modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architecture,
-        attempt: 1,
-      },
+  it("starts after the interview and candidate preparation, so replayed outcomes for them are duplicates", () => {
+    const start = enterCandidates();
+    expect(start.state).toMatchObject({
+      stage: "candidates",
+      completedRequestIds: ["architecture:interview"],
+      completedOperationIds: ["architecture-prepare-candidates"],
     });
+    expect(reduceArchitectureProgram(start.state, spawnSucceeded("architecture:interview"))).toEqual({
+      ok: false, error: { kind: "duplicate-outcome", requestId: "architecture:interview" },
+    });
+    expect(reduceArchitectureProgram(start.state, engineSucceeded("architecture-prepare-candidates"))).toEqual({
+      ok: false, error: { kind: "duplicate-operation-outcome", operationId: "architecture-prepare-candidates" },
+    });
+  });
 
-    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:interview")));
-    expect(step.action).toMatchObject({ type: "engine-operation", operation: "architecture-prepare-candidates" });
-
-    step = value(reduceArchitectureProgram(step.state, engineSucceeded("architecture-prepare-candidates")));
+  it("emits the exact candidates → judges → aggregate → finalize ordering", () => {
+    let step = enterCandidates();
     expect(step.action?.type).toBe("spawn-batch");
     if (step.action?.type !== "spawn-batch") throw new Error("expected candidate batch");
     expect(step.action.requests.map((request) => request.id)).toEqual([
@@ -165,19 +154,19 @@ describe("architecture panel program", () => {
   });
 
   it("blocks on failed prepare and aggregate engine operations with the original reason", () => {
-    const afterInterview = value(reduceArchitectureProgram(
-      architectureStart().state,
-      spawnSucceeded("architecture:interview"),
-    ));
-    const prepareFailed = value(reduceArchitectureProgram(afterInterview.state, {
+    let candidates = enterCandidates();
+    for (const id of ["architecture:candidate:1", "architecture:candidate:2"]) {
+      candidates = value(reduceArchitectureProgram(candidates.state, spawnSucceeded(id)));
+    }
+    const prepareFailed = value(reduceArchitectureProgram(candidates.state, {
       type: "engine-outcome",
-      operationId: "architecture-prepare-candidates",
+      operationId: "architecture-prepare-judges",
       outcome: "failed",
-      error: "candidate manifest invalid",
+      error: "judge criteria invalid",
     }));
-    expect(prepareFailed.state).toMatchObject({ stage: "blocked", reason: "candidate manifest invalid" });
+    expect(prepareFailed.state).toMatchObject({ stage: "blocked", reason: "judge criteria invalid" });
     expect(prepareFailed.action).toEqual({
-      type: "blocked", panel: "architecture", stage: "prepare-candidates", reason: "candidate manifest invalid",
+      type: "blocked", panel: "architecture", stage: "prepare-judges", reason: "judge criteria invalid",
     });
 
     let aggregate = enterJudges();
@@ -969,14 +958,14 @@ describe("current and historical Findings through the full persistent panel", ()
 
 describe("panel program construction invariants", () => {
   it("rejects empty and duplicate fan-out definitions at construction", () => {
-    const empty = startArchitectureProgram({ candidateLenses: [], judgeCriteria: [] });
+    const empty = startArchitectureDispatchProgram({ candidateLenses: [], judgeCriteria: [] });
     expect(empty.ok).toBe(false);
     if (!empty.ok) {
       expect(empty.errors).toContain("candidate lenses must be non-empty");
       expect(empty.errors).toContain("judge criteria must be non-empty");
     }
 
-    const duplicate = startArchitectureProgram({
+    const duplicate = startArchitectureDispatchProgram({
       candidateLenses: ["simplicity-first", "simplicity-first"],
       judgeCriteria: ["simplicity"],
     });
@@ -995,16 +984,22 @@ describe("panel program construction invariants", () => {
     const valid: SpawnBatchAction = { type: "spawn-batch", execution: "parallel", requests: [headless] };
     expect(valid.requests).toEqual([headless]);
 
-    const interactive = architectureStart().action;
-    if (interactive?.type !== "await-user") throw new Error("expected interactive request");
-    const invalidRequests = [interactive.request] as const;
+    const interactive: InteractiveSpawnRequest = {
+      id: "architecture:finalize",
+      agent: "architecture-agent",
+      modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architectureFinalization,
+      interaction: "interactive",
+      attempt: 1,
+      outputContract: "plan",
+    };
+    const invalidRequests = [interactive] as const;
     // @ts-expect-error interactive requests cannot inhabit a parallel batch
     const invalid: SpawnBatchAction = { type: "spawn-batch", execution: "parallel", requests: invalidRequests };
     expect(invalid.requests).toBe(invalidRequests);
   });
 
   it("rejects an operation outside the architecture vocabulary", () => {
-    const architecture = architectureStart();
+    const architecture = enterCandidates();
     const wrong = {
       type: "engine-outcome" as const,
       operationId: "refutation-tally",
@@ -1015,7 +1010,7 @@ describe("panel program construction invariants", () => {
     // @ts-expect-error a foreign operation cannot be passed to the architecture reducer
     expect(reduceArchitectureProgram(architecture.state, wrong)).toEqual({
       ok: false,
-      error: { kind: "unexpected-event", panel: "architecture", stage: "interview" },
+      error: { kind: "unexpected-event", panel: "architecture", stage: "candidates" },
     });
   });
 });

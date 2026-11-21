@@ -56,14 +56,11 @@ export { isRecord };
  * used to hardcode `"interview.md"` / `"candidates"` while the shell declared
  * them as constants, with nothing comparing the two.
  *
- * `Panel` is a phantom tag naming the panel a layout belongs to. Only the
- * architecture layout remains: the file-based review panel layout retired with
- * its helper (ADR-0096), and the Refutation Panel keeps its evidence in the
- * Run Directory instead.
+ * Only the architecture layout remains: the file-based review panel layout
+ * retired with its helper (ADR-0096), and the Refutation Panel keeps its
+ * evidence in the Run Directory instead.
  */
-export interface RunLayout<Panel extends string = string> {
-  /** Which panel this layout belongs to. */
-  readonly panel: Panel;
+export interface RunLayout {
   /** Human-readable context the panel was built from. */
   readonly contextMd: string;
   /** Its validated, canonical JSON form — the only version agents consume. */
@@ -75,8 +72,7 @@ export interface RunLayout<Panel extends string = string> {
 }
 
 /** `/loom --panel`: an interview digest and one candidate per lens. */
-export const ARCHITECTURE_LAYOUT: RunLayout<"architecture"> = Object.freeze({
-  panel: "architecture",
+export const ARCHITECTURE_LAYOUT: RunLayout = Object.freeze({
   contextMd: "interview.md",
   contextJson: "interview.json",
   itemDir: "candidates",
@@ -143,10 +139,10 @@ export interface RunManifestSpec<Id extends string = string> {
  * Every error is collected, for the same reason parseVerdictEnvelope collects
  * them: a re-run should learn all of its mistakes at once.
  */
-export function parseRunManifest<Panel extends string, Id extends string>(
+export function parseRunManifest<Id extends string>(
   raw: unknown,
   expectedRunDir: string,
-  layout: RunLayout<Panel>,
+  layout: RunLayout,
   spec: RunManifestSpec<Id>,
 ): ParseResult<RunManifest<Id>> {
   if (!isRecord(raw)) return fail([`${spec.label} must be a JSON object`]);

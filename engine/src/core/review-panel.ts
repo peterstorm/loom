@@ -276,23 +276,16 @@ export interface BriefSourceTask {
   readonly findings?: readonly Finding[];
 }
 
-/** Collect the wave's verifiable findings from the task graph. Pure.
- *
- *  `severity` defaults to `VERIFIED_SEVERITY`; it is the seam that constant's
- *  "revisit once the false-positive rate is measured" note anticipates, and the
- *  brief records it so no reader assumes the default. */
-export function buildFindingBrief(
-  wave: number,
-  tasks: readonly BriefSourceTask[],
-  severity: FindingSeverity = VERIFIED_SEVERITY,
-): FindingBrief {
+/** Collect the wave's verifiable findings — those at `VERIFIED_SEVERITY` — from
+ *  the task graph. Pure. The brief records the severity so no reader assumes it. */
+export function buildFindingBrief(wave: number, tasks: readonly BriefSourceTask[]): FindingBrief {
   const waveTasks = tasks.filter((task) => task.wave === wave);
   const findings = waveTasks.flatMap((task) =>
     (task.findings ?? [])
-      .filter((finding) => finding.severity === severity)
+      .filter((finding) => finding.severity === VERIFIED_SEVERITY)
       .map((finding) => projectFindingForPanel(task.id, finding)),
   );
-  return { wave, severity, taskIds: waveTasks.map((task) => task.id), findings };
+  return { wave, severity: VERIFIED_SEVERITY, taskIds: waveTasks.map((task) => task.id), findings };
 }
 
 /** Adapt an identified standalone finding set to the panel's scoped item model.
