@@ -33,7 +33,7 @@ import { capturedSpecCheck } from "../../../src/core/spec-check";
 import { deriveLoomStatusFromParsedGraph } from "../../../src/core/loom-status";
 import type { GateDeps } from "../../../src/core/wave-gate-checks";
 import { commitWaveGateCompletion, deriveWaveReadiness } from "../../../src/core/wave-gate-machine";
-import { installWaveGateRegistration } from "../../../src/core/wave-gate-registration";
+import { abandonWaveGateRegistration, installWaveGateRegistration } from "../../../src/core/wave-gate-registration";
 import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
 import { findingId } from "../../fixtures/finding-id";
 import { parseTaskReopeningArgs, reopenImplementedTasks } from "../../../src/core/task-reopening";
@@ -419,12 +419,12 @@ function commitCompletion(f: Fixture, observed: Partial<CompletionObservations> 
 
 /** Abandon the fixture's run naming no successor, as `orchestration abandon` does. */
 async function abandonRun(f: Fixture): Promise<void> {
-  const abandoned = await f.manager.abandonActiveWaveGateRegistration({
+  const abandoned = await f.manager.updateAndReturn((state) => abandonWaveGateRegistration(state, {
     runsRoot: f.manager.load().active_wave_gate!.runsRoot!,
     runId: f.handle.runId as ActiveWaveGateRegistration["runId"],
     reason: "fix the advisory first",
     supersededBy: null,
-  });
+  }));
   if (abandoned.kind !== "stamped") throw new Error(`fixture run not abandoned: ${abandoned.kind}`);
 }
 

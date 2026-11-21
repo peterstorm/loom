@@ -159,7 +159,7 @@ export function writtenContract(scope: RedThenGreenScope, taskId: string): strin
  * testcases green owe no I6 either (FR-010's covered-by-acceptance-contract
  * waiver). The writer keeps its `new-tests` obligation.
  *
- * Population, the State File obligation-match check (`taskUnionError`, and
+ * Population, the State File obligation-match check (`parseStoredTask`, and
  * through it the operator validator) and the proof-less pending migration ask
  * here. Revalidation and `redThenGreenDuty`'s no-Proof arm take the graph era
  * alone: Acceptance Contracts exist only in TaskGraphs whose population froze

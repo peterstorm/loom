@@ -46,7 +46,7 @@ import {
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { parseVerificationPolicy, type VerificationPolicy } from "../../src/core/verification-policy";
-import { parseTaskGraph, taskUnionError } from "../../src/state-file-wire";
+import { parseStoredTask, parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
 import { operatorManifest } from "../fixtures/i6-runner-manifest";
@@ -500,7 +500,7 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     if (!parsed.ok) expect(parsed.error).toContain("proof obligations do not exactly match");
   });
 
-  describe("taskUnionError holds the exact era it is given", () => {
+  describe("parseStoredTask holds the exact era it is given", () => {
     const ERAS: readonly RedThenGreenEra[] = ["owed-if-new-tests", "not-owed"];
     const otherEra = (era: RedThenGreenEra): RedThenGreenEra => era === "owed-if-new-tests" ? "not-owed" : "owed-if-new-tests";
     /** No contracts: every Task takes the graph's era. */
@@ -513,17 +513,17 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     };
 
     it.each(ERAS)("FR-005: accepts a Task carrying exactly the %s obligations under that era", (era) => {
-      expect(taskUnionError(wiredT1(era), 0, scope(era))).toBeNull();
+      expect(parseStoredTask(wiredT1(era), 0, scope(era))).toMatchObject({ ok: true });
     });
 
     it.each(ERAS)("FR-005: refuses the %s obligations under the other era", (era) => {
-      expect(taskUnionError(wiredT1(era), 0, scope(otherEra(era)))).toContain("proof obligations do not exactly match");
+      expect(parseStoredTask(wiredT1(era), 0, scope(otherEra(era)))).toMatchObject({ ok: false, error: expect.stringContaining("proof obligations do not exactly match") });
     });
 
     it("refuses T1's I6-era obligations once T1 writes a contract, and accepts the writer era's", () => {
       const writerScope: RedThenGreenScope = { era: "owed-if-new-tests", contractWriters: new Map([["T1", "CT-1"]]) };
-      expect(taskUnionError(wiredT1("owed-if-new-tests"), 0, writerScope)).toContain("proof obligations do not exactly match");
-      expect(taskUnionError(wiredT1("not-owed"), 0, writerScope)).toBeNull();
+      expect(parseStoredTask(wiredT1("owed-if-new-tests"), 0, writerScope)).toMatchObject({ ok: false, error: expect.stringContaining("proof obligations do not exactly match") });
+      expect(parseStoredTask(wiredT1("not-owed"), 0, writerScope)).toMatchObject({ ok: true });
     });
 
     it.each(ERAS)("FR-005: refuses obligations that match neither era, under %s", (era) => {
@@ -532,7 +532,7 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
       // Without `new-tests` the set is neither era's derivation for a Task requiring new tests.
       proof.obligations = proof.obligations.filter(({ kind }) => kind !== "new-tests");
       proof.results = proof.results.filter(({ obligation }) => obligation.kind !== "new-tests");
-      expect(taskUnionError(task, 0, scope(era))).toContain("proof obligations do not exactly match");
+      expect(parseStoredTask(task, 0, scope(era))).toMatchObject({ ok: false, error: expect.stringContaining("proof obligations do not exactly match") });
     });
   });
 

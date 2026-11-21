@@ -879,6 +879,46 @@ export function commitWaveGateCompletion(
   });
 }
 
+/**
+ * The locked completion: re-derive completion from the locked graph through
+ * the caller's pure `derive`, then prove the result terminalizes the exact
+ * active registration, archives the exact active completion suite, and retires
+ * both active authorities before the next Wave can register. The error is the
+ * refusal the shell reports; nothing is persisted on one.
+ */
+export function lockedWaveGateCompletion(
+  state: TaskGraph,
+  derive: (lockedState: TaskGraph) => DomainResult<WaveCompletionCommit, WaveCompletionCommitError>,
+): DomainResult<WaveCompletionCommit, string> {
+  const refuse = (message: string): DomainResult<WaveCompletionCommit, string> => Object.freeze({ ok: false, error: message });
+  const active = state.active_wave_gate;
+  if (state.current_phase !== "execute" || state.current_wave === undefined || active === undefined) {
+    return refuse("Protected execute/current Wave Gate authority is missing");
+  }
+  if (active.wave !== state.current_wave || active.terminalOutcome !== null) {
+    return refuse("Protected active/current Wave Gate authority is contradictory or terminal");
+  }
+  const committed = derive(state);
+  if (!committed.ok) return refuse(committed.error.message);
+  const terminal = committed.value.completedRegistration;
+  if (
+    terminal.runId !== active.runId || terminal.wave !== active.wave ||
+    terminal.authorityDigest !== active.authorityDigest || terminal.revision !== active.revision + 1 ||
+    committed.value.receipt !== terminal.completionReceipt
+  ) {
+    return refuse("Completion result does not terminalize the exact locked active registration");
+  }
+  const activeSuite = state.active_wave_completion_suite;
+  if (activeSuite === undefined || terminal.completionSuite !== activeSuite) {
+    return refuse("Completion must archive the exact active Wave completion suite");
+  }
+  if (committed.value.graph.active_wave_gate !== undefined ||
+      committed.value.graph.active_wave_completion_suite !== undefined) {
+    return refuse("Completion must retire active gate and completion-suite authority before the next Wave can register");
+  }
+  return committed;
+}
+
 // ---------------------------------------------------------------------------
 // LC-1 projection: the run's stage, reduced from durable evidence
 // ---------------------------------------------------------------------------

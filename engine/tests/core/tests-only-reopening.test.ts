@@ -64,7 +64,7 @@ import { newWaveGate } from "../../src/core/wave-gate-model";
 import { reconcileTaskFromStoredEvidence } from "../../src/handlers/helpers/reconcile-implementation-proof";
 import { observeTaskLocalCompletion, REAL_TASK_LOCAL_PORTS } from "../../src/handlers/helpers/task-local-completion";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
-import { parseTaskGraph, taskUnionError } from "../../src/state-file-wire";
+import { parseStoredTask, parseTaskGraph } from "../../src/state-file-wire";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { captureDeclaredArtifactBaseline } from "../../src/utils/declared-artifact-snapshot";
 import { captureRepositoryChangeBaseline } from "../../src/utils/repository-change-baseline";
@@ -467,7 +467,7 @@ describe("the State File proves a tests-only Task", () => {
   it("refuses an Acceptance Contract writer's tests-only scope", () => {
     const t1 = (raw().tasks as Record<string, unknown>[]).find((task) => task.id === "T1");
     const writers = redThenGreenScope(i6RunnerManifest(), [{ id: "CT-1", contractTask: "T1" }]);
-    expect(taskUnionError(t1, 0, writers)).toContain("an Acceptance Contract writer cannot be reopened for tests only");
+    expect(parseStoredTask(t1, 0, writers)).toMatchObject({ ok: false, error: expect.stringContaining("an Acceptance Contract writer cannot be reopened for tests only") });
   });
 
   it("refuses a scope on an implemented Task and an audit that spells out the default", () => {

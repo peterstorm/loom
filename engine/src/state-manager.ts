@@ -37,6 +37,7 @@ import {
   type RuntimeWriteBoundary,
 } from "./runtime-compatibility";
 import { installWaveGateRegistration, type WaveGateInstallProgram } from "./core/wave-gate-registration";
+import { lockedWaveGateCompletion } from "./core/wave-gate-machine";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
@@ -52,8 +53,6 @@ import {
   type AnchoredDirectoryIdentity,
 } from "./utils/no-follow-fs";
 import {
-  parseActiveWaveGateRegistration,
-  parseActiveWaveGateTerminalOutcome,
   parseTaskGraph,
   type ParsedTaskGraph,
 } from "./state-file-wire";
@@ -71,7 +70,8 @@ export {
   taskDependencyErrors,
   taskGraphLifecycleErrors,
   taskIdError,
-  taskUnionError,
+  parseStoredTask,
+  storedTaskErrors,
   orphanExecutionReservationError,
 } from "./state-file-wire";
 export type {
@@ -269,19 +269,6 @@ export type RegisteredWaveGateCompletionReplayError = Readonly<{
   message: string;
 }>;
 
-type AbandonedWaveGateRegistration = Extract<
-  ActiveWaveGateRegistration,
-  { terminalOutcome: { kind: "terminal-abandoned" } }
->;
-
-export type ActiveWaveGateAbandonmentResult =
-  | Readonly<{ kind: "stamped"; registration: AbandonedWaveGateRegistration }>
-  | Readonly<{ kind: "replayed"; registration: AbandonedWaveGateRegistration }>
-  | Readonly<{
-      kind: "not-targeted";
-      reason: "registration-absent" | "authority-mismatch" | "terminal-conflict";
-    }>;
-
 export function findRegisteredWaveGateCompletionReplay(
   graph: TaskGraph,
   authority: ActiveWaveGateRegistration,
@@ -428,123 +415,6 @@ export class StateManager {
   }
 
   /**
-   * Install one fresh protected active-run anchor, idempotently for exact
-   * replay. `program` is the run's program registration (or the part the
-   * install reads): its published Tasks, and the succession (ADR-0091) and
-   * narrowed reviews (ADR-0094) it froze, which the install checks against
-   * protected state.
-   */
-  async registerActiveWaveGate(
-    rawRegistration: unknown,
-    program: WaveGateInstallProgram,
-  ): Promise<ActiveWaveGateRegistration> {
-    const parsed = parseActiveWaveGateRegistration(rawRegistration);
-    if (!parsed.ok) throw new Error(`Invalid active Wave Gate registration: ${parsed.error}`);
-    return this.updateAndReturn((state) => {
-      const decision = installWaveGateRegistration(state, parsed.value, program);
-      if (decision.kind === "refused") throw new Error(decision.message);
-      return decision.kind === "replayed"
-        ? { state, value: decision.registration }
-        : { state: decision.state, value: decision.registration };
-    });
-  }
-
-  /**
-   * Stamp the operator's terminal abandonment onto the protected registration.
-   *
-   * `helper orchestration abandon` writes an immutable marker inside the Run
-   * Directory; this stamps the SAME terminal decision onto the active
-   * registration under the TaskGraph lock, so a tombstoned registration stops
-   * being active authority and a fresh `start` can supersede it. The outcome
-   * is re-proven through `parseActiveWaveGateTerminalOutcome` rather than
-   * constructed directly: the stored form is parser-proven, and the state
-   * boundary refuses to persist what its own parser would reject.
-   *
-   * A non-targeted result names why no protected registration changed. Exact
-   * repeat is a distinct replay result, not another apparent write.
-   */
-  async abandonActiveWaveGateRegistration(
-    abandonment: Readonly<{
-      runsRoot: string;
-      runId: ActiveWaveGateRegistration["runId"];
-      reason: string;
-      supersededBy: ActiveWaveGateRegistration["runId"] | null;
-    }>,
-  ): Promise<ActiveWaveGateAbandonmentResult> {
-    return this.updateAndReturn<ActiveWaveGateAbandonmentResult>((state) => {
-      const active = state.active_wave_gate;
-      if (active === undefined) {
-        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "registration-absent" as const }) };
-      }
-      if (active.runsRoot !== abandonment.runsRoot || active.runId !== abandonment.runId) {
-        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "authority-mismatch" as const }) };
-      }
-      if (active.terminalOutcome !== null) {
-        if (active.terminalOutcome.kind === "terminal-abandoned" &&
-            active.terminalOutcome.reason === abandonment.reason &&
-            active.terminalOutcome.supersededBy === abandonment.supersededBy) {
-          const registration: AbandonedWaveGateRegistration = Object.freeze({
-            ...active,
-            terminalOutcome: active.terminalOutcome,
-          });
-          return { state, value: Object.freeze({ kind: "replayed" as const, registration }) };
-        }
-        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "terminal-conflict" as const }) };
-      }
-      const outcome = parseActiveWaveGateTerminalOutcome(
-        { kind: "terminal-abandoned", reason: abandonment.reason, supersededBy: abandonment.supersededBy },
-        active.runId,
-      );
-      if (!outcome.ok || outcome.value?.kind !== "terminal-abandoned") {
-        throw new Error(`Invalid Wave Gate abandonment stamp: ${outcome.ok ? "unexpected outcome" : outcome.error}`);
-      }
-      const stamped = Object.freeze({ ...active, terminalOutcome: outcome.value });
-      return {
-        // Terminalizing the gate retires its correlated live-suite authority in
-        // the same locked transition. Retaining it would make the produced
-        // graph unparseable: live suites require a nonterminal active gate.
-        state: { ...state, active_wave_gate: stamped, active_wave_completion_suite: undefined },
-        value: Object.freeze({ kind: "stamped" as const, registration: stamped }),
-      };
-    });
-  }
-
-  /** Lock, re-derive completion through the caller's pure domain function,
-   * persist terminal history + advancement together, and return its receipt. */
-  async commitActiveWaveGateCompletion(
-    derive: (lockedState: TaskGraph) => DomainResult<WaveCompletionCommit, WaveCompletionCommitError>,
-  ): Promise<WaveCompletionCommit> {
-    return this.updateAndReturn((state) => {
-      const active = state.active_wave_gate;
-      if (state.current_phase !== "execute" || state.current_wave === undefined || active === undefined) {
-        throw new Error("Protected execute/current Wave Gate authority is missing");
-      }
-      if (active.wave !== state.current_wave || active.terminalOutcome !== null) {
-        throw new Error("Protected active/current Wave Gate authority is contradictory or terminal");
-      }
-      const committed = derive(state);
-      if (!committed.ok) throw new Error(committed.error.message);
-      const terminal = committed.value.completedRegistration;
-      if (
-        terminal.runId !== active.runId || terminal.wave !== active.wave ||
-        terminal.authorityDigest !== active.authorityDigest || terminal.revision !== active.revision + 1 ||
-        committed.value.receipt !== terminal.completionReceipt
-      ) {
-        throw new Error("Completion result does not terminalize the exact locked active registration");
-      }
-      const activeSuite = state.active_wave_completion_suite;
-      if (activeSuite === undefined || terminal.completionSuite !== activeSuite) {
-        throw new Error("Completion must archive the exact active Wave completion suite");
-      }
-      if (committed.value.graph.active_wave_gate !== undefined ||
-          committed.value.graph.active_wave_completion_suite !== undefined) {
-        throw new Error("Completion must retire active gate and completion-suite authority before the next Wave can register");
-      }
-      return { state: committed.value.graph, value: committed.value };
-    });
-  }
-
-  /**
    * Replace state entirely (used by populate-task-graph and repair-task-graph).
    * A full replacement never reads the outgoing graph, so it deliberately does
    * not route through `updateAndReturn`: recovering a graph the load boundary
@@ -622,4 +492,37 @@ export class StateManager {
         return produced.value;
       }));
   }
+}
+
+/**
+ * Install one fresh protected active-run anchor under the TaskGraph lock,
+ * idempotently for exact replay (`installWaveGateRegistration`). `program` is
+ * the run's program registration (or the part the install reads): its
+ * published Tasks, and the succession (ADR-0091) and narrowed reviews
+ * (ADR-0094) it froze, which the install checks against protected state.
+ */
+export async function registerActiveWaveGate(
+  manager: StateManager,
+  registration: ActiveWaveGateRegistration,
+  program: WaveGateInstallProgram,
+): Promise<ActiveWaveGateRegistration> {
+  return manager.updateAndReturn((state) => {
+    const decision = installWaveGateRegistration(state, registration, program);
+    if (decision.kind === "refused") throw new Error(decision.message);
+    return { state: decision.kind === "installed" ? decision.state : state, value: decision.registration };
+  });
+}
+
+/** Lock, re-derive completion through the caller's pure domain function
+ * (`lockedWaveGateCompletion`), persist terminal history + advancement
+ * together, and return its receipt. */
+export async function commitActiveWaveGateCompletion(
+  manager: StateManager,
+  derive: (lockedState: TaskGraph) => DomainResult<WaveCompletionCommit, WaveCompletionCommitError>,
+): Promise<WaveCompletionCommit> {
+  return manager.updateAndReturn((state) => {
+    const committed = lockedWaveGateCompletion(state, derive);
+    if (!committed.ok) throw new Error(committed.error);
+    return { state: committed.value.graph, value: committed.value };
+  });
 }

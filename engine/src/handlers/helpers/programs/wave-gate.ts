@@ -9,7 +9,7 @@ import { canonicalStructuralEquals } from '../../../core/orchestration-contract'
 import { isRecord } from '../../../core/plain-record';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH } from '../../../config';
-import { StateManager } from '../../../state-manager';
+import { commitActiveWaveGateCompletion, StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveReadiness } from '../../../core/wave-gate-machine';
 import { reanchorVerifiedClaims } from '../../../core/verified-claim-hashes';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
@@ -236,7 +236,7 @@ async function resumeWaveGateAfter(
       projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
     });
     const completionDocuments = completionObservation.authority;
-    const committed = await manager.commitActiveWaveGateCompletion((locked) => {
+    const committed = await commitActiveWaveGateCompletion(manager, (locked) => {
       if (locked.spec_file !== refreshed.spec_file || locked.plan_file !== refreshed.plan_file ||
           !waveSpecCheckDocumentsMatch(locked.wave_review_epoch?.specCheckDocuments, completionDocuments)) {
         return {

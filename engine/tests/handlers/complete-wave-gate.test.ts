@@ -91,9 +91,11 @@ import {
   type EffectReceipt,
 } from "../../src/core/orchestration-contract";
 import {
+  commitActiveWaveGateCompletion,
   findRegisteredWaveGateCompletionReplay,
   parseActiveWaveGateRegistration,
   parseTaskGraph,
+  registerActiveWaveGate,
   StateManager,
 } from "../../src/state-manager";
 import { findingId } from "../fixtures/finding-id";
@@ -2133,11 +2135,11 @@ describe("protected active Wave Gate registration", () => {
     writeFileSync(path, JSON.stringify(initial));
     const manager = new StateManager(path);
     try {
-      const first = await manager.registerActiveWaveGate(exactRegistration, { taskIds: taskIds });
-      const replay = await manager.registerActiveWaveGate(exactRegistration, { taskIds: taskIds });
+      const first = await registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration(exactRegistration)), { taskIds: taskIds });
+      const replay = await registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration(exactRegistration)), { taskIds: taskIds });
       expect(replay).toEqual(first);
       expect(manager.load().active_wave_gate).toEqual(first);
-      await expect(manager.registerActiveWaveGate({ ...exactRegistration, runId: "competing-run" }, { taskIds: taskIds }))
+      await expect(registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration({ ...exactRegistration, runId: "competing-run" })), { taskIds: taskIds }))
         .rejects.toThrow("already owns wave 1");
       expect(manager.load().active_wave_gate).toEqual(first);
     } finally {
@@ -2151,7 +2153,7 @@ describe("protected active Wave Gate registration", () => {
     writeFileSync(path, JSON.stringify(registeredGraph()));
     const manager = new StateManager(path);
     try {
-      const committed = await manager.commitActiveWaveGateCompletion((locked) => {
+      const committed = await commitActiveWaveGateCompletion(manager, (locked) => {
         const readiness = deriveWaveReadiness(locked, statusDeps);
         return readiness.ok
           ? commitWaveGateCompletion(readiness.value)
@@ -2167,7 +2169,7 @@ describe("protected active Wave Gate registration", () => {
         terminalOutcome: null,
       }));
       expect(replay).toEqual(committed.completedRegistration);
-      await expect(manager.registerActiveWaveGate(registration, { taskIds: ["T1"] }))
+      await expect(registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration(registration)), { taskIds: ["T1"] }))
         .rejects.toThrow("already completed or older than terminal Wave history");
       expect(manager.load().active_wave_gate).toBeUndefined();
     } finally {
@@ -2216,7 +2218,7 @@ describe("protected active Wave Gate registration", () => {
       expect(evaluateWaveGate(manager.load(), null, live).verdict.kind).toBe("pass");
       rmSync(artifact);
       let lockedFailure = "";
-      await expect(manager.commitActiveWaveGateCompletion((locked) => {
+      await expect(commitActiveWaveGateCompletion(manager, (locked) => {
         const liveDecision = evaluateWaveGate(locked, null, live);
         lockedFailure = liveDecision.verdict.kind === "fail" ? liveDecision.verdict.reason : "";
         const readiness = deriveWaveReadiness(locked, live);
@@ -2293,7 +2295,7 @@ describe("protected active Wave Gate registration", () => {
     writeFileSync(path, JSON.stringify(initial));
     const manager = new StateManager(path);
     try {
-      const committed = await manager.commitActiveWaveGateCompletion((locked) => {
+      const committed = await commitActiveWaveGateCompletion(manager, (locked) => {
         const readiness = deriveWaveReadiness(locked, statusDeps);
         if (!readiness.ok) return { ok: false, error: { kind: "wave-completion-commit-rejected", message: "unavailable" } };
         return commitWaveGateCompletion(readiness.value);

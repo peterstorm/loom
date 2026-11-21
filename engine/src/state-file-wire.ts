@@ -8,9 +8,9 @@
  * under the TaskGraph lock lives in `state-manager.ts`, which re-exports this
  * module's public surface so the import surface is unchanged.
  *
- * Parse, don't validate: every union-typed field is PROVEN in the union before
- * any cast, so a drifted or hand-edited value fails loudly at the load boundary
- * instead of exploding later inside typed gate logic.
+ * Parse, don't validate: every union-typed field is PROVEN in the union and
+ * installed as its parsed value, so a drifted or hand-edited value fails loudly
+ * at the load boundary instead of exploding later inside typed gate logic.
  */
 
 import { isAbsolute, join, resolve } from "node:path";
@@ -19,7 +19,9 @@ import {
   isWaveReviewRunRetirement,
   parseStoredNewTestEvidence,
   REVIEW_STATUSES,
-  storedNewTestEvidence,
+  type TaskCommonMetadata,
+  type TaskLifecycle,
+  type TaskStatus,
   TASK_STATUSES,
   type Phase,
 } from "./types";
@@ -29,14 +31,11 @@ import { parseReviewNarrowing } from "./core/review-narrowing";
 import {
   findingIdCollisionError,
   findingsLockstepError,
-  findingsUnionError,
-  parseStoredFindings,
-  parseStoredRefutations,
-  parseStoredResolutions,
+  parseStoredFindingsField,
+  parseStoredRefutationsField,
+  parseStoredResolutionsField,
   findingsViewError,
   evidenceFailureError,
-  refutationsUnionError,
-  resolutionsUnionError,
   reviewRunError,
 } from "./core/findings";
 import type {
@@ -76,7 +75,9 @@ import {
   parseOrchestrationRunId,
   parseSlotId,
   canonicalStructuralEquals,
+  isNonEmpty,
   nonEmpty,
+  nonEmptyOf,
   type NonEmpty,
   type OrchestrationRunId,
 } from "./core/orchestration-contract";
@@ -90,6 +91,8 @@ import {
   testsOnlyScopeOfProof,
   writtenContract,
   type RedThenGreenScope,
+  type ProofObligation,
+  type ProofTestResult,
   type TaskProof,
   type TestsOnlyScope,
 } from "./core/proof-obligations";
@@ -100,7 +103,7 @@ import {
   partitionsFileList,
   reopeningNeedsOf,
 } from "./core/reopen-scope";
-import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
+import { parseDeclaredArtifactBaseline, type DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import {
   parseSettledFloor,
   parseSpecIndexObservation,
@@ -108,8 +111,8 @@ import {
   type SpecIndexObservation,
 } from "./core/requirement-coverage";
 import { parseStoredSpecCheck } from "./core/spec-check";
-import { parseProofBoundaryObservation, type ProofBoundaryObservation } from "./core/proof-boundary-observation";
-import { parsePlanDesignReview, type RecordedPlanDesignReview } from "./core/plan-design-review";
+import { parseProofBoundaryObservation } from "./core/proof-boundary-observation";
+import { parsePlanDesignReview } from "./core/plan-design-review";
 import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wave-gate-model";
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
@@ -117,14 +120,13 @@ import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
 import { dependencyAddedEdit, parsePlanEditReason, taskAddedEdit, taskRescopedEdit, taskWithdrawnEdit } from "./core/wave-plan-edit";
 import { retroRecordEntry, retroScopeKnown } from "./core/retro-record";
-import { parseAdvisoryDispositions, type AdvisoryDisposition } from "./core/advisory-disposition";
+import { parseAdvisoryDispositions } from "./core/advisory-disposition";
 import { dependencyCycles } from "./core/task-dependencies";
 import {
   amendmentHistoryError,
   parseSpecTraceContract,
   parseTraceOwnership,
   specTraceDiagnosticMessages,
-  type TraceFields,
 } from "./core/spec-trace";
 import {
   claimsDistillPassWaiver,
@@ -147,13 +149,16 @@ import {
   parseImplementationAttemptAuthority,
   parseImplementationAttemptHistory,
   parseImplementationSettlementReceiptId,
-  type ImplementationSettlementReceiptId,
+  type ImplementationAttemptAuthority,
+  type ImplementationAttemptSettlementReceipt,
 } from "./core/implementation-completion";
 import {
   deriveImplementationRetryDisposition,
   implementationAttemptContextMatchesAuthority,
   parseImplementationAttemptContext,
   renderImplementationRetryContext,
+  type ImplementationAttemptContext,
+  type ImplementationRetryDisposition,
 } from "./core/implementation-retry";
 import { parseTaskId, type TaskId } from "./core/task-id";
 import {
@@ -162,7 +167,7 @@ import {
   type FrozenVerificationManifest,
 } from "./core/verification-manifest";
 import { parseWaveReviewerProtocolDescriptor } from "./core/reviewer-contract";
-import { parseTestEvidenceField, type EngineRunTestEvidence } from "./core/test-evidence-authority";
+import { parseTestEvidenceField } from "./core/test-evidence-authority";
 import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
 import { isRecord } from "./core/plain-record";
@@ -196,7 +201,7 @@ import type {
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
  *
- * The cast in `parseTaskGraph` asserts `Record<string, WaveGate>` and used to
+ * The TaskGraph asserts `Record<string, WaveGate>`, and the load used to
  * prove nothing beyond "the container is an object". Four booleans read by gate
  * logic as booleans: `validate-task-execution` blocks on `!gate.reviews_complete`,
  * so `{ reviews_complete: "no" }` loaded clean and read as TRUTHY — the
@@ -206,41 +211,35 @@ import type {
  * outright — no writer produces it, and a drifted graph carrying it would
  * otherwise mint a failure message nothing in the engine ever wrote.
  */
-function waveGateError(v: unknown, wave: string): string | null {
-  if (!isRecord(v)) {
-    return `wave_gates["${wave}"] must be an object`;
-  }
-  const gate = v as Record<string, unknown>;
-  const booleanFields = ["impl_complete", "reviews_complete", "blocked"] as const;
+function parseWaveGate(raw: unknown, wave: string): ParseResult<WaveGate> {
+  const label = `wave_gates["${wave}"]`;
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   // Diagnose malformed fields before absent siblings so a partially supplied
   // record points at the value the writer actually got wrong.
-  for (const field of booleanFields) {
-    if (field in gate && typeof gate[field] !== "boolean") {
-      return `wave_gates["${wave}"]: ${field} must be a boolean, got ${JSON.stringify(gate[field])}`;
-    }
+  const malformed = WAVE_GATE_FLAGS.find((field) => field in raw && typeof raw[field] !== "boolean");
+  if (malformed !== undefined) return parseErr(`${label}: ${malformed} must be a boolean, got ${JSON.stringify(raw[malformed])}`);
+  const { impl_complete: implComplete, reviews_complete: reviewsComplete, blocked, tests_passed: testsPassed } = raw;
+  if ("tests_passed" in raw && testsPassed !== null && typeof testsPassed !== "boolean") {
+    return parseErr(`${label}: tests_passed must be a boolean or null, got ${JSON.stringify(testsPassed)}`);
   }
-  if (
-    "tests_passed" in gate &&
-    gate.tests_passed !== null && typeof gate.tests_passed !== "boolean"
-  ) {
-    return (
-      `wave_gates["${wave}"]: tests_passed must be a boolean or null, ` +
-      `got ${JSON.stringify(gate.tests_passed)}`
-    );
-  }
-  if ("tests_passed" in gate && gate.tests_passed === false) {
-    return (
-      `wave_gates["${wave}"]: tests_passed: false is not a representable gate state ` +
+  if ("tests_passed" in raw && testsPassed === false) {
+    return parseErr(
+      `${label}: tests_passed: false is not a representable gate state ` +
       `(no writer produces it; failing runs are judged by test_result evidence) — ` +
-      `set null (not yet judged) or true (passed)`
+      `set null (not yet judged) or true (passed)`,
     );
   }
-  for (const field of booleanFields) {
-    if (!(field in gate)) return `wave_gates["${wave}"]: missing required field ${field}`;
-  }
-  if (!("tests_passed" in gate)) return `wave_gates["${wave}"]: missing required field tests_passed`;
-  return null;
+  // Every present flag is a boolean and a present tests_passed is true or
+  // null, so what is not one now is absent.
+  if (typeof implComplete !== "boolean") return parseErr(`${label}: missing required field impl_complete`);
+  if (typeof reviewsComplete !== "boolean") return parseErr(`${label}: missing required field reviews_complete`);
+  if (typeof blocked !== "boolean") return parseErr(`${label}: missing required field blocked`);
+  if (testsPassed !== true && testsPassed !== null) return parseErr(`${label}: missing required field tests_passed`);
+  return parseOk({ ...raw, impl_complete: implComplete, tests_passed: testsPassed, reviews_complete: reviewsComplete, blocked });
 }
+
+/** A Wave Gate's boolean flags, in the order a malformed one is diagnosed. */
+const WAVE_GATE_FLAGS = ["impl_complete", "reviews_complete", "blocked"] as const;
 
 /**
  * Prove the spec-check record, routed through the smart constructor that exists
@@ -291,22 +290,16 @@ function parseSpecCheckField(v: unknown):
  *      spec-check reports `critical_count > 0`.
  */
 function blockedGateCauseError(
-  waveGates: Record<string, unknown>,
-  tasks: readonly Record<string, unknown>[],
+  waveGates: Readonly<Record<string, WaveGate>>,
+  tasks: readonly ParsedTask[],
   specCheck: SpecCheck | undefined,
 ): string | null {
-  const causeTasks = tasks.map((task) => ({
-    wave: typeof task.wave === "number" ? task.wave : Number.NaN,
-    critical_findings: Array.isArray(task.critical_findings)
-      ? (task.critical_findings as readonly string[])
-      : undefined,
-  }));
   for (const [wave, gate] of Object.entries(waveGates)) {
-    if ((gate as Record<string, unknown>).blocked !== true) continue;
+    if (!gate.blocked) continue;
     // The SAME predicate the writers use to set and clear the flag
     // (`core/wave-gate-model`), so the boundary can never disagree with them
     // about what counts as a cause.
-    if (waveHasBlockCause(causeTasks, specCheck, Number(wave))) continue;
+    if (waveHasBlockCause(tasks, specCheck, Number(wave))) continue;
     return (
       `wave_gates["${wave}"]: blocked: true has no cause — no task in wave ${wave} carries ` +
       `critical review findings and spec_check does not report a critical finding for it. ` +
@@ -339,6 +332,40 @@ function exactFieldsError(
   const missingFields = required.filter((field) => !(field in record));
   return missingFields.length > 0 ? `${label} is missing field(s): ${missingFields.join(", ")}` : null;
 }
+
+/**
+ * An optional append-only log under its wire name `field`: absent, or an
+ * array whose every entry parses under its `field[index]` label and whose
+ * entries then hold together (`collectionError`). An entry parser is handed
+ * the entries before it, for a rule that refuses at the first entry
+ * repeating an earlier one. The first refusal wins.
+ */
+function parseOptionalLog<T>(
+  raw: unknown,
+  field: string,
+  parseEntry: (entry: unknown, label: string, earlier: readonly T[]) => ParseResult<T>,
+  collectionError: (entries: readonly T[]) => string | null = () => null,
+): ParseResult<readonly T[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr(`${field} must be an array when present`);
+  const entries: T[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const parsed = parseEntry(entry, `${field}[${index}]`, entries);
+    if (!parsed.ok) return parsed;
+    entries.push(parsed.value);
+  }
+  const error = collectionError(entries);
+  return error === null ? parseOk(Object.freeze(entries)) : parseErr(error);
+}
+
+/** A refusal its parser words without a location, prefixed with the `label` it occurred under. */
+function labelled<T>(label: string, parsed: ParseResult<T>): ParseResult<T> {
+  return parsed.ok ? parsed : parseErr(`${label}: ${parsed.error}`);
+}
+
+/** Why two entries share an identity, as `message`, or null when every identity is distinct. */
+const repeatedIdentity = (identities: readonly string[], message: string): string | null =>
+  new Set(identities).size === identities.length ? null : message;
 
 const WAVE_REVIEW_EPOCH_FIELDS = ["runId", "wave", "batchEpoch"] as const;
 const WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS = ["specCheckDocuments", "specCheckSlotAuthority", "settledSpecCheckFloor"] as const;
@@ -469,7 +496,7 @@ const ACTIVE_WAVE_GATE_FIELDS = [
 ] as const;
 const ACTIVE_WAVE_GATE_OPTIONAL_FIELDS = ["runsRoot"] as const;
 
-export function parseActiveWaveGateTerminalOutcome(
+function parseActiveWaveGateTerminalOutcome(
   raw: unknown,
   runId: ActiveWaveGateRegistration["runId"],
 ): ParseResult<ActiveWaveGateRegistration["terminalOutcome"]> {
@@ -737,19 +764,12 @@ function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<OrphanedWave
 }
 
 function parseOrphanedWaveGateHistory(raw: unknown): ParseResult<readonly OrphanedWaveGateRetirement[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("orphaned_wave_gate_history must be an array when present");
-  const history: OrphanedWaveGateRetirement[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    const parsed = parseOrphanedWaveGateRetirement(raw[index]);
-    if (!parsed.ok) return parseErr(`orphaned_wave_gate_history[${index}]: ${parsed.error}`);
-    history.push(parsed.value);
-  }
-  const retiredRunIds = history.map(({ runId }) => runId);
-  if (new Set(retiredRunIds).size !== retiredRunIds.length) {
-    return parseErr("orphaned_wave_gate_history contains duplicate retired run identities");
-  }
-  return parseOk(Object.freeze(history));
+  return parseOptionalLog(
+    raw,
+    "orphaned_wave_gate_history",
+    (entry, label) => labelled(label, parseOrphanedWaveGateRetirement(entry)),
+    (history) => repeatedIdentity(history.map(({ runId }) => runId), "orphaned_wave_gate_history contains duplicate retired run identities"),
+  );
 }
 
 const RETIRED_WAVE_REVIEW_RUN_FIELDS = ["schemaVersion", "kind", "runId", "wave", "authorityDigest", "retirement"] as const;
@@ -782,18 +802,10 @@ function parseRetiredWaveReviewRun(raw: unknown, label: string): ParseResult<Ret
 
 /** Parse the append-only Successor Carry provenance; a run is retired once. */
 function parseRetiredWaveReviewRuns(raw: unknown): ParseResult<readonly RetiredWaveReviewRun[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("retired_wave_review_runs must be an array when present");
-  const runs: RetiredWaveReviewRun[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseRetiredWaveReviewRun(entry, `retired_wave_review_runs[${index}]`);
-    if (!parsed.ok) return parsed;
-    runs.push(parsed.value);
-  }
-  const repeated = repeatedRetiredRun(runs);
-  return repeated === null
-    ? parseOk(Object.freeze(runs))
-    : parseErr(`retired_wave_review_runs retires run ${repeated.runId} twice`);
+  return parseOptionalLog(raw, "retired_wave_review_runs", parseRetiredWaveReviewRun, (runs) => {
+    const repeated = repeatedRetiredRun(runs);
+    return repeated === null ? null : `retired_wave_review_runs retires run ${repeated.runId} twice`;
+  });
 }
 
 const SPEC_TRACE_WAVE_GATE_RETIREMENT_FIELDS = [
@@ -879,24 +891,19 @@ function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<SpecTraceWa
 function parseSpecTraceWaveGateRetirements(
   raw: unknown,
 ): ParseResult<readonly SpecTraceWaveGateRetirement[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("spec_trace_wave_gate_retirements must be an array when present");
-  const retirements: SpecTraceWaveGateRetirement[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    const parsed = parseSpecTraceWaveGateRetirement(raw[index]);
-    if (!parsed.ok) return parseErr(`spec_trace_wave_gate_retirements[${index}]: ${parsed.error}`);
-    retirements.push(parsed.value);
-  }
-  const runIds = retirements.map(({ runId }) => runId);
-  if (new Set(runIds).size !== runIds.length) {
-    return parseErr("spec_trace_wave_gate_retirements contains duplicate retired run identities");
-  }
-  const authorityIdentities = retirements.map((entry) =>
-    `${entry.wave}:${entry.authorityDigest}:${entry.revision}:${entry.runsRoot}`);
-  if (new Set(authorityIdentities).size !== authorityIdentities.length) {
-    return parseErr("spec_trace_wave_gate_retirements contains colliding protected authority identities");
-  }
-  return parseOk(Object.freeze(retirements));
+  return parseOptionalLog(
+    raw,
+    "spec_trace_wave_gate_retirements",
+    (entry, label) => labelled(label, parseSpecTraceWaveGateRetirement(entry)),
+    (retirements) =>
+      repeatedIdentity(
+        retirements.map(({ runId }) => runId),
+        "spec_trace_wave_gate_retirements contains duplicate retired run identities",
+      ) ?? repeatedIdentity(
+        retirements.map((entry) => `${entry.wave}:${entry.authorityDigest}:${entry.revision}:${entry.runsRoot}`),
+        "spec_trace_wave_gate_retirements contains colliding protected authority identities",
+      ),
+  );
 }
 
 const SPEC_TRACE_AMENDMENT_FIELDS = [
@@ -1019,7 +1026,7 @@ function parseIndexedObservation(raw: unknown, label: string): ParseResult<Index
 }
 
 /** One immutable Spec Amendment audit (ADR-0087), bound to the roster: every re-judgement names a Task. */
-function parseSpecAmendment(raw: unknown, label: string, tasks: readonly Record<string, unknown>[]): ParseResult<SpecAmendment> {
+function parseSpecAmendment(raw: unknown, label: string, tasks: readonly ParsedTask[]): ParseResult<SpecAmendment> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
   const fieldsError = exactFieldsError(record, SPEC_AMENDMENT_FIELDS, [], label);
@@ -1062,28 +1069,12 @@ function parseSpecAmendment(raw: unknown, label: string, tasks: readonly Record<
   }));
 }
 
-function parseSpecAmendments(raw: unknown, tasks: readonly Record<string, unknown>[]): ParseResult<readonly SpecAmendment[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("spec_amendments must be an array when present");
-  const amendments: SpecAmendment[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseSpecAmendment(entry, `spec_amendments[${index}]`, tasks);
-    if (!parsed.ok) return parsed;
-    amendments.push(parsed.value);
-  }
-  return parseOk(Object.freeze(amendments));
+function parseSpecAmendments(raw: unknown, tasks: readonly ParsedTask[]): ParseResult<readonly SpecAmendment[] | undefined> {
+  return parseOptionalLog(raw, "spec_amendments", (entry, label) => parseSpecAmendment(entry, label, tasks));
 }
 
 function parseSpecTraceAmendments(raw: unknown): ParseResult<readonly SpecTraceAmendment[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("spec_trace_amendments must be an array when present");
-  const amendments: SpecTraceAmendment[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseSpecTraceAmendment(entry);
-    if (!parsed.ok) return parseErr(`spec_trace_amendments[${index}]: ${parsed.error}`);
-    amendments.push(parsed.value);
-  }
-  return parseOk(Object.freeze(amendments));
+  return parseOptionalLog(raw, "spec_trace_amendments", (entry, label) => labelled(label, parseSpecTraceAmendment(entry)));
 }
 
 const TASK_REOPENING_AUDIT_FIELDS = [
@@ -1162,7 +1153,7 @@ function parseReopenedTaskIds(
 function parseTaskReopeningAudit(
   raw: unknown,
   label: string,
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly ParsedTask[],
 ): ParseResult<TaskReopeningAudit> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
@@ -1204,20 +1195,17 @@ function parseTaskReopeningAudit(
  *  so no two audits may name the same run. */
 function parseTaskReopeningHistory(
   raw: unknown,
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly ParsedTask[],
 ): ParseResult<readonly TaskReopeningAudit[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("task_reopening_history must be an array when present");
-  const audits: TaskReopeningAudit[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseTaskReopeningAudit(entry, `task_reopening_history[${index}]`, tasks);
-    if (!parsed.ok) return parsed;
-    audits.push(parsed.value);
-  }
-  const runs = audits.flatMap(({ abandonedRunId }) => abandonedRunId === null ? [] : [abandonedRunId]);
-  return new Set(runs).size === runs.length
-    ? parseOk(Object.freeze(audits))
-    : parseErr("task_reopening_history names one abandoned Wave Gate run in two audits");
+  return parseOptionalLog(
+    raw,
+    "task_reopening_history",
+    (entry, label) => parseTaskReopeningAudit(entry, label, tasks),
+    (audits) => repeatedIdentity(
+      audits.flatMap(({ abandonedRunId }) => abandonedRunId === null ? [] : [abandonedRunId]),
+      "task_reopening_history names one abandoned Wave Gate run in two audits",
+    ),
+  );
 }
 
 const TASK_RESCOPED_EDIT_FIELDS = [
@@ -1230,7 +1218,7 @@ const isStringArray = (raw: unknown): raw is readonly string[] => Array.isArray(
  * What a plan edit may name: the roster, and the Tasks `withdraw-task` removed
  * from it (ADR-0086), whose earlier edits stay in the history.
  */
-type PlanEditRoster = Readonly<{ tasks: readonly Record<string, unknown>[]; withdrawn: ReadonlySet<string> }>;
+type PlanEditRoster = Readonly<{ tasks: readonly ParsedTask[]; withdrawn: ReadonlySet<string> }>;
 
 /** Whether `id` names a Task of the roster or a withdrawn one. */
 const knownToPlanEdits = (roster: PlanEditRoster, id: unknown): boolean =>
@@ -1379,7 +1367,7 @@ function withdrawnTaskIdsOf(raw: readonly unknown[]): ReadonlySet<string> {
  * null. A Task is added at most once and withdrawn at most once, only after
  * it was added and in the same Wave; a withdrawn Task has left the roster.
  */
-function wavePlanHistoryError(edits: readonly WavePlanEdit[], tasks: readonly Record<string, unknown>[]): string | null {
+function wavePlanHistoryError(edits: readonly WavePlanEdit[], tasks: readonly ParsedTask[]): string | null {
   const added = new Map<string, number>();
   const withdrawn = new Set<string>();
   for (const [index, edit] of edits.entries()) {
@@ -1399,19 +1387,15 @@ function wavePlanHistoryError(edits: readonly WavePlanEdit[], tasks: readonly Re
 
 function parseWavePlanEdits(
   raw: unknown,
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly ParsedTask[],
 ): ParseResult<readonly WavePlanEdit[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("wave_plan_edits must be an array when present");
-  const roster: PlanEditRoster = { tasks, withdrawn: withdrawnTaskIdsOf(raw) };
-  const edits: WavePlanEdit[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const parsed = parseWavePlanEdit(entry, `wave_plan_edits[${index}]`, roster);
-    if (!parsed.ok) return parsed;
-    edits.push(parsed.value);
-  }
-  const historyError = wavePlanHistoryError(edits, tasks);
-  return historyError === null ? parseOk(Object.freeze(edits)) : parseErr(historyError);
+  const roster: PlanEditRoster = { tasks, withdrawn: withdrawnTaskIdsOf(Array.isArray(raw) ? raw : []) };
+  return parseOptionalLog(
+    raw,
+    "wave_plan_edits",
+    (entry, label) => parseWavePlanEdit(entry, label, roster),
+    (edits) => wavePlanHistoryError(edits, tasks),
+  );
 }
 
 /** A retro scope's exact wire shape: `{kind:"run"}` or `{kind:"wave",wave}`, else null. */
@@ -1423,42 +1407,36 @@ function parseRetroScope(scope: Record<string, unknown>): RetroScope | null {
 }
 
 /** `retro_records`, each built by the one constructor (`core/retro-record.ts`). */
-function parseRetroRecords(raw: unknown, tasks: readonly Record<string, unknown>[]): ParseResult<readonly RetroRecord[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("retro_records must be an array when present");
-  const records: RetroRecord[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const label = `retro_records[${index}]`;
-    if (!isRecord(entry)) return parseErr(`${label} must be an object`);
-    const record = entry as Record<string, unknown>;
-    if (record.schemaVersion !== 1) return parseErr(`${label} has invalid schema or kind`);
-    const scope = record.scope;
-    if (!isRecord(scope)) return parseErr(`${label}.scope must be an object`);
-    const scopeRecord = scope as Record<string, unknown>;
-    if (record.kind === "retro-skipped") {
-      const fieldsError = exactFieldsError(record, ["schemaVersion", "kind", "scope", "reason"], [], label);
-      if (fieldsError !== null) return parseErr(fieldsError);
-      if (scopeRecord.kind !== "run" || Object.keys(scopeRecord).length !== 1) return parseErr(`${label}: a skip covers the whole run`);
-      if (typeof record.reason !== "string") return parseErr(`${label}.reason must be a string`);
-      const built = retroRecordEntry({ kind: "retro-skipped", reason: record.reason });
-      if (!built.ok) return parseErr(`${label} ${built.error}`);
-      records.push(built.value);
-      continue;
-    }
-    if (record.kind !== "retro-recorded") return parseErr(`${label} has invalid schema or kind`);
-    const fieldsError = exactFieldsError(record, ["schemaVersion", "kind", "scope", "path", "digest"], [], label);
+function parseRetroRecords(raw: unknown, tasks: readonly ParsedTask[]): ParseResult<readonly RetroRecord[] | undefined> {
+  const waves = tasks.map(({ wave }) => wave);
+  return parseOptionalLog(raw, "retro_records", (entry, label) => parseRetroRecord(entry, label, waves));
+}
+
+/** One retro record: a skip of the whole run, or a recorded retro of a run or of a Wave the TaskGraph holds. */
+function parseRetroRecord(raw: unknown, label: string, waves: readonly number[]): ParseResult<RetroRecord> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  if (raw.schemaVersion !== 1) return parseErr(`${label} has invalid schema or kind`);
+  const scope = raw.scope;
+  if (!isRecord(scope)) return parseErr(`${label}.scope must be an object`);
+  if (raw.kind === "retro-skipped") {
+    const fieldsError = exactFieldsError(raw, ["schemaVersion", "kind", "scope", "reason"], [], label);
     if (fieldsError !== null) return parseErr(fieldsError);
-    const parsedScope = parseRetroScope(scopeRecord);
-    if (parsedScope === null) return parseErr(`${label}.scope must be {kind:"run"} or {kind:"wave",wave}`);
-    if (typeof record.path !== "string" || typeof record.digest !== "string") return parseErr(`${label}.path and .digest must be strings`);
-    const built = retroRecordEntry({ kind: "retro-recorded", scope: parsedScope, path: record.path, digest: record.digest });
-    if (!built.ok) return parseErr(`${label} ${built.error}`);
-    if (!retroScopeKnown(built.value.scope, tasks.flatMap(({ wave }) => (typeof wave === "number" ? [wave] : [])))) {
-      return parseErr(`${label}.scope names a Wave the TaskGraph does not hold`);
-    }
-    records.push(built.value);
+    if (scope.kind !== "run" || Object.keys(scope).length !== 1) return parseErr(`${label}: a skip covers the whole run`);
+    if (typeof raw.reason !== "string") return parseErr(`${label}.reason must be a string`);
+    const built = retroRecordEntry({ kind: "retro-skipped", reason: raw.reason });
+    return built.ok ? parseOk(built.value) : parseErr(`${label} ${built.error}`);
   }
-  return parseOk(Object.freeze(records));
+  if (raw.kind !== "retro-recorded") return parseErr(`${label} has invalid schema or kind`);
+  const fieldsError = exactFieldsError(raw, ["schemaVersion", "kind", "scope", "path", "digest"], [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const parsedScope = parseRetroScope(scope);
+  if (parsedScope === null) return parseErr(`${label}.scope must be {kind:"run"} or {kind:"wave",wave}`);
+  if (typeof raw.path !== "string" || typeof raw.digest !== "string") return parseErr(`${label}.path and .digest must be strings`);
+  const built = retroRecordEntry({ kind: "retro-recorded", scope: parsedScope, path: raw.path, digest: raw.digest });
+  if (!built.ok) return parseErr(`${label} ${built.error}`);
+  return retroScopeKnown(built.value.scope, waves)
+    ? parseOk(built.value)
+    : parseErr(`${label}.scope names a Wave the TaskGraph does not hold`);
 }
 
 const FORWARD_FIX_AUDIT_FIELDS = [
@@ -1527,7 +1505,7 @@ function parseForwardFixAuditShape(raw: unknown, label: string): ParseResult<For
 /** Why a live audit contradicts the roster, or null: its fix Task and held
  *  Tasks are Tasks of the audited Wave, the fix is no Distill Task, and every
  *  sealed path is the fix Task's own and was written by an earlier Wave. */
-function forwardFixRosterError(audit: ForwardFixAudit, label: string, tasks: readonly Record<string, unknown>[]): string | null {
+function forwardFixRosterError(audit: ForwardFixAudit, label: string, tasks: readonly ParsedTask[]): string | null {
   const fix = tasks.find((task) => task.id === audit.fixTaskId);
   if (fix === undefined || fix.wave !== audit.wave) return `${label}.fixTaskId: ${audit.fixTaskId} is not a Task of Wave ${audit.wave}`;
   if (isDistillTask(fix)) return `${label}.fixTaskId: ${audit.fixTaskId} is a Distill Task`;
@@ -1546,23 +1524,17 @@ function forwardFixRosterError(audit: ForwardFixAudit, label: string, tasks: rea
 /** A fix Task is appended by exactly one audit, so no two audits name the same fix Task. */
 function parseForwardFixHistory(
   raw: unknown,
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly ParsedTask[],
 ): ParseResult<readonly ForwardFixAudit[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("forward_fix_history must be an array when present");
-  const audits: ForwardFixAudit[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const label = `forward_fix_history[${index}]`;
+  return parseOptionalLog(raw, "forward_fix_history", (entry, label, earlier: readonly ForwardFixAudit[]) => {
     const parsed = parseForwardFixAuditShape(entry, label);
     if (!parsed.ok) return parsed;
     const rosterError = forwardFixRosterError(parsed.value, label, tasks);
     if (rosterError !== null) return parseErr(rosterError);
-    if (audits.some(({ fixTaskId }) => fixTaskId === parsed.value.fixTaskId)) {
-      return parseErr(`forward_fix_history names fix Task ${parsed.value.fixTaskId} in two audits`);
-    }
-    audits.push(parsed.value);
-  }
-  return parseOk(Object.freeze(audits));
+    return earlier.some(({ fixTaskId }) => fixTaskId === parsed.value.fixTaskId)
+      ? parseErr(`forward_fix_history names fix Task ${parsed.value.fixTaskId} in two audits`)
+      : parsed;
+  });
 }
 
 const FORWARD_FIX_WITHDRAWAL_FIELDS = ["schemaVersion", "kind", "audit", "reason"] as const;
@@ -1576,30 +1548,24 @@ const FORWARD_FIX_WITHDRAWAL_FIELDS = ["schemaVersion", "kind", "audit", "reason
  */
 function parseForwardFixWithdrawals(
   raw: unknown,
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly ParsedTask[],
 ): ParseResult<readonly ForwardFixWithdrawal[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("forward_fix_withdrawals must be an array when present");
-  const withdrawals: ForwardFixWithdrawal[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const label = `forward_fix_withdrawals[${index}]`;
+  return parseOptionalLog(raw, "forward_fix_withdrawals", (entry, label, earlier: readonly ForwardFixWithdrawal[]) => {
     if (!isRecord(entry)) return parseErr(`${label} must be an object`);
-    const record = entry as Record<string, unknown>;
-    const fieldsError = exactFieldsError(record, FORWARD_FIX_WITHDRAWAL_FIELDS, [], label);
+    const fieldsError = exactFieldsError(entry, FORWARD_FIX_WITHDRAWAL_FIELDS, [], label);
     if (fieldsError !== null) return parseErr(fieldsError);
-    if (record.schemaVersion !== 1 || record.kind !== "forward-fix-withdrawn") return parseErr(`${label} has invalid schema or kind`);
-    const audit = parseForwardFixAuditShape(record.audit, `${label}.audit`);
+    if (entry.schemaVersion !== 1 || entry.kind !== "forward-fix-withdrawn") return parseErr(`${label} has invalid schema or kind`);
+    const audit = parseForwardFixAuditShape(entry.audit, `${label}.audit`);
     if (!audit.ok) return audit;
     const { fixTaskId } = audit.value;
     if (tasks.some((task) => task.id === fixTaskId)) return parseErr(`${label}: withdrawn fix Task ${fixTaskId} is still on the roster`);
-    if (withdrawals.some((withdrawal) => withdrawal.audit.fixTaskId === fixTaskId)) {
+    if (earlier.some((withdrawal) => withdrawal.audit.fixTaskId === fixTaskId)) {
       return parseErr(`forward_fix_withdrawals withdraws fix Task ${fixTaskId} twice`);
     }
-    const reason = parseBoundedReason(record.reason, label);
+    const reason = parseBoundedReason(entry.reason, label);
     if (!reason.ok) return reason;
-    withdrawals.push(Object.freeze({ schemaVersion: 1, kind: "forward-fix-withdrawn", audit: audit.value, reason: reason.value }));
-  }
-  return parseOk(Object.freeze(withdrawals));
+    return parseOk(Object.freeze({ schemaVersion: 1 as const, kind: "forward-fix-withdrawn" as const, audit: audit.value, reason: reason.value }));
+  });
 }
 
 /** An audit's operator reason under `label`: a trimmed non-blank string of at most the reopening bound. */
@@ -1626,8 +1592,11 @@ export function taskIdError(value: unknown, label: string): string | null {
   return parsed.ok ? null : parsed.error;
 }
 
+/** The Task fields the roster rules read: a raw Task record and a parsed Task are both one. */
+type RosterTaskView = Readonly<{ id?: unknown; wave?: unknown; depends_on?: unknown }>;
+
 export function orphanExecutionReservationError(
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly RosterTaskView[],
   executingTasks: unknown,
 ): string | null {
   if (!Array.isArray(executingTasks)) return null;
@@ -1669,7 +1638,7 @@ export function auditedSameWaveEdges(rawEdits: unknown): ReadonlySet<string> {
  * records it (ADR-0081). Only when there is none, every cycle.
  */
 export function taskDependencyErrors(
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly RosterTaskView[],
   auditedSameWave: ReadonlySet<string> = new Set(),
 ): readonly string[] {
   const byId = new Map(
@@ -1708,13 +1677,50 @@ export function taskDependencyErrors(
   return dependencyCycles(graph);
 }
 
+// ---------------------------------------------------------------------------
+// One stored Task
+// ---------------------------------------------------------------------------
+
+/** One stored Task's prefix in every load diagnostic: its position and id. */
+const taskLabel = (index: number, id: string): string => `tasks[${index}] ("${id}")`;
+
+/** `{ [field]: value }` for a present value, `{}` for an absent one: an absent field stays absent. */
+function present<K extends string, V>(field: K, value: V | undefined): Partial<Readonly<Record<K, V>>> {
+  const absent: Partial<Readonly<Record<K, V>>> = {};
+  return value === undefined ? absent : { ...absent, [field]: value };
+}
+
+/** A leaf parser's diagnostics as this boundary's one error: every diagnostic, in order. */
+function fromErrors<T>(
+  result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; errors: readonly string[] }>,
+): ParseResult<T> {
+  return result.ok ? parseOk(result.value) : parseErr(result.errors.join("; "));
+}
+
+/** `fromErrors` for the leaf parsers that wrap their diagnostics in an error record. */
+function fromErrorList<T>(
+  result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: Readonly<{ errors: readonly string[] }> }>,
+): ParseResult<T> {
+  return result.ok ? parseOk(result.value) : parseErr(result.error.errors.join("; "));
+}
+
+/** A stored Task's id and its position, or why the entry is no Task. */
+function parseStoredTaskIdentity(
+  raw: unknown,
+  index: number,
+): ParseResult<Readonly<{ record: Readonly<Record<string, unknown>>; id: TaskId; label: string }>> {
+  if (!isRecord(raw)) return parseErr(`tasks[${index}] must be an object`);
+  const id = parseTaskIdAt(raw.id, `tasks[${index}]`);
+  return id.ok ? parseOk({ record: raw, id: id.value, label: taskLabel(index, id.value) }) : id;
+}
+
 /**
- * Prove one task entry at the load boundary.
- *
- * Split into one validator per concern. The ORDER is preserved exactly —
- * each helper runs in the sequence its checks originally ran in, and the
- * first non-null error still wins — so the diagnostic a drifted graph
- * produces is unchanged.
+ * Parse one stored Task at the load boundary: every field once, in the order
+ * the load-guard suite pins, each cross-field rule judged on parsed values,
+ * and the first refusal wins, so the operator sees the outermost cause. A
+ * pending Task stored without a Proof is given the pending Proof its policy
+ * derives, and an active attempt's repository baseline is carried into
+ * `repository_baseline`.
  *
  * `scope` is the TaskGraph's I6 scope (`redThenGreenScope` of its
  * `verification_manifest` and `acceptance_contracts`, INV-6), whose
@@ -1723,304 +1729,389 @@ export function taskDependencyErrors(
  * required: the obligation check matches exactly that era's derivation, so no
  * caller can prove a Task against "either era".
  */
-export function taskUnionError(v: unknown, index: number, scope: RedThenGreenScope): string | null {
-  if (!isRecord(v)) {
-    return `tasks[${index}] must be an object`;
-  }
-  const t = v as Record<string, unknown>;
-  const identityError = taskIdError(t.id, `tasks[${index}]`);
-  if (identityError !== null) return identityError;
-  const id = t.id as string;
-  // Every validator below proves one family of the Task cast; each documents
-  // its own. The first failure wins, so the operator sees the outermost cause.
-  return taskShapeError(t, index, id)
-    ?? taskBaselineError(t, index, id)
-    ?? taskAttemptAuthorityError(t, index, id)
-    ?? taskRepositoryCarryError(t, index, id)
-    ?? taskPacketError(t, index, id)
-    ?? taskStatusError(t, index, id, scope)
-    ?? taskEvidenceError(t, index, id)
-    ?? taskFindingsError(t, index, id);
-}
-
-/** Structural fields the Task cast asserts: names, wave, dependencies, files. */
-function taskShapeError(
-  t: Record<string, unknown>,
-  index: number,
-  id: string,
-): string | null {
-  // drifted or hand-edited graph must fail at the load boundary, not
-  // explode later inside typed gate logic that trusts Task's shape.
-  if (typeof t.description !== "string" || t.description.trim() === "") {
-    return `tasks[${index}] ("${id}"): description must be a non-empty string, got ${JSON.stringify(t.description)}`;
-  }
-  if (typeof t.agent !== "string" || t.agent.trim() === "") {
-    return `tasks[${index}] ("${id}"): agent must be a non-empty string, got ${JSON.stringify(t.agent)}`;
-  }
-  if (!KNOWN_AGENTS.has(t.agent)) {
-    return `tasks[${index}] ("${id}"): unknown agent ${JSON.stringify(t.agent)}`;
-  }
-  if (typeof t.wave !== "number" || !Number.isSafeInteger(t.wave) || t.wave < 1) {
-    return `tasks[${index}] ("${id}"): wave must be an integer >= 1 within the safe-integer range, got ${JSON.stringify(t.wave)}`;
-  }
-  if (!Array.isArray(t.depends_on) || t.depends_on.some((d) => typeof d !== "string")) {
-    return `tasks[${index}] ("${id}"): depends_on must be an array of strings`;
-  }
-  if (t.file_list !== undefined) {
-    if (!Array.isArray(t.file_list)) {
-      return `tasks[${index}] ("${id}"): file_list must be an array of canonical repository-relative paths when present`;
-    }
-    const seen = new Set<string>();
-    for (const [pathIndex, rawPath] of t.file_list.entries()) {
-      const path = parseReviewPath(rawPath, `tasks[${index}] ("${id}"): file_list[${pathIndex}]`);
-      if (!path.ok) return path.errors.join("; ");
-      if (isProtectedVerificationPath(path.value)) {
-        return (
-          `tasks[${index}] ("${id}"): file_list path '${path.value}' is protected verification infrastructure; ` +
-          `remove it from this Task`
-        );
-      }
-      if (seen.has(path.value)) return `tasks[${index}] ("${id}"): file_list repeats '${path.value}'`;
-      seen.add(path.value);
-    }
-  }
-  if (
-    t.files_modified !== undefined &&
-    (!Array.isArray(t.files_modified) || t.files_modified.some((f) => typeof f !== "string"))
-  ) {
-    return `tasks[${index}] ("${id}"): files_modified must be an array of strings when present`;
-  }
-  return null;
-}
-
-/** Declared artifact baselines and their agreement with file_list. */
-function taskBaselineError(
-  t: Record<string, unknown>,
-  index: number,
-  id: string,
-): string | null {
-  const fileListAgreement = (
-    raw: unknown,
-    field: "artifact_baseline" | "attempt_artifact_baseline",
-    coverage: "exact" | "prefix",
-    requirement: string,
-  ): string | null => {
-    const baseline = parseDeclaredArtifactBaseline(raw, `tasks[${index}] ("${id}"): ${field}`);
-    if (!baseline.ok) return baseline.errors.join("; ");
-    const declaredArtifacts = Array.isArray(t.file_list) ? t.file_list : [];
-    const actualArtifacts = baseline.value.map(({ artifact }) => artifact);
-    const covers = coverage === "exact"
-      ? actualArtifacts.length === declaredArtifacts.length
-      : actualArtifacts.length >= declaredArtifacts.length;
-    if (
-      !covers ||
-      declaredArtifacts.some((artifact, artifactIndex) => artifact !== actualArtifacts[artifactIndex])
-    ) {
-      return `tasks[${index}] ("${id}"): ${field} ${requirement}`;
-    }
-    return null;
-  };
-  if (t.artifact_baseline !== undefined) {
-    const error = fileListAgreement(
-      t.artifact_baseline,
-      "artifact_baseline",
-      "exact",
-      "must exactly match file_list in order",
-    );
-    if (error !== null) return error;
-  }
-  if (t.attempt_artifact_baseline !== undefined) {
-    const label = `tasks[${index}] ("${id}"): attempt_artifact_baseline`;
-    const baseline = parseDeclaredArtifactBaseline(t.attempt_artifact_baseline, label);
-    if (!baseline.ok) return baseline.errors.join("; ");
-    if (t.active_implementation_attempt !== undefined) {
-      const expectedRaw = [
-        ...(Array.isArray(t.file_list) ? t.file_list : []),
-        ...(Array.isArray(t.files_modified) ? t.files_modified : []),
-      ];
-      const expected: string[] = [];
-      for (const [pathIndex, rawPath] of expectedRaw.entries()) {
-        const parsed = parseReviewPath(rawPath, `${label}.registration_scope[${pathIndex}]`);
-        if (!parsed.ok) return parsed.errors.join("; ");
-        if (!expected.includes(parsed.value)) expected.push(parsed.value);
-      }
-      const actual = baseline.value.map(({ artifact }) => artifact);
-      const actualSet = new Set(actual);
-      if (actual.length !== expected.length || actualSet.size !== expected.length ||
-          expected.some((path) => !actualSet.has(path))) {
-        return `${label} path set must exactly equal unique(file_list + files_modified) at registration scope`;
-      }
-    } else {
-      const error = fileListAgreement(
-        t.attempt_artifact_baseline,
-        "attempt_artifact_baseline",
-        "prefix",
-        "must cover file_list first and in order",
-      );
-      if (error !== null) return error;
-    }
-  }
-  if (t.attempt_repository_baseline !== undefined) {
-    const baseline = parseDeclaredArtifactBaseline(
-      t.attempt_repository_baseline,
-      `tasks[${index}] ("${id}"): attempt_repository_baseline`,
-    );
-    if (!baseline.ok) return baseline.errors.join("; ");
-  }
-  return null;
-}
-
-/** Modern attempt authority, baseline digest lockstep, and exact receipt history. */
-function taskAttemptAuthorityError(
-  t: Record<string, unknown>,
-  index: number,
-  id: string,
-): string | null {
-  const label = `tasks[${index}] ("${id}")`;
-  const parsedHistory = t.implementation_attempt_history === undefined
-    ? undefined
-    : parseImplementationAttemptHistory(
-        t.implementation_attempt_history,
-        `${label}: implementation_attempt_history`,
-      );
-  if (parsedHistory !== undefined && !parsedHistory.ok) {
-    return parsedHistory.error.errors.join("; ");
-  }
-  const history = parsedHistory?.value;
-  if (history?.some((receipt) => receipt.taskId !== id)) {
-    return `${label}: implementation_attempt_history receipt taskId must equal ${id}`;
-  }
-  const protocolPresent = t.implementation_retry_protocol !== undefined ||
-    t.implementation_retry_history_start !== undefined ||
-    t.implementation_retry_predecessor_receipt_id !== undefined;
-  let retryProtocol: 2 | undefined;
-  let retryHistoryStart: number | undefined;
-  let retryPredecessorReceiptId: ImplementationSettlementReceiptId | undefined;
-  if (protocolPresent) {
-    if (t.implementation_retry_protocol !== 2 ||
-        typeof t.implementation_retry_history_start !== "number" ||
-        !Number.isSafeInteger(t.implementation_retry_history_start) ||
-        t.implementation_retry_history_start < 0 ||
-        t.implementation_retry_history_start > (history?.length ?? 0)) {
-      return `${label}: implementation retry protocol 2 requires a valid history start index`;
-    }
-    if (t.implementation_retry_predecessor_receipt_id !== undefined) {
-      const predecessor = parseImplementationSettlementReceiptId(
-        t.implementation_retry_predecessor_receipt_id,
-        `${label}: implementation_retry_predecessor_receipt_id`,
-      );
-      if (!predecessor.ok) return predecessor.error.errors.join("; ");
-      retryPredecessorReceiptId = predecessor.value;
-    }
-    retryProtocol = 2;
-    retryHistoryStart = t.implementation_retry_history_start;
-  }
-  const retryDisposition = deriveImplementationRetryDisposition({
+export function parseStoredTask(raw: unknown, index: number, scope: RedThenGreenScope): ParseResult<ParsedTask> {
+  const identity = parseStoredTaskIdentity(raw, index);
+  if (!identity.ok) return identity;
+  const { record: t, id, label } = identity.value;
+  const shape = parseStoredTaskShape(t, label);
+  if (!shape.ok) return shape;
+  const baselines = parseStoredTaskBaselines(t, label, shape.value);
+  if (!baselines.ok) return baselines;
+  const attempt = parseStoredAttempt(t, label, id, shape.value.wave, baselines.value);
+  if (!attempt.ok) return attempt;
+  const carry = parseStoredRepositoryCarry(t, label, baselines.value);
+  if (!carry.ok) return carry;
+  const packetError = taskPacketError(t, label, id, shape.value);
+  if (packetError !== null) return parseErr(packetError);
+  const lifecycle = parseStoredLifecycle(t, label, id, shape.value, scope);
+  if (!lifecycle.ok) return lifecycle;
+  const evidence = parseStoredTaskEvidence(t, label);
+  if (!evidence.ok) return evidence;
+  const findings = readStoredTaskFindings(t, label);
+  if (findings.errors[0] !== undefined) return parseErr(findings.errors[0]);
+  const hashes = parseSpecAnchorHashes(t.spec_anchor_hashes, index);
+  if (!hashes.ok) return hashes;
+  const skeletons = parseSkeletonOutcomesField(t.skeleton_outcomes, shape.value.file_list, `tasks[${index}].skeleton_outcomes`);
+  if (!skeletons.ok) return skeletons;
+  return parseOk(loadedTask(t, {
     id,
-    implementation_attempt_history: history,
-    implementation_retry_protocol: retryProtocol,
-    implementation_retry_history_start: retryHistoryStart,
-    implementation_retry_predecessor_receipt_id: retryPredecessorReceiptId,
+    ...shape.value,
+    ...lifecycle.value.lifecycle,
+    ...lifecycle.value.reopening,
+    ...present("spec_anchor_hashes", hashes.value),
+    ...attempt.value,
+    ...carry.value,
+    ...evidence.value,
+    ...findings.fields,
+    ...present("skeleton_outcomes", skeletons.value),
+  }));
+}
+
+/**
+ * Every refusal the load boundary has for one stored Task, for the operator's
+ * validator: the one `parseStoredTask` stops at, and every findings-aggregate
+ * rule's. Those rules read only the review fields, so each is reported though
+ * an earlier one refused; the rest of the parse depends on what precedes it.
+ */
+export function storedTaskErrors(raw: unknown, index: number, scope: RedThenGreenScope): readonly string[] {
+  const parsed = parseStoredTask(raw, index, scope);
+  // A non-canonical id is its own refusal; the review fields are still judged under it.
+  const findings = isRecord(raw) && typeof raw.id === "string" ? readStoredTaskFindings(raw, taskLabel(index, raw.id)).errors : [];
+  return [...new Set([...findings, ...(parsed.ok ? [] : [parsed.error])])];
+}
+
+/** The Task fields this boundary parses into values of their own. */
+type InstalledTaskFields = Readonly<{ id: TaskId }> & StoredTaskShape & TaskLifecycle & Partial<Pick<Task,
+  | "reopen_scope" | "reopen_baseline" | "spec_anchor_hashes" | "skeleton_outcomes" | "repository_baseline"
+  | "findings" | "refuted_findings" | "resolved_findings" | "test_result" | "new_test_observation"
+  | "implementation_attempt_history" | "implementation_retry_protocol" | "implementation_retry_history_start"
+  | "implementation_retry_predecessor_receipt_id" | "active_implementation_attempt" | "active_implementation_context"
+>>;
+
+/**
+ * The loaded Task: its wire record with every parsed value installed in place
+ * (a derived Proof or a carried repository baseline appended), as one fresh
+ * recursively frozen copy, so no holder of the raw document can reach it.
+ *
+ * The record is the one place wire data meets the Task type. It supplies the
+ * fields the parse proves but stores as written (the review run, the review
+ * acceptances, issued packets, recovered writes, the verification policy, the
+ * artifact baselines, the review-evidence pair, the derived findings views)
+ * and the few no rule has ever proven (`test_evidence`, `start_sha`,
+ * `failure_reason`, `retry_count`, an unattempted `reserved_at`; the Spec trace
+ * contract proves `spec_anchors` and `spec_contributions` graph-wide).
+ */
+function loadedTask(record: Readonly<Record<string, unknown>>, installed: InstalledTaskFields): ParsedTask {
+  const wire = record as Partial<TaskCommonMetadata>;
+  return frozenJsonCopy({ ...wire, ...installed });
+}
+
+/** A stored Task's names, Wave, dependencies and files. */
+type StoredTaskShape = Pick<Task, "description" | "agent" | "wave" | "depends_on" | "file_list" | "files_modified">;
+
+/** Structural fields: a drifted or hand-edited graph fails here, not inside typed gate logic. */
+function parseStoredTaskShape(t: Readonly<Record<string, unknown>>, label: string): ParseResult<StoredTaskShape> {
+  const { description, agent, wave, depends_on: dependsOn, files_modified: filesModified } = t;
+  if (typeof description !== "string" || description.trim() === "") {
+    return parseErr(`${label}: description must be a non-empty string, got ${JSON.stringify(description)}`);
+  }
+  if (typeof agent !== "string" || agent.trim() === "") {
+    return parseErr(`${label}: agent must be a non-empty string, got ${JSON.stringify(agent)}`);
+  }
+  if (!KNOWN_AGENTS.has(agent)) return parseErr(`${label}: unknown agent ${JSON.stringify(agent)}`);
+  if (typeof wave !== "number" || !Number.isSafeInteger(wave) || wave < 1) {
+    return parseErr(`${label}: wave must be an integer >= 1 within the safe-integer range, got ${JSON.stringify(wave)}`);
+  }
+  if (!isStringArray(dependsOn)) return parseErr(`${label}: depends_on must be an array of strings`);
+  const fileList = parseStoredFileList(t.file_list, label);
+  if (!fileList.ok) return fileList;
+  if (filesModified !== undefined && !isStringArray(filesModified)) {
+    return parseErr(`${label}: files_modified must be an array of strings when present`);
+  }
+  return parseOk({
+    description,
+    agent,
+    wave,
+    depends_on: dependsOn,
+    ...present("file_list", fileList.value),
+    ...present("files_modified", filesModified),
+  });
+}
+
+/** A stored `file_list`: absent, or distinct canonical paths, none of them protected verification infrastructure. */
+function parseStoredFileList(raw: unknown, label: string): ParseResult<readonly string[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) {
+    return parseErr(`${label}: file_list must be an array of canonical repository-relative paths when present`);
+  }
+  const paths: string[] = [];
+  for (const [pathIndex, rawPath] of raw.entries()) {
+    const path = storedPath(rawPath, `${label}: file_list[${pathIndex}]`);
+    if (!path.ok) return path;
+    if (isProtectedVerificationPath(path.value)) {
+      return parseErr(`${label}: file_list path '${path.value}' is protected verification infrastructure; remove it from this Task`);
+    }
+    if (paths.includes(path.value)) return parseErr(`${label}: file_list repeats '${path.value}'`);
+    paths.push(path.value);
+  }
+  return parseOk(paths);
+}
+
+/** A stored artifact baseline field under `label`: absent, or the parsed baseline. */
+function parseStoredBaseline(raw: unknown, label: string): ParseResult<readonly DeclaredArtifactBaseline[] | undefined> {
+  return raw === undefined ? parseOk(undefined) : fromErrors(parseDeclaredArtifactBaseline(raw, label));
+}
+
+/** Whether a baseline's artifacts are `fileList`, in order: exactly, or as its prefix. */
+function baselineDeclaresFileList(
+  baseline: readonly DeclaredArtifactBaseline[],
+  fileList: readonly string[],
+  coverage: "exact" | "prefix",
+): boolean {
+  const actual = baseline.map(({ artifact }) => artifact);
+  const sized = coverage === "exact" ? actual.length === fileList.length : actual.length >= fileList.length;
+  return sized && fileList.every((artifact, artifactIndex) => artifact === actual[artifactIndex]);
+}
+
+/** The attempt baselines a stored Task carries, parsed for the rules that compare them. */
+type StoredAttemptBaselines = Readonly<{
+  attemptArtifact: readonly DeclaredArtifactBaseline[] | undefined;
+  attemptRepository: readonly DeclaredArtifactBaseline[] | undefined;
+}>;
+
+/** Declared artifact baselines and their agreement with `file_list` (or, under an active attempt, its registration scope). */
+function parseStoredTaskBaselines(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+  shape: StoredTaskShape,
+): ParseResult<StoredAttemptBaselines> {
+  const fileList = shape.file_list ?? [];
+  const artifact = parseStoredBaseline(t.artifact_baseline, `${label}: artifact_baseline`);
+  if (!artifact.ok) return artifact;
+  if (artifact.value !== undefined && !baselineDeclaresFileList(artifact.value, fileList, "exact")) {
+    return parseErr(`${label}: artifact_baseline must exactly match file_list in order`);
+  }
+  const attemptLabel = `${label}: attempt_artifact_baseline`;
+  const attemptArtifact = parseStoredBaseline(t.attempt_artifact_baseline, attemptLabel);
+  if (!attemptArtifact.ok) return attemptArtifact;
+  if (attemptArtifact.value !== undefined && t.active_implementation_attempt !== undefined) {
+    const scopeError = registrationScopeError(attemptArtifact.value, shape, attemptLabel);
+    if (scopeError !== null) return parseErr(scopeError);
+  } else if (attemptArtifact.value !== undefined && !baselineDeclaresFileList(attemptArtifact.value, fileList, "prefix")) {
+    return parseErr(`${attemptLabel} must cover file_list first and in order`);
+  }
+  const attemptRepository = parseStoredBaseline(t.attempt_repository_baseline, `${label}: attempt_repository_baseline`);
+  if (!attemptRepository.ok) return attemptRepository;
+  return parseOk({ attemptArtifact: attemptArtifact.value, attemptRepository: attemptRepository.value });
+}
+
+/** Why an active attempt's artifact baseline is not exactly unique(file_list + files_modified), or null. */
+function registrationScopeError(
+  baseline: readonly DeclaredArtifactBaseline[],
+  shape: StoredTaskShape,
+  label: string,
+): string | null {
+  const expected: string[] = [];
+  for (const [pathIndex, rawPath] of [...(shape.file_list ?? []), ...(shape.files_modified ?? [])].entries()) {
+    const parsed = storedPath(rawPath, `${label}.registration_scope[${pathIndex}]`);
+    if (!parsed.ok) return parsed.error;
+    if (!expected.includes(parsed.value)) expected.push(parsed.value);
+  }
+  const actual = new Set(baseline.map(({ artifact }) => artifact));
+  return baseline.length !== expected.length || actual.size !== expected.length || expected.some((path) => !actual.has(path))
+    ? `${label} path set must exactly equal unique(file_list + files_modified) at registration scope`
+    : null;
+}
+
+/** The implementation lineage fields a stored Task carries. */
+type StoredLineageFields = Partial<Pick<Task,
+  | "implementation_attempt_history" | "implementation_retry_protocol" | "implementation_retry_history_start"
+  | "implementation_retry_predecessor_receipt_id"
+>>;
+
+/** A stored Task's implementation lineage and the retry disposition it derives. */
+type StoredAttemptLineage = Readonly<{
+  fields: StoredLineageFields;
+  disposition: Exclude<ImplementationRetryDisposition, Readonly<{ kind: "invalid" }>>;
+}>;
+
+/** Exact receipt history and protocol-2 retry markers, proven as one lineage. */
+function parseStoredAttemptLineage(t: Readonly<Record<string, unknown>>, label: string, id: TaskId): ParseResult<StoredAttemptLineage> {
+  const history = t.implementation_attempt_history === undefined
+    ? parseOk(undefined)
+    : fromErrorList(parseImplementationAttemptHistory(t.implementation_attempt_history, `${label}: implementation_attempt_history`));
+  if (!history.ok) return history;
+  if (history.value?.some((receipt) => receipt.taskId !== id)) {
+    return parseErr(`${label}: implementation_attempt_history receipt taskId must equal ${id}`);
+  }
+  const markers = parseStoredRetryMarkers(t, label, history.value?.length ?? 0);
+  if (!markers.ok) return markers;
+  const fields: StoredLineageFields = { ...present("implementation_attempt_history", history.value), ...markers.value };
+  const disposition = deriveImplementationRetryDisposition({
+    id,
+    ...fields,
     ...(t.implementation_attestation === true ? { implementation_attestation: true } : {}),
   });
-  if (retryDisposition.kind === "invalid") {
-    return `${label}: invalid implementation retry lineage: ${retryDisposition.errors.join("; ")}`;
+  return disposition.kind === "invalid"
+    ? parseErr(`${label}: invalid implementation retry lineage: ${disposition.errors.join("; ")}`)
+    : parseOk({ fields, disposition });
+}
+
+/** The protocol-2 retry markers: all absent, or protocol 2 with a history start inside the history. */
+function parseStoredRetryMarkers(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+  historyLength: number,
+): ParseResult<Omit<StoredLineageFields, "implementation_attempt_history">> {
+  const {
+    implementation_retry_protocol: protocol,
+    implementation_retry_history_start: start,
+    implementation_retry_predecessor_receipt_id: predecessor,
+  } = t;
+  if (protocol === undefined && start === undefined && predecessor === undefined) return parseOk({});
+  if (protocol !== 2 || typeof start !== "number" || !Number.isSafeInteger(start) || start < 0 || start > historyLength) {
+    return parseErr(`${label}: implementation retry protocol 2 requires a valid history start index`);
   }
+  const markers = { implementation_retry_protocol: 2 as const, implementation_retry_history_start: start };
+  if (predecessor === undefined) return parseOk(markers);
+  const receiptId = fromErrorList(
+    parseImplementationSettlementReceiptId(predecessor, `${label}: implementation_retry_predecessor_receipt_id`),
+  );
+  return receiptId.ok ? parseOk({ ...markers, implementation_retry_predecessor_receipt_id: receiptId.value }) : receiptId;
+}
+
+/** The active attempt authority and the context frozen with it. */
+type StoredActiveAttempt = Partial<Pick<Task, "active_implementation_attempt" | "active_implementation_context">>;
+
+/** Modern attempt authority, its lineage, baseline digest lockstep and exact receipt history. */
+function parseStoredAttempt(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+  id: TaskId,
+  wave: number,
+  baselines: StoredAttemptBaselines,
+): ParseResult<StoredLineageFields & StoredActiveAttempt> {
+  const lineage = parseStoredAttemptLineage(t, label, id);
+  if (!lineage.ok) return lineage;
+  const active = parseStoredActiveAttempt(t, label, Object.freeze({ id, wave }), lineage.value, baselines);
+  return active.ok ? parseOk({ ...lineage.value.fields, ...active.value }) : active;
+}
+
+function parseStoredActiveAttempt(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+  task: Readonly<{ id: TaskId; wave: number }>,
+  lineage: StoredAttemptLineage,
+  baselines: StoredAttemptBaselines,
+): ParseResult<StoredActiveAttempt> {
   if (t.active_implementation_attempt === undefined) {
     return t.active_implementation_context === undefined
-      ? null
-      : `${label}: active_implementation_context requires active_implementation_attempt`;
+      ? parseOk({})
+      : parseErr(`${label}: active_implementation_context requires active_implementation_attempt`);
   }
-  if (t.proof === undefined) {
-    return `${label}: active_implementation_attempt requires modern authored Proof`;
+  if (t.proof === undefined) return parseErr(`${label}: active_implementation_attempt requires modern authored Proof`);
+  const parsed = parseImplementationAttemptAuthority(t.active_implementation_attempt);
+  if (!parsed.ok) return parseErr(`${label}: invalid active_implementation_attempt: ${parsed.error.errors.join("; ")}`);
+  const authority = parsed.value;
+  if (authority.taskId !== task.id || authority.wave !== task.wave) {
+    return parseErr(`${label}: active_implementation_attempt must match Task id and Wave`);
   }
-  const authority = parseImplementationAttemptAuthority(t.active_implementation_attempt);
-  if (!authority.ok) return `${label}: invalid active_implementation_attempt: ${authority.error.errors.join("; ")}`;
-  if (authority.value.taskId !== id || authority.value.wave !== t.wave) {
-    return `${label}: active_implementation_attempt must match Task id and Wave`;
+  const { disposition, fields } = lineage;
+  if (disposition.kind === "escalated") return parseErr(`${label}: escalated implementation lineage cannot carry an active attempt`);
+  const protocol = fields.implementation_retry_protocol;
+  if (protocol === undefined && authority.semanticAttempt === 2) {
+    return parseErr(`${label}: semantic attempt 2 requires protocol-2 retry lineage`);
   }
-  if (retryDisposition.kind === "escalated") {
-    return `${label}: escalated implementation lineage cannot carry an active attempt`;
+  if (protocol === 2 && authority.semanticAttempt !== disposition.semanticAttempt) {
+    return parseErr(`${label}: active_implementation_attempt semantic attempt contradicts settlement history`);
   }
-  if (retryProtocol === undefined && authority.value.semanticAttempt === 2) {
-    return `${label}: semantic attempt 2 requires protocol-2 retry lineage`;
+  const context = parseStoredAttemptContext(t, label, authority, lineage);
+  if (!context.ok) return context;
+  const lockstep = activeAttemptLockstepError(t, label, authority, fields.implementation_attempt_history, baselines);
+  return lockstep === null
+    ? parseOk({ active_implementation_attempt: authority, ...present("active_implementation_context", context.value) })
+    : parseErr(lockstep);
+}
+
+/** The context frozen before the active Agent dispatch: required under protocol 2, and the current retry's when retrying. */
+function parseStoredAttemptContext(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+  authority: ImplementationAttemptAuthority,
+  lineage: StoredAttemptLineage,
+): ParseResult<ImplementationAttemptContext | undefined> {
+  if (lineage.fields.implementation_retry_protocol === 2 && t.active_implementation_context === undefined) {
+    return parseErr(`${label}: protocol-2 active implementation requires active_implementation_context`);
   }
-  if (retryProtocol === 2 && authority.value.semanticAttempt !== retryDisposition.semanticAttempt) {
-    return `${label}: active_implementation_attempt semantic attempt contradicts settlement history`;
+  if (t.active_implementation_context === undefined) return parseOk(undefined);
+  const context = fromErrors(parseImplementationAttemptContext(t.active_implementation_context, `${label}: active_implementation_context`));
+  if (!context.ok) return context;
+  if (!implementationAttemptContextMatchesAuthority(context.value, authority)) {
+    return parseErr(`${label}: active_implementation_context must match active_implementation_attempt`);
   }
-  if (retryProtocol === 2 && t.active_implementation_context === undefined) {
-    return `${label}: protocol-2 active implementation requires active_implementation_context`;
-  }
-  if (t.active_implementation_context !== undefined) {
-    const context = parseImplementationAttemptContext(
-      t.active_implementation_context,
-      `${label}: active_implementation_context`,
-    );
-    if (!context.ok) return context.errors.join("; ");
-    if (!implementationAttemptContextMatchesAuthority(context.value, authority.value)) {
-      return `${label}: active_implementation_context must match active_implementation_attempt`;
-    }
-    if (retryDisposition.kind === "retry" && (
-      context.value.retryContext === null ||
-      context.value.predecessorReceiptId !== retryDisposition.predecessor.receiptId ||
-      renderImplementationRetryContext(context.value.retryContext) !== retryDisposition.promptAppendix
-    )) {
-      return `${label}: active retry context must match the current retry-required receipt`;
-    }
-  }
+  const { disposition } = lineage;
+  const { retryContext, predecessorReceiptId } = context.value;
+  return disposition.kind === "retry" && (
+    retryContext === null ||
+    predecessorReceiptId !== disposition.predecessor.receiptId ||
+    renderImplementationRetryContext(retryContext) !== disposition.promptAppendix
+  )
+    ? parseErr(`${label}: active retry context must match the current retry-required receipt`)
+    : context;
+}
+
+/** Why an active attempt disagrees with its history, reservation time or the attempt baselines it froze, or null. */
+function activeAttemptLockstepError(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+  authority: ImplementationAttemptAuthority,
+  history: readonly ImplementationAttemptSettlementReceipt[] | undefined,
+  baselines: StoredAttemptBaselines,
+): string | null {
   if (history?.some((receipt) =>
-    receipt.authorityDigest === authority.value.authorityDigest ||
-    receipt.reservationId === authority.value.reservationId)) {
+    receipt.authorityDigest === authority.authorityDigest || receipt.reservationId === authority.reservationId)) {
     return `${label}: active_implementation_attempt authorityDigest and reservationId must be absent from implementation_attempt_history`;
   }
-  if (t.reserved_at !== authority.value.reservedAt) {
-    return `${label}: reserved_at must equal active_implementation_attempt.reservedAt`;
-  }
-  if (t.attempt_artifact_baseline === undefined || t.attempt_repository_baseline === undefined) {
+  if (t.reserved_at !== authority.reservedAt) return `${label}: reserved_at must equal active_implementation_attempt.reservedAt`;
+  if (baselines.attemptArtifact === undefined || baselines.attemptRepository === undefined) {
     return `${label}: active_implementation_attempt requires both attempt baselines`;
   }
   const taskDigest = canonicalArtifactBaselineDigest(t.attempt_artifact_baseline);
   const dirtyDigest = canonicalArtifactBaselineDigest(t.attempt_repository_baseline);
   if (!taskDigest.ok || !dirtyDigest.ok) {
-    return `${label}: active attempt baseline is invalid: ${[
-      ...(taskDigest.ok ? [] : taskDigest.error.errors),
-      ...(dirtyDigest.ok ? [] : dirtyDigest.error.errors),
-    ].join("; ")}`;
+    const errors = [...(taskDigest.ok ? [] : taskDigest.error.errors), ...(dirtyDigest.ok ? [] : dirtyDigest.error.errors)];
+    return `${label}: active attempt baseline is invalid: ${errors.join("; ")}`;
   }
-  if (taskDigest.value !== authority.value.taskScopeBaselineDigest ||
-      dirtyDigest.value !== authority.value.dirtySetBaselineDigest) {
-    return `${label}: active attempt baseline digests do not match active_implementation_attempt`;
-  }
-  return null;
+  return taskDigest.value !== authority.taskScopeBaselineDigest || dirtyDigest.value !== authority.dirtySetBaselineDigest
+    ? `${label}: active attempt baseline digests do not match active_implementation_attempt`
+    : null;
 }
 
 /**
- * Persistent unresolved-attempt repository authority. Every settlement retires
- * the attempt boundary (implementation-application's RETIRED_ATTEMPT_BOUNDARY),
- * so an accepted lifecycle never retains it.
+ * Persistent unresolved-attempt repository authority, and the carry of an
+ * active attempt's repository baseline into it. Every settlement retires the
+ * attempt boundary (implementation-application's RETIRED_ATTEMPT_BOUNDARY), so
+ * an accepted lifecycle never retains it.
  */
-function taskRepositoryCarryError(
-  t: Record<string, unknown>,
-  index: number,
-  id: string,
-): string | null {
-  const label = `tasks[${index}] ("${id}")`;
-  if (t.repository_baseline !== undefined) {
-    const baseline = parseDeclaredArtifactBaseline(t.repository_baseline, `${label}: repository_baseline`);
-    if (!baseline.ok) return baseline.errors.join("; ");
-    if (t.active_implementation_attempt !== undefined && t.attempt_repository_baseline !== undefined) {
-      const persistentDigest = canonicalArtifactBaselineDigest(baseline.value);
-      const attemptDigest = canonicalArtifactBaselineDigest(t.attempt_repository_baseline);
-      if (!persistentDigest.ok || !attemptDigest.ok || persistentDigest.value !== attemptDigest.value) {
-        return `${label}: active attempt_repository_baseline must equal retained repository_baseline`;
-      }
+function parseStoredRepositoryCarry(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+  baselines: StoredAttemptBaselines,
+): ParseResult<Pick<Task, "repository_baseline">> {
+  const persistent = parseStoredBaseline(t.repository_baseline, `${label}: repository_baseline`);
+  if (!persistent.ok) return persistent;
+  const attemptActive = t.active_implementation_attempt !== undefined;
+  if (persistent.value !== undefined && attemptActive && baselines.attemptRepository !== undefined) {
+    const persistentDigest = canonicalArtifactBaselineDigest(persistent.value);
+    const attemptDigest = canonicalArtifactBaselineDigest(t.attempt_repository_baseline);
+    if (!persistentDigest.ok || !attemptDigest.ok || persistentDigest.value !== attemptDigest.value) {
+      return parseErr(`${label}: active attempt_repository_baseline must equal retained repository_baseline`);
     }
   }
-  if ((t.status === "implemented" || t.status === "completed") && t.repository_baseline !== undefined &&
-      t.active_implementation_attempt === undefined) {
-    return `${label}: accepted implementation lifecycle cannot retain repository_baseline`;
+  if ((t.status === "implemented" || t.status === "completed") && persistent.value !== undefined && !attemptActive) {
+    return parseErr(`${label}: accepted implementation lifecycle cannot retain repository_baseline`);
   }
-  return null;
+  return parseOk(present("repository_baseline", persistent.value ?? (attemptActive ? baselines.attemptRepository : undefined)));
 }
 
 /**
@@ -2101,9 +2192,9 @@ function storedAcceptanceScopeError(
     return `${prefix}: ${field}.scope must be a non-empty canonical path array`;
   }
   const rawScope: readonly unknown[] = authority.scope;
-  const scope = rawScope.map((path, pathIndex) => parseReviewPath(path, `${prefix}: ${field}.scope[${pathIndex}]`));
+  const scope = rawScope.map((path, pathIndex) => storedPath(path, `${prefix}: ${field}.scope[${pathIndex}]`));
   const scopeError = scope.find((parsed) => !parsed.ok);
-  if (scopeError !== undefined && !scopeError.ok) return scopeError.errors.join("; ");
+  if (scopeError !== undefined && !scopeError.ok) return scopeError.error;
   const scopePaths = scope.map((parsed) => parsed.ok ? parsed.value : "");
   const canonicalScope = scopePaths.every((path, pathIndex) => path === rawScope[pathIndex]);
   if (current && stored.kind === "accepted" && (authority.generation !== stored.reviewGeneration || !canonicalScope)) {
@@ -2118,93 +2209,106 @@ function storedAcceptanceScopeError(
     : null;
 }
 
-/** Issued review packets, recovered writes, and plan context. */
-function taskPacketError(
-  t: Record<string, unknown>,
-  index: number,
-  id: string,
-): string | null {
-  const prefix = `tasks[${index}] ("${id}")`;
+/** The review acceptances, issued packets, recovered writes and plan context: proven, and kept as stored. */
+function taskPacketError(t: Readonly<Record<string, unknown>>, label: string, id: TaskId, shape: StoredTaskShape): string | null {
+  const acceptanceError = taskAcceptanceError(t, label);
+  if (acceptanceError !== null) return acceptanceError;
+  const packetsError = issuedReviewPacketsError(t.issued_review_packets, label, id);
+  if (packetsError !== null) return packetsError;
+  const recoveredFrom = t.artifact_baseline_recovered_from;
+  if (recoveredFrom !== undefined && !isExactGitSha(recoveredFrom)) {
+    return `${label}: artifact_baseline_recovered_from must be a lowercase 40- or 64-character Git SHA`;
+  }
+  if (t.recovered_artifact_writes !== undefined) {
+    if (recoveredFrom === undefined) return `${label}: recovered_artifact_writes requires artifact_baseline_recovered_from`;
+    if (!Array.isArray(t.recovered_artifact_writes)) return `${label}: recovered_artifact_writes must be an array`;
+    const packetIds = new Set<string>();
+    for (const [recoveryIndex, raw] of t.recovered_artifact_writes.entries()) {
+      const recoveryLabel = `${label}: recovered_artifact_writes[${recoveryIndex}]`;
+      const recovery = recoveredArtifactWriteRecord(raw, recoveryLabel, recoveredFrom);
+      if (!recovery.ok) return recovery.error;
+      if (packetIds.has(recovery.value.packetId)) return `${recoveryLabel}.packet_id duplicates an earlier recovery`;
+      packetIds.add(recovery.value.packetId);
+      const pathsError = recoveredWritePathsError(recovery.value.record, recoveryLabel, shape.file_list);
+      if (pathsError !== null) return pathsError;
+    }
+  }
+  return t.plan_context !== undefined && typeof t.plan_context !== "string"
+    ? `${label}: plan_context must be a string when present`
+    : null;
+}
+
+/** The live acceptance and the Review Basis a reopening kept, which a new acceptance supersedes. */
+function taskAcceptanceError(t: Readonly<Record<string, unknown>>, label: string): string | null {
   if (t.accepted_review_authority !== undefined) {
     const acceptedError = storedAcceptanceError(
-      t.accepted_review_authority, prefix, "accepted_review_authority", { kind: "accepted", reviewGeneration: t.review_generation },
+      t.accepted_review_authority, label, "accepted_review_authority", { kind: "accepted", reviewGeneration: t.review_generation },
     );
     if (acceptedError !== null) return acceptedError;
   }
-  if (t.review_basis !== undefined) {
-    // A basis is the acceptance a reopening cleared (ADR-0094); a new
-    // acceptance supersedes it, so the two never stand side by side.
-    if (t.accepted_review_authority !== undefined) {
-      return `${prefix}: review_basis cannot stand beside an accepted_review_authority, which supersedes it`;
-    }
-    const basisError = storedAcceptanceError(t.review_basis, prefix, "review_basis", { kind: "basis" });
-    if (basisError !== null) return basisError;
+  if (t.review_basis === undefined) return null;
+  // A basis is the acceptance a reopening cleared (ADR-0094); a new
+  // acceptance supersedes it, so the two never stand side by side.
+  if (t.accepted_review_authority !== undefined) {
+    return `${label}: review_basis cannot stand beside an accepted_review_authority, which supersedes it`;
   }
-  if (t.issued_review_packets !== undefined) {
-    if (!Array.isArray(t.issued_review_packets)) {
-      return `tasks[${index}] ("${id}"): issued_review_packets must be an array`;
-    }
-    const packetIds = new Set<string>();
-    const packetPaths = new Set<string>();
-    for (const [packetIndex, raw] of t.issued_review_packets.entries()) {
-      const label = `tasks[${index}] ("${id}"): issued_review_packets[${packetIndex}]`;
-      const registration = parseIssuedReviewPacketRegistration(raw, label);
-      if (!registration.ok) return registration.errors.join("; ");
-      if (registration.value.task_id !== id) return `${label}.task_id must equal task id ${id}`;
-      if (packetIds.has(registration.value.packet_id)) return `${label}.packet_id duplicates an earlier registration`;
-      if (packetPaths.has(registration.value.packet_path)) return `${label}.packet_path duplicates an earlier registration`;
-      packetIds.add(registration.value.packet_id);
-      packetPaths.add(registration.value.packet_path);
-    }
+  return storedAcceptanceError(t.review_basis, label, "review_basis", { kind: "basis" });
+}
+
+/** Engine-issued packet registrations: each this Task's, under a distinct packet id and path. */
+function issuedReviewPacketsError(raw: unknown, label: string, id: TaskId): string | null {
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) return `${label}: issued_review_packets must be an array`;
+  const packetIds = new Set<string>();
+  const packetPaths = new Set<string>();
+  for (const [packetIndex, entry] of raw.entries()) {
+    const packetLabel = `${label}: issued_review_packets[${packetIndex}]`;
+    const registration = fromErrors(parseIssuedReviewPacketRegistration(entry, packetLabel));
+    if (!registration.ok) return registration.error;
+    const { task_id: taskId, packet_id: packetId, packet_path: packetPath } = registration.value;
+    if (taskId !== id) return `${packetLabel}.task_id must equal task id ${id}`;
+    if (packetIds.has(packetId)) return `${packetLabel}.packet_id duplicates an earlier registration`;
+    if (packetPaths.has(packetPath)) return `${packetLabel}.packet_path duplicates an earlier registration`;
+    packetIds.add(packetId);
+    packetPaths.add(packetPath);
   }
-  if (
-    t.artifact_baseline_recovered_from !== undefined &&
-    !isExactGitSha(t.artifact_baseline_recovered_from)
-  ) {
-    return `tasks[${index}] ("${id}"): artifact_baseline_recovered_from must be a lowercase 40- or 64-character Git SHA`;
+  return null;
+}
+
+/** One recovered artifact write's record and packet id: recovered from the Task's recovery commit. */
+function recoveredArtifactWriteRecord(
+  raw: unknown,
+  label: string,
+  recoveredFrom: unknown,
+): ParseResult<Readonly<{ record: Readonly<Record<string, unknown>>; packetId: string }>> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  if (!isExactGitSha(raw.baseline_sha)) return parseErr(`${label}.baseline_sha must be an exact Git SHA`);
+  if (raw.baseline_sha !== recoveredFrom) return parseErr(`${label}.baseline_sha must equal artifact_baseline_recovered_from`);
+  return typeof raw.packet_id === "string" && /^[0-9a-f]{64}$/.test(raw.packet_id)
+    ? parseOk({ record: raw, packetId: raw.packet_id })
+    : parseErr(`${label}.packet_id must be a lowercase SHA-256 digest`);
+}
+
+/** A recovered write's packet path and modified paths, after its packet id. */
+function recoveredWritePathsError(
+  recovery: Readonly<Record<string, unknown>>,
+  label: string,
+  fileList: readonly string[] | undefined,
+): string | null {
+  const packetPath = storedPath(recovery.packet_path, `${label}.packet_path`);
+  if (!packetPath.ok) return packetPath.error;
+  if (!Array.isArray(recovery.modified_paths) || recovery.modified_paths.length === 0) {
+    return `${label}.modified_paths must be a non-empty array`;
   }
-  if (t.recovered_artifact_writes !== undefined) {
-    if (t.artifact_baseline_recovered_from === undefined) {
-      return `tasks[${index}] ("${id}"): recovered_artifact_writes requires artifact_baseline_recovered_from`;
+  const seenPaths = new Set<string>();
+  for (const [pathIndex, path] of recovery.modified_paths.entries()) {
+    const parsed = storedPath(path, `${label}.modified_paths[${pathIndex}]`);
+    if (!parsed.ok) return parsed.error;
+    if (seenPaths.has(parsed.value)) return `${label}.modified_paths duplicates ${JSON.stringify(parsed.value)}`;
+    if (fileList !== undefined && !fileList.includes(parsed.value)) {
+      return `${label}.modified_paths includes ${JSON.stringify(parsed.value)} outside file_list`;
     }
-    if (!Array.isArray(t.recovered_artifact_writes)) {
-      return `tasks[${index}] ("${id}"): recovered_artifact_writes must be an array`;
-    }
-    const packetIds = new Set<string>();
-    for (const [recoveryIndex, raw] of t.recovered_artifact_writes.entries()) {
-      const label = `tasks[${index}] ("${id}"): recovered_artifact_writes[${recoveryIndex}]`;
-      if (!isRecord(raw)) return `${label} must be an object`;
-      const recovery = raw as Record<string, unknown>;
-      if (!isExactGitSha(recovery.baseline_sha)) {
-        return `${label}.baseline_sha must be an exact Git SHA`;
-      }
-      if (t.artifact_baseline_recovered_from !== undefined && recovery.baseline_sha !== t.artifact_baseline_recovered_from) {
-        return `${label}.baseline_sha must equal artifact_baseline_recovered_from`;
-      }
-      if (typeof recovery.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(recovery.packet_id)) {
-        return `${label}.packet_id must be a lowercase SHA-256 digest`;
-      }
-      if (packetIds.has(recovery.packet_id)) return `${label}.packet_id duplicates an earlier recovery`;
-      packetIds.add(recovery.packet_id);
-      const packetPath = parseReviewPath(recovery.packet_path, `${label}.packet_path`);
-      if (!packetPath.ok) return packetPath.errors.join("; ");
-      if (!Array.isArray(recovery.modified_paths) || recovery.modified_paths.length === 0) {
-        return `${label}.modified_paths must be a non-empty array`;
-      }
-      const seenPaths = new Set<string>();
-      for (const [pathIndex, path] of recovery.modified_paths.entries()) {
-        const parsed = parseReviewPath(path, `${label}.modified_paths[${pathIndex}]`);
-        if (!parsed.ok) return parsed.errors.join("; ");
-        if (seenPaths.has(parsed.value)) return `${label}.modified_paths duplicates ${JSON.stringify(parsed.value)}`;
-        if (Array.isArray(t.file_list) && !t.file_list.includes(parsed.value)) {
-          return `${label}.modified_paths includes ${JSON.stringify(parsed.value)} outside file_list`;
-        }
-        seenPaths.add(parsed.value);
-      }
-    }
-  }
-  if (t.plan_context !== undefined && typeof t.plan_context !== "string") {
-    return `tasks[${index}] ("${id}"): plan_context must be a string when present`;
+    seenPaths.add(parsed.value);
   }
   return null;
 }
@@ -2220,7 +2324,7 @@ const isEmptyOrAbsent = (value: unknown): boolean => value === undefined || (Arr
  * `behaviour-preserved`, and an attested Proof cannot be both.
  */
 function taskDistillError(
-  t: Record<string, unknown>,
+  t: Readonly<Record<string, unknown>>,
   label: string,
   verification: ParsedTaskVerificationPolicy,
 ): string | null {
@@ -2244,12 +2348,12 @@ function taskDistillError(
 }
 
 /** A Wave carries at most one Distill Task: the second one found, as its refusal. */
-function distillTaskPerWaveError(tasks: readonly Record<string, unknown>[]): string | null {
-  const firstByWave = new Map<unknown, Record<string, unknown>>();
+function distillTaskPerWaveError(tasks: readonly ParsedTask[]): string | null {
+  const firstByWave = new Map<number, ParsedTask>();
   for (const task of tasks.filter(isDistillTask)) {
     const first = firstByWave.get(task.wave);
     if (first !== undefined) {
-      return `Task ${String(task.id)}: Wave ${String(task.wave)} already has the Distill Task ${String(first.id)}; a Wave carries at most one`;
+      return `Task ${task.id}: Wave ${task.wave} already has the Distill Task ${first.id}; a Wave carries at most one`;
     }
     firstByWave.set(task.wave, task);
   }
@@ -2268,49 +2372,58 @@ function distillTaskPerWaveError(tasks: readonly Record<string, unknown>[]): str
  * classification is proven against the TaskGraph (`testsOnlyLinkError`).
  */
 function taskTestsOnlyScope(
-  t: Record<string, unknown>,
+  t: Readonly<Record<string, unknown>>,
   proof: TaskProof,
-  fileList: readonly string[],
+  task: Readonly<{ id: TaskId; status: TaskStatus; fileList: readonly string[] }>,
   verification: ParsedTaskVerificationPolicy,
   scope: RedThenGreenScope,
-  id: string,
   label: string,
-): TestsOnlyScopeReading {
-  const refused = (problem: string) => Object.freeze({ ok: false as const, error: `${label}: ${problem}` });
-  const reading = t.reopen_scope !== undefined ? liveTestsOnlyScope(t, fileList) : settledTestsOnlyScope(t, proof, fileList);
+): ParseResult<TestsOnlyReading> {
+  const refused = (problem: string): ParseResult<TestsOnlyReading> => parseErr(`${label}: ${problem}`);
+  const reading = t.reopen_scope !== undefined
+    ? liveTestsOnlyScope(t, task.status, task.fileList)
+    : settledTestsOnlyScope(task.status, proof, task.fileList);
   if (!reading.ok) return refused(reading.error);
-  const claimed = reading.value;
-  if (claimed === null) return Object.freeze({ ok: true as const, value: null });
+  if (reading.value.scope === null) return reading;
   if (t.implementation_attestation === true) return refused("a tests-only Task cannot be in attestation mode");
   if (isDistillTask(t)) return refused("a Distill Task cannot be reopened for tests only");
-  if (writtenContract(scope, id) !== undefined) return refused("an Acceptance Contract writer cannot be reopened for tests only");
+  if (writtenContract(scope, task.id) !== undefined) return refused("an Acceptance Contract writer cannot be reopened for tests only");
   if (verification.policy.regression.kind !== "required") return refused("a tests-only Task requires regression verification");
-  return Object.freeze({ ok: true as const, value: claimed });
+  return reading;
 }
 
-type TestsOnlyScopeReading = Readonly<{ ok: true; value: TestsOnlyScope | null }> | Readonly<{ ok: false; error: string }>;
+/** The tests-only scope a stored Task's Proof was derived under, and the live reopening fields that carry it. */
+type TestsOnlyReading = Readonly<{
+  scope: TestsOnlyScope | null;
+  reopening: Partial<Pick<Task, "reopen_scope" | "reopen_baseline">>;
+}>;
 
 /** A pending Task's live `reopen_scope`, with its `reopen_baseline` captured once an attempt registered. */
-function liveTestsOnlyScope(t: Record<string, unknown>, fileList: readonly string[]): TestsOnlyScopeReading {
-  const failed = (error: string) => Object.freeze({ ok: false as const, error });
-  const parsed = parseTestsOnlyScope(t.reopen_scope, fileList, "reopen_scope");
-  if (!parsed.ok) return failed(parsed.errors.join("; "));
-  if (t.status !== "pending") return failed("a tests-only reopen_scope requires pending status; its lineage's settlement ends it");
-  if (t.reopen_baseline !== undefined) {
-    const baseline = parseReopenBaseline(t.reopen_baseline, fileList);
-    if (!baseline.ok) return failed(baseline.errors.join("; "));
-  } else if (t.active_implementation_attempt !== undefined || t.attempt_artifact_baseline !== undefined) {
-    return failed("a registered tests-only attempt requires its captured reopen_baseline");
+function liveTestsOnlyScope(
+  t: Readonly<Record<string, unknown>>,
+  status: TaskStatus,
+  fileList: readonly string[],
+): ParseResult<TestsOnlyReading> {
+  const parsed = fromErrors(parseTestsOnlyScope(t.reopen_scope, fileList, "reopen_scope"));
+  if (!parsed.ok) return parsed;
+  if (status !== "pending") return parseErr("a tests-only reopen_scope requires pending status; its lineage's settlement ends it");
+  const baseline = t.reopen_baseline === undefined ? parseOk(undefined) : fromErrors(parseReopenBaseline(t.reopen_baseline, fileList));
+  if (!baseline.ok) return baseline;
+  if (baseline.value === undefined && (t.active_implementation_attempt !== undefined || t.attempt_artifact_baseline !== undefined)) {
+    return parseErr("a registered tests-only attempt requires its captured reopen_baseline");
   }
-  return Object.freeze({ ok: true as const, value: parsed.value });
+  return parseOk({
+    scope: parsed.value,
+    reopening: { reopen_scope: parsed.value, ...present("reopen_baseline", baseline.value) },
+  });
 }
 
 /** The scope an implemented or completed Task's settled tests-only Proof records, or null. */
-function settledTestsOnlyScope(t: Record<string, unknown>, proof: TaskProof, fileList: readonly string[]): TestsOnlyScopeReading {
-  const settled = t.status === "implemented" || t.status === "completed" ? testsOnlyScopeOfProof(proof.obligations) : null;
+function settledTestsOnlyScope(status: TaskStatus, proof: TaskProof, fileList: readonly string[]): ParseResult<TestsOnlyReading> {
+  const settled = status === "implemented" || status === "completed" ? testsOnlyScopeOfProof(proof.obligations) : null;
   return settled === null || partitionsFileList(settled.testFiles, settled.implementationFiles, fileList)
-    ? Object.freeze({ ok: true as const, value: settled })
-    : Object.freeze({ ok: false as const, error: "a settled tests-only Proof's test and implementation files must partition file_list in its order" });
+    ? parseOk({ scope: settled, reopening: {} })
+    : parseErr("a settled tests-only Proof's test and implementation files must partition file_list in its order");
 }
 
 /**
@@ -2322,12 +2435,11 @@ function settledTestsOnlyScope(t: Record<string, unknown>, proof: TaskProof, fil
  * null.
  */
 function testsOnlyLinkError(
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly ParsedTask[],
   audits: readonly TaskReopeningAudit[] | undefined,
   manifest: FrozenVerificationManifest | undefined,
 ): string | null {
-  for (const task of tasks) {
-    const parsed = task as Task;
+  for (const parsed of tasks) {
     const settled = parsed.status === "implemented" || parsed.status === "completed";
     const claimed = parsed.reopen_scope ?? (settled && parsed.proof !== undefined ? testsOnlyScopeOfProof(parsed.proof.obligations) : null);
     if (claimed === null) continue;
@@ -2347,261 +2459,340 @@ function testsOnlyLinkError(
   return null;
 }
 
-/** Status, review status/generation/run, and exact flat lifecycle invariants. */
-function taskStatusError(
-  t: Record<string, unknown>,
-  index: number,
-  id: string,
-  scope: RedThenGreenScope,
-): string | null {
-  const label = `tasks[${index}] ("${id}")`;
-  if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
-    return `${label}: status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
-  }
-  const verification = parseTaskVerificationPolicy(t, label);
-  if (!verification.ok) return verification.errors.join("; ");
-  if (t.implementation_attestation !== undefined && t.implementation_attestation !== true) {
-    return `${label}: implementation_attestation must be true when present`;
-  }
-  const distillError = taskDistillError(t, label, verification.value);
-  if (distillError !== null) return distillError;
-  if (t.implementation_attestation === true) {
-    if (verification.value.policy.regression.kind !== "required") {
-      return `${label}: attestation mode requires regression verification`;
-    }
-    if (verification.value.policy.newTests.kind !== "waived") {
-      return `${label}: attestation mode requires a verification policy that waives new tests — the dispatched child must not author new work`;
-    }
-  }
-  if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
-    return `${label}: review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
-  }
-  if (t.review_generation !== undefined && (
-    typeof t.review_generation !== "number" || !Number.isSafeInteger(t.review_generation) || t.review_generation < 0
-  )) return `${label}: review_generation must be a non-negative safe integer`;
-  if (t.review_run !== undefined && t.review_generation === undefined) return `${label}: review_run requires review_generation`;
-  if (t.review_run !== undefined && t.review_status !== "pending" && t.review_status !== "evidence_capture_failed") {
-    return `${label}: an in-progress review_run requires pending or evidence_capture_failed status`;
-  }
-  if (t.revalidation_required !== undefined && t.revalidation_required !== true) {
-    return `${label}: revalidation_required must be true when present`;
-  }
-  if (t.revalidation_required === true && t.status !== "pending") {
-    return `${label}: revalidation_required requires pending status until fresh task evidence is recorded`;
-  }
+/** A stored Task's lifecycle arm, and the live tests-only reopening fields its Proof was derived under. */
+type StoredLifecycle = Readonly<{
+  lifecycle: TaskLifecycle;
+  reopening: Partial<Pick<Task, "reopen_scope" | "reopen_baseline">>;
+}>;
 
+/**
+ * Status, Proof and their exact flat lifecycle invariants. A pending Task
+ * stored without a Proof (it carries no reopen_scope: that needs the Proof its
+ * scope derives) is given the pending Proof its policy derives.
+ */
+function parseStoredLifecycle(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+  id: TaskId,
+  shape: StoredTaskShape,
+  scope: RedThenGreenScope,
+): ParseResult<StoredLifecycle> {
+  const parsed = parseStoredTaskStatus(t, label);
+  if (!parsed.ok) return parsed;
+  const { status, verification } = parsed.value;
+  const fileList = shape.file_list ?? [];
+  const revalidation = t.revalidation_required === true;
   if (t.reopen_baseline !== undefined && t.reopen_scope === undefined) {
-    return `${label}: reopen_baseline belongs to a tests-only reopen_scope and cannot stand without one`;
+    return parseErr(`${label}: reopen_baseline belongs to a tests-only reopen_scope and cannot stand without one`);
   }
   if (t.proof === undefined) {
-    if (t.reopen_scope !== undefined) return `${label}: a tests-only reopen_scope requires the Proof its scope derives`;
-    return t.status === "pending" ? null : `${label}: ${String(t.status)} lifecycle requires a frozen Proof`;
+    if (t.reopen_scope !== undefined) return parseErr(`${label}: a tests-only reopen_scope requires the Proof its scope derives`);
+    if (status !== "pending") return parseErr(`${label}: ${status} lifecycle requires a frozen Proof`);
+    const proof = derivePendingTaskProof({
+      verificationPolicy: verification.policy,
+      declaredArtifacts: fileList,
+      ...taskArtifactScope({ agent: shape.agent, implementation_attestation: t.implementation_attestation }),
+      redThenGreen: taskRedThenGreenEra(scope, id),
+    });
+    return parseOk({ lifecycle: revalidation ? { status, proof, revalidation_required: true } : { status, proof }, reopening: {} });
   }
-  const proof = parseTaskProof(t.proof);
-  if (!proof.ok) return `${label}: invalid proof: ${proof.errors.join("; ")}`;
-  const fileList: readonly string[] = Array.isArray(t.file_list) ? t.file_list : [];
-  const testsOnly = taskTestsOnlyScope(t, proof.value, fileList, verification.value, scope, id, label);
-  if (!testsOnly.ok) return testsOnly.error;
+  const proof = fromErrors(parseTaskProof(t.proof));
+  if (!proof.ok) return parseErr(`${label}: invalid proof: ${proof.error}`);
+  const testsOnly = taskTestsOnlyScope(t, proof.value, { id, status, fileList }, verification, scope, label);
+  if (!testsOnly.ok) return testsOnly;
   // The one expectation rule (`taskArtifactScope`): a Distill Task's stored
   // Proof must be exactly task-completed and behaviour-preserved, and a
   // tests-only Task's exactly its scope's.
-  const expectedObligations = deriveProofObligations({
-    verificationPolicy: verification.value.policy,
+  const expected = deriveProofObligations({
+    verificationPolicy: verification.policy,
     declaredArtifacts: fileList,
-    ...(testsOnly.value === null
+    ...(testsOnly.value.scope === null
       ? { declaredArtifactExpectation: taskArtifactExpectation(t) }
-      : { testsOnly: testsOnly.value }),
+      : { testsOnly: testsOnly.value.scope }),
     redThenGreen: taskRedThenGreenEra(scope, id),
   });
-  const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
-    proof.value.obligations.every((actual, obligationIndex) => {
-      const expected = expectedObligations[obligationIndex];
-      if (expected === undefined || actual.kind !== expected.kind) return false;
-      if (actual.kind === "test-files-changed" || actual.kind === "implementation-files-unchanged") {
-        return canonicalStructuralEquals(actual, expected);
-      }
-      return actual.kind === "declared-artifact-changed" || actual.kind === "declared-artifact-attested"
-        ? (expected.kind === "declared-artifact-changed" || expected.kind === "declared-artifact-attested") &&
-          actual.artifact === expected.artifact
-        : true;
-    });
-  if (!obligationsMatch) return `${label}: proof obligations do not exactly match verification policy and file_list`;
-  if (t.status === "pending") {
-    return t.revalidation_required === true || proof.value.state !== "satisfied"
-      ? null
-      : `${label}: status/proof lockstep violated — pending lifecycle without revalidation cannot carry satisfied Proof`;
+  if (!proofObligationsMatch(proof.value.obligations, expected)) {
+    return parseErr(`${label}: proof obligations do not exactly match verification policy and file_list`);
   }
-  if (t.status === "implemented" || t.status === "completed") {
-    return proof.value.state === "satisfied"
-      ? null
-      : `${label}: status/proof lockstep violated — ${t.status} lifecycle requires satisfied Proof`;
-  }
-  return proof.value.state === "failed"
-    ? null
-    : `${label}: status/proof lockstep violated — failed lifecycle requires failed Proof`;
+  const lifecycle = storedLifecycle(status, proof.value, revalidation, label);
+  return lifecycle.ok ? parseOk({ lifecycle: lifecycle.value, reopening: testsOnly.value.reopening }) : lifecycle;
 }
 
-/** Test evidence. The acceptance DECISION is delegated to parseTaskTestResult —
+const isTaskStatus = (raw: unknown): raw is TaskStatus => (TASK_STATUSES as readonly unknown[]).includes(raw);
+
+/** Status, verification policy, attestation, review status/generation/run and revalidation, each proven alone. */
+function parseStoredTaskStatus(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+): ParseResult<Readonly<{ status: TaskStatus; verification: ParsedTaskVerificationPolicy }>> {
+  const { status, implementation_attestation: attestation } = t;
+  if (!isTaskStatus(status)) return parseErr(`${label}: status ${JSON.stringify(status)} is not one of ${TASK_STATUSES.join(", ")}`);
+  const verification = fromErrors(parseTaskVerificationPolicy(t, label));
+  if (!verification.ok) return verification;
+  if (attestation !== undefined && attestation !== true) return parseErr(`${label}: implementation_attestation must be true when present`);
+  const distillError = taskDistillError(t, label, verification.value);
+  if (distillError !== null) return parseErr(distillError);
+  const { regression, newTests } = verification.value.policy;
+  if (attestation === true && regression.kind !== "required") return parseErr(`${label}: attestation mode requires regression verification`);
+  if (attestation === true && newTests.kind !== "waived") {
+    return parseErr(`${label}: attestation mode requires a verification policy that waives new tests — the dispatched child must not author new work`);
+  }
+  const reviewError = storedReviewStateError(t, label);
+  if (reviewError !== null) return parseErr(reviewError);
+  if (t.revalidation_required !== undefined && t.revalidation_required !== true) {
+    return parseErr(`${label}: revalidation_required must be true when present`);
+  }
+  return t.revalidation_required === true && status !== "pending"
+    ? parseErr(`${label}: revalidation_required requires pending status until fresh task evidence is recorded`)
+    : parseOk({ status, verification: verification.value });
+}
+
+/** Why a stored review status, generation or in-progress run is invalid, or null. */
+function storedReviewStateError(t: Readonly<Record<string, unknown>>, label: string): string | null {
+  const { review_status: reviewStatus, review_generation: generation, review_run: run } = t;
+  if (reviewStatus !== undefined && !(REVIEW_STATUSES as readonly unknown[]).includes(reviewStatus)) {
+    return `${label}: review_status ${JSON.stringify(reviewStatus)} is not one of ${REVIEW_STATUSES.join(", ")}`;
+  }
+  if (generation !== undefined && (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0)) {
+    return `${label}: review_generation must be a non-negative safe integer`;
+  }
+  if (run !== undefined && generation === undefined) return `${label}: review_run requires review_generation`;
+  return run !== undefined && reviewStatus !== "pending" && reviewStatus !== "evidence_capture_failed"
+    ? `${label}: an in-progress review_run requires pending or evidence_capture_failed status`
+    : null;
+}
+
+/** Whether stored obligations are exactly the derived ones: same kinds in order, same artifacts and tests-only file sets. */
+function proofObligationsMatch(actual: readonly ProofObligation[], expected: readonly ProofObligation[]): boolean {
+  return actual.length === expected.length && actual.every((obligation, obligationIndex) => {
+    const derived = expected[obligationIndex];
+    if (derived === undefined || obligation.kind !== derived.kind) return false;
+    if (obligation.kind === "test-files-changed" || obligation.kind === "implementation-files-unchanged") {
+      return canonicalStructuralEquals(obligation, derived);
+    }
+    return obligation.kind === "declared-artifact-changed" || obligation.kind === "declared-artifact-attested"
+      ? (derived.kind === "declared-artifact-changed" || derived.kind === "declared-artifact-attested") &&
+        obligation.artifact === derived.artifact
+      : true;
+  });
+}
+
+/** The lifecycle arm a status and its stored Proof form: the status/proof lockstep. */
+function storedLifecycle(status: TaskStatus, proof: TaskProof, revalidation: boolean, label: string): ParseResult<TaskLifecycle> {
+  if (status === "pending" && revalidation) return parseOk({ status, proof, revalidation_required: true });
+  if (status === "pending") {
+    return proof.state === "satisfied"
+      ? parseErr(`${label}: status/proof lockstep violated — pending lifecycle without revalidation cannot carry satisfied Proof`)
+      : parseOk({ status, proof });
+  }
+  if (status === "implemented" || status === "completed") {
+    return proof.state === "satisfied"
+      ? parseOk({ status, proof })
+      : parseErr(`${label}: status/proof lockstep violated — ${status} lifecycle requires satisfied Proof`);
+  }
+  return proof.state === "failed"
+    ? parseOk({ status, proof })
+    : parseErr(`${label}: status/proof lockstep violated — failed lifecycle requires failed Proof`);
+}
+
+/** The stored test evidence: the new-test observation, then the test result. */
+type StoredTaskEvidence = Partial<Pick<Task, "test_result" | "new_test_observation">>;
+
+function parseStoredTaskEvidence(t: Readonly<Record<string, unknown>>, label: string): ParseResult<StoredTaskEvidence> {
+  const observation = t.new_test_observation === undefined ? undefined : parseStoredNewTestEvidence(t.new_test_observation);
+  if (observation !== undefined && !observation.ok) return parseErr(`${label}: ${observation.error}`);
+  const testResult = t.test_result === undefined ? parseOk(undefined) : parseStoredTestResult(t.test_result, label);
+  if (!testResult.ok) return testResult;
+  return parseOk({
+    ...present("test_result", testResult.value),
+    ...present("new_test_observation", observation?.value),
+  });
+}
+
+/** A stored test result. The acceptance DECISION is delegated to parseTaskTestResult —
  *  the ONE validator for the shared TaskTestResult/ProofTestResult union — so
  *  the load boundary can never drift from the proof evaluator on what shape
  *  the persisted field may have. Exact-shape causes pass through verbatim;
  *  older malformed verdicts retain the operator-facing spelling pinned by the
  *  load-guard suite. */
-function taskEvidenceError(
-  t: Record<string, unknown>,
-  index: number,
-  id: string,
-): string | null {
-  const prefix = `tasks[${index}] ("${id}")`;
-  if (t.new_test_observation !== undefined) {
-    const parsedObservation = parseStoredNewTestEvidence(t.new_test_observation);
-    if (!parsedObservation.ok) return `${prefix}: ${parsedObservation.error}`;
-  }
-  if (t.test_result === undefined) return null;
-  const parsed = parseTaskTestResult(t.test_result, `${prefix}: test_result`);
-  if (parsed.ok) return null;
+function parseStoredTestResult(raw: unknown, label: string): ParseResult<ProofTestResult> {
+  const parsed = parseTaskTestResult(raw, `${label}: test_result`);
+  if (parsed.ok) return parseOk(parsed.value);
   const exactShapeError = parsed.errors.find((error) => error.includes("unexpected field(s)"));
-  if (exactShapeError !== undefined) return exactShapeError;
-  const r = t.test_result as Record<string, unknown>;
-  if (typeof r !== "object" || r === null) return `${prefix}: test_result must be an object`;
-  if (r.verdict === "untrusted") {
-    return `${prefix}: untrusted test_result requires a boolean passed and a non-empty label naming the weak source`;
-  }
-  return `${prefix}: test_result.verdict ${JSON.stringify(r.verdict)} is not one of trusted-pass, trusted-fail, untrusted`;
+  if (exactShapeError !== undefined) return parseErr(exactShapeError);
+  if (typeof raw !== "object" || raw === null) return parseErr(`${label}: test_result must be an object`);
+  const verdict = isRecord(raw) ? raw.verdict : undefined;
+  return verdict === "untrusted"
+    ? parseErr(`${label}: untrusted test_result requires a boolean passed and a non-empty label naming the weak source`)
+    : parseErr(`${label}: test_result.verdict ${JSON.stringify(verdict)} is not one of trusted-pass, trusted-fail, untrusted`);
 }
 
-/** Findings and every view derived from them. */
-function taskFindingsError(
-  t: Record<string, unknown>,
-  index: number,
-  id: string,
-): string | null {
-  // `findings` and `refuted_findings` are proven for the same reason every
-  // union above is: the cast at the bottom of parseTaskGraph asserts
-  // `readonly Finding[]`, and a panel helper reading an unproven one surfaces
-  // as an unhandled TypeError from inside a pure function rather than as a
-  // contract diagnostic. Rejected rather than repaired here — dropping a
-  // malformed entry on every read would silently lose a critical, and
-  // `repair-task-graph` is the guarded, atomic repair that restores lockstep.
-  const findingsError = findingsUnionError(t.findings, `tasks[${index}] ("${id}"): findings`);
-  if (findingsError !== null) return findingsError;
-  // The two derived views earn their `readonly string[]` type independently of
-  // `findings`, because a task can carry a view with no array beside it (every
-  // pre-identity graph does) and the lockstep check below returns early on
-  // `findings === undefined`. Without this, a `critical_findings: ["real", 42]`
-  // on such a task loaded clean and `checkCriticalFindings` threw
-  // `f.trim is not a function` out of the wave gate.
-  for (const severity of ["critical", "advisory"] as const) {
-    const viewError = findingsViewError(
-      t[`${severity}_findings`],
-      `tasks[${index}] ("${id}"): ${severity}_findings`,
-    );
-    if (viewError !== null) return viewError;
-  }
-  // Shape alone is not the invariant. `critical_findings`/`advisory_findings`
-  // are DERIVED views, the wave gate counts them, and nothing proved they agree
-  // with the array they summarize — so a critical present in only one of the
-  // two either never blocked the wave or could never be adjudicated.
-  const lockstepError = findingsLockstepError(
-    t.findings,
-    t.critical_findings,
-    t.advisory_findings,
-    `tasks[${index}] ("${id}")`,
-  );
-  if (lockstepError !== null) return lockstepError;
-  const refutationsError = refutationsUnionError(
-    t.refuted_findings,
-    `tasks[${index}] ("${id}"): refuted_findings`,
-  );
-  if (refutationsError !== null) return refutationsError;
-  const resolutionsError = resolutionsUnionError(
-    t.resolved_findings,
-    `tasks[${index}] ("${id}"): resolved_findings`,
-  );
-  if (resolutionsError !== null) return resolutionsError;
-  const collisionError = findingIdCollisionError(
-    t.findings,
-    t.refuted_findings,
-    `tasks[${index}] ("${id}")`,
-    t.resolved_findings,
-  );
-  if (collisionError !== null) return collisionError;
-  const runError = reviewRunError(
-    t.review_run,
-    t.review_generation,
-    t.findings,
-    `tasks[${index}] ("${id}"): review_run`,
-  );
-  if (runError !== null) return runError;
-  if (t.review_run !== undefined) {
-    const run = t.review_run as Record<string, unknown>;
-    if (run.slot_authority !== undefined) {
-      const slots = run.slot_authority;
-      if (!Array.isArray(slots) || slots.length === 0) {
-        return `tasks[${index}] ("${id}"): review_run.slot_authority must be a non-empty array when present`;
-      }
-      const expectedAgents = run.expected_agents as readonly string[];
-      if (slots.length !== expectedAgents.length) {
-        return `tasks[${index}] ("${id}"): review_run.slot_authority must cover every expected agent exactly once in order`;
-      }
-      const slotIds = new Set<string>();
-      for (const [slotIndex, rawSlot] of slots.entries()) {
-        const label = `tasks[${index}] ("${id}"): review_run.slot_authority[${slotIndex}]`;
-        if (!isRecord(rawSlot)) return `${label} must be an object`;
-        const slot = rawSlot as Record<string, unknown>;
-        const fields = Object.keys(slot).sort();
-        // A current slot a restart carried also names its origin (ADR-0089);
-        // `reviewRunError` above has already proven that origin and its evidence.
-        const currentFields = ["agent", "attempted", "slot_id", "request_id", "context_digest",
-          ...(Object.hasOwn(slot, "carried_from") ? ["carried_from"] : [])];
-        const expectedFields = (run.reviewer_protocol === undefined
-          ? ["agent", "attempted", "slot_id"] : currentFields).sort();
-        if (fields.length !== expectedFields.length || fields.some((field, fieldIndex) => field !== expectedFields[fieldIndex])) {
-          return `${label} must contain exactly agent/slot_id/attempted`;
-        }
-        if (slot.agent !== expectedAgents[slotIndex]) return `${label}.agent must match expected_agents in order`;
-        const slotId = parseSlotId(slot.slot_id);
-        if (!slotId.ok) return `${label}.slot_id: ${slotId.error.message}`;
-        if (slotIds.has(slotId.value)) return `${label}.slot_id duplicates an earlier Review Run slot`;
-        slotIds.add(slotId.value);
-        if (slot.attempted !== 1 && slot.attempted !== 2) return `${label}.attempted must be 1 or 2`;
-      }
-    }
-  }
-  return evidenceFailureError(t, `tasks[${index}] ("${id}")`, REVIEW_SUB_AGENTS);
+/** A stored Task's parsed findings, refutations and resolutions, installed once every findings rule holds. */
+type StoredFindingsFields = Partial<Pick<Task, "findings" | "refuted_findings" | "resolved_findings">>;
+
+/**
+ * Every findings-aggregate rule's refusal for one stored Task, in rule order,
+ * and the parsed records when there is none. The records are proven for the
+ * same reason every union is: `Task` asserts `readonly Finding[]`, and a panel
+ * helper reading an unproven one surfaces as an unhandled TypeError from inside
+ * a pure function rather than as a contract diagnostic. Rejected rather than
+ * repaired — dropping a malformed entry on every read would silently lose a
+ * critical, and `repair-task-graph` is the guarded, atomic repair.
+ *
+ * The two derived views earn their `readonly string[]` type independently of
+ * `findings` (a pre-identity Task carries a view with no array beside it), and
+ * then their lockstep with it: a critical present in only one of the two
+ * either never blocked the Wave or could never be adjudicated.
+ */
+function readStoredTaskFindings(
+  t: Readonly<Record<string, unknown>>,
+  label: string,
+): Readonly<{ errors: readonly string[]; fields: StoredFindingsFields }> {
+  const findings = parseStoredFindingsField(t.findings, `${label}: findings`);
+  const refutations = parseStoredRefutationsField(t.refuted_findings, `${label}: refuted_findings`);
+  const resolutions = parseStoredResolutionsField(t.resolved_findings, `${label}: resolved_findings`);
+  const runError = reviewRunError(t.review_run, t.review_generation, t.findings, `${label}: review_run`);
+  const errors = [
+    findings.ok ? null : findings.error,
+    findingsViewError(t.critical_findings, `${label}: critical_findings`),
+    findingsViewError(t.advisory_findings, `${label}: advisory_findings`),
+    findingsLockstepError(t.findings, t.critical_findings, t.advisory_findings, label),
+    refutations.ok ? null : refutations.error,
+    resolutions.ok ? null : resolutions.error,
+    findingIdCollisionError(t.findings, t.refuted_findings, label, t.resolved_findings),
+    runError,
+    // `reviewRunError` proves the run the slot authority is read against.
+    runError === null ? slotAuthorityError(t.review_run, `${label}: review_run.slot_authority`) : null,
+    evidenceFailureError(t, label, REVIEW_SUB_AGENTS),
+  ].filter((error): error is string => error !== null);
+  if (errors.length > 0 || !findings.ok || !refutations.ok || !resolutions.ok) return { errors, fields: {} };
+  return {
+    errors,
+    fields: {
+      ...present("findings", findings.value),
+      ...present("refuted_findings", refutations.value),
+      ...present("resolved_findings", resolutions.value),
+    },
+  };
 }
 
-/** The persisted lifecycle fields shared by the loader and operator validator. */
+/** A proven Review Run's engine-owned slot authority: one exact slot per expected agent, in order, under distinct ids. */
+function slotAuthorityError(run: unknown, label: string): string | null {
+  if (!isRecord(run) || run.slot_authority === undefined) return null;
+  const { slot_authority: slots, expected_agents: expectedAgents } = run;
+  if (!Array.isArray(slots) || slots.length === 0) return `${label} must be a non-empty array when present`;
+  if (!Array.isArray(expectedAgents) || slots.length !== expectedAgents.length) {
+    return `${label} must cover every expected agent exactly once in order`;
+  }
+  const slotIds = new Set<string>();
+  for (const [slotIndex, rawSlot] of slots.entries()) {
+    const slotLabel = `${label}[${slotIndex}]`;
+    const slot = parseAuthoritySlot(rawSlot, slotLabel, expectedAgents[slotIndex], run.reviewer_protocol !== undefined);
+    if (!slot.ok) return slot.error;
+    if (slotIds.has(slot.value.slotId)) return `${slotLabel}.slot_id duplicates an earlier Review Run slot`;
+    slotIds.add(slot.value.slotId);
+    if (slot.value.attempted !== 1 && slot.value.attempted !== 2) return `${slotLabel}.attempted must be 1 or 2`;
+  }
+  return null;
+}
+
+/** One slot authority entry's exact field set, agent and slot id. */
+function parseAuthoritySlot(
+  raw: unknown,
+  label: string,
+  expectedAgent: unknown,
+  current: boolean,
+): ParseResult<Readonly<{ slotId: string; attempted: unknown }>> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const fields = Object.keys(raw).sort();
+  // A current slot a restart carried also names its origin (ADR-0089);
+  // `reviewRunError` has already proven that origin and its evidence.
+  const currentFields = ["agent", "attempted", "slot_id", "request_id", "context_digest",
+    ...(Object.hasOwn(raw, "carried_from") ? ["carried_from"] : [])];
+  const expectedFields = (current ? currentFields : ["agent", "attempted", "slot_id"]).sort();
+  if (fields.length !== expectedFields.length || fields.some((field, fieldIndex) => field !== expectedFields[fieldIndex])) {
+    return parseErr(`${label} must contain exactly agent/slot_id/attempted`);
+  }
+  if (raw.agent !== expectedAgent) return parseErr(`${label}.agent must match expected_agents in order`);
+  const slotId = parseSlotId(raw.slot_id);
+  return slotId.ok ? parseOk({ slotId: slotId.value, attempted: raw.attempted }) : parseErr(`${label}.slot_id: ${slotId.error.message}`);
+}
+
+/**
+ * A stored `spec_anchor_hashes`, parsed before `Task` can assert
+ * `Record<string, string>`. Non-string values are corrupt protected authority,
+ * not alternate spellings of a hash, so they fail here instead of being
+ * rewritten into plausible data.
+ */
+function parseSpecAnchorHashes(raw: unknown, index: number): ParseResult<Readonly<Record<string, string>> | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!isRecord(raw)) {
+    return parseErr(`tasks[${index}].spec_anchor_hashes must be a record of strings when present, got ${JSON.stringify(raw)}`);
+  }
+  const entries = Object.entries(raw);
+  const invalid = entries.find(([, value]) => typeof value !== "string");
+  if (invalid !== undefined) {
+    return parseErr(`tasks[${index}].spec_anchor_hashes[${JSON.stringify(invalid[0])}] must be a string, got ${JSON.stringify(invalid[1])}`);
+  }
+  const hashes = entries.flatMap(([claim, hash]) => typeof hash === "string" ? [[claim, hash] as const] : []);
+  return parseOk(Object.freeze(Object.fromEntries(hashes)));
+}
+
+/** The persisted lifecycle fields' every refusal, shared by the loader and operator validator. */
 export function taskGraphLifecycleErrors(obj: Record<string, unknown>): readonly string[] {
-  const errors: string[] = [];
-  if (!("current_phase" in obj)) errors.push("missing current_phase");
-  else if (!(PHASE_ORDER as readonly unknown[]).includes(obj.current_phase)) {
-    errors.push(`current_phase ${JSON.stringify(obj.current_phase)} is not one of ${PHASE_ORDER.join(", ")}`);
-  }
-  if (!("phase_artifacts" in obj)) errors.push("missing phase_artifacts");
-  else if (!isRecord(obj.phase_artifacts)) {
-    errors.push("phase_artifacts must be an object");
-  } else {
-    for (const [phase, artifact] of Object.entries(obj.phase_artifacts)) {
-      if (!(PHASE_ORDER as readonly string[]).includes(phase)) {
-        errors.push(`phase_artifacts contains unknown phase ${JSON.stringify(phase)}`);
-      } else if (typeof artifact !== "string") {
-        errors.push(`phase_artifacts.${phase} must be a string, got ${JSON.stringify(artifact)}`);
-      }
-    }
-  }
-  const skippedPhases = obj.skipped_phases ?? [];
-  if (!Array.isArray(skippedPhases)
-    || skippedPhases.some((phase) => !(PHASE_ORDER as readonly unknown[]).includes(phase))) {
-    errors.push(`skipped_phases must be an array containing only: ${PHASE_ORDER.join(", ")}`);
-  }
-  return errors;
+  const phase = parseCurrentPhase(obj);
+  const artifacts = parsePhaseArtifacts(obj);
+  const skipped = parseSkippedPhases(obj);
+  return [...(phase.ok ? [] : [phase.error]), ...(artifacts.ok ? [] : artifacts.errors), ...(skipped.ok ? [] : [skipped.error])];
 }
 
-type ParsedWaveGateRegistrations = Readonly<{
-  activeWaveGate: ActiveWaveGateRegistration | undefined;
-  waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
-}>;
+/** The lifecycle fields, or the first of `taskGraphLifecycleErrors`. */
+function parseTaskGraphLifecycle(obj: Readonly<Record<string, unknown>>): ParseResult<TaskGraphLifecycle> {
+  const phase = parseCurrentPhase(obj);
+  if (!phase.ok) return phase;
+  const artifacts = parsePhaseArtifacts(obj);
+  if (!artifacts.ok) return parseErr(artifacts.errors[0]);
+  const skipped = parseSkippedPhases(obj);
+  if (!skipped.ok) return skipped;
+  return parseOk({ current_phase: phase.value, phase_artifacts: artifacts.value, skipped_phases: skipped.value });
+}
+
+type TaskGraphLifecycle = Pick<TaskGraph, "current_phase" | "phase_artifacts" | "skipped_phases">;
+
+const isPhase = (raw: unknown): raw is Phase => (PHASE_ORDER as readonly unknown[]).includes(raw);
+
+function parseCurrentPhase(obj: Readonly<Record<string, unknown>>): ParseResult<Phase> {
+  if (!("current_phase" in obj)) return parseErr("missing current_phase");
+  const phase = obj.current_phase;
+  return isPhase(phase) ? parseOk(phase) : parseErr(`current_phase ${JSON.stringify(phase)} is not one of ${PHASE_ORDER.join(", ")}`);
+}
+
+/** `phase_artifacts`: the artifact path per known phase, or every entry's refusal. */
+function parsePhaseArtifacts(obj: Readonly<Record<string, unknown>>):
+  | Readonly<{ ok: true; value: TaskGraph["phase_artifacts"] }>
+  | Readonly<{ ok: false; errors: NonEmpty<string> }> {
+  if (!("phase_artifacts" in obj)) return { ok: false, errors: nonEmptyOf("missing phase_artifacts") };
+  if (!isRecord(obj.phase_artifacts)) return { ok: false, errors: nonEmptyOf("phase_artifacts must be an object") };
+  const errors: string[] = [];
+  const artifacts: (readonly [Phase, string])[] = [];
+  for (const [phase, artifact] of Object.entries(obj.phase_artifacts)) {
+    if (!isPhase(phase)) errors.push(`phase_artifacts contains unknown phase ${JSON.stringify(phase)}`);
+    else if (typeof artifact !== "string") errors.push(`phase_artifacts.${phase} must be a string, got ${JSON.stringify(artifact)}`);
+    else artifacts.push([phase, artifact]);
+  }
+  return isNonEmpty(errors) ? { ok: false, errors } : { ok: true, value: Object.freeze(Object.fromEntries(artifacts)) };
+}
+
+/** `skipped_phases`: absent (none), or known phases. */
+function parseSkippedPhases(obj: Readonly<Record<string, unknown>>): ParseResult<readonly Phase[]> {
+  const skipped = obj.skipped_phases ?? [];
+  return Array.isArray(skipped) && skipped.every(isPhase)
+    ? parseOk(Object.freeze([...skipped]))
+    : parseErr(`skipped_phases must be an array containing only: ${PHASE_ORDER.join(", ")}`);
+}
+
+/** The Wave Gate registrations' wire fields. */
+type ParsedWaveGateRegistrations = Pick<TaskGraph, "active_wave_gate" | "wave_gate_history">;
 
 /**
  * Parse the active and terminal Wave Gate registrations together.
@@ -2615,89 +2806,88 @@ type ParsedWaveGateRegistrations = Readonly<{
 function parseWaveGateRegistrations(
   obj: Record<string, unknown>,
 ): ParseResult<ParsedWaveGateRegistrations> {
-  let activeWaveGate: ActiveWaveGateRegistration | undefined;
-  if (obj.active_wave_gate !== undefined) {
-    const parsedRegistration = parseActiveWaveGateRegistration(obj.active_wave_gate);
-    if (!parsedRegistration.ok) return parseErr(parsedRegistration.error);
-    activeWaveGate = parsedRegistration.value;
-  }
+  const active = obj.active_wave_gate === undefined ? parseOk(undefined) : parseActiveWaveGateRegistration(obj.active_wave_gate);
+  if (!active.ok) return active;
+  const activeWaveGate = active.value;
+  const history = parseOptionalLog(
+    obj.wave_gate_history,
+    "wave_gate_history",
+    (entry, label) => labelled(label, parseCompletedWaveGateRegistration(entry)),
+    (completed) => waveGateHistoryError(completed, activeWaveGate),
+  );
+  if (!history.ok) return history;
+  const conflict = activeWaveGate?.terminalOutcome === null
+    ? nonterminalActiveGateConflict(obj, activeWaveGate, history.value)
+    : null;
+  return conflict === null
+    ? parseOk({
+        ...present("active_wave_gate", activeWaveGate),
+        ...present("wave_gate_history", history.value),
+      })
+    : parseErr(conflict);
+}
 
-  let waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
-  if (obj.wave_gate_history !== undefined) {
-    const parsedHistory = parseWaveGateHistory(obj.wave_gate_history, activeWaveGate);
-    if (!parsedHistory.ok) return parseErr(parsedHistory.error);
-    waveGateHistory = parsedHistory.value;
-  }
-
-  if (activeWaveGate?.terminalOutcome === null) {
-    const conflict = nonterminalActiveGateConflict(obj, activeWaveGate, waveGateHistory);
-    if (conflict !== null) return parseErr(conflict);
-  }
-  return parseOk({ activeWaveGate, waveGateHistory });
+/** Why the terminal registrations repeat a run or a Wave, or hold the active run, or null. */
+function waveGateHistoryError(
+  completed: readonly CompletedWaveGateRegistration[],
+  activeWaveGate: ActiveWaveGateRegistration | undefined,
+): string | null {
+  const runIds = completed.map(({ runId }) => runId);
+  const repeated = repeatedIdentity(runIds, "wave_gate_history contains duplicate run identities") ??
+    repeatedIdentity(completed.map(({ wave }) => String(wave)), "wave_gate_history contains duplicate completed Waves");
+  if (repeated !== null) return repeated;
+  return activeWaveGate !== undefined && runIds.includes(activeWaveGate.runId)
+    ? `active_wave_gate run ${activeWaveGate.runId} is already terminal in wave_gate_history`
+    : null;
 }
 
 function parseWaveReopeningHistory(raw: unknown): ParseResult<readonly WaveReopeningAudit[] | undefined> {
-  if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("wave_reopening_history must be an array when present");
-  const audits: WaveReopeningAudit[] = [];
-  for (const [index, rawAudit] of raw.entries()) {
-    if (!isRecord(rawAudit)) return parseErr(`wave_reopening_history[${index}] must be an object`);
-    const audit = rawAudit as Record<string, unknown>;
-    const fields = exactFieldsError(audit, ["schemaVersion", "kind", "proofMode", "runId", "wave", "authorityDigest", "completionReceipt", "reopenedTaskIds"], [SWEPT_DISTILL_TASK_IDS_FIELD], `wave_reopening_history[${index}]`);
-    if (fields !== null || audit.schemaVersion !== 1 || audit.kind !== "completed-wave-reopened-for-review-integrity" ||
-        (audit.proofMode !== "modern-exact-workspace-drift" && audit.proofMode !== "legacy-workspace-authority-unverifiable")) {
-      return parseErr(fields ?? `wave_reopening_history[${index}] has invalid schema, kind, or proof mode`);
-    }
-    const runId = parseOrchestrationRunId(audit.runId);
-    const authorityDigest = parseArtifactDigest(audit.authorityDigest);
-    const reopened = parseDistinctTaskIds(audit.reopenedTaskIds, `wave_reopening_history[${index}].reopenedTaskIds`);
-    if (!runId.ok || !authorityDigest.ok || typeof audit.wave !== "number" || !Number.isSafeInteger(audit.wave) || audit.wave < 1 ||
-        !reopened.ok ||
-        typeof audit.completionReceipt !== "object" || audit.completionReceipt === null) {
-      return parseErr(`wave_reopening_history[${index}] has invalid authority, receipt, or reopened Task ids`);
-    }
-    const receipt = audit.completionReceipt as Record<string, unknown>;
-    const effectId = parseEffectId(receipt.effectId);
-    const receiptRunId = parseOrchestrationRunId(receipt.runId);
-    const stateDigest = parseArtifactDigest(receipt.stateDigest);
-    const committedRevision = receipt.committedRevision;
-    if (!effectId.ok || !receiptRunId.ok || !stateDigest.ok || receipt.kind !== "protected-wave-state-committed" ||
-        receiptRunId.value !== runId.value || typeof committedRevision !== "number" ||
-        !Number.isSafeInteger(committedRevision) || committedRevision < 1) {
-      return parseErr(`wave_reopening_history[${index}] has an invalid completion receipt`);
-    }
-    // The audited Tasks may have left the roster since, so no roster check here.
-    const reopenedIds = parseReopenedTaskIds(
-      audit[SWEPT_DISTILL_TASK_IDS_FIELD], `wave_reopening_history[${index}]`, reopened.value, null);
-    if (!reopenedIds.ok) return reopenedIds;
-    audits.push(Object.freeze({ schemaVersion: 1, kind: "completed-wave-reopened-for-review-integrity", proofMode: audit.proofMode,
-      runId: runId.value, wave: audit.wave, authorityDigest: authorityDigest.value,
-      completionReceipt: Object.freeze({ kind: "protected-wave-state-committed" as const, effectId: effectId.value, runId: runId.value, committedRevision, stateDigest: stateDigest.value }),
-      ...reopenedIds.value }));
-  }
-  const identities = audits.map((audit) => `${audit.runId}:${audit.authorityDigest}`);
-  return new Set(identities).size === identities.length ? parseOk(Object.freeze(audits)) : parseErr("wave_reopening_history contains duplicate authority audits");
+  return parseOptionalLog(raw, "wave_reopening_history", parseWaveReopeningAudit, (audits) => repeatedIdentity(
+    audits.map((audit) => `${audit.runId}:${audit.authorityDigest}`),
+    "wave_reopening_history contains duplicate authority audits",
+  ));
 }
 
-function parseWaveGateHistory(
-  raw: unknown,
-  activeWaveGate: ActiveWaveGateRegistration | undefined,
-): ParseResult<readonly CompletedWaveGateRegistration[]> {
-  if (!Array.isArray(raw)) return parseErr("wave_gate_history must be an array when present");
-  const parsedHistory: CompletedWaveGateRegistration[] = [];
-  for (let index = 0; index < raw.length; index++) {
-    const parsed = parseCompletedWaveGateRegistration(raw[index]);
-    if (!parsed.ok) return parseErr(`wave_gate_history[${index}]: ${parsed.error}`);
-    parsedHistory.push(parsed.value);
+/** One completed Wave's review-integrity reopening: its run authority, completion receipt and reopened Tasks. */
+function parseWaveReopeningAudit(raw: unknown, label: string): ParseResult<WaveReopeningAudit> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const fields = exactFieldsError(raw, ["schemaVersion", "kind", "proofMode", "runId", "wave", "authorityDigest", "completionReceipt", "reopenedTaskIds"], [SWEPT_DISTILL_TASK_IDS_FIELD], label);
+  const { proofMode, wave } = raw;
+  if (fields !== null || raw.schemaVersion !== 1 || raw.kind !== "completed-wave-reopened-for-review-integrity" ||
+      (proofMode !== "modern-exact-workspace-drift" && proofMode !== "legacy-workspace-authority-unverifiable")) {
+    return parseErr(fields ?? `${label} has invalid schema, kind, or proof mode`);
   }
-  const runIds = parsedHistory.map(({ runId }) => runId);
-  if (new Set(runIds).size !== runIds.length) return parseErr("wave_gate_history contains duplicate run identities");
-  const waves = parsedHistory.map(({ wave }) => wave);
-  if (new Set(waves).size !== waves.length) return parseErr("wave_gate_history contains duplicate completed Waves");
-  if (activeWaveGate !== undefined && runIds.includes(activeWaveGate.runId)) {
-    return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already terminal in wave_gate_history`);
+  const runId = parseOrchestrationRunId(raw.runId);
+  const authorityDigest = parseArtifactDigest(raw.authorityDigest);
+  const reopened = parseDistinctTaskIds(raw.reopenedTaskIds, `${label}.reopenedTaskIds`);
+  if (!runId.ok || !authorityDigest.ok || typeof wave !== "number" || !Number.isSafeInteger(wave) || wave < 1 ||
+      !reopened.ok ||
+      typeof raw.completionReceipt !== "object" || raw.completionReceipt === null) {
+    return parseErr(`${label} has invalid authority, receipt, or reopened Task ids`);
   }
-  return parseOk(Object.freeze(parsedHistory));
+  const receipt = parseReopenedWaveReceipt(raw.completionReceipt, runId.value);
+  if (receipt === null) return parseErr(`${label} has an invalid completion receipt`);
+  // The audited Tasks may have left the roster since, so no roster check here.
+  const reopenedIds = parseReopenedTaskIds(raw[SWEPT_DISTILL_TASK_IDS_FIELD], label, reopened.value, null);
+  if (!reopenedIds.ok) return reopenedIds;
+  return parseOk(Object.freeze({ schemaVersion: 1 as const, kind: "completed-wave-reopened-for-review-integrity" as const, proofMode,
+    runId: runId.value, wave, authorityDigest: authorityDigest.value, completionReceipt: receipt, ...reopenedIds.value }));
+}
+
+/** The protected-state commit receipt a reopened Wave completed under, in its run; null when it is not one. */
+function parseReopenedWaveReceipt(raw: unknown, runId: OrchestrationRunId): WaveReopeningAudit["completionReceipt"] | null {
+  // A non-record (an array) reads as a receipt with no fields, and so refuses.
+  const receipt: Readonly<Record<string, unknown>> = isRecord(raw) ? raw : {};
+  const effectId = parseEffectId(receipt.effectId);
+  const receiptRunId = parseOrchestrationRunId(receipt.runId);
+  const stateDigest = parseArtifactDigest(receipt.stateDigest);
+  const committedRevision = receipt.committedRevision;
+  if (!effectId.ok || !receiptRunId.ok || !stateDigest.ok || receipt.kind !== "protected-wave-state-committed" ||
+      receiptRunId.value !== runId || typeof committedRevision !== "number" ||
+      !Number.isSafeInteger(committedRevision) || committedRevision < 1) {
+    return null;
+  }
+  return Object.freeze({ kind: "protected-wave-state-committed" as const, effectId: effectId.value, runId, committedRevision, stateDigest: stateDigest.value });
 }
 
 /** An in-flight gate must agree with the protected phase, wave, and history. */
@@ -2721,20 +2911,29 @@ function nonterminalActiveGateConflict(
 }
 
 /** Create a recursively frozen defensive copy of JSON-shaped protected data. */
-function frozenJsonCopy(value: unknown, copies = new WeakMap<object, unknown>()): unknown {
+function frozenJsonCopy<T>(value: T): T {
+  return copyFrozenJson(value, new WeakMap()) as T;
+}
+
+/**
+ * The structural copy behind `frozenJsonCopy`, untyped because it rebuilds a
+ * value key by key: the copy has exactly the original's JSON shape, which is
+ * what lets `frozenJsonCopy` return it under the original's type.
+ */
+function copyFrozenJson(value: unknown, copies: WeakMap<object, unknown>): unknown {
   if (typeof value !== "object" || value === null) return value;
   const existing = copies.get(value);
   if (existing !== undefined) return existing;
   if (Array.isArray(value)) {
     const copy: unknown[] = [];
     copies.set(value, copy);
-    copy.push(...value.map((entry) => frozenJsonCopy(entry, copies)));
+    copy.push(...value.map((entry) => copyFrozenJson(entry, copies)));
     return Object.freeze(copy);
   }
   const copy: Record<string, unknown> = {};
   copies.set(value, copy);
   for (const [key, entry] of Object.entries(value)) {
-    copy[key] = frozenJsonCopy(entry, copies);
+    copy[key] = copyFrozenJson(entry, copies);
   }
   return Object.freeze(copy);
 }
@@ -2757,195 +2956,109 @@ function parseExecutingTaskIds(raw: unknown): ParseResult<readonly TaskId[] | un
   return parseOk(Object.freeze(parsed));
 }
 
-function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null {
-  for (const field of ["spec_dir", "spec_file", "plan_file"] as const) {
-    if (obj[field] !== undefined && obj[field] !== null && typeof obj[field] !== "string") {
-      return `${field} must be a string or null when present, got ${JSON.stringify(obj[field])}`;
-    }
+/** The document paths and the scalar fields, each optional; the two document paths default to null. */
+type TaskGraphScalars = Pick<TaskGraph,
+  "spec_file" | "plan_file" | "spec_dir" | "plan_title" | "github_repo" | "updated_at" | "github_issue" | "current_wave">;
+
+function parseTaskGraphScalars(obj: Readonly<Record<string, unknown>>): ParseResult<TaskGraphScalars> {
+  const specDir = optionalNullableString(obj, "spec_dir");
+  if (!specDir.ok) return specDir;
+  const specFile = optionalNullableString(obj, "spec_file");
+  if (!specFile.ok) return specFile;
+  const planFile = optionalNullableString(obj, "plan_file");
+  if (!planFile.ok) return planFile;
+  const planTitle = optionalString(obj, "plan_title");
+  if (!planTitle.ok) return planTitle;
+  const githubRepo = optionalString(obj, "github_repo");
+  if (!githubRepo.ok) return githubRepo;
+  const updatedAt = optionalString(obj, "updated_at");
+  if (!updatedAt.ok) return updatedAt;
+  const { github_issue: githubIssue, current_wave: currentWave } = obj;
+  if (githubIssue !== undefined && (typeof githubIssue !== "number" || !Number.isInteger(githubIssue) || githubIssue < 1)) {
+    return parseErr(`github_issue must be an integer >= 1 when present, got ${JSON.stringify(githubIssue)}`);
   }
-  for (const field of ["plan_title", "github_repo", "updated_at"] as const) {
-    if (obj[field] !== undefined && typeof obj[field] !== "string") {
-      return `${field} must be a string when present, got ${JSON.stringify(obj[field])}`;
-    }
+  if (currentWave !== undefined && (typeof currentWave !== "number" || !Number.isSafeInteger(currentWave) || currentWave < 1)) {
+    return parseErr(`current_wave must be an integer >= 1 within the safe-integer range when present, got ${JSON.stringify(currentWave)}`);
   }
-  if (obj.github_issue !== undefined &&
-      (typeof obj.github_issue !== "number" || !Number.isInteger(obj.github_issue) || obj.github_issue < 1)) {
-    return `github_issue must be an integer >= 1 when present, got ${JSON.stringify(obj.github_issue)}`;
-  }
-  if (obj.current_wave !== undefined &&
-      (typeof obj.current_wave !== "number" || !Number.isSafeInteger(obj.current_wave) || obj.current_wave < 1)) {
-    return `current_wave must be an integer >= 1 within the safe-integer range when present, got ${JSON.stringify(obj.current_wave)}`;
-  }
-  return null;
+  return parseOk({
+    // The order a document path a raw graph omits takes in the loaded one.
+    spec_file: specFile.value ?? null,
+    plan_file: planFile.value ?? null,
+    ...present("spec_dir", specDir.value),
+    ...present("plan_title", planTitle.value),
+    ...present("github_repo", githubRepo.value),
+    ...present("updated_at", updatedAt.value),
+    ...present("github_issue", githubIssue),
+    ...present("current_wave", currentWave),
+  });
 }
 
-/** A copy of `record` without `keys`, every other key kept in order: how a
- *  migration retires a field in one expression. */
-function withoutKeys(record: Record<string, unknown>, ...keys: readonly string[]): Record<string, unknown> {
+function optionalNullableString(obj: Readonly<Record<string, unknown>>, field: string): ParseResult<string | null | undefined> {
+  const value = obj[field];
+  return value === undefined || value === null || typeof value === "string"
+    ? parseOk(value)
+    : parseErr(`${field} must be a string or null when present, got ${JSON.stringify(value)}`);
+}
+
+function optionalString(obj: Readonly<Record<string, unknown>>, field: string): ParseResult<string | undefined> {
+  const value = obj[field];
+  return value === undefined || typeof value === "string"
+    ? parseOk(value)
+    : parseErr(`${field} must be a string when present, got ${JSON.stringify(value)}`);
+}
+
+/** The raw document without `keys`, every other key kept in order: the fields no section parser installs. */
+function withoutKeys(record: Readonly<Record<string, unknown>>, ...keys: readonly string[]): Readonly<Record<string, unknown>> {
   return Object.fromEntries(Object.entries(record).filter(([key]) => !keys.includes(key)));
-}
-
-function migrateParsedTask(
-  task: Record<string, unknown>,
-  index: number,
-  scope: RedThenGreenScope,
-): ParseResult<Record<string, unknown>> {
-  const identity = parseTaskId(task.id, `tasks[${index}].id`);
-  if (!identity.ok) return parseErr(identity.error.errors.join("; "));
-  const verification = parseTaskVerificationPolicy(task, `tasks[${index}]`);
-  if (!verification.ok) return parseErr(verification.errors.join("; "));
-  let migrated: Record<string, unknown> = { ...task, id: identity.value };
-  if (task.proof === undefined && task.status === "pending") {
-    // A Task without Proof carries no reopen_scope (`taskStatusError` refuses
-    // one), so the one scope reader derives its expectation.
-    migrated = {
-      ...migrated,
-      proof: derivePendingTaskProof({
-        verificationPolicy: verification.value.policy,
-        declaredArtifacts: Array.isArray(task.file_list) ? task.file_list : [],
-        ...taskArtifactScope({ agent: task.agent, implementation_attestation: task.implementation_attestation }),
-        redThenGreen: taskRedThenGreenEra(scope, identity.value),
-      }),
-    };
-  } else if (task.proof !== undefined) {
-    const proof = parseTaskProof(task.proof);
-    if (!proof.ok) return parseErr(proof.errors.join("; "));
-    migrated = { ...migrated, proof: proof.value };
-  }
-  // Already proven against file_list by `taskStatusError`; parsed again so the
-  // Task carries the frozen values, never the raw records.
-  const fileList: readonly string[] = Array.isArray(task.file_list) ? task.file_list : [];
-  if (task.reopen_scope !== undefined) {
-    const reopenScope = parseTestsOnlyScope(task.reopen_scope, fileList);
-    if (!reopenScope.ok) return parseErr(reopenScope.errors.join("; "));
-    migrated = { ...migrated, reopen_scope: reopenScope.value };
-  }
-  if (task.reopen_baseline !== undefined) {
-    const reopenBaseline = parseReopenBaseline(task.reopen_baseline, fileList);
-    if (!reopenBaseline.ok) return parseErr(reopenBaseline.errors.join("; "));
-    migrated = { ...migrated, reopen_baseline: reopenBaseline.value };
-  }
-  // Parse the persisted record before `Task` can assert Record<string,string>.
-  // Non-string values are corrupt protected authority, not alternate spellings
-  // of a hash, so they fail here instead of being rewritten into plausible data.
-  if (task.spec_anchor_hashes !== undefined) {
-    if (!isRecord(task.spec_anchor_hashes)) {
-      return parseErr(
-        `tasks[${index}].spec_anchor_hashes must be a record of strings when present, ` +
-        `got ${JSON.stringify(task.spec_anchor_hashes)}`,
-      );
-    }
-    const entries = Object.entries(task.spec_anchor_hashes);
-    const invalid = entries.find(([, value]) => typeof value !== "string");
-    if (invalid !== undefined) {
-      return parseErr(
-        `tasks[${index}].spec_anchor_hashes[${JSON.stringify(invalid[0])}] must be a string, ` +
-        `got ${JSON.stringify(invalid[1])}`,
-      );
-    }
-    migrated = {
-      ...migrated,
-      spec_anchor_hashes: Object.freeze(Object.fromEntries(entries)),
-    };
-  }
-  if (task.active_implementation_attempt !== undefined) {
-    const authority = parseImplementationAttemptAuthority(task.active_implementation_attempt);
-    if (!authority.ok) return parseErr(authority.error.errors.join("; "));
-    migrated = { ...migrated, active_implementation_attempt: authority.value };
-    if (task.active_implementation_context !== undefined) {
-      const context = parseImplementationAttemptContext(
-        task.active_implementation_context,
-        `tasks[${index}].active_implementation_context`,
-      );
-      if (!context.ok) return parseErr(context.errors.join("; "));
-      migrated = { ...migrated, active_implementation_context: context.value };
-    }
-  }
-  const repositoryCarry = task.repository_baseline ?? (
-    task.active_implementation_attempt === undefined ? undefined : task.attempt_repository_baseline
-  );
-  if (repositoryCarry !== undefined) {
-    const baseline = parseDeclaredArtifactBaseline(repositoryCarry, `tasks[${index}].repository_baseline`);
-    if (!baseline.ok) return parseErr(baseline.errors.join("; "));
-    migrated = { ...migrated, repository_baseline: baseline.value };
-  }
-  if (task.implementation_attempt_history !== undefined) {
-    const history = parseImplementationAttemptHistory(task.implementation_attempt_history);
-    if (!history.ok) return parseErr(history.error.errors.join("; "));
-    migrated = { ...migrated, implementation_attempt_history: history.value };
-  }
-  if (task.test_result !== undefined) {
-    const testResult = parseTaskTestResult(task.test_result, `tasks[${index}]: test_result`);
-    if (!testResult.ok) return parseErr(testResult.errors.join("; "));
-    migrated = { ...migrated, test_result: testResult.value };
-  }
-  if (task.new_test_observation !== undefined) {
-    const storedNewTests = parseStoredNewTestEvidence(task.new_test_observation);
-    if (!storedNewTests.ok) return parseErr(storedNewTests.error);
-    migrated = { ...migrated, ...storedNewTestEvidence(storedNewTests.value) };
-  }
-  // Install parser-produced Finding values rather than retaining the raw JSON
-  // records that were merely accepted as parseable. This preserves legacy
-  // location normalization while ensuring downstream panel code receives the
-  // exact `string | null` / positive-safe-integer-or-null shape Task promises.
-  if (task.findings !== undefined) {
-    migrated = { ...migrated, findings: Object.freeze(parseStoredFindings(task.findings)) };
-  }
-  if (task.refuted_findings !== undefined) {
-    migrated = { ...migrated, refuted_findings: Object.freeze(parseStoredRefutations(task.refuted_findings)) };
-  }
-  if (task.resolved_findings !== undefined) {
-    migrated = { ...migrated, resolved_findings: Object.freeze(parseStoredResolutions(task.resolved_findings)) };
-  }
-  const skeletonOutcomes = parseSkeletonOutcomesField(task.skeleton_outcomes, task.file_list, `tasks[${index}].skeleton_outcomes`);
-  if (!skeletonOutcomes.ok) return parseErr(skeletonOutcomes.error);
-  if (skeletonOutcomes.value !== undefined) migrated = { ...migrated, skeleton_outcomes: skeletonOutcomes.value };
-  return parseOk(migrated);
 }
 
 function parseTaskGraphTasks(
   obj: Record<string, unknown>,
   executingTasks: readonly TaskId[],
   scope: RedThenGreenScope,
-): ParseResult<readonly unknown[]> {
+): ParseResult<Pick<ParsedTaskGraph, "tasks" | "spec_trace_version">> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
-  const executing = new Set<string>(executingTasks);
-  const parsedTasks: Record<string, unknown>[] = [];
-  for (let i = 0; i < tasks.length; i++) {
-    const err = taskUnionError(tasks[i], i, scope);
-    if (err !== null) return parseErr(err);
-    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, scope);
-    if (!migrated.ok) return migrated;
-    parsedTasks.push(migrated.value);
+  const parsedTasks: ParsedTask[] = [];
+  for (const [index, raw] of tasks.entries()) {
+    const task = parseStoredTask(raw, index, scope);
+    if (!task.ok) return task;
+    parsedTasks.push(task.value);
   }
-  const taskIds = parsedTasks.map((task) => task.id as string);
-  const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
-  if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
-  const distillWaveError = distillTaskPerWaveError(parsedTasks);
-  if (distillWaveError !== null) return parseErr(distillWaveError);
-  const orphanReservation = orphanExecutionReservationError(parsedTasks, [...executing]);
-  if (orphanReservation !== null) return parseErr(orphanReservation);
-  const relationError = parsedTasks.flatMap((task) => {
-    const id = task.id as string;
-    const modern = task.active_implementation_attempt !== undefined;
-    return modern && !executing.has(id)
-      ? [`Task ${id}: active_implementation_attempt requires executing_tasks membership`]
-      : [];
-  })[0];
-  if (relationError !== undefined) return parseErr(relationError);
-  const dependencyError = taskDependencyErrors(parsedTasks, auditedSameWaveEdges(obj.wave_plan_edits))[0];
-  if (dependencyError !== undefined) return parseErr(dependencyError);
+  const rosterError = taskRosterError(parsedTasks, executingTasks, obj.wave_plan_edits);
+  if (rosterError !== null) return parseErr(rosterError);
   const trace = parseSpecTraceContract(obj.spec_trace_version, parsedTasks);
-  return trace.ok ? parseOk(parsedTasks) : parseErr(specTraceDiagnosticMessages(trace).join("; "));
+  if (!trace.ok) return parseErr(specTraceDiagnosticMessages(trace).join("; "));
+  const tasksField = { tasks: Object.freeze(parsedTasks) };
+  return parseOk(obj.spec_trace_version === 2 ? { ...tasksField, spec_trace_version: 2 } : tasksField);
 }
 
-function parseTaskGraphWaveGates(obj: Record<string, unknown>): ParseResult<Record<string, unknown>> {
+/** The first rule the loaded Tasks break together: distinct ids, one Distill Task per Wave, reservations, dependencies. */
+function taskRosterError(
+  tasks: readonly ParsedTask[],
+  executingTasks: readonly TaskId[],
+  wavePlanEdits: unknown,
+): string | null {
+  const taskIds = tasks.map(({ id }) => id);
+  const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
+  if (duplicateTaskId !== undefined) return `duplicate task id: ${duplicateTaskId}`;
+  const distillWaveError = distillTaskPerWaveError(tasks);
+  if (distillWaveError !== null) return distillWaveError;
+  const orphanReservation = orphanExecutionReservationError(tasks, executingTasks);
+  if (orphanReservation !== null) return orphanReservation;
+  const executing = new Set<string>(executingTasks);
+  const unreserved = tasks.find((task) => task.active_implementation_attempt !== undefined && !executing.has(task.id));
+  if (unreserved !== undefined) return `Task ${unreserved.id}: active_implementation_attempt requires executing_tasks membership`;
+  return taskDependencyErrors(tasks, auditedSameWaveEdges(wavePlanEdits))[0] ?? null;
+}
+
+function parseTaskGraphWaveGates(obj: Record<string, unknown>): ParseResult<Readonly<Record<string, WaveGate>>> {
   const waveGates = obj.wave_gates ?? {};
   if (!isRecord(waveGates)) {
     return parseErr("wave_gates must be an object");
   }
-  for (const [wave, gate] of Object.entries(waveGates as Record<string, unknown>)) {
+  const parsed: (readonly [string, WaveGate])[] = [];
+  for (const [wave, raw] of Object.entries(waveGates)) {
     // Wave numbers are written as String(wave) with wave >= 1 — canonical
     // decimal, no leading zeros. A key outside that domain ("01", "abc",
     // "-1", "1.0") would load here and persist, even though every writer
@@ -2954,19 +3067,15 @@ function parseTaskGraphWaveGates(obj: Record<string, unknown>): ParseResult<Reco
     if (!/^(0|[1-9]\d*)$/.test(wave) || !Number.isSafeInteger(Number(wave)) || Number(wave) < 1) {
       return parseErr(`wave_gates key must be a canonical positive safe-integer wave number, got ${JSON.stringify(wave)}`);
     }
-    const err = waveGateError(gate, wave);
-    if (err !== null) return parseErr(err);
+    const gate = parseWaveGate(raw, wave);
+    if (!gate.ok) return gate;
+    parsed.push([wave, gate.value]);
   }
-  return parseOk(waveGates as Record<string, unknown>);
+  return parseOk(Object.fromEntries(parsed));
 }
 
-type ParsedTaskGraphAuthorityFields = Readonly<{
-  activeWaveGate: ActiveWaveGateRegistration | undefined;
-  waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
-  waveReviewEpoch: WaveReviewEpochAuthority | undefined;
-  verificationManifest: FrozenVerificationManifest | undefined;
-  activeWaveCompletionSuite: AcceptedWaveCompletionReceipt | undefined;
-}>;
+/** The Wave Gate authority's wire fields: registrations, review epoch and the active Wave's completion suite. */
+type TaskGraphAuthority = Pick<TaskGraph, "active_wave_gate" | "wave_gate_history" | "wave_review_epoch" | "active_wave_completion_suite">;
 
 function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerificationManifest | undefined> {
   if (raw === undefined) return parseOk(undefined);
@@ -3034,9 +3143,7 @@ function parseEngineRevisionField(raw: unknown): ParseResult<EngineRevisionPin |
  * Acceptance Contracts' shape.
  */
 function parseFrozenVerificationFields(obj: Record<string, unknown>): ParseResult<Readonly<{
-  verificationManifest: FrozenVerificationManifest | undefined;
-  testEvidence: EngineRunTestEvidence | undefined;
-  engineRevision: EngineRevisionPin | undefined;
+  fields: Pick<TaskGraph, "verification_manifest" | "test_evidence" | "engine_revision">;
   contractShapes: readonly AcceptanceContract[] | undefined;
 }>> {
   const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
@@ -3048,9 +3155,11 @@ function parseFrozenVerificationFields(obj: Record<string, unknown>): ParseResul
   const contractShapes = parseAcceptanceContractsShape(obj.acceptance_contracts);
   if (!contractShapes.ok) return contractShapes;
   return parseOk({
-    verificationManifest: verificationManifest.value,
-    testEvidence: testEvidence.value,
-    engineRevision: engineRevision.value,
+    fields: {
+      ...present("verification_manifest", verificationManifest.value),
+      ...present("test_evidence", testEvidence.value),
+      ...present("engine_revision", engineRevision.value),
+    },
     contractShapes: contractShapes.value,
   });
 }
@@ -3058,16 +3167,6 @@ function parseFrozenVerificationFields(obj: Record<string, unknown>): ParseResul
 /** The graph fields the owner check's authority derives from: the contracts
  *  name the Tasks whose stubs owe nothing (`owesInWave`). */
 type OwnerStampedGraph = Pick<TaskGraph, "tasks" | "owner_obligations" | "acceptance_contracts">;
-
-/** The proven Tasks and obligation fields as the owner check's authority reads them. */
-const ownerStampedGraph = (
-  tasks: readonly unknown[],
-  obligations: Readonly<{ acceptanceContracts: readonly AcceptanceContract[] | undefined; ownerObligations: readonly OwnerObligation[] | undefined }>,
-): OwnerStampedGraph => ({
-  tasks: tasks as TaskGraph["tasks"],
-  owner_obligations: obligations.ownerObligations,
-  acceptance_contracts: obligations.acceptanceContracts,
-});
 
 function completionRosterConflict(
   receipt: AcceptedWaveCompletionReceipt,
@@ -3145,10 +3244,10 @@ function parseTaskGraphAuthorityFields(
   obj: Record<string, unknown>,
   verificationManifest: FrozenVerificationManifest | undefined,
   stamped: OwnerStampedGraph,
-): ParseResult<ParsedTaskGraphAuthorityFields> {
+): ParseResult<TaskGraphAuthority> {
   const registrations = parseWaveGateRegistrations(obj);
   if (!registrations.ok) return parseErr(registrations.error);
-  const { activeWaveGate, waveGateHistory } = registrations.value;
+  const activeWaveGate = registrations.value.active_wave_gate;
   const waveReviewEpoch = parseWaveReviewEpoch(obj.wave_review_epoch);
   if (!waveReviewEpoch.ok) return parseErr(waveReviewEpoch.error);
   if (activeWaveGate !== undefined && waveReviewEpoch.value !== undefined &&
@@ -3171,28 +3270,18 @@ function parseTaskGraphAuthorityFields(
   );
   if (!activeWaveCompletionSuite.ok) return parseErr(activeWaveCompletionSuite.error);
   return parseOk({
-    activeWaveGate,
-    waveGateHistory,
-    waveReviewEpoch: waveReviewEpoch.value,
-    verificationManifest,
-    activeWaveCompletionSuite: activeWaveCompletionSuite.value,
+    ...registrations.value,
+    ...present("wave_review_epoch", waveReviewEpoch.value),
+    ...present("active_wave_completion_suite", activeWaveCompletionSuite.value),
   });
 }
 
-type ParsedTaskGraphHistoryFields = Readonly<{
-  reopeningHistory: readonly WaveReopeningAudit[] | undefined;
-  taskReopeningHistory: readonly TaskReopeningAudit[] | undefined;
-  forwardFixHistory: readonly ForwardFixAudit[] | undefined;
-  forwardFixWithdrawals: readonly ForwardFixWithdrawal[] | undefined;
-  orphanedHistory: readonly OrphanedWaveGateRetirement[] | undefined;
-  specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
-  retiredReviewRuns: readonly RetiredWaveReviewRun[] | undefined;
-  specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
-  specAmendments: readonly SpecAmendment[] | undefined;
-  wavePlanEdits: readonly WavePlanEdit[] | undefined;
-  retroRecords: readonly RetroRecord[] | undefined;
-  advisoryDispositions: readonly AdvisoryDisposition[] | undefined;
-}>;
+/** The append-only audit histories' wire fields. */
+type TaskGraphHistory = Pick<TaskGraph,
+  | "wave_reopening_history" | "task_reopening_history" | "forward_fix_history" | "forward_fix_withdrawals"
+  | "retro_records" | "advisory_dispositions" | "orphaned_wave_gate_history" | "spec_trace_wave_gate_retirements"
+  | "retired_wave_review_runs" | "spec_trace_amendments" | "spec_amendments" | "wave_plan_edits"
+>;
 
 function activeWaveGateRetirementConflict(
   activeWaveGate: ActiveWaveGateRegistration | undefined,
@@ -3250,82 +3339,92 @@ function activeWaveGateInstallationAuditConflict(
  */
 function parseTaskGraphLinkedHistory(
   obj: Record<string, unknown>,
-  authority: ParsedTaskGraphAuthorityFields,
-  tasks: readonly Record<string, unknown>[],
+  authority: TaskGraphAuthority,
+  tasks: readonly ParsedTask[],
   verificationManifest: FrozenVerificationManifest | undefined,
-): ParseResult<ParsedTaskGraphHistoryFields> {
-  const history = parseTaskGraphHistoryFields(obj, authority.activeWaveGate, authority.waveGateHistory, tasks);
-  if (!history.ok) return history;
-  const testsOnlyLink = testsOnlyLinkError(tasks, history.value.taskReopeningHistory, verificationManifest);
-  return testsOnlyLink === null ? history : parseErr(testsOnlyLink);
+): ParseResult<TaskGraphHistory> {
+  const audits = parseTaskGraphAuditLogs(obj, tasks);
+  if (!audits.ok) return audits;
+  const retirements = parseTaskGraphRetirementLogs(obj, authority, tasks);
+  if (!retirements.ok) return retirements;
+  const testsOnlyLink = testsOnlyLinkError(tasks, audits.value.task_reopening_history, verificationManifest);
+  return testsOnlyLink === null ? parseOk({ ...audits.value, ...retirements.value }) : parseErr(testsOnlyLink);
 }
 
-function parseTaskGraphHistoryFields(
-  obj: Record<string, unknown>,
-  activeWaveGate: ActiveWaveGateRegistration | undefined,
-  waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined,
-  tasks: readonly Record<string, unknown>[],
-): ParseResult<ParsedTaskGraphHistoryFields> {
+/** The reopening, plan-edit, Forward Fix, retro and advisory logs, each against the roster it names. */
+function parseTaskGraphAuditLogs(obj: Record<string, unknown>, tasks: readonly ParsedTask[]): ParseResult<Pick<TaskGraph,
+  | "wave_reopening_history" | "task_reopening_history" | "wave_plan_edits" | "forward_fix_history"
+  | "forward_fix_withdrawals" | "retro_records" | "advisory_dispositions"
+>> {
   const reopeningHistory = parseWaveReopeningHistory(obj.wave_reopening_history);
-  if (!reopeningHistory.ok) return parseErr(reopeningHistory.error);
+  if (!reopeningHistory.ok) return reopeningHistory;
   const taskReopeningHistory = parseTaskReopeningHistory(obj.task_reopening_history, tasks);
-  if (!taskReopeningHistory.ok) return parseErr(taskReopeningHistory.error);
+  if (!taskReopeningHistory.ok) return taskReopeningHistory;
   const wavePlanEdits = parseWavePlanEdits(obj.wave_plan_edits, tasks);
-  if (!wavePlanEdits.ok) return parseErr(wavePlanEdits.error);
+  if (!wavePlanEdits.ok) return wavePlanEdits;
   const forwardFixHistory = parseForwardFixHistory(obj.forward_fix_history, tasks);
-  if (!forwardFixHistory.ok) return parseErr(forwardFixHistory.error);
+  if (!forwardFixHistory.ok) return forwardFixHistory;
   const forwardFixWithdrawals = parseForwardFixWithdrawals(obj.forward_fix_withdrawals, tasks);
-  if (!forwardFixWithdrawals.ok) return parseErr(forwardFixWithdrawals.error);
+  if (!forwardFixWithdrawals.ok) return forwardFixWithdrawals;
   const retroRecords = parseRetroRecords(obj.retro_records, tasks);
-  if (!retroRecords.ok) return parseErr(retroRecords.error);
+  if (!retroRecords.ok) return retroRecords;
   const advisoryDispositions = parseAdvisoryDispositions(obj.advisory_dispositions);
   if (!advisoryDispositions.ok) return parseErr(advisoryDispositions.error);
+  return parseOk({
+    ...present("wave_reopening_history", reopeningHistory.value),
+    ...present("task_reopening_history", taskReopeningHistory.value),
+    ...present("wave_plan_edits", wavePlanEdits.value),
+    ...present("forward_fix_history", forwardFixHistory.value),
+    ...present("forward_fix_withdrawals", forwardFixWithdrawals.value),
+    ...present("retro_records", retroRecords.value),
+    ...present("advisory_dispositions", advisoryDispositions.value),
+  });
+}
+
+/** The Wave Gate retirement and Spec amendment logs, against the registrations they retire and the roster. */
+function parseTaskGraphRetirementLogs(
+  obj: Record<string, unknown>,
+  authority: TaskGraphAuthority,
+  tasks: readonly ParsedTask[],
+): ParseResult<Pick<TaskGraph,
+  | "orphaned_wave_gate_history" | "spec_trace_wave_gate_retirements" | "retired_wave_review_runs"
+  | "spec_trace_amendments" | "spec_amendments"
+>> {
+  const { active_wave_gate: activeWaveGate, wave_gate_history: waveGateHistory } = authority;
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
-  if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
+  if (!orphanedHistory.ok) return orphanedHistory;
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
-  if (!specTraceRetirements.ok) return parseErr(specTraceRetirements.error);
+  if (!specTraceRetirements.ok) return specTraceRetirements;
   if ((specTraceRetirements.value?.length ?? 0) > 0 && obj.spec_trace_version !== 2) {
     return parseErr("spec_trace_wave_gate_retirements requires spec_trace_version 2");
   }
-  const activeConflict = activeWaveGateRetirementConflict(activeWaveGate, orphanedHistory.value, specTraceRetirements.value);
-  if (activeConflict !== null) return parseErr(activeConflict);
-  const specTraceConflict = specTraceRetirementCollision(waveGateHistory, orphanedHistory.value, specTraceRetirements.value);
-  if (specTraceConflict !== null) return parseErr(specTraceConflict);
-  const installationConflict = activeWaveGateInstallationAuditConflict(activeWaveGate, orphanedHistory.value);
-  if (installationConflict !== null) return parseErr(installationConflict);
+  const conflict = activeWaveGateRetirementConflict(activeWaveGate, orphanedHistory.value, specTraceRetirements.value) ??
+    specTraceRetirementCollision(waveGateHistory, orphanedHistory.value, specTraceRetirements.value) ??
+    activeWaveGateInstallationAuditConflict(activeWaveGate, orphanedHistory.value);
+  if (conflict !== null) return parseErr(conflict);
   const retiredReviewRuns = parseRetiredWaveReviewRuns(obj.retired_wave_review_runs);
-  if (!retiredReviewRuns.ok) return parseErr(retiredReviewRuns.error);
+  if (!retiredReviewRuns.ok) return retiredReviewRuns;
   // A retired run's tombstone is gone: the registration that still names it
   // was never retired.
   if (activeWaveGate !== undefined && retiredReviewRuns.value?.some(({ runId }) => runId === activeWaveGate.runId)) {
     return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already in retired_wave_review_runs`);
   }
   const specTraceAmendments = parseSpecTraceAmendments(obj.spec_trace_amendments);
-  if (!specTraceAmendments.ok) return parseErr(specTraceAmendments.error);
+  if (!specTraceAmendments.ok) return specTraceAmendments;
   const specAmendments = parseSpecAmendments(obj.spec_amendments, tasks);
-  if (!specAmendments.ok) return parseErr(specAmendments.error);
+  if (!specAmendments.ok) return specAmendments;
   if ((specTraceAmendments.value?.length ?? 0) > 0 && obj.spec_trace_version !== 2) {
     return parseErr("spec_trace_amendments requires spec_trace_version 2");
   }
   // parseTaskGraphTasks already proved every v2 Task id and trace array.
-  const amendmentTraceError = amendmentHistoryError(
-    specTraceAmendments.value,
-    tasks as readonly (TraceFields & Readonly<{ id: string }>)[],
-  );
+  const amendmentTraceError = amendmentHistoryError(specTraceAmendments.value, tasks);
   if (amendmentTraceError !== null) return parseErr(amendmentTraceError);
   return parseOk({
-    reopeningHistory: reopeningHistory.value,
-    taskReopeningHistory: taskReopeningHistory.value,
-    forwardFixHistory: forwardFixHistory.value,
-    forwardFixWithdrawals: forwardFixWithdrawals.value,
-    orphanedHistory: orphanedHistory.value,
-    specTraceRetirements: specTraceRetirements.value,
-    retiredReviewRuns: retiredReviewRuns.value,
-    specTraceAmendments: specTraceAmendments.value,
-    specAmendments: specAmendments.value,
-    wavePlanEdits: wavePlanEdits.value,
-    retroRecords: retroRecords.value,
-    advisoryDispositions: advisoryDispositions.value,
+    ...present("orphaned_wave_gate_history", orphanedHistory.value),
+    ...present("spec_trace_wave_gate_retirements", specTraceRetirements.value),
+    ...present("retired_wave_review_runs", retiredReviewRuns.value),
+    ...present("spec_trace_amendments", specTraceAmendments.value),
+    ...present("spec_amendments", specAmendments.value),
   });
 }
 
@@ -3369,7 +3468,7 @@ function parseOwnerObligationsField(raw: unknown): ParseResult<readonly OwnerObl
  */
 function bindAcceptanceContracts(
   contracts: readonly AcceptanceContract[] | undefined,
-  tasks: readonly Record<string, unknown>[],
+  tasks: readonly ParsedTask[],
 ): ParseResult<readonly AcceptanceContract[] | undefined> {
   if (contracts === undefined) return parseOk(undefined);
   for (const contract of contracts) {
@@ -3435,8 +3534,7 @@ function exactRecord(
 
 /** A repository path as every State File path is stored: canonical and relative. */
 function storedPath(raw: unknown, label: string): ParseResult<string> {
-  const path = parseReviewPath(raw, label);
-  return path.ok ? parseOk(path.value) : parseErr(path.errors.join("; "));
+  return fromErrors(parseReviewPath(raw, label));
 }
 
 function parseIdentifierField(raw: unknown, label: string): ParseResult<Identifier> {
@@ -3670,10 +3768,8 @@ function parseSkeletonOutcomesField(
   return parseOk(Object.freeze(outcomes));
 }
 
-type ParsedSkeletonFields = Readonly<{
-  exportBindings: readonly ExportBinding[] | undefined;
-  skeletons: readonly SkeletonRecord[] | undefined;
-}>;
+/** The graph's G2 fields. */
+type TaskGraphSkeletons = Pick<TaskGraph, "export_bindings" | "skeletons">;
 
 /**
  * Why one recorded outcome contradicts the graph's stamp and records, or
@@ -3728,16 +3824,16 @@ function recordedOutcomeConflict(
  * no outcome, and each outcome agrees with the stamp and records
  * (`recordedOutcomeConflict`).
  */
-function recordedOutcomesError(tasks: readonly Record<string, unknown>[], fields: ParsedSkeletonFields): string | null {
+function recordedOutcomesError(tasks: readonly ParsedTask[], fields: TaskGraphSkeletons): string | null {
   for (const [index, task] of tasks.entries()) {
-    const outcomes = task.skeleton_outcomes as readonly PathSkeletonOutcome[] | undefined;
+    const outcomes = task.skeleton_outcomes;
     if (outcomes === undefined) continue;
-    const label = `tasks[${index}] ("${String(task.id)}").skeleton_outcomes`;
-    if (fields.exportBindings === undefined) {
+    const label = `${taskLabel(index, task.id)}.skeleton_outcomes`;
+    if (fields.export_bindings === undefined) {
       return `${label} is recorded, but the TaskGraph has no export_bindings stamp; a graph populated before G2 records no skeleton outcome`;
     }
     const stamped = {
-      exportBindings: fields.exportBindings,
+      exportBindings: fields.export_bindings,
       skeletons: fields.skeletons ?? [],
       holdsSkeletons: taskRolePolicy(task).holdsSkeletons,
     };
@@ -3753,36 +3849,17 @@ function recordedOutcomesError(tasks: readonly Record<string, unknown>[], fields
 function parseTaskGraphSkeletonFields(
   obj: Record<string, unknown>,
   contracts: readonly AcceptanceContract[] | undefined,
-  tasks: readonly unknown[],
-): ParseResult<ParsedSkeletonFields> {
+  tasks: readonly ParsedTask[],
+): ParseResult<TaskGraphSkeletons> {
   const exportBindings = parseExportBindingsField(obj.export_bindings, contracts);
   if (!exportBindings.ok) return exportBindings;
   const skeletons = parseSkeletonsField(obj.skeletons, exportBindings.value);
   if (!skeletons.ok) return skeletons;
-  const fields: ParsedSkeletonFields = { exportBindings: exportBindings.value, skeletons: skeletons.value };
+  const fields: TaskGraphSkeletons = { ...present("export_bindings", exportBindings.value), ...present("skeletons", skeletons.value) };
   // parseTaskGraphTasks already proved each Task's outcomes against its own file_list.
-  const outcomesError = recordedOutcomesError(tasks as readonly Record<string, unknown>[], fields);
+  const outcomesError = recordedOutcomesError(tasks, fields);
   return outcomesError === null ? parseOk(fields) : parseErr(outcomesError);
 }
-
-type ParsedTaskGraphParts = Readonly<{
-  phaseArtifacts: Readonly<Record<string, string>>;
-  skippedPhases: readonly Phase[];
-  tasks: readonly unknown[];
-  executingTasks: readonly TaskId[] | undefined;
-  waveGates: Readonly<Record<string, unknown>>;
-  specCheck: SpecCheck | undefined;
-  specIndexObservation: SpecIndexObservation | undefined;
-  proofBoundaryObservation: ProofBoundaryObservation | undefined;
-  planDesignReview: RecordedPlanDesignReview | undefined;
-  acceptanceContracts: readonly AcceptanceContract[] | undefined;
-  ownerObligations: readonly OwnerObligation[] | undefined;
-  skeletonFields: ParsedSkeletonFields;
-  authority: ParsedTaskGraphAuthorityFields;
-  history: ParsedTaskGraphHistoryFields;
-  testEvidence: EngineRunTestEvidence | undefined;
-  engineRevision: EngineRevisionPin | undefined;
-}>;
 
 /** A loaded Task: its id is a parsed `TaskId`. */
 export type ParsedTask = Task & Readonly<{ id: TaskId }>;
@@ -3792,96 +3869,21 @@ export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Rea
   executing_tasks?: readonly TaskId[];
 }>;
 
-/** The proven audit histories as the graph's fields: each present one under its wire name, an absent one absent. */
-function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<TaskGraph> {
-  const {
-    reopeningHistory, taskReopeningHistory, forwardFixHistory, forwardFixWithdrawals, orphanedHistory,
-    specTraceRetirements, retiredReviewRuns, specTraceAmendments, specAmendments, wavePlanEdits, retroRecords,
-    advisoryDispositions,
-  } = history;
-  return {
-    ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
-    ...(taskReopeningHistory === undefined ? {} : { task_reopening_history: taskReopeningHistory }),
-    ...(forwardFixHistory === undefined ? {} : { forward_fix_history: forwardFixHistory }),
-    ...(forwardFixWithdrawals === undefined ? {} : { forward_fix_withdrawals: forwardFixWithdrawals }),
-    ...(retroRecords === undefined ? {} : { retro_records: retroRecords }),
-    ...(advisoryDispositions === undefined ? {} : { advisory_dispositions: advisoryDispositions }),
-    ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
-    ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
-    ...(retiredReviewRuns === undefined ? {} : { retired_wave_review_runs: retiredReviewRuns }),
-    ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
-    ...(specAmendments === undefined ? {} : { spec_amendments: specAmendments }),
-    ...(wavePlanEdits === undefined ? {} : { wave_plan_edits: wavePlanEdits }),
-  };
-}
+/** The document fields: lifecycle, document paths and scalars, and the observations of the documents. */
+type TaskGraphDocuments = TaskGraphLifecycle & TaskGraphScalars &
+  Pick<TaskGraph, "spec_index_observation" | "proof_boundary_observation" | "plan_design_review">;
 
-function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): ParsedTaskGraph {
-  // Fresh recursively frozen copies, never aliases of parsed JSON: a caller
-  // retaining the raw object cannot mutate nested Task or Wave Gate data and
-  // bypass StateManager.update's locked transform.
-  const frozenTasks = Object.freeze(parts.tasks.map((task) => frozenJsonCopy(task)));
-  const frozenWaveGates = Object.freeze(Object.fromEntries(
-    Object.entries(parts.waveGates).map(([wave, gate]) => [wave, frozenJsonCopy(gate)]),
-  ));
-  const {
-    activeWaveGate,
-    waveGateHistory,
-    waveReviewEpoch,
-    verificationManifest,
-    activeWaveCompletionSuite,
-  } = parts.authority;
-  // The single blessed cast: every union field above is proven in place.
-  return {
-    // `test_evidence` is installed only as its parsed value, never as the raw JSON.
-    ...withoutKeys(obj, "test_evidence", "engine_revision"),
-    phase_artifacts: parts.phaseArtifacts,
-    skipped_phases: parts.skippedPhases,
-    spec_file: obj.spec_file ?? null,
-    plan_file: obj.plan_file ?? null,
-    tasks: frozenTasks,
-    ...(parts.executingTasks === undefined
-      ? {}
-      : { executing_tasks: parts.executingTasks }),
-    wave_gates: frozenWaveGates,
-    ...(parts.specCheck === undefined ? {} : { spec_check: parts.specCheck }),
-    ...(parts.specIndexObservation === undefined
-      ? {}
-      : { spec_index_observation: parts.specIndexObservation }),
-    ...(parts.proofBoundaryObservation === undefined
-      ? {}
-      : { proof_boundary_observation: parts.proofBoundaryObservation }),
-    ...(parts.planDesignReview === undefined ? {} : { plan_design_review: parts.planDesignReview }),
-    ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
-    ...(verificationManifest === undefined ? {} : { verification_manifest: verificationManifest }),
-    ...(parts.testEvidence === undefined ? {} : { test_evidence: parts.testEvidence }),
-    ...(parts.engineRevision === undefined ? {} : { engine_revision: parts.engineRevision }),
-    ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
-    ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
-    ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
-    ...historyGraphFields(parts.history),
-    ...(parts.acceptanceContracts === undefined ? {} : { acceptance_contracts: parts.acceptanceContracts }),
-    ...(parts.ownerObligations === undefined ? {} : { owner_obligations: parts.ownerObligations }),
-    ...(parts.skeletonFields.exportBindings === undefined ? {} : { export_bindings: parts.skeletonFields.exportBindings }),
-    ...(parts.skeletonFields.skeletons === undefined ? {} : { skeletons: parts.skeletonFields.skeletons }),
-  } as unknown as ParsedTaskGraph;
-}
-
-function parseTaskGraphDocumentFields(
-  obj: Record<string, unknown>,
-): ParseResult<Pick<ParsedTaskGraphParts,
-  "phaseArtifacts" | "skippedPhases" | "specIndexObservation" | "proofBoundaryObservation" | "planDesignReview">> {
-  const lifecycleErrors = taskGraphLifecycleErrors(obj);
-  if (lifecycleErrors[0] !== undefined) return parseErr(lifecycleErrors[0]);
-  const phaseArtifacts = Object.freeze({ ...(obj.phase_artifacts as Record<string, string>) });
-  const skippedPhases = Object.freeze([...(Array.isArray(obj.skipped_phases) ? obj.skipped_phases : [])] as Phase[]);
-  const scalarError = taskGraphScalarFieldError(obj);
-  if (scalarError !== null) return parseErr(scalarError);
+function parseTaskGraphDocumentFields(obj: Record<string, unknown>): ParseResult<TaskGraphDocuments> {
+  const lifecycle = parseTaskGraphLifecycle(obj);
+  if (!lifecycle.ok) return lifecycle;
+  const scalars = parseTaskGraphScalars(obj);
+  if (!scalars.ok) return scalars;
   const specIndexObservation = obj.spec_index_observation === undefined
     ? parseOk<SpecIndexObservation | undefined>(undefined)
     : parseSpecIndexObservation(obj.spec_index_observation);
   if (!specIndexObservation.ok) return parseErr(specIndexObservation.error);
   if (specIndexObservation.value !== undefined &&
-      specIndexObservationPath(specIndexObservation.value) !== (obj.spec_file ?? null)) {
+      specIndexObservationPath(specIndexObservation.value) !== scalars.value.spec_file) {
     return parseErr("spec_index_observation path must match protected spec_file authority");
   }
   // Legacy graphs predate the observation; absence stays absent (unknown).
@@ -3898,18 +3900,19 @@ function parseTaskGraphDocumentFields(
     : parsePlanDesignReview(obj.plan_design_review);
   if (planDesignReview !== undefined && !planDesignReview.ok) return parseErr(planDesignReview.error);
   return parseOk({
-    phaseArtifacts,
-    skippedPhases,
-    specIndexObservation: specIndexObservation.value,
-    proofBoundaryObservation: proofBoundaryObservation?.value,
-    planDesignReview: planDesignReview?.value,
+    // The order a field a raw graph omits takes in the loaded one.
+    phase_artifacts: lifecycle.value.phase_artifacts,
+    skipped_phases: lifecycle.value.skipped_phases,
+    ...scalars.value,
+    current_phase: lifecycle.value.current_phase,
+    ...present("spec_index_observation", specIndexObservation.value),
+    ...present("proof_boundary_observation", proofBoundaryObservation?.value),
+    ...present("plan_design_review", planDesignReview?.value),
   });
 }
 
-type ParsedTaskGraphGating = Readonly<{
-  waveGates: Readonly<Record<string, unknown>>;
-  specCheck: SpecCheck | undefined;
-}>;
+/** The Wave Gates, after an UNKNOWN spec-check's block migration, and the spec-check record. */
+type TaskGraphGating = Pick<TaskGraph, "wave_gates" | "spec_check">;
 
 /**
  * Parse the wave gates and spec-check, migrate an UNKNOWN spec-check's block,
@@ -3917,10 +3920,10 @@ type ParsedTaskGraphGating = Readonly<{
  */
 function parseTaskGraphGating(
   obj: Record<string, unknown>,
-  tasks: readonly unknown[],
-): ParseResult<ParsedTaskGraphGating> {
+  tasks: readonly ParsedTask[],
+): ParseResult<TaskGraphGating> {
   const waveGates = parseTaskGraphWaveGates(obj);
-  if (!waveGates.ok) return parseErr(waveGates.error);
+  if (!waveGates.ok) return waveGates;
   const specCheck = parseSpecCheckField(obj.spec_check);
   if (!specCheck.ok) return parseErr(specCheck.error);
   const rawSpecCheck = isRecord(obj.spec_check) ? obj.spec_check : null;
@@ -3928,33 +3931,30 @@ function parseTaskGraphGating(
   // those unusable counts, so reconcile the old spec-check-only block from the
   // migrated evidence before enforcing the no-causeless-block invariant.
   const migratedWaveGates = rawSpecCheck?.verdict === "UNKNOWN" && specCheck.value !== undefined
-    ? reconcileWaveBlock(
-        waveGates.value as Readonly<Record<string, WaveGate>>,
-        tasks as Task[],
-        specCheck.value,
-        specCheck.value.wave,
-      )
+    ? reconcileWaveBlock(waveGates.value, tasks, specCheck.value, specCheck.value.wave)
     : waveGates.value;
-  const blockedCauseError = blockedGateCauseError(
-    migratedWaveGates,
-    tasks as Record<string, unknown>[],
-    specCheck.value,
-  );
+  const blockedCauseError = blockedGateCauseError(migratedWaveGates, tasks, specCheck.value);
   if (blockedCauseError !== null) return parseErr(blockedCauseError);
-  return parseOk({ waveGates: migratedWaveGates, specCheck: specCheck.value });
+  // A fresh recursively frozen copy, never an alias of parsed JSON: a caller
+  // retaining the raw object cannot mutate a Wave Gate and bypass
+  // StateManager.update's locked transform.
+  return parseOk({ wave_gates: frozenJsonCopy(migratedWaveGates), ...present("spec_check", specCheck.value) });
 }
 
 /** What the graph owes: its bound Acceptance Contracts and its stamped Owner Obligations. */
 function parseTaskGraphObligationFields(
   obj: Record<string, unknown>,
   contractShapes: readonly AcceptanceContract[] | undefined,
-  tasks: readonly unknown[],
-): ParseResult<{ acceptanceContracts: readonly AcceptanceContract[] | undefined; ownerObligations: readonly OwnerObligation[] | undefined }> {
-  const acceptanceContracts = bindAcceptanceContracts(contractShapes, tasks as Record<string, unknown>[]);
-  if (!acceptanceContracts.ok) return parseErr(acceptanceContracts.error);
+  tasks: readonly ParsedTask[],
+): ParseResult<Pick<TaskGraph, "acceptance_contracts" | "owner_obligations">> {
+  const acceptanceContracts = bindAcceptanceContracts(contractShapes, tasks);
+  if (!acceptanceContracts.ok) return acceptanceContracts;
   const ownerObligations = parseOwnerObligationsField(obj.owner_obligations);
-  if (!ownerObligations.ok) return parseErr(ownerObligations.error);
-  return parseOk({ acceptanceContracts: acceptanceContracts.value, ownerObligations: ownerObligations.value });
+  if (!ownerObligations.ok) return ownerObligations;
+  return parseOk({
+    ...present("acceptance_contracts", acceptanceContracts.value),
+    ...present("owner_obligations", ownerObligations.value),
+  });
 }
 
 /** Task fields only an engine older than the current shapes wrote (ADR-0098). */
@@ -4010,57 +4010,56 @@ function legacyStateFileRefusal(shape: string): string {
 /**
  * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
  * union-typed field (current_phase, task status / review_status /
- * test_result.verdict) is PROVEN in the union before the cast, so a
- * drifted or hand-edited value fails loudly at the load boundary instead
- * of exploding later inside an `.exhaustive()` match (testResultPassed) or
- * silently flowing through typed gate logic. Unknown extra fields pass
- * through untouched (legacyTestsPassedNote still fires downstream);
- * missing tasks/wave_gates default for early phases (populated in Phase 4).
+ * test_result.verdict) is PROVEN in the union, so a drifted or hand-edited
+ * value fails loudly at the load boundary instead of exploding later inside an
+ * `.exhaustive()` match (testResultPassed) or silently flowing through typed
+ * gate logic. Each section parser returns its TaskGraph fields under their
+ * wire names; the graph is the raw document with every section's parsed
+ * fields installed over it. Unknown extra fields pass through untouched
+ * (legacyTestsPassedNote still fires downstream); missing tasks/wave_gates
+ * default for early phases (populated in Phase 4).
  */
 export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!isRecord(raw)) return parseErr("not an object");
-  const obj = raw as Record<string, unknown>;
+  const obj = raw;
   const legacyShape = legacyStateFileShape(obj);
   if (legacyShape !== null) return parseErr(legacyStateFileRefusal(legacyShape));
   const documents = parseTaskGraphDocumentFields(obj);
-  if (!documents.ok) return parseErr(documents.error);
+  if (!documents.ok) return documents;
   const executingTasks = parseExecutingTaskIds(obj.executing_tasks);
-  if (!executingTasks.ok) return parseErr(executingTasks.error);
+  if (!executingTasks.ok) return executingTasks;
   // The frozen manifest and the contracts' shape are parsed before the Tasks:
   // the manifest decides the graph's I6 era and the contracts name the
   // writers it exempts, and so which obligations each stored Proof must carry
   // (INV-6). The contracts are bound to the roster once the Tasks are proven.
   const frozen = parseFrozenVerificationFields(obj);
-  if (!frozen.ok) return parseErr(frozen.error);
-  const { verificationManifest, testEvidence, engineRevision, contractShapes } = frozen.value;
-  const tasks = parseTaskGraphTasks(
-    obj,
-    executingTasks.value ?? [],
-    redThenGreenScope(verificationManifest, contractShapes ?? []),
-  );
-  if (!tasks.ok) return parseErr(tasks.error);
-  const gating = parseTaskGraphGating(obj, tasks.value);
-  if (!gating.ok) return parseErr(gating.error);
-  const obligations = parseTaskGraphObligationFields(obj, contractShapes, tasks.value);
-  if (!obligations.ok) return parseErr(obligations.error);
-  const skeletonFields = parseTaskGraphSkeletonFields(obj, obligations.value.acceptanceContracts, tasks.value);
-  if (!skeletonFields.ok) return parseErr(skeletonFields.error);
-  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest, ownerStampedGraph(tasks.value, obligations.value));
-  if (!authority.ok) return parseErr(authority.error);
-  const history = parseTaskGraphLinkedHistory(obj, authority.value, tasks.value as Record<string, unknown>[], verificationManifest);
-  if (!history.ok) return parseErr(history.error);
-
-  return parseOk(taskGraphFromParsedParts(obj, {
+  if (!frozen.ok) return frozen;
+  const { fields: verification, contractShapes } = frozen.value;
+  const manifest = verification.verification_manifest;
+  const tasks = parseTaskGraphTasks(obj, executingTasks.value ?? [], redThenGreenScope(manifest, contractShapes ?? []));
+  if (!tasks.ok) return tasks;
+  const gating = parseTaskGraphGating(obj, tasks.value.tasks);
+  if (!gating.ok) return gating;
+  const obligations = parseTaskGraphObligationFields(obj, contractShapes, tasks.value.tasks);
+  if (!obligations.ok) return obligations;
+  const skeletons = parseTaskGraphSkeletonFields(obj, obligations.value.acceptance_contracts, tasks.value.tasks);
+  if (!skeletons.ok) return skeletons;
+  const authority = parseTaskGraphAuthorityFields(obj, manifest, { tasks: tasks.value.tasks, ...obligations.value });
+  if (!authority.ok) return authority;
+  const history = parseTaskGraphLinkedHistory(obj, authority.value, tasks.value.tasks, manifest);
+  if (!history.ok) return history;
+  return parseOk({
+    // `test_evidence` and `engine_revision` are installed only as their parsed
+    // values, after the fields a raw graph may omit.
+    ...withoutKeys(obj, "test_evidence", "engine_revision"),
     ...documents.value,
-    tasks: tasks.value,
-    executingTasks: executingTasks.value,
-    waveGates: gating.value.waveGates,
-    specCheck: gating.value.specCheck,
+    ...tasks.value,
+    ...present("executing_tasks", executingTasks.value),
+    ...gating.value,
+    ...verification,
+    ...authority.value,
+    ...history.value,
     ...obligations.value,
-    skeletonFields: skeletonFields.value,
-    authority: authority.value,
-    history: history.value,
-    testEvidence,
-    engineRevision,
-  }));
+    ...skeletons.value,
+  });
 }

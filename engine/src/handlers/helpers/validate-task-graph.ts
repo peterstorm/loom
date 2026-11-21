@@ -13,15 +13,7 @@ import {
   claimsOfSeverity,
   currentFindingAuthorityError,
   deduplicateFindingIds,
-  findingIdCollisionError,
-  findingsLockstepError,
-  findingsUnionError,
-  findingsViewError,
-  evidenceFailureError,
   nextOrdinal,
-  refutationsUnionError,
-  resolutionsUnionError,
-  reviewRunError,
   parseStoredFindings,
   parseStoredRefutations,
   parseStoredResolutions,
@@ -40,7 +32,7 @@ import {
   taskGraphLifecycleErrors,
   parseTaskGraph,
   taskIdError,
-  taskUnionError,
+  storedTaskErrors,
 } from "../../state-manager";
 import { parseReviewPath } from "../../core/review-packet";
 import { type ValidationResult, ok, fail } from "./validation-result";
@@ -98,33 +90,6 @@ function fixMinimal(json: Record<string, unknown>): string {
     spec_file: "spec_file" in json ? json.spec_file : null,
     plan_file: "plan_file" in json ? json.plan_file : null,
   }, null, 2);
-}
-
-/**
- * Every findings-aggregate rule the load boundary applies to one task.
- *
- * Shared shape of the findings-aggregate agreement: `taskUnionError`
- * (state-manager) runs these same aggregate checks before its additional
- * engine-owned slot-authority checks, and `--fix` repairs what these reject.
- * A findings rule added to one and not the other is the drift that let the
- * operator's validator disagree with the loader.
- */
-function findingsErrorsOf(task: Record<string, unknown>, label: string): string[] {
-  const errors: string[] = [];
-  const push = (error: string | null): void => {
-    if (error !== null) errors.push(error);
-  };
-  push(findingsUnionError(task.findings, `${label}: findings`));
-  for (const severity of ["critical", "advisory"] as const) {
-    push(findingsViewError(task[`${severity}_findings`], `${label}: ${severity}_findings`));
-  }
-  push(findingsLockstepError(task.findings, task.critical_findings, task.advisory_findings, label));
-  push(refutationsUnionError(task.refuted_findings, `${label}: refuted_findings`));
-  push(resolutionsUnionError(task.resolved_findings, `${label}: resolved_findings`));
-  push(findingIdCollisionError(task.findings, task.refuted_findings, label, task.resolved_findings));
-  push(reviewRunError(task.review_run, task.review_generation, task.findings, `${label}: review_run`));
-  push(evidenceFailureError(task, label, REVIEW_SUB_AGENTS));
-  return errors;
 }
 
 /**
@@ -282,19 +247,13 @@ export function validateFull(
       }
     }
 
-    // The findings aggregate, checked with the SAME functions the load boundary
-    // uses. This validator ran none of them, so `helper validate-task-graph`
-    // reported `{ok: true}` on a graph `StateManager.load()` refuses to open —
-    // two validators, two rule sets, and the one the operator is told to run was
-    // the weaker one. Sharing the functions is what keeps "valid" one answer.
-    if (scope === "state-file") {
-      for (const check of findingsErrorsOf(task, `Task ${tid}`)) errors.push(check);
-      // Decompose payloads intentionally omit execution state; every persisted
-      // state task must agree with StateManager's exact parser, including when a
-      // required field is absent rather than merely malformed.
-      const stateError = taskUnionError(task, i, redThenGreen);
-      if (stateError !== null) errors.push(stateError);
-    }
+    // Every persisted state Task is judged by the load boundary's own parser,
+    // in its all-errors mode: the refusal `StateManager.load()` stops at, and
+    // every findings-aggregate rule's. A second rule set here is the drift that
+    // once let `helper validate-task-graph` report `{ok: true}` on a graph the
+    // loader refuses to open. Decompose payloads intentionally omit execution
+    // state, so they are not held to it.
+    if (scope === "state-file") errors.push(...storedTaskErrors(task, i, redThenGreen));
 
     const verification = parseTaskVerificationPolicy(
       task,
