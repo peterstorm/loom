@@ -1015,15 +1015,6 @@ export function evaluateTaskProof(
   return evaluateProofObligations(deriveProofObligations(input), observed, policy);
 }
 
-/** Re-evaluation depends only on the authored obligations, not the prior state. */
-export function reevaluateTaskProof(
-  proof: TaskProof,
-  observed: ObservedProofEvidence,
-  policy: ProofEvaluationPolicy = TRUSTED_LEDGER_ONLY_POLICY,
-): FailedTaskProof | SatisfiedTaskProof {
-  return evaluateProofObligations(proof.obligations, observed, policy);
-}
-
 // ---------------------------------------------------------------------------
 // Unknown-input parsers
 // ---------------------------------------------------------------------------

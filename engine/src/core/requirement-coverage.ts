@@ -508,11 +508,6 @@ export function settledCriticalFindings(
   ]);
 }
 
-/** The number and identities are derived from one projection expression. */
-export function settledCriticalCount(coverage: RequirementCoverage): SettledCriticalCount {
-  return settledCriticalFindings(coverage).length as SettledCriticalCount;
-}
-
 /**
  * The settled floor as it travels to a settlement path.
  *

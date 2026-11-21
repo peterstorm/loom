@@ -194,11 +194,6 @@ export function assertReviewPanelDisjoint(
 
 assertReviewPanelDisjoint();
 
-/** Implementation and finding-producing review agents used by execute-phase
- * dispatch sets. Refutation verifiers also classify as execute work, but remain
- * separate so SubagentStop never parses their verdicts as review findings. */
-export const EXECUTE_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...REVIEW_AGENTS]);
-
 /** Panel agents that would be MISROUTED away from architecture classification
  *  by colliding with an execute-phase or utility agent. validatePhaseOrder
  *  short-circuits UTILITY agents to passthrough before detectPhase runs;

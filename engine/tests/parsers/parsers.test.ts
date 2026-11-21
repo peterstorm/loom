@@ -9,8 +9,8 @@ import { readPersistedOutput } from "../../src/utils/persisted-output";
 /** The production persisted-output reader, bound once: no test here is about it. */
 const parseBashOutput = (jsonl: string): string => parseBashTestOutput(jsonl, readPersistedOutput);
 import { parsePhaseArtifacts } from "../../src/parsers/parse-phase-artifacts";
-import { parseSubagentStartInput, parseSubagentStartStdin } from "../../src/parsers/parse-subagent-start-input";
-import { parseSubagentStopInput, parseSubagentStopStdin } from "../../src/parsers/parse-subagent-stop-input";
+import { parseSubagentStartStdin } from "../../src/parsers/parse-subagent-start-input";
+import { parseSubagentStopStdin } from "../../src/parsers/parse-subagent-stop-input";
 
 describe("Claude Code harness records", () => {
   // Claude Code writes request telemetry beside the conversation. Its
@@ -52,9 +52,9 @@ describe("Subagent lifecycle input parsers", () => {
     agent_transcript_path: "/tmp/transcript.jsonl",
   };
 
-  it("projects the same immutable wire fields through both public wrappers", () => {
-    const start = parseSubagentStartInput({ ...valid, ignored: true });
-    const stop = parseSubagentStopInput({ ...valid, ignored: true });
+  it("projects the same immutable wire fields through both stdin parsers", () => {
+    const start = parseSubagentStartStdin(JSON.stringify({ ...valid, ignored: true }));
+    const stop = parseSubagentStopStdin(JSON.stringify({ ...valid, ignored: true }));
 
     expect(start).toEqual({ ok: true, value: valid });
     expect(stop).toEqual({ ok: true, value: valid });
@@ -63,10 +63,10 @@ describe("Subagent lifecycle input parsers", () => {
   });
 
   it.each([
-    ["SubagentStart", parseSubagentStartInput],
-    ["SubagentStop", parseSubagentStopInput],
+    ["SubagentStart", parseSubagentStartStdin],
+    ["SubagentStop", parseSubagentStopStdin],
   ] as const)("retains event-specific diagnostics for malformed %s fields", (event, parse) => {
-    expect(parse({ session_id: "session-1", agent_id: 42 })).toEqual({
+    expect(parse(JSON.stringify({ session_id: "session-1", agent_id: 42 }))).toEqual({
       ok: false,
       error: `${event} agent_id must be a string when present`,
     });

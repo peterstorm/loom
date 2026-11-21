@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   buildContextPacket, buildReviewerContextPacket, parseContextPacket, encodeByteSection,
-  contextPacketDigest, contextPacketByteLength, CONTEXT_PACKET_SCHEMA_VERSION, REVIEWER_CONTEXT_PACKET_SCHEMA_VERSION,
+  contextPacketDigest, CONTEXT_PACKET_SCHEMA_VERSION, REVIEWER_CONTEXT_PACKET_SCHEMA_VERSION,
   type ByteSection, type ContextPacketInput, type ReviewerContextPacketV2,
 } from "../../src/core/context-packets";
 import {
@@ -72,7 +72,6 @@ describe("reviewer-only v2 Context Packet", () => {
     expect(packet.digest).toBe(sha256Hex(JSON.stringify(identity)));
     const { reviewerProtocol, ...without } = identity;
     expect(packet.digest).not.toBe(sha256Hex(JSON.stringify({ ...without, reviewerProtocol })));
-    expect(contextPacketByteLength(packet)).toBe(packet.fixedContext.reduce((sum, entry) => sum + entry.bytes.byteLength, 0));
   });
   it("retains all input bytes without aliasing caller arrays, and freezes every level", () => {
     const data = { ...input, fixedContext: [...input.fixedContext], variableContext: [section("task", "exact\n 🧵 bytes")] };

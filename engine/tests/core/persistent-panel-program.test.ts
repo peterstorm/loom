@@ -17,7 +17,6 @@ import {
   createPanelProofs,
   jsonEqual,
   panelProgramCheckpoint,
-  parsePanelProgramCheckpoint,
   parsePanelProgramCheckpointRecord,
   reduceParsedPanelEvent,
   reducePanelProgram,
@@ -142,7 +141,7 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
       expect(jsonEqual(replayed.state, recorded.state)).toBe(true);
       const checkpoint = value(panelProgramCheckpoint(TALLY, recorded.state, record(events).events, resolver));
       expect(checkpoint).toMatchObject({ schemaVersion: 2, kind: "tally-panel-checkpoint", authority: { runId: "run.tally" } });
-      const restored = value(parsePanelProgramCheckpoint(TALLY, wireOf(checkpoint), resolver));
+      const restored = value(parsePanelProgramCheckpointRecord(TALLY, wireOf(checkpoint), resolver)).step;
       expect(jsonEqual(restored.state, recorded.state)).toBe(true);
       expect(value(resumePanelProgram(TALLY, restored.state)).action).toEqual({ kind: "tally", count });
     }));
@@ -184,7 +183,7 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
     ["an authority its codec refuses", (raw) => ({ ...raw, authority: { runId: 7 } }), { kind: "invalid-authority" }],
     ["an authority that is not a record at all", (raw) => ({ ...raw, authority: "run.tally" }), { kind: "invalid-authority" }],
   ])("refuses a checkpoint carrying %s", (_name, tamper, expected) => {
-    expect(refusal(parsePanelProgramCheckpoint(TALLY, tamper(durableCheckpoint()), resolver))).toMatchObject(expected);
+    expect(refusal(parsePanelProgramCheckpointRecord(TALLY, tamper(durableCheckpoint()), resolver))).toMatchObject(expected);
   });
 
   it("compares recorded and replayed states only through the program's canonical projection", () => {
@@ -196,11 +195,11 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
     const twin: typeof TALLY = { ...TALLY, canonicalStateJson: withoutEcho };
     const durable = durableCheckpoint();
     const echoed = { ...durable, state: { ...(durable.state as object), echo: { size: 2 } } };
-    expect(value(parsePanelProgramCheckpoint(twin, echoed, resolver)).state).toMatchObject({ count: 2 });
-    expect(refusal(parsePanelProgramCheckpoint(TALLY, echoed, resolver))).toMatchObject(DISAGREES);
+    expect(value(parsePanelProgramCheckpointRecord(twin, echoed, resolver)).step.state).toMatchObject({ count: 2 });
+    expect(refusal(parsePanelProgramCheckpointRecord(TALLY, echoed, resolver))).toMatchObject(DISAGREES);
     // The projection decides agreement, never membership: the twin still refuses real disagreement.
     const disagreeing = { ...echoed, state: { ...echoed.state, count: 7 } };
-    expect(refusal(parsePanelProgramCheckpoint(twin, disagreeing, resolver))).toMatchObject(DISAGREES);
+    expect(refusal(parsePanelProgramCheckpointRecord(twin, disagreeing, resolver))).toMatchObject(DISAGREES);
   });
 
   it("returns the accepted checkpoint as the record its writer emits, with the step it replays to", () => {
@@ -211,7 +210,7 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
       expect(parsed.checkpoint).toEqual(written);
       expect(jsonEqual(parsed.checkpoint, written)).toBe(true);
       expect(Object.isFrozen(parsed.checkpoint)).toBe(true);
-      expect(value(parsePanelProgramCheckpoint(TALLY, written, resolver))).toEqual(parsed.step);
+      expect(value(parsePanelProgramCheckpointRecord(TALLY, written, resolver)).step).toEqual(parsed.step);
     }));
   });
 
@@ -225,11 +224,6 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
     const durable = durableCheckpoint();
     const echoed = { ...durable, state: { ...(durable.state as object), echo: { size: 2 } } };
     expect(value(parsePanelProgramCheckpointRecord(twin, echoed, resolver)).checkpoint).toEqual(durable);
-  });
-
-  it("refuses through the record parse exactly what the step parse refuses", () => {
-    const tampered = { ...durableCheckpoint(), state: { count: 7 } };
-    expect(refusal(parsePanelProgramCheckpointRecord(TALLY, tampered, resolver))).toEqual(refusal(parsePanelProgramCheckpoint(TALLY, tampered, resolver)));
   });
 });
 

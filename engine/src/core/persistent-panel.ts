@@ -47,7 +47,6 @@ import {
   createPanelProofs,
   jsonEqual,
   panelProgramCheckpoint,
-  parsePanelProgramCheckpoint,
   parsePanelProgramCheckpointRecord,
   reduceParsedPanelEvent,
   reducePanelProgram,
@@ -971,10 +970,6 @@ export function refutationPanelCheckpoint(
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<RefutationPanelCheckpoint> {
   return panelProgramCheckpoint(REFUTATION_PROGRAM, state, events, resolver);
-}
-
-export function parseRefutationPanelCheckpoint(raw: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
-  return parsePanelProgramCheckpoint(REFUTATION_PROGRAM, raw, resolver);
 }
 
 /** A refutation checkpoint as its parse accepted it: the step and the record. */

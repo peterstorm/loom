@@ -11,7 +11,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  carriedOverCount,
   parseLegacyFindings,
   parseMachineSummary,
   reconcileFindings,
@@ -46,7 +45,7 @@ describe("a block that loses arbitration still contributes its claims", () => {
     expect(parsed).not.toBeNull();
     expect(parsed!.blockStatus.kind).toBe("superseded");
     expect(parsed!.critical).toContain("real blocker A");
-    expect(carriedOverCount(parsed!.blockStatus)).toBe(1);
+    expect(parsed!.blockStatus).toMatchObject({ carriedOver: 1 });
   });
 
   it("the surviving claim keeps its file and line", () => {
@@ -71,7 +70,7 @@ describe("a block that loses arbitration still contributes its claims", () => {
     const parsed = parseMachineSummary(transcript)!;
     expect(parsed.blockStatus.kind).toBe("superseded");
     expect(parsed.critical.filter((c) => c === "shared claim")).toHaveLength(1);
-    expect(carriedOverCount(parsed.blockStatus)).toBe(0);
+    expect(parsed.blockStatus).toMatchObject({ carriedOver: 0 });
   });
 
   it("reconciliation counts what actually survived, not what the markers held", () => {
@@ -256,7 +255,7 @@ describe("the operator is told how many claims were carried over", () => {
     const parsed = parseMachineSummary(transcript)!;
     expect(parsed.blockStatus.kind).toBe("partial");
     expect(parsed.critical).toHaveLength(4);
-    expect(carriedOverCount(parsed.blockStatus)).toBe(2);
+    expect(parsed.blockStatus).toMatchObject({ carriedOver: 2 });
 
     const log = reviewResolutionLog("T1", { kind: "findings", agent: "code-reviewer", findings: parsed });
     expect(log).toContain("2 claim(s) carried over");

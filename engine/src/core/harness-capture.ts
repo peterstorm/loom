@@ -341,16 +341,3 @@ export function captureRejectionAuditRecord(
     diagnostic,
   });
 }
-
-/**
- * Two receipts describe the same accepted result. Used by the acceptance suite
- * to prove Pi and Claude reach byte-identical outcomes: the harness and native
- * correlator differ by construction, so everything else must match exactly.
- */
-export function capturesAgree(left: CaptureReceipt, right: CaptureReceipt): boolean {
-  return left.requestId === right.requestId &&
-    left.slotId === right.slotId &&
-    left.attempt === right.attempt &&
-    left.byteLength === right.byteLength &&
-    left.digest === right.digest;
-}

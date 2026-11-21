@@ -630,14 +630,6 @@ export function reduceArchitectureProgram(
   }
 }
 
-// This helper is intentionally exported only as a type-shape constructor aid:
-// reducers never accept arbitrary requests, so callers cannot alter ordering,
-// agents, profiles, interaction, retries, or contracts.
-export const isParallelSpawnBatch = (action: PanelProgramAction): action is SpawnBatchAction =>
-  action.type === "spawn-batch" && action.requests.length > 0 &&
-  action.requests.every((request) => request.interaction === "headless");
-
-
 // ---------------------------------------------------------------------------
 // The journal — what `/loom --panel` keeps in its run's panel-program.json
 // ---------------------------------------------------------------------------

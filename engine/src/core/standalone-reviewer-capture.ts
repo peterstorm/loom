@@ -128,11 +128,6 @@ export interface StandaloneCaptureAuthority {
   readonly issuedRequests: readonly SpawnRequest[];
 }
 
-/** T11 implements this port from durable reservation/publication receipts. */
-type StandaloneIssuedRequestAuthorityResolver = (
-  request: SpawnRequest,
-) => DomainResult<SpawnRequest, StandaloneCaptureError>;
-
 export interface PreparedStandaloneReviewerCapture {
   readonly kind: "prepared-standalone-reviewer-capture";
   readonly request: AgentRequestAuthority;
@@ -182,28 +177,6 @@ export function bindStandaloneCaptureAuthority(
   return success(bound);
 }
 
-/** Rebuild request-bound capture authority only after durable issuance proof. */
-export function parseStandaloneCaptureAuthority(
-  authority: FrozenStandaloneReviewAuthority,
-  rawIssuedRequests: unknown,
-  resolveIssuedRequest: StandaloneIssuedRequestAuthorityResolver,
-): DomainResult<StandaloneCaptureAuthority, StandaloneCaptureError> {
-  if (!Array.isArray(rawIssuedRequests) || rawIssuedRequests.length === 0) {
-    return captureFailure("persisted issued request set must be non-empty");
-  }
-  const parsedRequests: SpawnRequest[] = [];
-  for (const rawRequest of rawIssuedRequests) {
-    if (!isRecord(rawRequest)) return captureFailure("persisted issued request is malformed");
-    const proof = resolveIssuedRequest(rawRequest as unknown as SpawnRequest);
-    if (!proof.ok) return proof;
-    if (JSON.stringify(proof.value) !== JSON.stringify(rawRequest)) {
-      return captureFailure("persisted issued request differs from durable issuance authority");
-    }
-    parsedRequests.push(proof.value);
-  }
-  return bindStandaloneCaptureAuthority(authority, parsedRequests);
-}
-
 /**
  * Request-bound direct capture boundary. Harnesses submit only the issued
  * request identity and exact bytes; all attribution and destination facts are
@@ -251,30 +224,6 @@ export function captureStandaloneReviewerBytes(
   });
   preparedStandaloneCaptureCache.add(prepared);
   return success(prepared);
-}
-
-/** Rehydrate a prepared capture by re-deriving its byte identity and destination. */
-export function parsePreparedStandaloneReviewerCapture(
-  captureAuthority: StandaloneCaptureAuthority,
-  raw: unknown,
-): DomainResult<PreparedStandaloneReviewerCapture, StandaloneCaptureError> {
-  if (!isRecord(raw) || raw.kind !== "prepared-standalone-reviewer-capture" ||
-      !isRecord(raw.request) || typeof raw.request.requestId !== "string" || !isRecord(raw.rawBytes)) {
-    return captureFailure("persisted prepared standalone capture is malformed");
-  }
-  const encoded = parseRawReviewerBytes(raw.rawBytes);
-  if (!encoded.ok) return captureFailure(encoded.error.message);
-  const rebuilt = captureStandaloneReviewerBytes(
-    captureAuthority,
-    raw.request.requestId,
-    Buffer.from(encoded.value.data, "base64"),
-  );
-  if (!rebuilt.ok) return rebuilt;
-  if (JSON.stringify(rebuilt.value.intent) !== JSON.stringify(raw.intent) ||
-      JSON.stringify(rebuilt.value.expectedArtifact) !== JSON.stringify(raw.expectedArtifact)) {
-    return captureFailure("persisted prepared capture intent or artifact destination was changed");
-  }
-  return rebuilt;
 }
 
 /** Complete capture only from T1's typed receipt reconciliation. */

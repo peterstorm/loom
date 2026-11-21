@@ -116,7 +116,7 @@ export type HarnessBinding = ClaudeCodeBinding | PiBinding;
  * names a Pi binding its profile never issued.
  */
 export type PolicyError = Readonly<{
-  kind: "invalid-profile" | "unknown-agent" | "invalid-harness" | "invalid-frontmatter" | "malformed-spawn-input" | "unrecorded-pi-binding";
+  kind: "invalid-profile" | "unknown-agent" | "invalid-frontmatter" | "malformed-spawn-input" | "unrecorded-pi-binding";
   message: string;
 }>;
 
@@ -532,37 +532,6 @@ export function parseRecordedLlmProfileId(raw: unknown): PolicyResult<RecordedLl
       });
 }
 
-/** Parse a complete profile object and prove all exact harness fields. */
-export function parseLlmProfile(raw: unknown): PolicyResult<LlmProfile> {
-  if (!isRecord(raw)) {
-    return failure({ kind: "invalid-profile", message: "model profile must be an object" });
-  }
-
-  const parsedId = parseLlmProfileId(raw.id);
-  if (!parsedId.ok) return parsedId;
-  const canonical = LLM_PROFILES.find(({ id }) => id === parsedId.value);
-  if (canonical === undefined) {
-    return failure({
-      kind: "invalid-profile",
-      message: `model profile '${parsedId.value}' has no catalog entry`,
-    });
-  }
-
-  const claudeCode = raw.claudeCode;
-  const pi = raw.pi;
-  if (
-    !isRecord(claudeCode) || claudeCode.model !== canonical.claudeCode.model ||
-    !isRecord(pi) || pi.provider !== canonical.pi.provider ||
-    pi.model !== canonical.pi.model || pi.thinking !== canonical.pi.thinking
-  ) {
-    return failure({
-      kind: "invalid-profile",
-      message: `model profile '${parsedId.value}' does not match its exact harness bindings`,
-    });
-  }
-  return success(canonical);
-}
-
 /** Resolve an untrusted id against the catalog; there is deliberately no fallback parameter. */
 export function resolveModelProfile(raw: unknown): PolicyResult<LlmProfile> {
   const parsed = parseLlmProfileId(raw);
@@ -647,15 +616,6 @@ export function catalogProfileOfAgent(raw: unknown): LlmProfileId | null {
   return policy.ok ? policy.value.profile : null;
 }
 
-export function parseHarness(raw: unknown): PolicyResult<Harness> {
-  return raw === "claude-code" || raw === "pi"
-    ? success(raw)
-    : failure({
-        kind: "invalid-harness",
-        message: `harness must be 'claude-code' or 'pi'; received ${JSON.stringify(raw)}`,
-      });
-}
-
 /** Lower a validated profile to a harness-specific binding with no inherited fields. */
 export function lowerModelProfile(profileValue: LlmProfile, harness: "claude-code"): ClaudeCodeBinding;
 export function lowerModelProfile(profileValue: LlmProfile, harness: "pi"): LocalPiBinding;
@@ -694,16 +654,6 @@ export function validateExplicitSpawnModel(
     : invalid([
         `agent '${String(agent)}' model mismatch: requested=${requestedModel}, expected=${expected.value}`,
       ]);
-}
-
-/** Parse agent + harness from unknown and return only an exact explicit binding. */
-export function resolveHarnessBinding(agent: unknown, harness: unknown): PolicyResult<HarnessBinding> {
-  const parsedHarness = parseHarness(harness);
-  if (!parsedHarness.ok) return parsedHarness;
-  const selectedProfile = resolveAgentProfile(agent);
-  return selectedProfile.ok
-    ? success(lowerModelProfile(selectedProfile.value, parsedHarness.value))
-    : selectedProfile;
 }
 
 /**

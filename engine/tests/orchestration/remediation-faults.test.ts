@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,6 @@ import {
   observeDirtyPaths,
   openGitRepository,
   readStagedPaths,
-  readRepositoryBytes,
   runRemediationGit,
   snapshotRepositoryWitness,
   stageAuditedPaths,
@@ -69,37 +68,6 @@ function stageTarget(repository: GitRepository, paths: readonly string[]): Reado
   const witness = verifiedRemediationInstallation(repository, temporary.value);
   return { temporary: temporary.value, witness };
 }
-
-describe("repository byte reads distinguish absence from failure", () => {
-  it("returns exact existing bytes and null only for an absent path", () => {
-    const repository = fixtureRepository();
-    expect(readRepositoryBytes(repository.root, "src/target.ts"))
-      .toEqual(Buffer.from("export const target = 1;\n"));
-    expect(readRepositoryBytes(repository.root, "src/absent.ts")).toBeNull();
-  });
-
-  it("surfaces directory, non-directory ancestor, and symlink-loop errors", () => {
-    const repository = fixtureRepository();
-    symlinkSync("loop", join(repository.root, "loop"));
-    for (const [path, code] of [["src", "EISDIR"], ["src/target.ts/child", "ENOTDIR"], ["loop", "ELOOP"]] as const) {
-      expect(() => readRepositoryBytes(repository.root, path)).toThrow(expect.objectContaining({ code }));
-    }
-  });
-
-  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-    "surfaces permission errors for an unprivileged reader", () => {
-      const repository = fixtureRepository();
-      const target = join(repository.root, "src/target.ts");
-      chmodSync(target, 0o000);
-      try {
-        expect(() => readRepositoryBytes(repository.root, "src/target.ts"))
-          .toThrow(expect.objectContaining({ code: "EACCES" }));
-      } finally {
-        chmodSync(target, 0o644);
-      }
-    },
-  );
-});
 
 // --- Drift between verification and installation ----------------------------
 

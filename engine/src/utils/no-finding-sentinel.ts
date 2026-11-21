@@ -32,8 +32,3 @@ const NO_FINDING_SENTINEL = /^[\s(]*(?:none|n\/?a|nil|null)[\s)]*(?:$|[—–\-.
 export function isNoFindingSentinel(text: string): boolean {
   return NO_FINDING_SENTINEL.test(text.trim());
 }
-
-/** Drop empty strings and "no findings" sentinels from a list of finding texts. */
-export function dropNoFindingSentinels(xs: readonly string[]): string[] {
-  return xs.filter((s) => s.trim() !== "" && !isNoFindingSentinel(s));
-}

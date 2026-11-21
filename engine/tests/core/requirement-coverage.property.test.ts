@@ -10,7 +10,7 @@ import {
   projectRequirementCoverage,
   recordedAnchorHashes,
   renderRequirementCoverage,
-  settledCriticalCount,
+  settledCriticalFindings,
   settledFloorOf,
   type CoverageTask,
   type RecordedHash,
@@ -238,7 +238,7 @@ describe("Requirement Coverage Projection properties", () => {
         claimSeverity(verdict) === "CRITICAL").length;
       const unclaimed = coverage.unclaimed.length + coverage.unclaimedScenarios.length;
       const synthetic = coverage.rows.length === 0 && coverage.unclaimedTrace === "nowhere" ? 1 : 0;
-      expect(settledCriticalCount(coverage)).toBe(structuralCriticals + unclaimed + synthetic);
+      expect(settledCriticalFindings(coverage).length).toBe(structuralCriticals + unclaimed + synthetic);
     }));
   });
 

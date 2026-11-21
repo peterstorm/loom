@@ -231,14 +231,6 @@ export function observeStaleLock(lockDir: string): StaleLockObservation | null {
   return claim;
 }
 
-/** Check if a lock dir is stale without retaining retirement authority. */
-export function isStaleLock(lockDir: string): boolean {
-  const observed = observeStaleLock(lockDir);
-  if (observed === null) return false;
-  releaseGenerationClaim(observed);
-  return true;
-}
-
 /**
  * Atomic birth: stage `<lockDir>/pid` in a private temp dir, then rename it
  * onto the lock path. False when the lock is held (rename refuses to

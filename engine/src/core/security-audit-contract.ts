@@ -665,36 +665,3 @@ export function derivePriorStatus(prior: PriorRecordFacts | null): PriorStatus {
     .with("rejected", () => "prior_rejected_claim_changed")
     .exhaustive();
 }
-
-export type CarryAction =
-  /** Seed a planned unit, exclude the root cause from hunters, and re-verify it. */
-  | Readonly<{ kind: "carry-confirmed" }>
-  /** Current planned work: the prior confirmation is only valid for its own source. */
-  | Readonly<{ kind: "revalidate" }>
-  /** Suppress only the unchanged failed claim, never coverage of the unit. */
-  | Readonly<{ kind: "suppress-rejected-claim" }>
-  /** Current planned work with the prior record's state as context, not evidence. */
-  | Readonly<{ kind: "current-work" }>;
-
-export function carryAction(priorStatus: PriorStatus): CarryAction {
-  return match(priorStatus)
-    .returnType<CarryAction>()
-    .with("prior_confirmed_same_source", () => ({ kind: "carry-confirmed" }))
-    .with(
-      "prior_confirmed_changed_source",
-      "prior_covered_changed_source",
-      "prior_needs_validation",
-      () => ({ kind: "revalidate" }),
-    )
-    .with("prior_rejected_claim_changed", () => ({ kind: "suppress-rejected-claim" }))
-    .with(
-      "prior_covered_same_source",
-      "prior_deferred",
-      "prior_blocked",
-      "prior_out_of_scope",
-      "new",
-      "none",
-      () => ({ kind: "current-work" }),
-    )
-    .exhaustive();
-}

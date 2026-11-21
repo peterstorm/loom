@@ -8,7 +8,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import {
   bindCapture,
   captureKey,
-  capturesAgree,
+  type CaptureReceipt,
   parseFinalPayload,
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
@@ -60,6 +60,16 @@ const identity = (overrides: Partial<HarnessResultIdentity> = {}): HarnessResult
   attempt: 1,
   nativeId: "agent-abc",
   ...overrides,
+});
+
+/** What two harnesses' receipts must share for the same accepted result: the
+ *  harness and native correlator differ by construction, everything else must match. */
+const acceptedResult = (receipt: CaptureReceipt) => ({
+  requestId: receipt.requestId,
+  slotId: receipt.slotId,
+  attempt: receipt.attempt,
+  byteLength: receipt.byteLength,
+  digest: receipt.digest,
 });
 
 function payloadOf(text: string) {
@@ -177,7 +187,7 @@ describe("Pi and Claude reach the same result", () => {
 
     expect(piReceipt.ok && claudeReceipt.ok).toBe(true);
     if (!piReceipt.ok || !claudeReceipt.ok) return;
-    expect(capturesAgree(piReceipt.value, claudeReceipt.value)).toBe(true);
+    expect(acceptedResult(piReceipt.value)).toEqual(acceptedResult(claudeReceipt.value));
     expect(piReceipt.value.harness).not.toBe(claudeReceipt.value.harness);
   });
 
@@ -423,7 +433,7 @@ describe("Pi and Claude reach the same result", () => {
       expect(piOutcome.kind).toBe("captured");
       expect(claudeOutcome.kind).toBe("captured");
       if (piOutcome.kind !== "captured" || claudeOutcome.kind !== "captured") return;
-      expect(capturesAgree(piOutcome.receipt, claudeOutcome.receipt)).toBe(true);
+      expect(acceptedResult(piOutcome.receipt)).toEqual(acceptedResult(claudeOutcome.receipt));
     });
 
     it("applies the same refusals to a Pi result as to a Claude one", async () => {

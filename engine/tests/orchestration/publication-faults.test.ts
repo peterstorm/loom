@@ -14,7 +14,6 @@ import {
 } from "../../src/core/orchestration-contract";
 import {
   buildContextPacket,
-  contextPacketByteLength,
   encodeByteSection,
   parseContextPacket,
   type ByteSection,
@@ -417,7 +416,6 @@ describe("context packets", () => {
 
     expect(first.fixedContext[0]?.digest).toBe(second.fixedContext[0]?.digest);
     expect(first.digest).not.toBe(second.digest);
-    expect(contextPacketByteLength(first)).toBeGreaterThan(0);
   });
 
   it("publishes a packet content-addressed and idempotently", async () => {

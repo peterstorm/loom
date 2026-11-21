@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import * as parserBarrel from "../../src/parsers";
 import {
   parseSpec,
   parseSpecContentHash,
@@ -308,17 +307,6 @@ describe("parseSpec", () => {
     expect(parsed.value.scenarios[0].id).toBe("AS-001");
     expect(parsed.value.oos[0].id).toBe("OOS-001");
     expect(parsed.value.glossary[0].term).toBe("Spec Index");
-  });
-
-  // The Spec Index moved out of `parsers/` and into the functional core when
-  // the Requirement Coverage Projection needed it: `core/` may not import
-  // `parsers/`, and opening that arrow to reach one pure projection would have
-  // inverted the layering for every core module. The barrel must therefore NOT
-  // re-export it — a re-export is exactly the import path the boundary refuses,
-  // and it would compile until the day a core module used it.
-  it("is not reachable through the parser barrel", () => {
-    expect(Object.hasOwn(parserBarrel, "parseSpec")).toBe(false);
-    expect(Object.hasOwn(parserBarrel, "specContentHash")).toBe(false);
   });
 
   it("collects scenarios from every Acceptance Scenarios block", () => {

@@ -23,7 +23,7 @@ import {
 
   nextOrdinal,
   recoverViewOnlyClaims,
-  refutationsUnionError,
+  parseStoredRefutationsField,
   type Finding,
   type RefutedFinding,
 } from "../../src/core/findings";
@@ -355,9 +355,9 @@ describe("finding ids are unique ACROSS findings and refuted_findings", () => {
     expect(repaired[0]!.claim, "the claim is a naming defect's victim, not its cause").toBe("live claim");
   });
 
-  it("refutationsUnionError rejects a repeated refuted id", () => {
-    const error = refutationsUnionError([refuted, refuted], "T1: refuted_findings");
-    expect(error).toContain("repeats refuted finding id");
+  it("parseStoredRefutationsField rejects a repeated refuted id", () => {
+    const parsed = parseStoredRefutationsField([refuted, refuted], "T1: refuted_findings");
+    expect(parsed).toEqual({ ok: false, error: expect.stringContaining("repeats refuted finding id") });
   });
 
   it("findingIdCollisionError is silent when either side is absent", () => {

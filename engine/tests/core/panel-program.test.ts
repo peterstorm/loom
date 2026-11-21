@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   PANEL_PROGRAM_MODEL_PROFILES,
-  isParallelSpawnBatch,
   reduceArchitectureProgram,
   startArchitectureProgram,
   type ArchitectureEngineOperation,
@@ -30,7 +29,7 @@ import {
   completePersistentRefutationPanel,
   panelRequestIdentity,
   parsePersistentRefutationPanelEvent,
-  parseRefutationPanelCheckpoint,
+  parseRefutationPanelCheckpointRecord,
   reducePersistentRefutationPanel,
   refutationPanelCheckpoint,
   replayPersistentRefutationPanel,
@@ -128,7 +127,6 @@ describe("architecture panel program", () => {
       request.interaction === "headless" &&
       request.modelProfile === PANEL_PROGRAM_MODEL_PROFILES.design,
     )).toBe(true);
-    expect(isParallelSpawnBatch(step.action)).toBe(true);
 
     // Completion order is deliberately opposite to dispatch order.
     step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:2")));
@@ -592,10 +590,10 @@ describe("persistent refutation panel", () => {
       verdictJson(fixture.authority, 1, votes[1]!),
     ));
     const checkpoint = value(refutationPanelCheckpoint(afterResume.state, [...journal, afterResume.recordedEvent!], publicationResolver));
-    expect(JSON.parse(JSON.stringify(value(parseRefutationPanelCheckpoint(
+    expect(JSON.parse(JSON.stringify(value(parseRefutationPanelCheckpointRecord(
       JSON.parse(JSON.stringify(checkpoint)),
       publicationResolver,
-    )).state))).toEqual(JSON.parse(JSON.stringify(afterResume.state)));
+    )).step.state))).toEqual(JSON.parse(JSON.stringify(afterResume.state)));
   });
 
   it("structurally hashes verifier authority so delimiter-bearing finding sets cannot collide", () => {
@@ -646,10 +644,10 @@ describe("persistent refutation panel", () => {
     if (!replayResult.ok) throw new Error(JSON.stringify(replayResult.error));
     expect(JSON.parse(JSON.stringify(replayResult.value.state))).toEqual(JSON.parse(JSON.stringify(step.state)));
     const checkpoint = value(refutationPanelCheckpoint(step.state, events, publicationResolver));
-    expect(value(parseRefutationPanelCheckpoint(
+    expect(value(parseRefutationPanelCheckpointRecord(
       JSON.parse(JSON.stringify(checkpoint)),
       publicationResolver,
-    )).state.stage).toBe("terminal-blocked");
+    )).step.state.stage).toBe("terminal-blocked");
   });
 
   it("replays the complete roster after JSON restart and preserves strict-majority audit evidence", () => {
@@ -684,8 +682,8 @@ describe("persistent refutation panel", () => {
     });
     const checkpoint = value(refutationPanelCheckpoint(step.state, events, publicationResolver));
     expect(JSON.parse(JSON.stringify(value(
-      parseRefutationPanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), publicationResolver),
-    ).state))).toEqual(JSON.parse(JSON.stringify(step.state)));
+      parseRefutationPanelCheckpointRecord(JSON.parse(JSON.stringify(checkpoint)), publicationResolver),
+    ).step.state))).toEqual(JSON.parse(JSON.stringify(step.state)));
     expect(events.at(-1)).not.toHaveProperty("roster");
   });
 
@@ -891,7 +889,7 @@ describe("current and historical Findings through the full persistent panel", ()
       expect(checkpoint.schemaVersion).toBe(2);
       expect(checkpoint.events).toHaveLength(events.length);
       const snapshot = JSON.stringify(checkpoint);
-      const reloaded = value(parseRefutationPanelCheckpoint(JSON.parse(snapshot), publicationResolver));
+      const reloaded = value(parseRefutationPanelCheckpointRecord(JSON.parse(snapshot), publicationResolver)).step;
       expect(JSON.stringify(reloaded.state)).toBe(JSON.stringify(step.state));
       expect(JSON.stringify(value(replayPersistentRefutationPanel(fixture.authority, JSON.parse(JSON.stringify(events)), publicationResolver)).state))
         .toBe(JSON.stringify(step.state));
@@ -919,7 +917,7 @@ describe("current and historical Findings through the full persistent panel", ()
     if (mutation === "claim") entry.claim += " altered";
     if (mutation === "consequence") entry.basis.consequence.impact += " altered";
     if (mutation === "advisory") { entry.severity = "advisory"; entry.reason = "downgraded"; }
-    expect(parseRefutationPanelCheckpoint(checkpoint, publicationResolver).ok).toBe(false);
+    expect(parseRefutationPanelCheckpointRecord(checkpoint, publicationResolver).ok).toBe(false);
   });
 
   it("reloads a checkpoint whose recorded roster view is a legacy serialization, yet refuses recorded roster slots that disagree", () => {
@@ -932,11 +930,11 @@ describe("current and historical Findings through the full persistent panel", ()
     const legacy = durable();
     expect(legacy.state.authority.verifierRoster.byId).toEqual({});
     legacy.state.authority.verifierRoster.byId = { size: legacy.state.authority.verifierRoster.orderedSlots.length };
-    expect(value(parseRefutationPanelCheckpoint(legacy, publicationResolver)).state.stage).toBe("done");
+    expect(value(parseRefutationPanelCheckpointRecord(legacy, publicationResolver)).step.state.stage).toBe("done");
     // The slots the view derives from are recorded content: reordering them is disagreement.
     const reordered = durable();
     reordered.state.authority.verifierRoster.orderedSlots.reverse();
-    expect(parseRefutationPanelCheckpoint(reordered, publicationResolver)).toMatchObject({ ok: false,
+    expect(parseRefutationPanelCheckpointRecord(reordered, publicationResolver)).toMatchObject({ ok: false,
       error: { kind: "malformed-checkpoint", message: "refutation checkpoint state disagrees with its immutable event prefix" } });
   });
 
@@ -995,14 +993,14 @@ describe("panel program construction invariants", () => {
       outputContract: "candidate",
     };
     const valid: SpawnBatchAction = { type: "spawn-batch", execution: "parallel", requests: [headless] };
-    expect(isParallelSpawnBatch(valid)).toBe(true);
+    expect(valid.requests).toEqual([headless]);
 
     const interactive = architectureStart().action;
     if (interactive?.type !== "await-user") throw new Error("expected interactive request");
     const invalidRequests = [interactive.request] as const;
     // @ts-expect-error interactive requests cannot inhabit a parallel batch
     const invalid: SpawnBatchAction = { type: "spawn-batch", execution: "parallel", requests: invalidRequests };
-    expect(isParallelSpawnBatch(invalid)).toBe(false);
+    expect(invalid.requests).toBe(invalidRequests);
   });
 
   it("rejects an operation outside the architecture vocabulary", () => {

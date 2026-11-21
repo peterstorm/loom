@@ -115,16 +115,6 @@ export function isProgrammaticRule(rule: Rule): rule is ProgrammaticRule {
   return rule.kind === "programmatic";
 }
 
-export function isPass(result: LintResult): result is { kind: "pass" } {
-  return result.kind === "pass";
-}
-
-export function isViolations(
-  result: LintResult
-): result is { kind: "violations"; violations: readonly Violation[] } {
-  return result.kind === "violations";
-}
-
 export function isError(
   result: LintResult
 ): result is { kind: "error"; message: string } {

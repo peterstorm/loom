@@ -26,7 +26,6 @@ import {
   type RefutedFinding,
 } from "../../src/core/findings";
 import {
-  carriedOverCount,
   parseMachineSummary,
   reviewResolutionLog,
 } from "../../src/core/review-output";
@@ -438,14 +437,7 @@ describe("chooseSource keeps claim identity and marker severity in lockstep", ()
     ].join("\n"))!;
     expect(parsed.blockStatus.kind).toBe("superseded");
     expect(parsed.advisory).toContain("a nit only the block named");
-    expect(carriedOverCount(parsed.blockStatus)).toBe(1);
-  });
-
-  it("carriedOverCount is zero for every arm that carries nothing", () => {
-    expect(carriedOverCount({ kind: "absent" })).toBe(0);
-    expect(carriedOverCount({ kind: "used" })).toBe(0);
-    expect(carriedOverCount({ kind: "rejected", reason: "invalid JSON" })).toBe(0);
-    expect(carriedOverCount({ kind: "partial", carriedOver: 3 })).toBe(3);
+    expect(parsed.blockStatus).toMatchObject({ carriedOver: 1 });
   });
 });
 

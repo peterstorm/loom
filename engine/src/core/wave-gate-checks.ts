@@ -41,10 +41,6 @@ export type GateCheck =
 const pass = (summary: string): GateCheck => canonicalRecord({ passed: true, summary });
 const fail = (reason: string): GateCheck => canonicalRecord({ passed: false, reason });
 
-export function gateCheckMessage(check: GateCheck): string {
-  return check.passed ? check.summary : check.reason;
-}
-
 function proofFailureMessage(failure: ProofFailure): string {
   return match(failure)
     .with({ kind: P.union("declared-artifact-not-changed", "declared-artifact-drifted") },

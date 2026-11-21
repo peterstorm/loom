@@ -25,7 +25,7 @@ import {
   completePersistentRefutationPanel,
   panelRequestIdentity,
   parsePersistentRefutationPanelEvent,
-  parseRefutationPanelCheckpoint,
+  parseRefutationPanelCheckpointRecord,
   reducePersistentRefutationPanel,
   refutationPanelCheckpoint,
   startPersistentRefutationPanel,
@@ -438,7 +438,7 @@ describe("the durable accepted-event source arm", () => {
     const completed = value(completePersistentRefutationPanel(step.state, publicationResolver));
     const tallyEvent = completed.recordedEvent!;
     const checkpoint = value(refutationPanelCheckpoint(completed.state, [emissionEvent, extractionEvent, tallyEvent], publicationResolver));
-    const replayed = value(parseRefutationPanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), publicationResolver));
+    const replayed = value(parseRefutationPanelCheckpointRecord(JSON.parse(JSON.stringify(checkpoint)), publicationResolver)).step;
     expect(replayed.state.stage).toBe("done");
     const persistedEvents = JSON.parse(JSON.stringify(checkpoint.events)) as readonly { type?: string; source?: { toolCallId?: string } }[];
     const persistedEmission = persistedEvents.find((event) => event.type === "refutation-verdict-accepted" && event.source?.toolCallId === "call-cp");

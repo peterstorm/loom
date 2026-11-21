@@ -22,7 +22,7 @@ import {
   computeNextWave,
   deriveWaveStartReadiness,
   evaluateWaveGate,
-  gateCheckMessage,
+  type GateCheck,
   type GateDeps as CoreGateDeps,
 } from "../../src/core/wave-gate-checks";
 import {
@@ -92,7 +92,6 @@ import {
 } from "../../src/core/orchestration-contract";
 import {
   commitActiveWaveGateCompletion,
-  findRegisteredWaveGateCompletionReplay,
   parseActiveWaveGateRegistration,
   parseTaskGraph,
   registerActiveWaveGate,
@@ -102,6 +101,8 @@ import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
 
 const satisfiedProof = eraSatisfiedProof([]);
+
+const gateCheckMessage = (check: GateCheck): string => (check.passed ? check.summary : check.reason);
 
 const MODEL_FREE_PLAN_MODELS = Object.freeze({
   lifecycles: Object.freeze([]),
@@ -2159,16 +2160,7 @@ describe("protected active Wave Gate registration", () => {
           ? commitWaveGateCompletion(readiness.value)
           : { ok: false, error: { kind: "wave-completion-commit-rejected" as const, message: "unavailable" } };
       });
-      const replay = value(findRegisteredWaveGateCompletionReplay(manager.load(), {
-        schemaVersion: 1,
-        kind: "active-wave-gate",
-        runId: committed.completedRegistration.runId,
-        wave: committed.completedRegistration.wave,
-        authorityDigest: committed.completedRegistration.authorityDigest,
-        revision: committed.completedRegistration.revision - 1,
-        terminalOutcome: null,
-      }));
-      expect(replay).toEqual(committed.completedRegistration);
+      expect(manager.load().wave_gate_history).toContainEqual(committed.completedRegistration);
       await expect(registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration(registration)), { taskIds: ["T1"] }))
         .rejects.toThrow("already completed or older than terminal Wave history");
       expect(manager.load().active_wave_gate).toBeUndefined();

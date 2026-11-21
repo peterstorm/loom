@@ -356,22 +356,6 @@ function setsIntersect(a: MatchSet, b: MatchSet): boolean {
 export type NowFn = () => number;
 
 /**
- * @internal — post-hoc duration assertion (cannot interrupt blocking work).
- * Retained for test assertions only. NOT a real timeout.
- */
-export function assertDurationWithin<T>(fn: () => T, timeoutMs: number, now: NowFn = performance.now.bind(performance)): T {
-  const start = now();
-  const result = fn();
-  const elapsed = now() - start;
-  if (elapsed > timeoutMs) {
-    throw new Error(
-      `Execution exceeded timeout of ${timeoutMs}ms (took ${Math.round(elapsed)}ms)`
-    );
-  }
-  return result;
-}
-
-/**
  * Creates a deadline checker function for use in line-by-line processing loops.
  * The caller should invoke checkDeadline() periodically (e.g., every N lines).
  *

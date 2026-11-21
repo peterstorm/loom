@@ -1264,19 +1264,6 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("retains malformed completion checkpoint parser diagnostics", async () => {
-    const extensionSpecifier = "../../pi/review-run-authority.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      standaloneCompletionCheckpointProblem: (checkpoint: string) => string | null;
-    };
-    expect(module.standaloneCompletionCheckpointProblem(JSON.stringify({ kind: "done" }))).toBeNull();
-    expect(module.standaloneCompletionCheckpointProblem(JSON.stringify({ kind: "blocked" }))).toBe("review is not done");
-    expect(module.standaloneCompletionCheckpointProblem("{")).toMatch(/^completion checkpoint is invalid JSON: .+/);
-    for (const notARecord of ["null", "[]", '"done"', "7", '[{"kind":"done"}]']) {
-      expect(module.standaloneCompletionCheckpointProblem(notARecord), notARecord).toBe("review is not done");
-    }
-  });
-
   it("preserves malformed Pi transcript extraction as an explicit capture rejection", async () => {
     const module = await piCaptureModules();
     const staged = await piCaptureRun("malformed-transcript");

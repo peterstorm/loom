@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import fc from "fast-check";
-import { PANEL_DESIGNERS_DEFAULT, PANEL_DESIGNERS_MIN, PANEL_JUDGES_DEFAULT, PANEL_LENS_COUNT, EXECUTE_AGENTS, panelPhaseOverlap, assertPanelPhaseDisjoint, panelExecuteOverlap, assertPanelExecuteDisjoint } from "../src/config";
+import { PANEL_DESIGNERS_DEFAULT, PANEL_DESIGNERS_MIN, PANEL_JUDGES_DEFAULT, PANEL_LENS_COUNT, panelPhaseOverlap, assertPanelPhaseDisjoint, panelExecuteOverlap, assertPanelExecuteDisjoint } from "../src/config";
 import { ARCH_PANEL_PHASE, UTILITY_AGENTS } from "../src/core/phase-policy";
 import { READ_ONLY_STATE_COMMANDS } from "../src/core/tool-vocabulary";
 import { ARCH_PANEL_AGENTS, PHASE_AGENT_MAP, KNOWN_AGENTS, IMPL_AGENTS, REVIEW_SUB_AGENTS, REVIEW_AGENTS } from "../src/core/agent-catalog-projections";
@@ -82,7 +82,6 @@ describe("exported agent-policy sets are immutable", () => {
     ["UTILITY_AGENTS", UTILITY_AGENTS],
     ["REVIEW_SUB_AGENTS", REVIEW_SUB_AGENTS],
     ["REVIEW_AGENTS", REVIEW_AGENTS],
-    ["EXECUTE_AGENTS", EXECUTE_AGENTS],
   ] as const)("blocks ordinary mutation of %s", (_name, policy) => {
     const before = [...policy];
     expect(() => (policy as Set<string>).add("injected-agent")).toThrow(/immutable/);

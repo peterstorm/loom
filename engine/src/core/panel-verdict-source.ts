@@ -12,7 +12,6 @@ import {
   type IssuedEmissionBindingOf,
 } from "./emission-tool";
 import type { EmissionObservation } from "./emission-observation";
-import { reviewerEmissionToolContract } from "./reviewer-contract";
 import { success as domainSuccess, failure as domainFailure } from "./orchestration-contract/identity";
 import type { PayloadProducerKindName } from "./agent-catalog-projections";
 import {
@@ -59,36 +58,6 @@ const PANEL_VERDICT_KINDS = Object.freeze({
 type PanelVerdictKindName = {
   [Kind in PayloadProducerKindName]: (typeof PANEL_VERDICT_KINDS)[Kind] extends true ? Kind : never;
 }[PayloadProducerKindName];
-
-// Route-aware panel-verdict wire-instruction rendering (AD-7; FR-020/AS-012).
-
-/**
- * The closed wire-instruction route of ONE panel verdict spawn attempt — the
- * same route discriminant the request programs project (AD-7). The emission
- * arm carries the registry-minted binding; the extraction-only arm its
- * admission reason. A refused route is not representable — the shell throws
- * it fail-closed before any render.
- */
-export type PanelVerdictInstructionRoute =
-  | Readonly<{ kind: "emission"; binding: IssuedEmissionBinding }>
-  | Readonly<{ kind: "extraction-only"; reason: string }>;
-
-/**
- * Route-aware rendered panel-verdict wire instructions (AD-7, FR-020/AS-012):
- * an emission route renders the ONE frozen tool-primary wording over the
- * binding's exact issued tool; an extraction-only verdict attempt — today's
- * whole panel-verdict spawn surface, and any unqualified route — renders the
- * panel's own final-message contract (`finalMessageContract`) VERBATIM. A
- * pure projection; it never rewrites issued packet or verdict-schema bytes.
- */
-export function renderPanelVerdictInstructions(
-  route: PanelVerdictInstructionRoute,
-  finalMessageContract: string,
-): string {
-  return route.kind === "emission"
-    ? reviewerEmissionToolContract(route.binding.toolName)
-    : finalMessageContract;
-}
 
 /** A retained emission refusal in its durable provenance form: the parse's
  *  closed code widened to the validated non-empty string the source records

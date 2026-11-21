@@ -16,12 +16,10 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { z } from "zod/v4";
 import {
-  PRIOR_STATUSES,
   SECURITY_INCOMPLETE_REASONS,
   SECURITY_PROFILES,
   admitWave,
   canonicalCoverageId,
-  carryAction,
   derivePriorStatus,
   encodeCanonicalRef,
   isCanonicalCoverageRefs,
@@ -100,32 +98,20 @@ describe("prior-run carry", () => {
     ...overrides,
   });
 
-  it("treats an unchecked source as current work (INV-C1)", () => {
+  it("treats an unchecked source as changed (INV-C1)", () => {
     expect(derivePriorStatus(facts({ sourceUnchanged: null }))).toBe("prior_confirmed_changed_source");
-    expect(carryAction(derivePriorStatus(facts({ sourceUnchanged: null })))).toEqual({ kind: "revalidate" });
     expect(derivePriorStatus(null)).toBe("none");
-    expect(carryAction("none")).toEqual({ kind: "current-work" });
   });
 
-  it("carries only a confirmation whose source is proven unchanged", () => {
-    expect(carryAction(derivePriorStatus(facts({ sourceUnchanged: true })))).toEqual({ kind: "carry-confirmed" });
-    expect(carryAction(derivePriorStatus(facts({ verdict: "confirmed", sourceUnchanged: false })))).toEqual({ kind: "revalidate" });
+  it("marks only a confirmation whose source is proven unchanged as same-source", () => {
+    expect(derivePriorStatus(facts({ sourceUnchanged: true }))).toBe("prior_confirmed_same_source");
+    expect(derivePriorStatus(facts({ verdict: "confirmed", sourceUnchanged: false }))).toBe("prior_confirmed_changed_source");
   });
 
-  it("suppresses only the failed claim, never the unit's coverage", () => {
-    expect(carryAction(derivePriorStatus(facts({ verdict: "rejected", sourceUnchanged: false })))).toEqual({
-      kind: "suppress-rejected-claim",
-    });
-    expect(carryAction(derivePriorStatus(facts({ verdict: "covered", sourceUnchanged: true })))).toEqual({ kind: "current-work" });
-    expect(carryAction(derivePriorStatus(facts({ verdict: "deferred", sourceUnchanged: true })))).toEqual({ kind: "current-work" });
-  });
-
-  it("is total over the closed prior-status vocabulary", () => {
-    fc.assert(
-      fc.property(fc.constantFrom(...PRIOR_STATUSES), (status) => {
-        expect(["current-work", "carry-confirmed", "revalidate", "suppress-rejected-claim"]).toContain(carryAction(status).kind);
-      }),
-    );
+  it("names a rejected claim apart from the unit's coverage states", () => {
+    expect(derivePriorStatus(facts({ verdict: "rejected", sourceUnchanged: false }))).toBe("prior_rejected_claim_changed");
+    expect(derivePriorStatus(facts({ verdict: "covered", sourceUnchanged: true }))).toBe("prior_covered_same_source");
+    expect(derivePriorStatus(facts({ verdict: "deferred", sourceUnchanged: true }))).toBe("prior_deferred");
   });
 });
 

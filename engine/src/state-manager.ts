@@ -27,7 +27,7 @@ import {
   sessionScopedPath,
   TASK_GRAPH_POINTER_SUFFIX,
 } from "./machine";
-import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
+import type { ActiveWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
 import {
@@ -56,8 +56,6 @@ import {
   parseTaskGraph,
   type ParsedTaskGraph,
 } from "./state-file-wire";
-
-export { TASK_ID_PATTERN } from "./core/task-id";
 
 // The State File wire grammar is re-exported here so every historical importer
 // of `state-manager` keeps its exact import surface; only the dependency arrow
@@ -262,46 +260,6 @@ function resolveLocalSessionTaskGraphAuthority(sessionId: string): TaskGraphFile
     );
   }
   return pointedTaskGraphAuthority(pointedPath, sessionFile);
-}
-
-export type RegisteredWaveGateCompletionReplayError = Readonly<{
-  kind: "registered-wave-gate-completion-replay-rejected";
-  message: string;
-}>;
-
-export function findRegisteredWaveGateCompletionReplay(
-  graph: TaskGraph,
-  authority: ActiveWaveGateRegistration,
-): DomainResult<CompletedWaveGateRegistration | null, RegisteredWaveGateCompletionReplayError> {
-  const reject = (message: string): DomainResult<never, RegisteredWaveGateCompletionReplayError> =>
-    Object.freeze({
-      ok: false,
-      error: Object.freeze({ kind: "registered-wave-gate-completion-replay-rejected", message }),
-    });
-  if (authority.terminalOutcome !== null) {
-    return reject(`Pre-read Wave Gate run ${authority.runId} was already terminal rather than active`);
-  }
-  const history = graph.wave_gate_history ?? [];
-  const sameRun = history.find((entry) => entry.runId === authority.runId);
-  const sameWave = history.find((entry) => entry.wave === authority.wave);
-  const candidate = sameRun ?? sameWave;
-  if (candidate === undefined) return Object.freeze({ ok: true, value: null });
-  if (
-    candidate.runId !== authority.runId || candidate.wave !== authority.wave ||
-    candidate.authorityDigest !== authority.authorityDigest || candidate.revision !== authority.revision + 1
-  ) {
-    return reject(
-      `Wave ${authority.wave} terminal history conflicts with pre-read active run ${authority.runId} ` +
-      `(expected digest ${authority.authorityDigest} and revision ${authority.revision + 1})`,
-    );
-  }
-  if (
-    candidate.completionReceipt.runId !== authority.runId ||
-    candidate.completionReceipt.committedRevision !== candidate.revision
-  ) {
-    return reject(`Wave ${authority.wave} terminal history carries a contradictory completion receipt`);
-  }
-  return Object.freeze({ ok: true, value: candidate });
 }
 
 export class StateManager {

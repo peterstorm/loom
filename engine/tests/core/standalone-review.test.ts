@@ -48,8 +48,6 @@ import {
   completeStandaloneReviewerCapture,
   fingerprintCapturedReviewerResult,
   parseCapturedReviewerResult,
-  parsePreparedStandaloneReviewerCapture,
-  parseStandaloneCaptureAuthority,
   type CapturedReviewerResult,
 } from "../../src/core/standalone-reviewer-capture";
 import { parseStandalonePanelOutcomes, type FrozenStandalonePanelAuthority } from "../../src/core/standalone-refutation-panel";
@@ -1063,46 +1061,6 @@ describe("fresh preparation and request-bound byte capture", () => {
       expect(completed.value.value.rawBytes.data).toBe(Buffer.from(bytes).toString("base64"));
       expect(JSON.stringify(completed.value.value)).not.toContain("�");
       expect(parseCapturedReviewerResult(completed.value.value).ok).toBe(true);
-    }
-  });
-
-  it("rehydrates issued-request and prepared-byte capture authority from durable receipts", () => {
-    const authority = preparedAuthority();
-    const complete = completeCapturedRoster(authority, [transcript(), transcript()]);
-    const issued = complete.roster.ordered.map(({ issuedRequest }) => issuedRequest);
-    const persistedRequests = JSON.parse(JSON.stringify(issued));
-    const rebound = parseStandaloneCaptureAuthority(authority, persistedRequests, (request) => {
-      const expected = issued.find(({ authority: candidate }) => candidate.requestId === request.authority.requestId);
-      return expected !== undefined && JSON.stringify(expected) === JSON.stringify(request)
-        ? { ok: true, value: expected }
-        : { ok: false, error: { kind: "standalone-capture-rejected" as const, message: "issuance receipt mismatch" } };
-    });
-    expect(rebound.ok).toBe(true);
-    if (!rebound.ok) return;
-    const bytes = Buffer.from(transcript([], ["captured without parent publication"]), "utf-8");
-    const prepared = captureStandaloneReviewerBytes(rebound.value, issued[0]!.authority.requestId, bytes);
-    expect(prepared.ok).toBe(true);
-    if (!prepared.ok) return;
-    const reloaded = parsePreparedStandaloneReviewerCapture(
-      rebound.value,
-      JSON.parse(JSON.stringify(prepared.value)),
-    );
-    expect(reloaded.ok).toBe(true);
-    if (reloaded.ok) {
-      expect(reloaded.value.intent.bytes).toEqual([...bytes]);
-      expect(reloaded.value.expectedArtifact.digest).toBe(createHash("sha256").update(bytes).digest("hex"));
-      const consumed = completeStandaloneReviewerCapture(reloaded.value, {
-        kind: "raw-transcript-captured",
-        effectId: reloaded.value.intent.effectId,
-        runId: authority.runId,
-        requestId: issued[0]!.authority.requestId,
-        artifact: reloaded.value.expectedArtifact,
-      });
-      expect(consumed.ok).toBe(true);
-      if (consumed.ok) {
-        expect(consumed.value.authority.requestId).toBe(issued[0]!.authority.requestId);
-        expect(Buffer.from(consumed.value.value.rawBytes.data, "base64")).toEqual(bytes);
-      }
     }
   });
 

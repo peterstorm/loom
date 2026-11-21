@@ -471,13 +471,3 @@ export function fileCandidates(
   const findings = parseSecurityFindings(consolidated.kept);
   return findings.ok ? success({ findings: findings.value, absorbed: consolidated.absorbed }) : findings;
 }
-
-/** The adjudication ballot: loom's two levels, with the five-level ladder kept
- *  as recorded context. `null` means "no severity recorded" (needs_validation). */
-export function overallSeverity(finding: SecurityFinding): SeverityScore | null {
-  return finding.verdict === "confirmed" ? finding.severity.overall_severity : null;
-}
-
-export function severityAtLeast(score: SeverityScore, floor: SeverityScore): boolean {
-  return SEVERITY_RANK[score] >= SEVERITY_RANK[floor];
-}

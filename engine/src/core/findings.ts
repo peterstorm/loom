@@ -838,18 +838,6 @@ export function parseStoredResolutionsField(raw: unknown, label: string): Domain
   return parseRetiredFindingsField(raw, label, parseStoredResolution, "resolution", "resolved");
 }
 
-/** Load-boundary check for `Task.refuted_findings`: `parseStoredRefutationsField`'s verdict. */
-export function refutationsUnionError(raw: unknown, label: string): string | null {
-  const parsed = parseStoredRefutationsField(raw, label);
-  return parsed.ok ? null : parsed.error;
-}
-
-/** Load-boundary check for `Task.resolved_findings`: `parseStoredResolutionsField`'s verdict. */
-export function resolutionsUnionError(raw: unknown, label: string): string | null {
-  const parsed = parseStoredResolutionsField(raw, label);
-  return parsed.ok ? null : parsed.error;
-}
-
 function hasReservedFindingFields(record: Record<string, unknown>): boolean {
   return "protocolVersion" in record || "basis" in record || "reason" in record;
 }
@@ -1206,7 +1194,7 @@ export function evidenceFailureError(
  * Load-boundary check that no id is live and refuted at the same time.
  *
  * `findingsUnionError` proves uniqueness within `findings` and
- * `refutationsUnionError` within `refuted_findings`; neither can see the other
+ * `parseStoredRefutationsField` within `refuted_findings`; neither can see the other
  * array, and the ACROSS case is the one with a terminal consequence. The tally's
  * replay guard builds `alreadyRefuted` from `refuted_findings` and refuses to
  * adjudicate any brief item whose id is in it — so a live finding sharing an id

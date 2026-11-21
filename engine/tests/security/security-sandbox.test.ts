@@ -11,7 +11,6 @@ import {
   DEFAULT_SANDBOX_LIMITS,
   bindSandboxRun,
   SANDBOX_ENV_ALLOWLIST,
-  SANDBOX_RECEIPT_PREFIX,
   describeUnboundedRun,
   judgeLocalReceipt,
   sandboxNonce,
@@ -168,7 +167,7 @@ describe("sandbox receipt", () => {
   it("requires the caller's nonce in the marker", () => {
     const stdout = `${boundReceipt({ exit: 1 })}\n${boundReceipt({ exit: 0 })}\n`;
     // An unbound receipt line — what a command prints — is not even considered.
-    expect(parseSandboxReceipt(`${stdout}${SANDBOX_RECEIPT_PREFIX}{"schemaVersion":1}`, NONCE).ok).toBe(true);
+    expect(parseSandboxReceipt(`${stdout}LOOM-SANDBOX-RECEIPT {"schemaVersion":1}`, NONCE).ok).toBe(true);
     expect(parseSandboxReceipt(stdout, "fedcba9876543210").ok).toBe(false);
     expect(parseSandboxReceipt(stdout, "not-hex").ok).toBe(false);
   });

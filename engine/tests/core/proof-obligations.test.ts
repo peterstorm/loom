@@ -21,7 +21,6 @@ import {
   parseProofObligationResult,
   parseTaskProof,
   parseTaskTestResult,
-  reevaluateTaskProof,
   type ObservedProofEvidence,
   type ProofObligationInput,
 } from "../../src/core/proof-obligations";
@@ -280,8 +279,8 @@ describe("proof evaluation", () => {
 
   it("re-evaluation is a value-level fixed point and ignores the prior state arm", () => {
     const pending = derivePendingTaskProof(input);
-    const once = reevaluateTaskProof(pending, completeEvidence);
-    const twice = reevaluateTaskProof(once, completeEvidence);
+    const once = evaluateProofObligations(pending.obligations, completeEvidence);
+    const twice = evaluateProofObligations(once.obligations, completeEvidence);
     expect(twice).toEqual(once);
   });
 });
@@ -448,7 +447,7 @@ describe("proof properties", () => {
           });
           const obligations = deriveProofObligations(source);
           const once = evaluateProofObligations(obligations, evidence);
-          const twice = reevaluateTaskProof(once, evidence);
+          const twice = evaluateProofObligations(once.obligations, evidence);
           return (
             JSON.stringify(once) === JSON.stringify(twice)
             && once.results.length === once.obligations.length
