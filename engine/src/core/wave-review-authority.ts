@@ -1124,7 +1124,7 @@ export function waveSpecCheckScope(tasks: readonly Task[]): readonly WaveSpecChe
 const parsedAnchorHashes = (stored: Task["spec_anchor_hashes"]): ReadonlyMap<string, RecordedHash> =>
   new Map(Object.entries(stored ?? {}).map(([claim, raw]) => {
     const hash = parseSpecContentHash(raw);
-    // The load boundary proves `spec_anchor_hashes`: `migrateParsedTask`
+    // The load boundary proves `spec_anchor_hashes`: `parseStoredTask`
     // rejects every non-string value before this lift runs, so `raw` is always
     // a string here. The unreadable arm keeps covering strings that are not the
     // shape `specContentHash` mints: a truncated or tampered hash stays

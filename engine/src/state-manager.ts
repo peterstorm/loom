@@ -71,7 +71,8 @@ export {
   taskDependencyErrors,
   taskGraphLifecycleErrors,
   taskIdError,
-  taskUnionError,
+  parseStoredTask,
+  storedTaskErrors,
   orphanExecutionReservationError,
 } from "./state-file-wire";
 export type {
