@@ -17,7 +17,6 @@ import { isAbsolute, join, resolve } from "node:path";
 import { parseErr, parseOk, type ParseResult } from "./machine";
 import {
   isWaveReviewRunRetirement,
-  parseNewTestEvidence,
   parseStoredNewTestEvidence,
   REVIEW_STATUSES,
   storedNewTestEvidence,
@@ -159,7 +158,6 @@ import {
 import { parseTaskId, type TaskId } from "./core/task-id";
 import {
   authorizeWaveCompletionSuite,
-  legacyDefaultVerificationManifest,
   parseFrozenVerificationManifest,
   type FrozenVerificationManifest,
 } from "./core/verification-manifest";
@@ -168,7 +166,6 @@ import { parseTestEvidenceField, type EngineRunTestEvidence } from "./core/test-
 import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
 import { isRecord } from "./core/plain-record";
-import type { LegacyWaveGateCompatibilityAuthority } from "./core/legacy-archive";
 import {
   contractWriter,
   frozenPaths,
@@ -568,12 +565,8 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
   }));
 }
 
-const COMPLETED_WAVE_GATE_COMMON_FIELDS = [
-  "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "completionReceipt",
-] as const;
-const COMPLETED_WAVE_GATE_V2_FIELDS = [
-  ...COMPLETED_WAVE_GATE_COMMON_FIELDS,
-  "completionSuite",
+const COMPLETED_WAVE_GATE_FIELDS = [
+  "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "completionReceipt", "completionSuite",
 ] as const;
 
 type CompletedWaveGateCommon = Omit<CompletedWaveGateRegistration, "schemaVersion" | "completionSuite">;
@@ -665,25 +658,20 @@ function parseCompletedWaveGateSuite(
 }
 
 /** Parse immutable terminal history independently from active next-Wave authority.
- * The schema tag selects one exact shape: v1 cannot carry a suite and v2 must. */
+ * Schema v2 is the one shape: every completed Wave archives the suite receipt
+ * that authorized it (the suite-less v1 is refused at load, ADR-0098). */
 export function parseCompletedWaveGateRegistration(raw: unknown): ParseResult<CompletedWaveGateRegistration> {
   if (!isRecord(raw)) {
     return parseErr("wave_gate_history entry must be an object");
   }
   const record = raw as Record<string, unknown>;
-  if (record.schemaVersion !== 1 && record.schemaVersion !== 2) {
-    return parseErr("wave_gate_history entry schemaVersion must be 1 or 2");
+  if (record.schemaVersion !== 2) {
+    return parseErr("wave_gate_history entry schemaVersion must be 2");
   }
-  const fields = record.schemaVersion === 1
-    ? COMPLETED_WAVE_GATE_COMMON_FIELDS
-    : COMPLETED_WAVE_GATE_V2_FIELDS;
-  const fieldsError = exactFieldsError(record, fields, [], "wave_gate_history entry");
+  const fieldsError = exactFieldsError(record, COMPLETED_WAVE_GATE_FIELDS, [], "wave_gate_history entry");
   if (fieldsError !== null) return parseErr(fieldsError);
   const common = parseCompletedWaveGateCommon(record);
   if (!common.ok) return common;
-  if (record.schemaVersion === 1) {
-    return parseOk(Object.freeze({ schemaVersion: 1, ...common.value }));
-  }
   const completionSuite = parseCompletedWaveGateSuite(record, common.value);
   return completionSuite.ok
     ? parseOk(Object.freeze({ schemaVersion: 2, ...common.value, completionSuite: completionSuite.value }))
@@ -1938,18 +1926,12 @@ function taskAttemptAuthorityError(
   if (retryDisposition.kind === "invalid") {
     return `${label}: invalid implementation retry lineage: ${retryDisposition.errors.join("; ")}`;
   }
-  if (t.legacy_execution_reservation !== undefined && t.legacy_execution_reservation !== true) {
-    return `${label}: legacy_execution_reservation must be true when present`;
-  }
   if (t.active_implementation_attempt === undefined) {
     return t.active_implementation_context === undefined
       ? null
       : `${label}: active_implementation_context requires active_implementation_attempt`;
   }
-  if (t.legacy_execution_reservation === true) {
-    return `${label}: active_implementation_attempt cannot coexist with legacy_execution_reservation`;
-  }
-  if (t.legacy_missing_proof === true || t.proof === undefined) {
+  if (t.proof === undefined) {
     return `${label}: active_implementation_attempt requires modern authored Proof`;
   }
   const authority = parseImplementationAttemptAuthority(t.active_implementation_attempt);
@@ -2013,12 +1995,9 @@ function taskAttemptAuthorityError(
 }
 
 /**
- * Persistent unresolved-attempt repository authority, plus the legacy
- * `unresolved_repository_paths` carry. No current writer produces that carry:
- * every settlement retires the attempt boundary (implementation-application's
- * RETIRED_ATTEMPT_BOUNDARY), so Task no longer declares the field. State files
- * written before that retirement still parse under the original invariants
- * here, and `migrateParsedTask` drops the field so the next write retires it.
+ * Persistent unresolved-attempt repository authority. Every settlement retires
+ * the attempt boundary (implementation-application's RETIRED_ATTEMPT_BOUNDARY),
+ * so an accepted lifecycle never retains it.
  */
 function taskRepositoryCarryError(
   t: Record<string, unknown>,
@@ -2035,23 +2014,6 @@ function taskRepositoryCarryError(
       if (!persistentDigest.ok || !attemptDigest.ok || persistentDigest.value !== attemptDigest.value) {
         return `${label}: active attempt_repository_baseline must equal retained repository_baseline`;
       }
-    }
-  }
-  if (t.unresolved_repository_paths !== undefined) {
-    if (t.repository_baseline === undefined) {
-      return `${label}: unresolved_repository_paths requires repository_baseline`;
-    }
-    if (!Array.isArray(t.unresolved_repository_paths)) {
-      return `${label}: unresolved_repository_paths must be an array of canonical repository paths`;
-    }
-    const canonical: string[] = [];
-    for (const [pathIndex, raw] of t.unresolved_repository_paths.entries()) {
-      const parsed = parseReviewPath(raw, `${label}: unresolved_repository_paths[${pathIndex}]`);
-      if (!parsed.ok) return parsed.errors.join("; ");
-      canonical.push(parsed.value);
-    }
-    if (canonical.length === 0 || new Set(canonical).size !== canonical.length) {
-      return `${label}: unresolved_repository_paths must be non-empty and unique when present`;
     }
   }
   if ((t.status === "implemented" || t.status === "completed") && t.repository_baseline !== undefined &&
@@ -2410,12 +2372,6 @@ function taskStatusError(
     if (verification.value.policy.newTests.kind !== "waived") {
       return `${label}: attestation mode requires a verification policy that waives new tests — the dispatched child must not author new work`;
     }
-    if (t.legacy_missing_proof === true) {
-      return `${label}: attestation mode requires modern authored Proof, not legacy_missing_proof`;
-    }
-    if (t.legacy_execution_reservation === true) {
-      return `${label}: attestation mode requires a modern implementation dispatch, not a legacy execution reservation`;
-    }
   }
   if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
     return `${label}: review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
@@ -2433,24 +2389,14 @@ function taskStatusError(
   if (t.revalidation_required === true && t.status !== "pending") {
     return `${label}: revalidation_required requires pending status until fresh task evidence is recorded`;
   }
-  if (t.legacy_missing_proof !== undefined && t.legacy_missing_proof !== true) {
-    return `${label}: legacy_missing_proof must be true when present`;
-  }
 
   if (t.reopen_baseline !== undefined && t.reopen_scope === undefined) {
     return `${label}: reopen_baseline belongs to a tests-only reopen_scope and cannot stand without one`;
   }
   if (t.proof === undefined) {
     if (t.reopen_scope !== undefined) return `${label}: a tests-only reopen_scope requires the Proof its scope derives`;
-    if (t.status === "pending") {
-      return t.legacy_missing_proof === undefined
-        ? null
-        : `${label}: pending lifecycle cannot carry legacy_missing_proof`;
-    }
-    if (t.status === "implemented" || t.status === "completed") return null;
-    return `${label}: modern failed lifecycle requires failed Proof`;
+    return t.status === "pending" ? null : `${label}: ${String(t.status)} lifecycle requires a frozen Proof`;
   }
-  if (t.legacy_missing_proof === true) return `${label}: legacy_missing_proof requires absent Proof`;
   const proof = parseTaskProof(t.proof);
   if (!proof.ok) return `${label}: invalid proof: ${proof.errors.join("; ")}`;
   const fileList: readonly string[] = Array.isArray(t.file_list) ? t.file_list : [];
@@ -2507,27 +2453,9 @@ function taskEvidenceError(
   id: string,
 ): string | null {
   const prefix = `tasks[${index}] ("${id}")`;
-  const hasWritten = t.new_tests_written !== undefined;
-  const hasEvidence = t.new_test_evidence !== undefined;
-  if (t.new_test_observation !== undefined && (hasWritten || hasEvidence)) {
-    return `${prefix}: new_test_observation cannot coexist with legacy new_tests_written/new_test_evidence`;
-  }
   if (t.new_test_observation !== undefined) {
     const parsedObservation = parseStoredNewTestEvidence(t.new_test_observation);
     if (!parsedObservation.ok) return `${prefix}: ${parsedObservation.error}`;
-  }
-  if (!hasWritten && hasEvidence) {
-    return `${prefix}: new_test_evidence requires new_tests_written`;
-  }
-  if (hasWritten && typeof t.new_tests_written !== "boolean") {
-    return `${prefix}: new_tests_written must be a boolean when present`;
-  }
-  if (hasEvidence && typeof t.new_test_evidence !== "string") {
-    return `${prefix}: new_test_evidence must be a string when present`;
-  }
-  if (t.new_tests_written === true &&
-      (typeof t.new_test_evidence !== "string" || t.new_test_evidence.trim() === "")) {
-    return `${prefix}: new_tests_written true requires non-empty new_test_evidence`;
   }
   if (t.test_result === undefined) return null;
   const parsed = parseTaskTestResult(t.test_result, `${prefix}: test_result`);
@@ -2860,17 +2788,13 @@ function withoutKeys(record: Record<string, unknown>, ...keys: readonly string[]
 function migrateParsedTask(
   task: Record<string, unknown>,
   index: number,
-  executing: ReadonlySet<string>,
   scope: RedThenGreenScope,
 ): ParseResult<Record<string, unknown>> {
   const identity = parseTaskId(task.id, `tasks[${index}].id`);
   if (!identity.ok) return parseErr(identity.error.errors.join("; "));
   const verification = parseTaskVerificationPolicy(task, `tasks[${index}]`);
   if (!verification.ok) return parseErr(verification.errors.join("; "));
-  // `unresolved_repository_paths` is a legacy carry, already validated by
-  // taskRepositoryCarryError: no reader consumes it, so the parsed Task never
-  // carries it again.
-  let migrated: Record<string, unknown> = withoutKeys({ ...task, id: identity.value }, "unresolved_repository_paths");
+  let migrated: Record<string, unknown> = { ...task, id: identity.value };
   if (task.proof === undefined && task.status === "pending") {
     // A Task without Proof carries no reopen_scope (`taskStatusError` refuses
     // one), so the one scope reader derives its expectation.
@@ -2883,8 +2807,6 @@ function migrateParsedTask(
         redThenGreen: taskRedThenGreenEra(scope, identity.value),
       }),
     };
-  } else if (task.proof === undefined && (task.status === "implemented" || task.status === "completed")) {
-    migrated = { ...migrated, legacy_missing_proof: true };
   } else if (task.proof !== undefined) {
     const proof = parseTaskProof(task.proof);
     if (!proof.ok) return parseErr(proof.errors.join("; "));
@@ -2938,10 +2860,6 @@ function migrateParsedTask(
       if (!context.ok) return parseErr(context.errors.join("; "));
       migrated = { ...migrated, active_implementation_context: context.value };
     }
-  } else if (executing.has(String(task.id))) {
-    migrated = { ...migrated, legacy_execution_reservation: true };
-  } else {
-    migrated = withoutKeys(migrated, "legacy_execution_reservation");
   }
   const repositoryCarry = task.repository_baseline ?? (
     task.active_implementation_attempt === undefined ? undefined : task.attempt_repository_baseline
@@ -2961,22 +2879,11 @@ function migrateParsedTask(
     if (!testResult.ok) return parseErr(testResult.errors.join("; "));
     migrated = { ...migrated, test_result: testResult.value };
   }
-  const storedNewTests = task.new_test_observation === undefined
-    ? null
-    : parseStoredNewTestEvidence(task.new_test_observation);
-  if (storedNewTests !== null && !storedNewTests.ok) return parseErr(storedNewTests.error);
-  let parsedNewTests;
-  if (storedNewTests?.ok) {
-    parsedNewTests = storedNewTests.value;
-  } else if (task.new_tests_written === undefined && task.new_test_evidence === undefined) {
-    parsedNewTests = null;
-  } else {
-    parsedNewTests = parseNewTestEvidence(task.new_tests_written, task.new_test_evidence);
+  if (task.new_test_observation !== undefined) {
+    const storedNewTests = parseStoredNewTestEvidence(task.new_test_observation);
+    if (!storedNewTests.ok) return parseErr(storedNewTests.error);
+    migrated = { ...migrated, ...storedNewTestEvidence(storedNewTests.value) };
   }
-  const withoutLegacyNewTests = withoutKeys(migrated, "new_tests_written", "new_test_evidence");
-  migrated = parsedNewTests === null
-    ? withoutLegacyNewTests
-    : { ...withoutLegacyNewTests, ...storedNewTestEvidence(parsedNewTests) };
   // Install parser-produced Finding values rather than retaining the raw JSON
   // records that were merely accepted as parseable. This preserves legacy
   // location normalization while ensuring downstream panel code receives the
@@ -3008,7 +2915,7 @@ function parseTaskGraphTasks(
   for (let i = 0; i < tasks.length; i++) {
     const err = taskUnionError(tasks[i], i, scope);
     if (err !== null) return parseErr(err);
-    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, executing, scope);
+    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, scope);
     if (!migrated.ok) return migrated;
     parsedTasks.push(migrated.value);
   }
@@ -3021,13 +2928,10 @@ function parseTaskGraphTasks(
   if (orphanReservation !== null) return parseErr(orphanReservation);
   const relationError = parsedTasks.flatMap((task) => {
     const id = task.id as string;
-    const isExecuting = executing.has(id);
     const modern = task.active_implementation_attempt !== undefined;
-    const legacy = task.legacy_execution_reservation === true;
-    if (modern && !isExecuting) return [`Task ${id}: active_implementation_attempt requires executing_tasks membership`];
-    if (legacy && !isExecuting) return [`Task ${id}: legacy_execution_reservation requires executing_tasks membership`];
-    if (isExecuting && !modern && !legacy) return [`Task ${id}: executing reservation is unclassified`];
-    return [];
+    return modern && !executing.has(id)
+      ? [`Task ${id}: active_implementation_attempt requires executing_tasks membership`]
+      : [];
   })[0];
   if (relationError !== undefined) return parseErr(relationError);
   const dependencyError = taskDependencyErrors(parsedTasks, auditedSameWaveEdges(obj.wave_plan_edits))[0];
@@ -3224,16 +3128,16 @@ function parseActiveWaveCompletionSuiteField(
   if (mismatches.length > 0) {
     return parseErr(`active_wave_completion_suite must match active_wave_gate: ${mismatches.join(", ")}`);
   }
-  // A graph without a frozen manifest predates population freezing one; its
-  // receipts were stamped with the pre-I6 engine default's digest.
-  const manifest = verificationManifest ?? legacyDefaultVerificationManifest();
-  if (receipt.manifestDigest !== manifest.manifestDigest) {
+  if (verificationManifest === undefined) {
+    return parseErr("active_wave_completion_suite requires verification_manifest authority");
+  }
+  if (receipt.manifestDigest !== verificationManifest.manifestDigest) {
     return parseErr("active_wave_completion_suite.manifestDigest must match verification_manifest authority");
   }
   // The owner check joins the roster exactly as the gate authorized it: from the
   // graph's own stamp, for the active Wave (AD-1).
   const owner = ownerCheckAuthorityOf(waveOwnerDuty(stamped, activeWaveGate.wave));
-  const rosterConflict = completionRosterConflict(receipt, manifest, activeWaveGate, owner);
+  const rosterConflict = completionRosterConflict(receipt, verificationManifest, activeWaveGate, owner);
   return rosterConflict === null ? parseOk(receipt) : parseErr(rosterConflict);
 }
 
@@ -4053,6 +3957,56 @@ function parseTaskGraphObligationFields(
   return parseOk({ acceptanceContracts: acceptanceContracts.value, ownerObligations: ownerObligations.value });
 }
 
+/** Task fields only an engine older than the current shapes wrote (ADR-0098). */
+const LEGACY_TASK_FIELDS = [
+  "legacy_execution_reservation",
+  "legacy_missing_proof",
+  "new_tests_written",
+  "new_test_evidence",
+  "unresolved_repository_paths",
+] as const;
+
+/**
+ * The first State File shape no current writer produces, or null (ADR-0098).
+ * Executing without an attempt predates attempt authority; an implemented or
+ * completed Task without a Proof predates frozen Proof; an executing graph
+ * without a manifest, and a terminal Wave Gate archived without a completion
+ * suite, predate the Verification Manifest. Earlier phases carry no manifest
+ * legitimately: population freezes it in the write that enters `execute`.
+ */
+function legacyStateFileShape(obj: Record<string, unknown>): string | null {
+  if (obj.current_phase === "execute" && obj.verification_manifest === undefined) {
+    return "an execute-phase TaskGraph without verification_manifest";
+  }
+  const history: readonly unknown[] = Array.isArray(obj.wave_gate_history) ? obj.wave_gate_history : [];
+  const unsuited = history.filter(isRecord).find((entry) => entry.schemaVersion === 1);
+  if (unsuited !== undefined) {
+    return `a schema-1 wave_gate_history entry (Wave ${JSON.stringify(unsuited.wave)} completed without a completion suite)`;
+  }
+  const executing: readonly unknown[] = Array.isArray(obj.executing_tasks) ? obj.executing_tasks : [];
+  const tasks: readonly unknown[] = Array.isArray(obj.tasks) ? obj.tasks : [];
+  for (const task of tasks.filter(isRecord)) {
+    const id = JSON.stringify(task.id);
+    const field = LEGACY_TASK_FIELDS.find((name) => task[name] !== undefined);
+    if (field !== undefined) return `Task ${id} carrying ${field}`;
+    if (executing.includes(task.id) && task.active_implementation_attempt === undefined) {
+      return `Task ${id} in executing_tasks without active_implementation_attempt`;
+    }
+    if ((task.status === "implemented" || task.status === "completed") && task.proof === undefined) {
+      return `${task.status} Task ${id} without a frozen proof`;
+    }
+  }
+  return null;
+}
+
+/** The operator message for a refused legacy shape: what it is, and the way forward. */
+function legacyStateFileRefusal(shape: string): string {
+  return `legacy State File refused (ADR-0098): ${shape}. This engine no longer migrates State Files ` +
+    "written before attempt authority, frozen Proof and the Verification Manifest. Finish the run on the " +
+    "engine release that wrote it, or move the State File aside and run /loom again from its spec and plan " +
+    "to re-populate the TaskGraph.";
+}
+
 /**
  * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
  * union-typed field (current_phase, task status / review_status /
@@ -4066,6 +4020,8 @@ function parseTaskGraphObligationFields(
 export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!isRecord(raw)) return parseErr("not an object");
   const obj = raw as Record<string, unknown>;
+  const legacyShape = legacyStateFileShape(obj);
+  if (legacyShape !== null) return parseErr(legacyStateFileRefusal(legacyShape));
   const documents = parseTaskGraphDocumentFields(obj);
   if (!documents.ok) return parseErr(documents.error);
   const executingTasks = parseExecutingTaskIds(obj.executing_tasks);
@@ -4107,52 +4063,4 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     testEvidence,
     engineRevision,
   }));
-}
-
-export type ParsedLegacyWaveGateMigrationAuthority = Readonly<{
-  registration: ActiveWaveGateRegistration;
-  compatibility: LegacyWaveGateCompatibilityAuthority;
-}>;
-
-export function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<ParsedLegacyWaveGateMigrationAuthority> {
-  if (!isRecord(raw)) {
-    return parseErr("Legacy Wave Gate migration authority must be an object");
-  }
-  const record = raw as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  const expected = ["authorityDigest", "kind", "runId", "schemaVersion", "wave"].sort();
-  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
-    return parseErr("Legacy Wave Gate migration authority must contain exactly schemaVersion/kind/runId/wave/authorityDigest");
-  }
-  if (record.schemaVersion !== 1 || record.kind !== "legacy-wave-gate-compatibility") {
-    return parseErr("Legacy Wave Gate migration authority tag is invalid");
-  }
-  const runId = parseOrchestrationRunId(record.runId);
-  const digest = parseArtifactDigest(record.authorityDigest);
-  if (!runId.ok) return parseErr(runId.error.message);
-  if (!digest.ok) return parseErr(digest.error.message);
-  const wave = parseIntegerBound(
-    record.wave,
-    "Legacy Wave Gate migration wave",
-    1,
-    "an integer >= 1 within the safe-integer range",
-  );
-  if (!wave.ok) return parseErr(wave.error);
-  const registration: ActiveWaveGateRegistration = Object.freeze({
-    schemaVersion: 1,
-    kind: "active-wave-gate",
-    runId: runId.value,
-    wave: wave.value,
-    authorityDigest: digest.value,
-    revision: 0,
-    terminalOutcome: null,
-  });
-  const compatibility: LegacyWaveGateCompatibilityAuthority = Object.freeze({
-    schemaVersion: 1,
-    kind: "legacy-wave-gate-compatibility",
-    runId: registration.runId,
-    wave: registration.wave,
-    authorityDigest: registration.authorityDigest,
-  });
-  return parseOk({ registration, compatibility });
 }

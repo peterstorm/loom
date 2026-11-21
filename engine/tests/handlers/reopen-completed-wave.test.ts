@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -16,9 +16,8 @@ import reopenCompletedWaveHandler, {
   reopenCompletedWave,
   type WaveReopeningProof,
 } from "../../src/handlers/helpers/reopen-completed-wave";
-import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
+import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
-import { applyUntrustedStopResolution } from "../../src/core/implementation-application";
 import {
   createImplementationAttemptAuthority,
   createReclaimedImplementationAttemptReceipt,
@@ -26,7 +25,8 @@ import {
 } from "../../src/core/implementation-completion";
 import type { WaveReviewContextAuthority } from "../../src/core/wave-review-authority";
 import { parseReopenRequest } from "../../src/core/wave-reopening-request";
-import { taskFixture, observedEvidence } from "../fixtures/task-lifecycle";
+import { completedWaveGateFixture, taskFixture, observedEvidence } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
@@ -79,7 +79,8 @@ const laterWaveAttempt = (): ImplementationAttemptAuthority => value(createImple
 const graph = (tasks: readonly Task[] = [task("T19", 3), task("T22", 3), pendingTask("T23", 4)]): TaskGraph => ({
   current_phase: "execute", current_wave: 4, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
   tasks, wave_gates: { "3": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
-  wave_gate_history: [{ schemaVersion: 1, kind: "completed-wave-gate", runId: "wave-run", wave: 3, authorityDigest: digest, revision: 1, completionReceipt: receipt } as never],
+  verification_manifest: legacyDefaultVerificationManifest(),
+  wave_gate_history: [{ ...completedWaveGateFixture({ runId: "wave-run", wave: 3, authorityDigest: digest }), completionReceipt: receipt } as never],
 });
 /** A reopening payload as the helper's parser admits it. */
 const reopenRequest = (raw: Readonly<{ runId: string; wave: number; authorityDigest: string; taskIds: readonly string[] }>) =>
@@ -357,7 +358,7 @@ describe("reopen completed Wave", () => {
     expect(() => reopenCompletedWave(reopened, request, legacyProof)).toThrow("current_wave exactly");
   });
 
-  it("refuses immediate Wave Gate start before claiming a run and forbids legacy task-stop positive bypass", () => {
+  it("refuses immediate Wave Gate start before claiming a run", () => {
     const root = canonicalTempDir("loom-reopened-wave-");
     const runsRoot = canonicalTempDir("loom-reopened-wave-runs-");
     try {
@@ -392,34 +393,6 @@ describe("reopen completed Wave", () => {
       expect(blocked.stderr).toContain("wave 3 cannot start its Wave Gate");
       expect(blocked.stderr).toContain("revalidation=fresh-test-evidence-required");
       expect(existsSync(blockedRun)).toBe(false);
-
-      const freshStop = {
-        taskCompleted: true,
-        testResult: { verdict: "untrusted" as const, passed: true, label: "pi-structured: fresh bun test pass", provenance: "pi-structured" as const },
-        testEvidence: "fresh bun test pass",
-        filesModified: ["src/a.ts"],
-        changedDeclaredArtifacts: ["src/a.ts"],
-        bytesChangedSinceAttempt: false,
-        newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
-      };
-      const revalidated = ["T19", "T22"].reduce<TaskGraph>((state, taskId) =>
-        applyUntrustedStopResolution({ ...state, executing_tasks: [taskId] }, taskId, freshStop).state,
-      awaitingRevalidation);
-      expect(revalidated.tasks.slice(0, 2)).toMatchObject([
-        { status: "pending", proof: { state: "failed" }, revalidation_required: true },
-        { status: "pending", proof: { state: "failed" }, revalidation_required: true },
-      ]);
-      expect(checkImplementationProof(revalidated.tasks.filter((entry) => entry.wave === 3))).toMatchObject({ passed: false });
-      chmodSync(statePath, 0o644);
-      writeFileSync(statePath, JSON.stringify(revalidated));
-      const runDir = join(runsRoot, "run.revalidated-wave");
-      const started = spawnSync("bun", [CLI, "helper", "orchestration", "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], {
-        cwd: root, encoding: "utf8", input: JSON.stringify({ wave: 3 }),
-        env: { ...env, LOOM_STATE_PATH: statePath },
-      });
-      expect(started.status, started.stdout).not.toBe(0);
-      expect(started.stderr).toContain("Not all tasks have satisfied implementation proof");
-      expect(existsSync(runDir)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(runsRoot, { recursive: true, force: true });

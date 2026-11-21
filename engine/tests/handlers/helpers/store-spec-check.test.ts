@@ -13,8 +13,15 @@ import { join } from "node:path";
 import { execSync, spawnSync } from "node:child_process";
 import type { TaskGraph } from "../../../src/types";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
+
+/**
+ * Every loadable execute-phase TaskGraph carries a verification_manifest
+ * (ADR-0098), so a manual write is an attributable operator override.
+ */
+const MANUAL_OVERRIDE = "SPEC_CHECK_OVERRIDE: operator re-ran the spec-check by hand";
 
 describe("store-spec-check helper", () => {
   let tmpDir: string;
@@ -33,6 +40,7 @@ describe("store-spec-check helper", () => {
     statePath = join(stateDir, "active_task_graph.json");
     const graph: TaskGraph = {
       current_phase: "execute",
+      verification_manifest: legacyDefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,
@@ -66,6 +74,7 @@ describe("store-spec-check helper", () => {
     const { exitCode } = runHelper(
       [
         "SPEC_CHECK_WAVE: 1",
+        MANUAL_OVERRIDE,
         "CRITICAL: requirement REQ-1 not implemented",
         "HIGH: partial coverage of REQ-2",
         "HIGH: missing error path for REQ-3",
@@ -97,6 +106,7 @@ describe("store-spec-check helper", () => {
 
     const { exitCode } = runHelper([
       "SPEC_CHECK_WAVE: 1",
+      MANUAL_OVERRIDE,
       "SPEC_CHECK_CRITICAL_COUNT: 0",
       "SPEC_CHECK_HIGH_COUNT: 0",
       "SPEC_CHECK_VERDICT: PASSED",
@@ -111,6 +121,7 @@ describe("store-spec-check helper", () => {
     const { exitCode, stderr } = runHelper(
       [
         "SPEC_CHECK_WAVE: 1",
+        MANUAL_OVERRIDE,
         "CRITICAL: requirement REQ-1 not implemented",
         "SPEC_CHECK_CRITICAL_COUNT: 0",
         "SPEC_CHECK_HIGH_COUNT: 0",
@@ -126,6 +137,7 @@ describe("store-spec-check helper", () => {
     const { exitCode, stderr } = runHelper(
       [
         "SPEC_CHECK_WAVE: 1",
+        MANUAL_OVERRIDE,
         "HIGH: partial coverage of REQ-2",
         "SPEC_CHECK_CRITICAL_COUNT: 0",
         "SPEC_CHECK_HIGH_COUNT: 3",

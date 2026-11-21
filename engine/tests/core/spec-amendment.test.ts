@@ -28,7 +28,9 @@ import {
   protectedGraphFixture,
   satisfiedProof,
   taskFixture,
+  executingGraphFixture,
 } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const SPEC = "spec.md";
 /** The spec before: FR-001, FR-002, AS-001. */
@@ -63,6 +65,7 @@ function populated(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return protectedGraphFixture({
     spec_trace_version: 2,
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: SPEC,
@@ -161,7 +164,7 @@ describe("amendSpec", () => {
 
   it.each<[string, () => TaskGraph, string]>([
     ["a graph outside the execute Phase", () => populated({ current_phase: "decompose" }), "not-executing"],
-    ["an active implementation reservation", () => populated({ executing_tasks: ["T2"] }), "implementation-active"],
+    ["an active implementation reservation", () => executingGraphFixture(populated(), ["T2"]), "implementation-active"],
     ["a live Wave Gate", () => populated({ active_wave_gate: activeWaveGateFixture({ runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64) }) }), "live-wave-gate"],
     ["a legacy trace graph", () => { const { spec_trace_version: _v2, ...legacy } = populated(); return legacy as TaskGraph; }, "legacy-graph"],
     ["another spec_file", () => populated({ spec_file: "other.md" }), "spec-authority-changed"],

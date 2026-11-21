@@ -18,7 +18,7 @@ import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { authorizeGraphCompletionSuite } from "../../src/core/owner-verification/suite-authority";
 import type { InvariantVerdict, OwnerVerificationObservation } from "../../src/core/owner-verification/types";
 import { ownerObligation } from "../fixtures/owner-obligation";
-import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
+import { evaluateAsRecorded, greenCompletionSuiteResult } from "../fixtures/completion-suite-evaluation";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
@@ -102,34 +102,10 @@ function acceptedReceipt(
   reportByteLength = 10,
 ): AcceptedWaveCompletionReceipt {
   const authority = value(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest, null));
-  const evaluated = evaluateAsRecorded(authority, {
-    kind: "wave-completion-suite-result",
-    runId: authority.runId,
-    wave: authority.wave,
-    revision: authority.revision,
-    authorityDigest: authority.authorityDigest,
-    manifestDigest: authority.manifestDigest,
-    suiteDigest: authority.suiteDigest,
-    workspaceDigest: authority.workspaceDigest,
-    checks: authority.checks.map((check) => ({
-      checkId: check.checkId,
-      scope: "wave",
-      outcome: {
-        kind: "observed",
-        exitCode: 0,
-        timedOut: false,
-        signal: null,
-        report: check.reportPolicy.kind === "not-required"
-          ? { kind: "not-required" }
-          : {
-              kind: "produced",
-              path: check.reportPolicy.path,
-              digest: reportDigest,
-              byteLength: reportByteLength,
-            },
-      },
-    })),
-  });
+  const evaluated = evaluateAsRecorded(
+    authority,
+    greenCompletionSuiteResult(authority, { digest: reportDigest, byteLength: reportByteLength }),
+  );
   if (evaluated.kind !== "accepted") throw new Error("suite fixture must be accepted");
   return evaluated.receipt;
 }
@@ -271,12 +247,6 @@ describe("Wave completion suite gate readiness", () => {
         waveCompletionSuiteReadiness: { value: { kind: "accepted", projectVerificationCoverage: expectedHistoricalCoverage } },
       } });
     expect(historical.wave_gate_history).toBe(committed.graph.wave_gate_history);
-  });
-
-  it("does not borrow current configuration for schema-v1 history", () => {
-    const committed = value(commitWaveGateCompletion(value(deriveWaveReadiness(graph(), deps()))));
-    expect(deriveWaveCompletionSuiteReadiness({ ...committed.graph, verification_manifest: manifestWithReport() }, 1, workspace("d")))
-      .toEqual({ kind: "legacy-unavailable", verificationManifestDigest: null });
   });
 
   it("fails a modern graph that has no accepted suite or persisted result", () => {
@@ -472,14 +442,15 @@ describe("Wave completion suite gate readiness", () => {
       });
   });
 
-  it("preserves direct legacy compatibility with an explicit legacy-unavailable summary", () => {
+  it("fails closed for a graph carrying no verification_manifest, which no loaded State File can be (ADR-0098)", () => {
     const state = graph();
     const decision = evaluateWaveGate(state, null, deps());
 
-    expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: null });
+    expect(decision.verdict.kind).toBe("fail");
     expect(decision.checks[4]).toEqual({
-      passed: true,
-      summary: "4. Wave completion suite: legacy-unavailable (verification_manifest and active receipt absent).",
+      passed: false,
+      reason: "FAILED: Wave completion suite unavailable: the TaskGraph carries no verification_manifest " +
+        "(a legacy State File the loader refuses, ADR-0098).",
     });
     expect(value(deriveWaveReadiness(state, deps())).facts.waveCompletionSuiteReadiness).toEqual({
       kind: "known",
@@ -585,13 +556,9 @@ describe("Wave completion authority and atomic commit", () => {
     expect(historicalAfterLiveChange.kind).not.toBe("stale");
   });
 
-  it("writes schema v1 only for field-absent legacy compatibility", () => {
-    const committed = value(commitWaveGateCompletion(
-      value(deriveWaveReadiness(graph(), deps())),
-    ));
-
-    expect(committed.completedRegistration.schemaVersion).toBe(1);
-    expect("completionSuite" in committed.completedRegistration).toBe(false);
+  it("never commits a graph carrying no verification_manifest: there is no schema-v1 completion (ADR-0098)", () => {
+    const readiness = value(deriveWaveReadiness(graph(), deps()));
+    expect(commitWaveGateCompletion(readiness)).toMatchObject({ ok: false });
   });
 });
 

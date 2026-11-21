@@ -26,6 +26,7 @@ import {
   completedWaveGateFixture,
   protectedGraphFixture,
   satisfiedProof,
+  executingGraphFixture,
 } from "../fixtures/task-lifecycle";
 
 const task = i6PlanTask;
@@ -140,7 +141,7 @@ describe("addDependency", () => {
     ["a Task that is not pending", () => graph([implemented("T12", 2, ["src/t12.ts", "src/t12.test.ts"]), task("T25", 2, ["src/t25.ts", "src/t25.test.ts"])]), request("T12", ["T25"]), "not-pending"],
     ["a later-Wave dependency", () => graph([task("T12", 2, ["src/t12.ts", "src/t12.test.ts"]), task("T30", 3, ["src/t30.ts", "src/t30.test.ts"])]), request("T12", ["T30"]), "illegal-dependency"],
     ["a live Wave Gate run", () => graph(undefined, { active_wave_gate: activeWaveGateFixture({ runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64) }) }), request("T12", ["T25"]), "live-wave-gate"],
-    ["an active implementation reservation", () => graph(undefined, { executing_tasks: ["T28"] }), request("T12", ["T25"]), "implementation-active"],
+    ["an active implementation reservation", () => executingGraphFixture(graph(), ["T28"]), request("T12", ["T25"]), "implementation-active"],
     ["a graph outside the execute Phase", () => graph(undefined, { current_phase: "decompose" }), request("T12", ["T25"]), "not-executing"],
     ["an attested Task", () => graph([task("T12", 2, ["src/t12.ts", "src/t12.test.ts"], { implementation_attestation: true, verification_policy: ATTESTABLE }), task("T25", 2, ["src/t25.ts", "src/t25.test.ts"])]), request("T12", ["T25"]), "attested"],
     ["a Distill Task that waits", () => graph([distill("T30"), task("T25", 2, ["src/t25.ts", "src/t25.test.ts"])]), request("T30", ["T25"]), "distill-task"],

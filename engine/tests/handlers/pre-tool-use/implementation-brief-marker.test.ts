@@ -17,6 +17,8 @@ import { SPAWN_VETOES } from "../../../src/handlers/pre-tool-use/spawn-vetoes";
 import validateTaskExecution, { createValidateTaskExecutionHandler } from "../../../src/handlers/pre-tool-use/validate-task-execution";
 import { hookSuccessStdout, preToolUseRewriteResult, type HookHandler, type PreToolUseInput } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { satisfiedProof } from "../../fixtures/task-lifecycle";
 
 const MARKER = "LOOM_IMPLEMENTATION_BRIEF: T2";
 
@@ -165,7 +167,7 @@ function activeGraph(): string {
   writeFileSync(plan, "# Plan\n");
   const path = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(path, JSON.stringify({
-    current_phase: "execute", current_wave: 2, phase_artifacts: {}, skipped_phases: ["plan-alignment"],
+    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 2, phase_artifacts: {}, skipped_phases: ["plan-alignment"],
     spec_file: null, plan_file: plan, executing_tasks: [],
     wave_gates: {
       "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
@@ -174,7 +176,7 @@ function activeGraph(): string {
     tasks: [
       {
         id: "T1", description: "Build the seam", agent: "code-implementer-agent", wave: 1, depends_on: [],
-        file_list: ["src/seam.ts"], files_modified: ["src/seam.ts"], status: "completed", legacy_missing_proof: true,
+        file_list: ["src/seam.ts"], files_modified: ["src/seam.ts"], status: "completed", proof: satisfiedProof(["src/seam.ts"]),
       },
       {
         id: "T2", description: "Use the seam", agent: "code-implementer-agent", wave: 2, depends_on: ["T1"],

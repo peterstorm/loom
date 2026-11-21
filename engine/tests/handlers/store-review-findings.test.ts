@@ -14,10 +14,11 @@ import {
 import { claimsOfSeverity } from "../../src/core/findings";
 import { AGENT_POLICIES, DISTILL_AGENT } from "../../src/core/model-profiles";
 import { waveReviewStanding } from "../../src/core/wave-review-authority";
-import { distillTaskFixture } from "../fixtures/task-lifecycle";
+import { distillTaskFixture, satisfiedProof } from "../fixtures/task-lifecycle";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { Task } from "../../src/types";
 import { findingId } from "../fixtures/finding-id";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src", "cli.ts");
 
@@ -27,7 +28,7 @@ const baseTask: Task = {
   agent: "test",
   wave: 1,
   status: "implemented",
-  legacy_missing_proof: true,
+  proof: satisfiedProof([]),
   depends_on: [],
 };
 
@@ -218,6 +219,7 @@ describe("store-review-findings CLI — an override must land or say why not", (
 
   const graph = () => ({
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

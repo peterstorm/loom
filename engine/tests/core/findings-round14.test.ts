@@ -12,7 +12,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { Task, TaskCommonMetadata } from "../../src/types";
-import { taskFixture } from "../fixtures/task-lifecycle";
+import { satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 import {
   attributeFindings,
   deduplicateFindingIds,
@@ -31,6 +31,7 @@ import { applyReviewResolution, resolveReviewFindings } from "../../src/core/rev
 import { parseTaskGraph } from "../../src/state-manager";
 import { updateTaskFindings } from "../../src/handlers/helpers/store-review-findings";
 import { findingId } from "../fixtures/finding-id";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const draft = (severity: "critical" | "advisory", claim: string) =>
   makeDraftFinding({ severity, claim })!;
@@ -50,11 +51,12 @@ function task(overrides: Partial<TaskCommonMetadata> = {}): Task {
 function graphWith(t: Record<string, unknown>): unknown {
   return {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     spec_file: null,
     plan_file: null,
     wave_gates: {},
-    tasks: [{ id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [], ...t }],
+    tasks: [{ id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", proof: satisfiedProof([]), depends_on: [], ...t }],
   };
 }
 

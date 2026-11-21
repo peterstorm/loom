@@ -26,7 +26,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "subagent-start": new Set(["mark-subagent-active"]),
   "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear", "lint-coverage"]),
   "helper": new Set([
-    "complete-wave-gate", "populate-task-graph", "write-verification-manifest", "upgrade-spec-trace", "amend-spec-trace", "amend-spec", "revise-contract", "contract-status", "stop-check-plan", "red-then-green-status", "validate-task-graph", "repair-task-graph",
+    "populate-task-graph", "write-verification-manifest", "upgrade-spec-trace", "amend-spec-trace", "amend-spec", "revise-contract", "contract-status", "stop-check-plan", "red-then-green-status", "validate-task-graph", "repair-task-graph",
     "store-review-findings", "store-spec-check", "mark-tests-passed",
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "complete-orchestration", "lint-wave-gate", "validate-lint-rules",
@@ -89,7 +89,6 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "post-tool-use/record-orchestration-spawn",
   "subagent-start/mark-subagent-active",
   "session-start/cleanup-stale-subagents",
-  "helper/complete-wave-gate",
   "helper/populate-task-graph",
   "helper/write-verification-manifest",
   "helper/upgrade-spec-trace",

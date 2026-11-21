@@ -55,6 +55,7 @@ import { CLOCK, CLOCK_EXEMPTION, FEES, FEES_CLOCK_PLAN_FILE, FEES_CLOCK_PLAN_TEX
 import { labelledValue, value } from "../fixtures/parse-result";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -79,7 +80,7 @@ function briefGraph(fileList: readonly string[]): string {
   writeFileSync(join(root, PLAN_FILE), FEES_CLOCK_PLAN_TEXT);
   const path = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(path, JSON.stringify({
-    current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: PLAN_FILE, wave_gates: {},
     owner_obligations: OBLIGATIONS,
     tasks: [{

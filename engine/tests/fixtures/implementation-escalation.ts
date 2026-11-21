@@ -1,8 +1,6 @@
 import {
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   settleImplementationAttempt,
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
 import { TRUSTED_LEDGER_ONLY_POLICY, derivePendingTaskProof } from "../../src/core/proof-obligations";
@@ -20,21 +18,6 @@ const authority = (semanticAttempt: 1 | 2, reservationId: string, second: number
     taskScopeBaseline: [],
     dirtySetBaseline: [],
   }));
-
-const suite = (attempt: ReturnType<typeof authority>) => {
-  const authorized = labelledValue("implementation escalation", createTaskCompletionSuiteAuthority(attempt));
-  return {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: authorized.implementationAuthorityDigest,
-    suiteDigest: authorized.suiteDigest,
-    checks: [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "accepted", changedPaths: [] },
-    }],
-  };
-};
 
 const observation = (observedAt: string) => ({
   schemaVersion: 1,
@@ -61,7 +44,7 @@ const settle = (
     proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     active_implementation_attempt: attempt,
     implementation_attempt_history: history,
-  }, attempt, attempt, observation(observedAt), suite(attempt));
+  }, attempt, attempt, observation(observedAt), { kind: "accepted" });
   if (!result.ok || result.value.kind === "ignored") {
     throw new Error("implementation escalation fixture settlement failed");
   }

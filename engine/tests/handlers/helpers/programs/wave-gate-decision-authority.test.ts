@@ -52,7 +52,8 @@ import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { capturedSpecCheck } from "../../../../src/core/spec-check";
 import type { TaskGraph } from "../../../../src/types";
 import { findingId } from "../../../fixtures/finding-id";
-import { trustedPassEvidence } from "../../../fixtures/task-lifecycle";
+import { satisfiedProof, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../../../src/core/verification-manifest";
 
 const RUN_ID = "run.wave-decision";
 const DIGEST = "a".repeat(64);
@@ -67,6 +68,7 @@ const task = (id: string, claim: string): TaskGraph["tasks"][number] => ({
   agent: "code-implementer-agent",
   wave: 1,
   status: "completed",
+  proof: satisfiedProof([]),
   depends_on: [],
   findings: [{
     id: `${id}-1`,
@@ -84,6 +86,7 @@ const TASKS = [task("T1", "prefer a named predicate"), task("T2", "tighten the e
 
 const graph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
   current_phase: "execute",
+  verification_manifest: legacyDefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,
@@ -631,6 +634,7 @@ describe("Wave review epoch installation", () => {
       };
       const beforeActive: TaskGraph = {
         current_phase: "execute",
+        verification_manifest: legacyDefaultVerificationManifest(),
         current_wave: 1,
         phase_artifacts: {},
         skipped_phases: [],

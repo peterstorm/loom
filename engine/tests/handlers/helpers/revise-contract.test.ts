@@ -14,6 +14,7 @@ import type { Task } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
 import { completedWaveGateFixture, satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
@@ -80,6 +81,7 @@ function fixture(): Fixture {
   writeFileSync(statePath, JSON.stringify({
     spec_trace_version: 2,
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

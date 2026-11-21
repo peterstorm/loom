@@ -15,7 +15,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import { parseNewTestEvidence, type TaskGraph, type Task } from "../../../src/types";
-import { pendingTaskProof } from "../../fixtures/task-lifecycle";
+import { pendingTaskProof, satisfiedProof } from "../../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -27,6 +28,7 @@ function makeTmpDir(): string {
 function graphWith(task: Partial<Task>): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -80,7 +82,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
       statePath,
       JSON.stringify(
         graphWith({
-          status: "implemented",
+          status: "implemented", proof: satisfiedProof([]),
           test_result: { verdict: "trusted-fail" },
           test_evidence: "ledger: exit 1 (npm test)",
         }),
@@ -105,7 +107,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
   it("a trusted-pass verdict is equally protected", () => {
     writeFileSync(
       statePath,
-      JSON.stringify(graphWith({ status: "implemented", test_result: { verdict: "trusted-pass" } }), null, 2),
+      JSON.stringify(graphWith({ status: "implemented", proof: satisfiedProof([]), test_result: { verdict: "trusted-pass" } }), null, 2),
     );
 
     const { exitCode } = runHelper("TEST_PASSED: false\nTEST_EVIDENCE: fabricated failure\n");
@@ -199,7 +201,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
       statePath,
       JSON.stringify(
         graphWith({
-          status: "implemented",
+          status: "implemented", proof: satisfiedProof([]),
           test_result: { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)", provenance: "unverified" },
         }),
         null,

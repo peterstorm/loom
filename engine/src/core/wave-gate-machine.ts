@@ -840,26 +840,19 @@ export function commitWaveGateCompletion(
     return commitFailure("locked active/current Wave authority drifted before completion");
   }
   const activeCompletionSuite = snapshot.graph.active_wave_completion_suite;
-  const completedRegistration: CompletedWaveGateRegistration = activeCompletionSuite === undefined
-    ? canonicalRecord({
-        schemaVersion: 1,
-        kind: "completed-wave-gate",
-        runId: snapshot.registration.runId,
-        wave: snapshot.wave,
-        authorityDigest: snapshot.registration.authorityDigest,
-        revision: receipt.committedRevision,
-        completionReceipt: receipt,
-      })
-    : canonicalRecord({
-        schemaVersion: 2,
-        kind: "completed-wave-gate",
-        runId: snapshot.registration.runId,
-        wave: snapshot.wave,
-        authorityDigest: snapshot.registration.authorityDigest,
-        revision: receipt.committedRevision,
-        completionReceipt: receipt,
-        completionSuite: activeCompletionSuite,
-      });
+  if (activeCompletionSuite === undefined) {
+    return commitFailure("completion requires the exact accepted Wave completion suite to archive");
+  }
+  const completedRegistration: CompletedWaveGateRegistration = canonicalRecord({
+    schemaVersion: 2,
+    kind: "completed-wave-gate",
+    runId: snapshot.registration.runId,
+    wave: snapshot.wave,
+    authorityDigest: snapshot.registration.authorityDigest,
+    revision: receipt.committedRevision,
+    completionReceipt: receipt,
+    completionSuite: activeCompletionSuite,
+  });
   const priorHistory = advanced.wave_gate_history ?? [];
   if (priorHistory.some((entry) => entry.runId === completedRegistration.runId)) {
     return commitFailure(`Wave Gate run ${completedRegistration.runId} is already terminal in history`);

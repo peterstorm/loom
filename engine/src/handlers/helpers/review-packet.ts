@@ -226,7 +226,7 @@ function prepareTaskReviewPacket(root: string, task: Task, baseSha: BaseSha, hea
     modifiedPaths,
     artifacts: packetLeaves(root, baseSha, scope).map((leaf) => artifact(root, baseSha, leaf)),
     planContext: task.plan_context ?? "",
-    proofObligations: task.proof?.obligations ?? [],
+    proofObligations: task.proof.obligations,
   });
   return { packet, scope } as const;
 }

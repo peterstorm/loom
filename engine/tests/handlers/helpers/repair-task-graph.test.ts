@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { prepareTaskGraphRepair } from "../../../src/handlers/helpers/repair-task-graph";
 import type { PlanBindingDeps } from "../../../src/handlers/helpers/validate-model-bindings";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -27,6 +28,7 @@ afterEach(() => {
 function graph(taskFields: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     plan_title: "Repair plan",

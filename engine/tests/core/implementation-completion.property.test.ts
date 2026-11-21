@@ -2,11 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   canonicalArtifactBaselineDigest,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
-  evaluateTaskCompletionSuite,
   parseArtifactBaselineDigest,
   parseCanonicalArtifactBaseline,
   parseGitSha,
@@ -18,15 +15,14 @@ import {
   parseIsoInstant,
   parseReservationId,
   parseSemanticAttempt,
-  parseTaskCompletionSuiteAuthority,
-  parseTaskCompletionSuiteResult,
   parseTaskId,
   parseWave,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
   type ImplementationAttemptSettlementReceipt,
-  type TaskCompletionSuiteAuthority,
+  type TaskByteScopeOutcome,
 } from "../../src/core/implementation-completion";
+import { parseReviewPath } from "../../src/core/review-packet";
 import { UNKNOWN_SCHEME_BASELINE } from "../../src/core/artifact-baseline";
 import {
   CLAUDE_CONTENT_BLOCK_TYPES,
@@ -72,27 +68,15 @@ function authority(
   }));
 }
 
-function suiteAuthority(attempt: ImplementationAttemptAuthority): TaskCompletionSuiteAuthority {
-  return value(createTaskCompletionSuiteAuthority(attempt));
-}
-
-function suiteResult(
-  attempt: ImplementationAttemptAuthority,
-  checks?: readonly unknown[],
-): Record<string, unknown> {
-  const suite = suiteAuthority(attempt);
-  return {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: suite.implementationAuthorityDigest,
-    suiteDigest: suite.suiteDigest,
-    checks: checks ?? [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "accepted", changedPaths: ["engine/src/a.ts", "engine/tests/a.test.ts"] },
-    }],
-  };
-}
+const ACCEPTED_BYTE_SCOPE: TaskByteScopeOutcome = Object.freeze({ kind: "accepted" });
+const OUT_OF_SCOPE_WRITES: TaskByteScopeOutcome = Object.freeze({
+  kind: "out-of-scope-writes",
+  paths: Object.freeze([value(parseReviewPath("foreign.ts"))] as const),
+});
+const UNAVAILABLE_BYTE_SCOPE: TaskByteScopeOutcome = Object.freeze({
+  kind: "observation-unavailable",
+  reason: "baseline missing",
+});
 
 const authoredProof = () => derivePendingTaskProof({
   declaredArtifactExpectation: "changed",
@@ -137,7 +121,7 @@ function acceptedTransition(attempt = authority()) {
     attempt,
     attempt,
     observation(),
-    suiteResult(attempt),
+    ACCEPTED_BYTE_SCOPE,
   ));
 }
 
@@ -158,8 +142,6 @@ const parsers = [
   (raw: unknown) => parseCanonicalArtifactBaseline(raw, "baseline", UNKNOWN_SCHEME_BASELINE),
   canonicalArtifactBaselineDigest,
   parseImplementationAttemptAuthority,
-  parseTaskCompletionSuiteAuthority,
-  parseTaskCompletionSuiteResult,
   parseImplementationObservation,
   parseImplementationAttemptSettlementReceipt,
   parseImplementationAttemptHistory,
@@ -354,27 +336,12 @@ describe("implementation completion exact parsers", () => {
     expect(parseIsoInstant("2026-08-23T00:00:00Z").ok).toBe(false);
   });
 
-  it("rejects surplus keys at every authority, suite, observation, outcome, and receipt arm", () => {
+  it("rejects surplus keys at every authority, observation, outcome, and receipt arm", () => {
     const attempt = authority();
-    const suite = suiteAuthority(attempt);
     const transition = acceptedTransition(attempt);
     if (transition.kind !== "implemented") throw new Error("fixture must implement");
     const cases = [
       parseImplementationAttemptAuthority({ ...attempt, surplus: true }),
-      parseTaskCompletionSuiteAuthority({ ...suite, surplus: true }),
-      parseTaskCompletionSuiteAuthority({
-        ...suite,
-        checks: [{ ...suite.checks[0], surplus: true }],
-      }),
-      parseTaskCompletionSuiteResult({ ...suiteResult(attempt), surplus: true }),
-      parseTaskCompletionSuiteResult({
-        ...suiteResult(attempt),
-        checks: [{
-          checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-          scope: "task",
-          outcome: { kind: "accepted", changedPaths: [], surplus: true },
-        }],
-      }),
       parseImplementationObservation({ ...observation(), surplus: true }),
       parseImplementationObservation({
         schemaVersion: 1,
@@ -395,17 +362,13 @@ describe("implementation completion exact parsers", () => {
     cases.forEach((parsed) => expect(parsed.ok).toBe(false));
   });
 
-  it("round-trips canonical authority, suite, result, observation, receipt, and history immutably", () => {
+  it("round-trips canonical authority, observation, receipt, and history immutably", () => {
     const attempt = authority();
-    const suite = suiteAuthority(attempt);
-    const result = value(parseTaskCompletionSuiteResult(suiteResult(attempt)));
     const observed = value(parseImplementationObservation(observation()));
     const transition = acceptedTransition(attempt);
     if (transition.kind !== "implemented") throw new Error("fixture must implement");
     const valuesAndParsers = [
       [attempt, parseImplementationAttemptAuthority],
-      [suite, parseTaskCompletionSuiteAuthority],
-      [result, parseTaskCompletionSuiteResult],
       [observed, parseImplementationObservation],
       [transition.receipt, parseImplementationAttemptSettlementReceipt],
       [[transition.receipt], parseImplementationAttemptHistory],
@@ -458,80 +421,13 @@ describe("canonical baseline and self-digest policy", () => {
   });
 });
 
-const INVALID_TASK_SUITE_CASES = Object.freeze([
-  ["missing", []],
-  ["duplicate", [
-    { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-    { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-  ]],
-  ["surplus", [
-    { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-    { checkId: "project:surplus", scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-  ]],
-  ["wrong-scope", [
-    { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "wave", outcome: { kind: "accepted", changedPaths: [] } },
-  ]],
-] as const);
-
-describe("pure Task suite evaluation", () => {
-  it("accepts only the exact engine-owned byte-scope result", () => {
-    const attempt = authority();
-    const parsed = parseTaskCompletionSuiteResult(suiteResult(attempt));
-    expect(parsed.ok).toBe(true);
-    if (parsed.ok) {
-      const [only] = parsed.value.checks;
-      expect(only).toMatchObject({ checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task" });
-    }
-    const evaluated = evaluateTaskCompletionSuite(suiteAuthority(attempt), suiteResult(attempt));
-    expect(evaluated.kind).toBe("accepted");
-  });
-
-  it("rejects a syntactically valid digest that does not identify the canonical Task roster", () => {
-    const attempt = authority();
-    const malformed = { ...suiteResult(attempt), suiteDigest: "f".repeat(64) };
-
-    expect(parseTaskCompletionSuiteResult(malformed)).toMatchObject({
-      ok: false,
-      error: { errors: [expect.stringContaining("does not match its canonical roster")] },
-    });
-  });
-
-  it.each(INVALID_TASK_SUITE_CASES)("rejects %s roster evidence", (_label, checks) => {
-    const attempt = authority();
-    expect(parseTaskCompletionSuiteResult(suiteResult(attempt, checks)).ok).toBe(false);
-    const evaluated = evaluateTaskCompletionSuite(suiteAuthority(attempt), suiteResult(attempt, checks));
-    expect(evaluated.kind).toBe("rejected");
-    if (evaluated.kind === "rejected") expect(evaluated.authorityFailures.length).toBeGreaterThan(0);
-  });
-
-  it("keeps out-of-scope writes semantic and read uncertainty infrastructure", () => {
-    const attempt = authority();
-    const semantic = evaluateTaskCompletionSuite(suiteAuthority(attempt), suiteResult(attempt, [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "out-of-scope-writes", paths: ["foreign.ts"] },
-    }]));
-    const infrastructure = evaluateTaskCompletionSuite(suiteAuthority(attempt), suiteResult(attempt, [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "observation-unavailable", reason: "baseline could not be read" },
-    }]));
-    expect(semantic.kind === "rejected" && semantic.semanticFailures).toHaveLength(1);
-    expect(semantic.kind === "rejected" && semantic.infrastructureFailures).toHaveLength(0);
-    expect(infrastructure.kind === "rejected" && infrastructure.infrastructureFailures).toHaveLength(1);
-    expect(infrastructure.kind === "rejected" && infrastructure.semanticFailures).toHaveLength(0);
-  });
-});
-
 describe("Implementation Completion Oracle", () => {
-  it("implements only with exact accepted suite and satisfied Proof", () => {
+  it("implements only with an accepted byte scope and satisfied Proof", () => {
     const attempt = authority();
     const transition = acceptedTransition(attempt);
     expect(transition.kind).toBe("implemented");
     if (transition.kind !== "implemented") return;
     expect(transition.proof.state).toBe("satisfied");
-    expect(transition.suite.checks).toHaveLength(1);
-    expect(transition.suite.checks[0]?.checkId).toBe(TASK_BYTE_SCOPE_CHECK_ID_TEXT);
     expect(transition.receipt.transition).toBe("implemented");
     expect(transition.receipt.consumesSemanticAttempt).toBe(false);
   });
@@ -548,7 +444,7 @@ describe("Implementation Completion Oracle", () => {
       proofEvaluationPolicy: PI_STRUCTURED_EVIDENCE_POLICY,
     });
     const transition = settledValue(settleImplementationAttempt(
-      task(attempt), attempt, attempt, piObservation, suiteResult(attempt),
+      task(attempt), attempt, attempt, piObservation, ACCEPTED_BYTE_SCOPE,
     ));
     expect(transition.kind).toBe("implemented");
     if (transition.kind === "implemented") {
@@ -575,7 +471,7 @@ describe("Implementation Completion Oracle", () => {
       }),
     });
     const transition = settledValue(settleImplementationAttempt(
-      task(attempt), attempt, attempt, failing, suiteResult(attempt),
+      task(attempt), attempt, attempt, failing, ACCEPTED_BYTE_SCOPE,
     ));
     expect(transition.kind).toBe("retry-required");
     if (transition.kind === "retry-required") {
@@ -596,7 +492,7 @@ describe("Implementation Completion Oracle", () => {
         }) })
         : observation({ evidence: trustedPassEvidence([]) });
       const transition = settledValue(settleImplementationAttempt(
-        task(attempt), attempt, attempt, failedObservation, suiteResult(attempt),
+        task(attempt), attempt, attempt, failedObservation, ACCEPTED_BYTE_SCOPE,
       ));
       expect(transition.kind).toBe("escalation-required");
       if (transition.kind === "escalation-required") {
@@ -605,7 +501,7 @@ describe("Implementation Completion Oracle", () => {
     }));
   });
 
-  it("does not consume a semantic attempt for observation or suite infrastructure uncertainty", () => {
+  it("does not consume a semantic attempt for observation or byte-scope infrastructure uncertainty", () => {
     const attempt = authority();
     const unavailableObservation = {
       schemaVersion: 1,
@@ -613,18 +509,15 @@ describe("Implementation Completion Oracle", () => {
       observedAt: "2026-08-23T00:01:00.000Z",
       failure: { kind: "observation-unavailable", message: "harness evidence missing" },
     };
-    const unavailableSuite = suiteResult(attempt, [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "observation-unavailable", reason: "baseline missing" },
-    }]);
-    for (const [observed, suite] of [
-      [unavailableObservation, suiteResult(attempt)],
-      [observation(), unavailableSuite],
-    ]) {
-      const transition = settledValue(settleImplementationAttempt(task(attempt), attempt, attempt, observed, suite));
+    for (const [observed, byteScope, failure] of [
+      [unavailableObservation, ACCEPTED_BYTE_SCOPE, { kind: "implementation-observation-unavailable", message: "harness evidence missing" }],
+      [observation(), UNAVAILABLE_BYTE_SCOPE, { kind: "task-byte-scope-unavailable", reason: "baseline missing" }],
+    ] as const) {
+      const transition = settledValue(settleImplementationAttempt(task(attempt), attempt, attempt, observed, byteScope));
       expect(transition.kind).toBe("infrastructure-blocked");
       if (transition.kind === "infrastructure-blocked") {
+        expect(transition.failures).toEqual([failure]);
+        expect(transition.receipt.failureKinds).toEqual([failure.kind]);
         expect(transition.receipt.consumesSemanticAttempt).toBe(false);
       }
     }
@@ -634,7 +527,7 @@ describe("Implementation Completion Oracle", () => {
     const current = authority(1, "reservation-current");
     const stale = authority(1, "reservation-stale");
     expect(settledValue(settleImplementationAttempt(
-      task(current), current, stale, observation(), suiteResult(stale),
+      task(current), current, stale, observation(), ACCEPTED_BYTE_SCOPE,
     ))).toEqual({ kind: "ignored", reason: "stale" });
 
     const implemented = acceptedTransition(current);
@@ -644,7 +537,7 @@ describe("Implementation Completion Oracle", () => {
       current,
       current,
       observation(),
-      suiteResult(current),
+      ACCEPTED_BYTE_SCOPE,
     ))).toEqual({ kind: "ignored", reason: "duplicate" });
 
     const parsedObservation = value(parseImplementationObservation(observation()));
@@ -664,15 +557,8 @@ describe("Implementation Completion Oracle", () => {
       current,
       current,
       observation(),
-      suiteResult(current),
+      ACCEPTED_BYTE_SCOPE,
     ))).toEqual({ kind: "ignored", reason: "already-completed" });
-  });
-
-  it.each(INVALID_TASK_SUITE_CASES)("cannot implement with %s suite evidence", (_label, checks) => {
-    const attempt = authority();
-    const settled = settleImplementationAttempt(task(attempt), attempt, attempt, observation(), suiteResult(attempt, checks));
-    expect(settled.ok).toBe(false);
-    if (!settled.ok) expect(settled.error.kind).toBe("task-suite-authority-failure");
   });
 
   it("cannot implement an out-of-scope write even when Proof itself is satisfied", () => {
@@ -682,26 +568,26 @@ describe("Implementation Completion Oracle", () => {
       attempt,
       attempt,
       observation(),
-      suiteResult(attempt, [{
-        checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-        scope: "task",
-        outcome: { kind: "out-of-scope-writes", paths: ["foreign.ts"] },
-      }]),
+      OUT_OF_SCOPE_WRITES,
     ));
     expect(transition.kind).toBe("retry-required");
-    if (transition.kind === "retry-required") expect(transition.proof.state).toBe("satisfied");
+    if (transition.kind === "retry-required") {
+      expect(transition.proof.state).toBe("satisfied");
+      expect(transition.failures).toEqual([{ kind: "task-byte-scope-violation", paths: ["foreign.ts"] }]);
+      expect(transition.receipt.failureKinds).toEqual(["task-byte-scope-violation"]);
+      expect(transition.receipt.consumesSemanticAttempt).toBe(true);
+    }
   });
 
   it("settlement is deterministic and does not mutate any input", () => {
     const attempt = authority();
     const inputTask = task(attempt);
     const inputObservation = observation();
-    const inputSuite = suiteResult(attempt);
-    const before = JSON.stringify([inputTask, attempt, inputObservation, inputSuite]);
-    const first = settleImplementationAttempt(inputTask, attempt, attempt, inputObservation, inputSuite);
-    const second = settleImplementationAttempt(inputTask, attempt, attempt, inputObservation, inputSuite);
+    const before = JSON.stringify([inputTask, attempt, inputObservation, OUT_OF_SCOPE_WRITES]);
+    const first = settleImplementationAttempt(inputTask, attempt, attempt, inputObservation, OUT_OF_SCOPE_WRITES);
+    const second = settleImplementationAttempt(inputTask, attempt, attempt, inputObservation, OUT_OF_SCOPE_WRITES);
     expect(second).toEqual(first);
-    expect(JSON.stringify([inputTask, attempt, inputObservation, inputSuite])).toBe(before);
+    expect(JSON.stringify([inputTask, attempt, inputObservation, OUT_OF_SCOPE_WRITES])).toBe(before);
   });
 });
 
@@ -719,7 +605,7 @@ describe("settlement receipt history", () => {
         filesModified: [],
         newTestsWritten: false,
       }) }),
-      suiteResult(secondAttempt),
+      ACCEPTED_BYTE_SCOPE,
     ));
     if (first.kind !== "implemented" || second.kind !== "escalation-required") {
       throw new Error("fixtures must settle");

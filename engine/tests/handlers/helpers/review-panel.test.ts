@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { applyWaveTallyState } from "../../../src/handlers/helpers/review-panel";
 import type { FindingOutcome, WaveFindingId } from "../../../src/core/review-panel";
 import type { TaskGraph } from "../../../src/types";
+import { reviewBlockedWaveGraph, satisfiedProof } from "../../fixtures/task-lifecycle";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "src", "cli.ts");
 
@@ -16,20 +17,12 @@ const F2 = "T1:silent-failure-hunter-1";
 /** A wave-1 task graph with two criticals — one on a sensitive path, so the
  *  `security` lens is signal-selected and the default panel is three lenses. */
 function taskGraph() {
-  return {
-    current_phase: "execute",
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    current_wave: 1,
-    wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: false, blocked: true } },
-    tasks: [{
+  return reviewBlockedWaveGraph([{
       id: "T1",
       description: "d",
       agent: "code-implementer-agent",
       wave: 1,
-      status: "implemented",
+      status: "implemented", proof: satisfiedProof([]),
       depends_on: [],
       review_status: "blocked",
       findings: [
@@ -39,8 +32,7 @@ function taskGraph() {
       ],
       critical_findings: ["unchecked cast in the token reducer", "catch block swallows the error"],
       advisory_findings: ["prefer a named constant"],
-    }],
-  };
+    }]);
 }
 
 describe("review-panel locked tally update", () => {

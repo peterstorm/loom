@@ -23,6 +23,7 @@ import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import { activeWaveGateFixture, fileOf, protectedGraphFixture, siblingTaskFixture } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -57,7 +58,7 @@ const registrationNarrowing = (roles: readonly string[]): RegisteredWaveGateProg
 });
 
 const graphHolding = (task: Task): TaskGraph => protectedGraphFixture({
-  spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+  spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
   spec_file: null, plan_file: PLAN, wave_gates: {}, executing_tasks: [], tasks: [task],
   active_wave_gate: activeWaveGateFixture({ runId: RUN, wave: 1, authorityDigest: DIGEST }),
 });

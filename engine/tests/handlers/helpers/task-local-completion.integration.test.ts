@@ -87,10 +87,8 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: [],
       engineSkeletons: [],
     });
-    expect(observed.suite.checks[0]?.outcome).toEqual({
-      kind: "accepted",
-      changedPaths: ["src/a.ts"],
-    });
+    expect(observed.byteScope).toEqual({ kind: "accepted" });
+    expect(observed.attributedAttemptChangedPaths).toEqual(["src/a.ts"]);
     expect(observed.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
   });
 
@@ -112,7 +110,8 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: [],
       engineSkeletons: [],
     });
-    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
+    expect(observed.byteScope).toEqual({ kind: "accepted" });
+    expect(observed.attributedAttemptChangedPaths).toEqual(["src/a.ts"]);
   });
 
   it("keeps a foreign transcript path semantic even when it names an existing file", () => {
@@ -126,7 +125,7 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: [],
       engineSkeletons: [],
     });
-    expect(observed.suite.checks[0]?.outcome).toEqual({
+    expect(observed.byteScope).toEqual({
       kind: "out-of-scope-writes",
       paths: ["sibling.ts"],
     });
@@ -144,7 +143,8 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: ["sibling.ts"],
       engineSkeletons: [],
     });
-    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(observed.byteScope).toEqual({ kind: "accepted" });
+    expect(observed.attributedAttemptChangedPaths).toEqual([]);
     expect(observed.cumulativeProofArtifactChanges).toEqual([]);
     expect(observed.taskBytesChangedOrUnobservable).toBe(false);
     expect(observed.invalidationBytesChanged).toBe(false);
@@ -167,7 +167,8 @@ describe("Task-local completion observation shell", () => {
       authoritativeStatePath: statePath,
     });
 
-    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(observed.byteScope).toEqual({ kind: "accepted" });
+    expect(observed.attributedAttemptChangedPaths).toEqual([]);
   });
 
   it("keeps an unowned review-namespace write as out-of-scope evidence", () => {
@@ -186,7 +187,7 @@ describe("Task-local completion observation shell", () => {
       authoritativeStatePath: join(fixture.root, ".claude", "state", "active_task_graph.json"),
     });
 
-    expect(observed.suite.checks[0]?.outcome).toEqual({
+    expect(observed.byteScope).toEqual({
       kind: "out-of-scope-writes",
       paths: [".claude/reviews/forged-authority.json"],
     });
@@ -205,7 +206,7 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: [],
       engineSkeletons: [],
     });
-    expect(persistent.suite.checks[0]?.outcome).toEqual({
+    expect(persistent.byteScope).toEqual({
       kind: "out-of-scope-writes",
       paths: ["sibling.ts"],
     });
@@ -220,11 +221,12 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: [],
       engineSkeletons: [],
     });
-    expect(repaired.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(repaired.byteScope).toEqual({ kind: "accepted" });
+    expect(repaired.attributedAttemptChangedPaths).toEqual([]);
     expect(repaired.unresolvedRepositoryPaths).toEqual([]);
   });
 
-  it("makes the Task suite unavailable when a foreign path is committed after attempt registration", () => {
+  it("makes the byte scope unavailable when a foreign path is committed after attempt registration", () => {
     const fixture = repository();
     writeFileSync(join(fixture.root, "sibling.ts"), "export const sibling = 2;\n");
     execFileSync("git", ["add", "sibling.ts"], { cwd: fixture.root });
@@ -240,7 +242,7 @@ describe("Task-local completion observation shell", () => {
       engineSkeletons: [],
     });
 
-    expect(observed.suite.checks[0]?.outcome).toMatchObject({
+    expect(observed.byteScope).toMatchObject({
       kind: "observation-unavailable",
       reason: expect.stringContaining("does not equal attempt authority"),
     });
@@ -249,7 +251,7 @@ describe("Task-local completion observation shell", () => {
     expect(observed.invalidationBytesChanged).toBe(true);
   });
 
-  it("makes the Task suite unavailable when HEAD drifts across the bounded observations", () => {
+  it("makes the byte scope unavailable when HEAD drifts across the bounded observations", () => {
     const fixture = repository();
     const observedHeads = [
       { ok: true as const, headSha: fixture.authority.headSha },
@@ -267,13 +269,13 @@ describe("Task-local completion observation shell", () => {
       ...REAL_TASK_LOCAL_PORTS,
       observeHead: () => observedHeads.shift() ?? { ok: false, error: "unexpected extra HEAD read" },
     });
-    expect(observed.suite.checks[0]?.outcome).toMatchObject({
+    expect(observed.byteScope).toMatchObject({
       kind: "observation-unavailable",
       reason: expect.stringContaining("after Task-local observation"),
     });
   });
 
-  it("makes the Task suite unavailable when exact HEAD cannot be read", () => {
+  it("makes the byte scope unavailable when exact HEAD cannot be read", () => {
     const fixture = repository();
     const observed = observeTaskLocalCompletion({
       repositoryRoot: fixture.root,
@@ -284,7 +286,7 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: [],
       engineSkeletons: [],
     }, { ...REAL_TASK_LOCAL_PORTS, observeHead: () => ({ ok: false, error: "git object database unreadable" }) });
-    expect(observed.suite.checks[0]?.outcome).toMatchObject({
+    expect(observed.byteScope).toMatchObject({
       kind: "observation-unavailable",
       reason: expect.stringContaining("git object database unreadable"),
     });
@@ -355,10 +357,8 @@ describe("Task-local completion observation shell", () => {
       engineSkeletons: [],
     });
 
-    expect(observed.suite.checks[0]?.outcome).toEqual({
-      kind: "accepted",
-      changedPaths: ["calibration/dir", "scripts/x.ts"],
-    });
+    expect(observed.byteScope).toEqual({ kind: "accepted" });
+    expect(observed.attributedAttemptChangedPaths).toEqual(["calibration/dir", "scripts/x.ts"]);
     expect(observed.cumulativeProofArtifactChanges).toEqual(["calibration/dir", "scripts/x.ts"]);
     expect(observed.cumulativeModifiedPaths).toEqual(["calibration/dir", "scripts/x.ts"]);
     expect(observed.unresolvedRepositoryPaths).toEqual([]);
@@ -379,7 +379,7 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: [],
       engineSkeletons: [],
     });
-    expect(observed.suite.checks[0]?.outcome).toMatchObject({ kind: "observation-unavailable" });
+    expect(observed.byteScope).toMatchObject({ kind: "observation-unavailable" });
     expect(observed.taskBytesChangedOrUnobservable).toBe(true);
   });
 });
@@ -422,7 +422,8 @@ describe("engine skeleton observation at the Task-local observation seam (FR-012
 
     const observed = observeWith(fixture, [engineRecord(STUB)]);
 
-    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(observed.byteScope).toEqual({ kind: "accepted" });
+    expect(observed.attributedAttemptChangedPaths).toEqual([]);
     expect(observed.unresolvedRepositoryPaths).toEqual([]);
   });
 
@@ -434,7 +435,8 @@ describe("engine skeleton observation at the Task-local observation seam (FR-012
 
     const observed = observeWith(fixture, [engineRecord(path)]);
 
-    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(observed.byteScope).toEqual({ kind: "accepted" });
+    expect(observed.attributedAttemptChangedPaths).toEqual([]);
   });
 
   it("gives a deleted engine skeleton no digest, so its deletion stays an out-of-scope write", () => {
@@ -443,7 +445,7 @@ describe("engine skeleton observation at the Task-local observation seam (FR-012
 
     const observed = observeWith(fixture, [engineRecord(STUB)]);
 
-    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "out-of-scope-writes", paths: [STUB] });
+    expect(observed.byteScope).toEqual({ kind: "out-of-scope-writes", paths: [STUB] });
   });
 
   it("gives a symlink no digest even when its target holds the engine's bytes, so it is never subtracted", () => {
@@ -456,7 +458,7 @@ describe("engine skeleton observation at the Task-local observation seam (FR-012
 
     const observed = observeWith(fixture, [engineRecord(STUB)]);
 
-    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "out-of-scope-writes", paths: [STUB] });
+    expect(observed.byteScope).toEqual({ kind: "out-of-scope-writes", paths: [STUB] });
   });
 
   // The leaf reader's own failure arms (an lstat or no-follow read failing
@@ -479,7 +481,7 @@ describe("engine skeleton observation at the Task-local observation seam (FR-012
     });
 
     expect(readPaths).toEqual([STUB]);
-    expect(observed.suite.checks[0]?.outcome).toMatchObject({
+    expect(observed.byteScope).toMatchObject({
       kind: "observation-unavailable",
       reason: expect.stringContaining(`engine skeleton ${STUB}: ${error}`),
     });

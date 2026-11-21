@@ -22,7 +22,9 @@ import {
   protectedGraphFixture,
   satisfiedProof,
   taskFixture,
+  executingGraphFixture,
 } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const TYPES = "src/payload-contract.ts";
 const ACCEPTANCE = "tests/payload.acceptance.test.ts";
@@ -69,6 +71,7 @@ function populated(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return protectedGraphFixture({
     spec_trace_version: 2,
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -168,7 +171,7 @@ describe("reviseAcceptanceContract", () => {
   });
 
   it("refuses while implementation reservations are active", () => {
-    expect(refusal(populated({ executing_tasks: ["T3"] }))).toMatchObject({ kind: "implementation-active" });
+    expect(refusal(executingGraphFixture(populated(), ["T3"]))).toMatchObject({ kind: "implementation-active" });
   });
 
   it("refuses while a current-Wave Task holds an active implementation attempt, through the precondition Task Reopening shares", () => {

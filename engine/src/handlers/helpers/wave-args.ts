@@ -1,6 +1,6 @@
 /**
  * Single source of truth for --wave CLI parsing across the wave-scoped
- * helpers (complete-wave-gate, lint-wave-gate, mark-tests-passed). Each
+ * helpers (lint-wave-gate, mark-tests-passed). Each
  * helper previously carried its own copy with a "mirrors …" comment doing
  * the job of this import.
  */

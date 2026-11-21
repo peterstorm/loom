@@ -21,6 +21,8 @@ import {
 } from "../../fixtures/implementation-escalation";
 import { parseTaskGraph } from "../../../src/state-manager";
 import type { Task } from "../../../src/types";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { reserveLiveAttempt } from "../../fixtures/task-lifecycle";
 
 
 const requireReceipt = (receiptId: string | null): string => {
@@ -47,6 +49,7 @@ const installState = (taskFields: Record<string, unknown>): string | null => {
   const { terminal_receipt: _terminalReceipt, ...persistedFields } = taskFields;
   const graph = {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     plan_title: "Remediation plan",
@@ -140,14 +143,16 @@ describe("orchestration remediate consumes the escalation recovery", () => {
     const terminalReceiptId = requireReceipt(installState({
       ...implementationEscalatedTaskFields(),
     }));
-    // Live attempt: the task is still bound to executing_tasks.
-    const raw = JSON.parse(readFileSync(statePath, "utf-8")) as { executing_tasks: string[] };
-    raw.executing_tasks = ["T1"];
-    writeFileSync(statePath, JSON.stringify(raw));
+    // Live attempt: an escalated lineage cannot carry one (the State File
+    // refuses it), so a Task reserved under exact attempt authority is refused
+    // before its lineage is read.
+    installState({});
+    reserveLiveAttempt(statePath);
     const live = await remediateOperation(["--task", "T1", "--receipt", terminalReceiptId, "--reason", "live"]);
     expect(live).toMatchObject({ kind: "error" });
     if (live.kind !== "error") return;
     expect(live.message).toContain("live implementation attempt");
+    installState({ ...implementationEscalatedTaskFields() });
 
     // Legacy lineage: attempt-1 history with no protocol fields cannot even
     // load (no compatibility projection) — the aggregate command refuses it too.

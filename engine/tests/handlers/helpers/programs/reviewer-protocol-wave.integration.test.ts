@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { attributeFindings } from "../../../../src/core/findings";
+import { freezeVerificationManifest } from "../../../../src/core/verification-manifest";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { BASE_WAVE_REVIEW_AGENTS, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
 import { OWNER_MAP_SECTION, renderOwnerMapSection } from "../../../../src/core/owner-verification/owner-map";
@@ -38,7 +39,7 @@ import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../.
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
-import type { CurrentReviewRun, DraftFinding, Finding, Task, TaskGraph } from "../../../../src/types";
+import { parseNewTestEvidence, type CurrentReviewRun, type DraftFinding, type Finding, type Task, type TaskGraph } from "../../../../src/types";
 import { supersedeAbandonedWaveGateReview } from "../../../../src/core/wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
 import { observeRestartCarry } from "../../../../src/handlers/helpers/programs/wave-gate-replacement";
@@ -94,11 +95,26 @@ const specText = `# Feature: Wave fixture
 | Wave evidence | Exact issued evidence |
 `;
 const specPass = "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\n";
+/** Why `OWNED_X` owes no mutation: the fixture's manifest freezes no affected runner. */
+const OWNED_X_EXEMPTION = "the fixture manifest freezes no affected runner";
 /** One owned Invariant whose owner module is the fixture Task's only file, so the Task touches its family. */
 const OWNED_X = ownerObligation({
   invariant: "INV-1", title: "x is decided only by its owner", statement: "Every entry point reads x through src/x.ts.",
-  owner: "src/x.ts", siblings: [], matrixTest: "tests/x.matrix.test.ts", mutation: { kind: "verify" },
+  owner: "src/x.ts", siblings: [], matrixTest: "tests/x.matrix.test.ts", mutation: { kind: "exempt", reason: OWNED_X_EXEMPTION },
 });
+/** The plan that derives exactly `OWNED_X`, so the gate's plan integrity check agrees with the stamp. */
+const OWNED_X_PLAN = [
+  "# Model-free plan", "", "## Invariants", "",
+  `### ${OWNED_X.invariant}: ${OWNED_X.title}`, "",
+  "**Tier:** advisory",
+  "**Owner module:** `src/x.ts`",
+  "**Sibling entry points:** none",
+  "**Matrix test:** `tests/x.matrix.test.ts`",
+  `**Statement:** ${OWNED_X.statement}`,
+  `**Mutation exemption:** ${OWNED_X_EXEMPTION}`, "",
+].join("\n");
+/** `OWNED_X`'s matrix test: it reaches the owner, so the gate's coverage check passes. */
+const OWNED_X_MATRIX_TEST = 'import { expect, it } from "vitest";\nimport { x } from "../src/x";\n\nit("reads x through its owner", () => expect(x).toBe(1));\n';
 const X_SURFACE = { types: "src/x.ts", acceptance: "tests/x.acceptance.test.ts" };
 /** One Acceptance Contract whose Contract Task is the fixture Task and whose types file is the file that Task modified. */
 const X_CONTRACT = contract({
@@ -108,6 +124,52 @@ const X_CONTRACT = contract({
 const X_CONTRACT_FILES = [X_SURFACE.types, X_SURFACE.acceptance];
 /** A graph whose Task declares `X_CONTRACT_FILES`, stamped with `X_CONTRACT`: that Task is then a Contract Task writing a types file. */
 const asContractTask = (state: TaskGraph): TaskGraph => ({ ...state, acceptance_contracts: [X_CONTRACT] });
+/** The report `RED_ACCEPTANCE_CHECK` writes, beneath the protected completion report root. */
+const RED_ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.xml";
+/** A project check standing in for the acceptance runner: it reports `X_CONTRACT`'s one AS-001 testcase failing, as its RED Wave requires. */
+const RED_ACCEPTANCE_SCRIPT = [
+  'import { mkdirSync, writeFileSync } from "node:fs";',
+  'mkdirSync(".loom/completion-reports", { recursive: true });',
+  `writeFileSync(${JSON.stringify(RED_ACCEPTANCE_REPORT)}, ${JSON.stringify([
+    '<?xml version="1.0" encoding="UTF-8" ?>',
+    '<testsuites name="vitest tests" tests="1" failures="1" errors="0">',
+    `<testsuite name="${X_SURFACE.acceptance}" tests="1" failures="1" errors="0" skipped="0">`,
+    `<testcase classname="${X_SURFACE.acceptance}" name="AS-001: the Wave progresses">`,
+    '<failure message="expected 1 to be 2" type="AssertionError">expected 1 to be 2</failure>',
+    "</testcase>",
+    "</testsuite>",
+    "</testsuites>",
+  ].join("\n"))});`,
+  "process.exit(1);",
+  "",
+].join("\n");
+/** The manifest whose one Wave check is `RED_ACCEPTANCE_SCRIPT`. */
+const RED_ACCEPTANCE_MANIFEST = value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+  schemaVersion: 1,
+  kind: "loom-verification-manifest",
+  checks: [{
+    id: "project:acceptance",
+    scope: "wave",
+    executable: "node",
+    args: ["acceptance.mjs"],
+    cwd: ".",
+    timeoutMs: 10_000,
+    report: { kind: "required-file", path: RED_ACCEPTANCE_REPORT },
+  }],
+}))));
+/**
+ * Make `p`'s Task the Contract Task of `X_CONTRACT` before its Wave Gate
+ * starts, as population would: the contract stamped, its acceptance file
+ * written, and a frozen check that observes that file RED.
+ */
+async function contractWave(p: ReturnType<typeof project>): Promise<void> {
+  writeFileSync(join(p.root, ".gitignore"), "runs/\n.loom/completion-reports/\n");
+  writeFileSync(join(p.root, "acceptance.mjs"), RED_ACCEPTANCE_SCRIPT);
+  mkdirSync(join(p.root, "tests"), { recursive: true });
+  writeFileSync(join(p.root, X_SURFACE.acceptance),
+    'import { expect, it } from "vitest";\nimport { x } from "../src/x";\n\nit("AS-001: the Wave progresses", () => expect(x).toBe(2));\n');
+  await new StateManager(p.statePath).update((state) => ({ ...asContractTask(state), verification_manifest: RED_ACCEPTANCE_MANIFEST }));
+}
 
 /** One implemented Wave 1 Task with satisfied proof over `declaredFiles`. */
 function implementedTask(id: string, declaredFiles: readonly string[], modified: string,
@@ -118,7 +180,7 @@ function implementedTask(id: string, declaredFiles: readonly string[], modified:
   return taskFixture({ id, description: `review fixture ${id}`, agent: "code-implementer-agent", wave: 1,
     depends_on: [], status: "implemented", proof, file_list: [...declaredFiles], files_modified: [modified],
     ...trace, test_result: { verdict: "trusted-pass" },
-    test_evidence: "fixture checks passed", new_tests_written: true, new_test_evidence: "fixture tests present",
+    test_evidence: "fixture checks passed", new_test_observation: parseNewTestEvidence(true, "fixture tests present"),
     review_generation: 0, review_status: "pending", findings: [...priors],
     critical_findings: priors.filter(({ severity }) => severity === "critical").map(({ claim }) => claim), advisory_findings: [],
   });
@@ -135,8 +197,9 @@ function project(priors: readonly Finding[] = [], declaredFiles: readonly string
   writeFileSync(join(root, "src", "y.ts"), "export const y = 2;\n");
   writeFileSync(join(root, "spec.md"), specText);
   writeFileSync(join(root, "plan.md"), "# Model-free plan\n");
+  writeFileSync(join(root, ".gitignore"), "runs/\n");
   git(root, ["init", "-q"]);
-  git(root, ["add", "src/x.ts", "src/y.ts", "spec.md", "plan.md"]);
+  git(root, ["add", ".gitignore", "src/x.ts", "src/y.ts", "spec.md", "plan.md"]);
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
   const tasks = [
     implementedTask("T1", declaredFiles, "src/x.ts", { spec_anchors: ["FR-001", "AS-001"], spec_contributions: [] }, priors),
@@ -146,6 +209,13 @@ function project(priors: readonly Finding[] = [], declaredFiles: readonly string
   const statePath = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(statePath, JSON.stringify(value(parseTaskGraph(graph))));
   return { root, statePath, runsRoot: join(root, "runs") };
+}
+/** Stamp `OWNED_X` on `p` as population would: its plan derives the obligation and its matrix test exists. */
+async function ownXFamily(p: ReturnType<typeof project>): Promise<void> {
+  writeFileSync(join(p.root, "plan.md"), OWNED_X_PLAN);
+  mkdirSync(join(p.root, "tests"), { recursive: true });
+  writeFileSync(join(p.root, "tests", "x.matrix.test.ts"), OWNED_X_MATRIX_TEST);
+  await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
 }
 type Action = Readonly<{ kind: string; requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[];
   diagnostic?: { message: string }; request?: { requestId: string }; outcome?: unknown }>;
@@ -165,6 +235,15 @@ async function start(p: ReturnType<typeof project>, runId = "run.current", paren
 }
 const resume = (p: ReturnType<typeof project>, handle: RunDirHandle) => runCli(p, ["resume", "--runs-root", p.runsRoot, "--run", handle.runId]);
 const graph = (p: ReturnType<typeof project>) => value(parseTaskGraph(JSON.parse(readFileSync(p.statePath, "utf8"))));
+/**
+ * The State File without its Wave completion suite. A resume installs the
+ * Wave's accepted completion suite before any review install, so a refused
+ * review install leaves everything else byte-for-byte as it was.
+ */
+const withoutCompletionSuite = (bytes: Buffer): unknown => {
+  const { active_wave_completion_suite: _suite, ...rest } = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+  return rest;
+};
 /** A restart observation under which nothing can carry: these tests pin the full-reset restart. */
 const NO_CARRY_OBSERVED = { workspaces: [], issuedRosters: new Map<string, readonly string[]>() };
 /** The pre-fix shape of an owner-mapped Task's run: the five base reviewers bound, architecture-tech-lead absent. */
@@ -303,7 +382,7 @@ describe("registered Wave reviewer protocol", () => {
 
   it("FR-022: issues architecture-tech-lead last for a Task touching an owned family, carries the owner map to both owner-map roles, and completes only with all six reviewers", async () => {
     const p = project();
-    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    await ownXFamily(p);
     const { handle, action } = await start(p);
     const issued = action.requests!;
     expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS]);
@@ -360,7 +439,7 @@ describe("registered Wave reviewer protocol", () => {
 
   it("a completed run's replay refuses when a registered Task's roster can no longer be derived", async () => {
     const p = project();
-    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    await ownXFamily(p);
     const { handle, action } = await start(p);
     const issued = action.requests!;
     await capture(handle, issued[0]!.authority, specPass);
@@ -379,7 +458,7 @@ describe("registered Wave reviewer protocol", () => {
 
   it("FR-022: an owner-mapped Task's Review Run bound to only the base five reviewers settles nothing: the roster is the Task's derived one", async () => {
     const p = project();
-    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    await ownXFamily(p);
     const { handle, action } = await start(p);
     await new StateManager(p.statePath).update(toBaseFive);
     await capture(handle, action.requests![0]!.authority, specPass);
@@ -399,7 +478,7 @@ describe("registered Wave reviewer protocol", () => {
       return waveReviewerSlotProblem(state, state.tasks[0]!, context.value, issuedWaveProtocol(handle, registration(handle), authority));
     };
     const owned = project();
-    await new StateManager(owned.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    await ownXFamily(owned);
     const { handle, action } = await start(owned);
     const codeReviewer = action.requests!.find(({ authority }) => authority.role === "code-reviewer")!.authority;
     expect(membership(handle, codeReviewer, graph(owned))).toBeNull();
@@ -415,7 +494,7 @@ describe("registered Wave reviewer protocol", () => {
 
   it("FR-022: exhausted-run restart over an owner-mapped Task binds all six slots, and refuses a five-agent run", async () => {
     const p = project();
-    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    await ownXFamily(p);
     const { handle } = await start(p);
     const exhausted = (state: TaskGraph): TaskGraph => ({ ...state, tasks: state.tasks.map((task) => {
       const run = task.review_run;
@@ -557,7 +636,7 @@ describe("registered Wave reviewer protocol", () => {
 
   it("ADR-0069: issues architecture-tech-lead last for a Contract Task writing a types file, and carries the contract surface to both surface roles", async () => {
     const p = project([], X_CONTRACT_FILES);
-    await new StateManager(p.statePath).update(asContractTask);
+    await contractWave(p);
     const { handle, action } = await start(p);
     const issued = action.requests!;
     expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS]);
@@ -577,25 +656,26 @@ describe("registered Wave reviewer protocol", () => {
     expect(await resume(p, handle)).toMatchObject({ kind: "spawn-batch" });
   }, 30_000);
 
-  it("ADR-0069: a five-agent Review Run installed before its Task's review carried the contract surface collects and settles as issued", async () => {
+  // A contract stamped after the Wave's completion suite ran changes what the
+  // gate owes that contract: the suite's recorded acceptance expectation no
+  // longer matches, so the five-agent run settles nothing (ADR-0098: every
+  // execute graph carries a manifest, so no gate runs without the suite).
+  it("ADR-0069: a contract stamped after the Wave's completion suite ran conflicts with its acceptance expectation and settles nothing", async () => {
     const p = project([], X_CONTRACT_FILES);
     const { handle, action } = await start(p);
     const issued = action.requests!;
     expect(graph(p).tasks[0]!.review_run!.expected_agents).toEqual(BASE_WAVE_REVIEW_AGENTS);
     await new StateManager(p.statePath).update(asContractTask);
     await capture(handle, issued[0]!.authority, specPass);
-    const reviewers = issued.slice(1);
-    for (const { authority } of reviewers.slice(0, -1)) {
-      const step = await submit(p, handle, authority, payload(handle, authority));
-      expect(step.kind, `${authority.role}: ${JSON.stringify(step)}`).toBe("spawn-batch");
-      expect(graph(p).tasks[0]!.review_run!.expected_agents, authority.role).toEqual(BASE_WAVE_REVIEW_AGENTS);
-    }
-    const last = reviewers.at(-1)!.authority;
-    await submit(p, handle, last, payload(handle, last));
-    const settledTask = graph(p).tasks[0]!;
-    expect(settledTask.review_run).toBeUndefined();
-    expect(settledTask.review_status).toBe("passed");
-    expect(settledTask.accepted_review_authority?.run_id).toBe(handle.runId);
+    const first = issued[1]!.authority;
+    expect(await submit(p, handle, first, payload(handle, first))).toMatchObject({
+      kind: "blocked",
+      diagnostic: { kind: "wave-completion-suite-blocked", message: expect.stringContaining("acceptance-expectation-mismatch") },
+    });
+    const unsettled = graph(p).tasks[0]!;
+    expect(unsettled.review_run?.expected_agents).toEqual(BASE_WAVE_REVIEW_AGENTS);
+    expect(unsettled.review_run?.evidence.map(({ agent }) => agent)).toEqual(["code-reviewer"]);
+    expect(unsettled.review_status).not.toBe("passed");
   }, 60_000);
 
   it("re-anchors the completed Wave's claim hashes to the spec text its spec-check reviewed", async () => {
@@ -984,17 +1064,17 @@ describe("Wave Gate restart carries accepted review evidence", () => {
   it.each([
     ["a whole-roster acceptance", "x.ts", "Task T1 cannot keep the acceptance its restart carried from run run.current: drift in head, subject"],
     ["carried slots", "y.ts", "Task T2 carried review evidence no longer judges it: drift in head, subject"],
-  ])("the first install refuses %s whose reviewed bytes changed after the restart, and writes nothing", async (_label, file, refusal) => {
+  ])("the first install refuses %s whose reviewed bytes changed after the restart, and writes no review state", async (_label, file, refusal) => {
     const { p, next } = await restartedBeforeFirstResume();
-    writeFileSync(join(p.root, "src", file), "export const changed = true;\n");
+    writeFileSync(join(p.root, "src", file), `export const ${file.replace(".ts", "")} = 3;\n`);
     const before = readFileSync(p.statePath);
     expect(await resume(p, next)).toMatchObject({ kind: "blocked", diagnostic: { message: `internal Wave Gate failure: ${refusal}` } });
-    expect(readFileSync(p.statePath)).toEqual(before);
+    expect(withoutCompletionSuite(readFileSync(p.statePath))).toEqual(withoutCompletionSuite(before));
   }, 120_000);
 
   it("a restart names each reviewed Task it does not carry, and why, on its output", async () => {
     const { p, previous } = await exhausted();
-    writeFileSync(join(p.root, "src", "y.ts"), "export const changed = true;\n");
+    writeFileSync(join(p.root, "src", "y.ts"), "export const y = 3;\n");
     const restarted = await cliResult(p, ["restart", "--runs-root", p.runsRoot, "--run", previous.runId, "--new-run", "run.restarted"]);
     expect(restarted.status, restarted.stderr).toBe(0);
     const reported = restarted.stderr.split("\n").flatMap((line) => {
@@ -1278,7 +1358,7 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
       "succession")).toBe(false);
   }, 180_000);
 
-  it("the first batch install refuses a carried acceptance whose bytes changed after the start, and writes nothing", async () => {
+  it("the first batch install refuses a carried acceptance whose bytes changed after the start, and writes no review state", async () => {
     const p = await abandonedAdvisoryRound();
     await reopenAndReimplementT6(p);
     // The start's preflight and registration as `start wave-gate` commits them, before its first resume.
@@ -1301,7 +1381,7 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
     const installed = readFileSync(p.statePath);
     expect(await resume(p, next)).toMatchObject({ kind: "blocked", diagnostic: { message:
       "internal Wave Gate failure: Task T1 cannot keep the acceptance its succession carried from run run.first: drift in head, subject" } });
-    expect(readFileSync(p.statePath)).toEqual(installed);
+    expect(withoutCompletionSuite(readFileSync(p.statePath))).toEqual(withoutCompletionSuite(installed));
   }, 180_000);
 });
 

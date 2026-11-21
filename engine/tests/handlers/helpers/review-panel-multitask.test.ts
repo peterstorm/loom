@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { reviewBlockedWaveGraph, satisfiedProof } from "../../fixtures/task-lifecycle";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "src", "cli.ts");
 
@@ -37,44 +38,35 @@ const critical = (id: string, agent: string, file: string, claim: string) => ({
 });
 
 function taskGraph() {
-  return {
-    current_phase: "execute",
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    current_wave: 1,
-    wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: false, blocked: true } },
-    tasks: [
-      {
-        id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", depends_on: [], review_status: "blocked",
-        findings: [critical("code-reviewer-1", "code-reviewer", "src/auth/token.ts", "T1 unchecked cast")],
-        critical_findings: ["T1 unchecked cast"],
-        advisory_findings: [],
-      },
-      {
-        id: "T2", description: "d", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", depends_on: [], review_status: "blocked",
-        findings: [
-          // Same LOCAL id as T1's finding — legal, and the reason ids are
-          // wave-scoped before they reach a verifier.
-          critical("code-reviewer-1", "code-reviewer", "src/b.ts", "T2 unchecked cast"),
-          critical("silent-failure-hunter-1", "silent-failure-hunter", "src/c.ts", "T2 swallowed error"),
-        ],
-        critical_findings: ["T2 unchecked cast", "T2 swallowed error"],
-        advisory_findings: [],
-      },
-      // A wave-2 task, so "the brief is scoped to the wave" is not vacuous.
-      {
-        id: "T9", description: "d", agent: "code-implementer-agent", wave: 2,
-        status: "pending", depends_on: [], review_status: "pending",
-        findings: [critical("code-reviewer-1", "code-reviewer", "src/z.ts", "a later wave's blocker")],
-        critical_findings: ["a later wave's blocker"],
-        advisory_findings: [],
-      },
-    ],
-  };
+  return reviewBlockedWaveGraph([
+    {
+      id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
+      status: "implemented", proof: satisfiedProof([]), depends_on: [], review_status: "blocked",
+      findings: [critical("code-reviewer-1", "code-reviewer", "src/auth/token.ts", "T1 unchecked cast")],
+      critical_findings: ["T1 unchecked cast"],
+      advisory_findings: [],
+    },
+    {
+      id: "T2", description: "d", agent: "code-implementer-agent", wave: 1,
+      status: "implemented", proof: satisfiedProof([]), depends_on: [], review_status: "blocked",
+      findings: [
+        // Same LOCAL id as T1's finding — legal, and the reason ids are
+        // wave-scoped before they reach a verifier.
+        critical("code-reviewer-1", "code-reviewer", "src/b.ts", "T2 unchecked cast"),
+        critical("silent-failure-hunter-1", "silent-failure-hunter", "src/c.ts", "T2 swallowed error"),
+      ],
+      critical_findings: ["T2 unchecked cast", "T2 swallowed error"],
+      advisory_findings: [],
+    },
+    // A wave-2 task, so "the brief is scoped to the wave" is not vacuous.
+    {
+      id: "T9", description: "d", agent: "code-implementer-agent", wave: 2,
+      status: "pending", depends_on: [], review_status: "pending",
+      findings: [critical("code-reviewer-1", "code-reviewer", "src/z.ts", "a later wave's blocker")],
+      critical_findings: ["a later wave's blocker"],
+      advisory_findings: [],
+    },
+  ]);
 }
 
 describe("review panel over a multi-task wave", () => {

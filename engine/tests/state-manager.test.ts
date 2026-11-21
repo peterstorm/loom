@@ -12,7 +12,8 @@ import { capturedSpecCheck } from "../src/core/spec-check";
 import type { TaskId } from "../src/core/task-id";
 import { acceptedWaveCompletionSuite as acceptedCompletionSuite } from "./fixtures/accepted-wave-completion-suite";
 import { findingId } from "./fixtures/finding-id";
-import { trustedPassEvidence } from "./fixtures/task-lifecycle";
+import { executingGraphFixture, protectedGraphFixture, trustedPassEvidence, satisfiedProof } from "./fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -113,6 +114,7 @@ describe("StateManager", () => {
     const newState: TaskGraph = {
       ...minimalGraph(),
       current_phase: "execute",
+      verification_manifest: legacyDefaultVerificationManifest(),
       tasks: [{
         id: "T1",
         description: "test",
@@ -203,6 +205,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
   };
   const validGraph = {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -440,7 +443,12 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     const fileList = ["src/a.ts"];
     const labels = ["original"];
     const gateNotes = ["pending"];
-    const rawTask = { ...validTask, depends_on: dependsOn, file_list: fileList, metadata: { labels } };
+    // An executing Task holds exact attempt authority (ADR-0098).
+    const reserved = executingGraphFixture(
+      protectedGraphFixture({ ...validGraph, tasks: [{ ...validTask, file_list: ["src/a.ts"] }] }),
+      ["T1"],
+    ).tasks[0]!;
+    const rawTask = { ...reserved, depends_on: dependsOn, file_list: fileList, metadata: { labels } };
     const rawGate = {
       impl_complete: false,
       tests_passed: null,
@@ -1280,6 +1288,7 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
   };
   const graph = (task: Record<string, unknown>) => ({
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     tasks: [{ ...validTask, ...task }],
     wave_gates: {},
@@ -1363,6 +1372,7 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
 describe("protected Wave Gate abandonment stamp (orchestration abandon → tombstone → supersede)", () => {
   const waveGraph = {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],
@@ -1371,7 +1381,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     wave_gates: {},
     tasks: [{
       id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-      status: "implemented", depends_on: [],
+      status: "implemented", proof: satisfiedProof([]), depends_on: [],
     }],
   };
   const tombstone = (reason = "gate terminally blocked", supersededBy: string | null = null) => ({

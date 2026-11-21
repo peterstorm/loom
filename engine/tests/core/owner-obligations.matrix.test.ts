@@ -238,7 +238,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     mkdirSync(join(root, ".claude", "plans"), { recursive: true });
     writeFileSync(join(root, PLAN_FILE), "# Plan: matrix\n");
     const parsed = parseTaskGraph({
-      spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: PLAN_FILE, wave_gates: {},
       ...(stamp === undefined ? {} : { owner_obligations: stamp }),
       tasks: [taskFixture({
@@ -392,12 +392,15 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
    * Whether the sibling `state-file-wire.ts` loads the graph, written as JSON,
    * with a receipt minted under `owner`. The wire re-derives the authority from
    * the stamp on purpose instead of trusting the receipt's roster: a receipt
-   * never certifies itself. The graph carries no frozen manifest, so the wire
-   * holds the receipt to the legacy engine default.
+   * never certifies itself. The graph is written under the pre-I6 default its
+   * Tasks were derived for, and the receipt is minted under that same manifest.
    */
   const loads = (value: TaskGraph, owner: OwnerCheckAuthority | null): boolean => {
-    const { verification_manifest: _frozen, ...legacy } = value;
-    const written = { ...legacy, active_wave_completion_suite: receiptUnder(owner, legacyDefaultVerificationManifest()) };
+    const written = {
+      ...value,
+      verification_manifest: legacyDefaultVerificationManifest(),
+      active_wave_completion_suite: receiptUnder(owner, legacyDefaultVerificationManifest()),
+    };
     return parseTaskGraph(JSON.parse(JSON.stringify(written))).ok;
   };
 

@@ -247,7 +247,7 @@ It is orchestration authority: an Agent that could edit it could forge phase com
 | `spec_file`, `plan_file` | `null` (`spec_file` is set at once with `--skip-specify`) | Recorded when the phase artifact appears |
 | `tasks`, `wave_gates` | `[]`, `{}` | Installed by `populate-task-graph` with `github_issue`, `current_wave` and `executing_tasks` |
 
-Task status moves `pending` → `implemented` (the exact attempt satisfies proof and the Task-local suite) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).
+Task status moves `pending` → `implemented` (the exact attempt satisfies proof within its byte scope) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).
 
 ### Immutable Run Directories
 
@@ -434,7 +434,7 @@ Determinism is scoped to what Loom can observe and own:
 
 - semantic design/review correctness still depends on models and user judgment;
 - a tool call with no `agent_id` cannot be attributed in a contended session, so it is neither recorded nor gated; Pi children run without the live phase gate, because Pi cannot name a tool call’s caller;
-- a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), or on Pi to the first Task id in the parent's spawn prompt; such a guess settles only through the untrusted legacy resolution, which stores its evidence but leaves the Task pending for revalidation and reports the attribution as unproven, and it can never complete a Task, because completion requires engine-minted attempt authority;
+- an implementation result that holds no engine-minted attempt authority settles nothing: every executing Task of a loadable State File carries an attempt (ADR-0098), so the engine never guesses a Task from the executing set or a parent's spawn prompt;
 - report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals; likewise a security sandbox receipt's nonce binds it to its artifact path but does not authenticate it against a hunter that writes the artifact itself, and a security ballot is bound to its issued verifier spawn, but against a subagent that evades the shell-string guard (on either harness) a verification run's capture file stays writable (no capture attestation backs it, so neither harness imports or counts such a slot; see [Running a security audit](./security-audit.md#honest-limits));
 - the shell guard judges command text, not an abstract Bash execution graph;
 - a machine's digest pin is engine source the user's account can write, so code an agent gets executed indirectly (a Git hook, a package script) could rewrite a machine and its pin together; pinning turns that into a coordinated change of shipped code, and only OS isolation would close it;

@@ -23,6 +23,7 @@ import type { Task, TaskGraph } from "../../src/types";
 import { canonicalTempDir } from "./canonical-temp-dir";
 import { observedWorkspace } from "./reviewed-workspace";
 import { protectedGraphFixture, taskFixture } from "./task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 /** A fresh project root holding `planFile`; the root is pushed onto `cleanup`. */
 export function projectWithPlanFile(prefix: string, planFile: string, cleanup: string[]): string {
@@ -47,7 +48,7 @@ export function reviewGraphFixture(
   stamps: Readonly<Record<string, unknown>> = {},
 ): TaskGraph {
   return protectedGraphFixture({
-    spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+    spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: planFile, wave_gates: {}, ...stamps, tasks,
   });
 }

@@ -52,15 +52,8 @@ import {
   type AnchoredDirectoryIdentity,
 } from "./utils/no-follow-fs";
 import {
-  findLegacyWaveGateCompletionReplay,
-  deriveLegacyWaveGateCompatibilityAuthority,
-  type LegacyWaveGateCompatibilityAuthority,
-  type LegacyWaveGateCompletionReplayError,
-} from "./core/legacy-archive";
-import {
   parseActiveWaveGateRegistration,
   parseActiveWaveGateTerminalOutcome,
-  parseLegacyWaveGateMigrationAuthority,
   parseTaskGraph,
   type ParsedTaskGraph,
 } from "./state-file-wire";
@@ -80,10 +73,8 @@ export {
   taskIdError,
   taskUnionError,
   orphanExecutionReservationError,
-  parseLegacyWaveGateMigrationAuthority,
 } from "./state-file-wire";
 export type {
-  ParsedLegacyWaveGateMigrationAuthority,
   ParsedTask,
   ParsedTaskGraph,
 } from "./state-file-wire";
@@ -518,37 +509,6 @@ export class StateManager {
     });
   }
 
-  /** Explicit anti-corruption migration for a historical graph that predates
-   * active registrations. No run id, Wave, or digest is invented implicitly. */
-  async migrateLegacyWaveGateRegistration(raw: unknown): Promise<ActiveWaveGateRegistration> {
-    const parsed = parseLegacyWaveGateMigrationAuthority(raw);
-    if (!parsed.ok) throw new Error(parsed.error);
-    const { registration, compatibility } = parsed.value;
-    return this.updateAndReturn((state) => {
-      const terminalReplay = findLegacyWaveGateCompletionReplay(state, compatibility);
-      if (!terminalReplay.ok) throw new Error(terminalReplay.error.message);
-      if (terminalReplay.value !== null) {
-        throw new Error(`Legacy Wave ${registration.wave} is already completed by run ${terminalReplay.value.runId}`);
-      }
-      const existing = state.active_wave_gate;
-      if (existing !== undefined) {
-        const exactReplay = existing.runId === registration.runId &&
-          existing.wave === registration.wave &&
-          existing.authorityDigest === registration.authorityDigest &&
-          existing.revision === 0 && existing.terminalOutcome === null;
-        if (exactReplay) return { state, value: existing };
-        throw new Error("Legacy migration is allowed only when active Wave Gate authority is absent");
-      }
-      if (state.current_phase !== "execute" || state.current_wave !== registration.wave) {
-        throw new Error("Legacy migration must exactly match protected execute/current_wave authority");
-      }
-      if (state.tasks.every((task) => task.wave !== registration.wave)) {
-        throw new Error(`Legacy migration wave ${registration.wave} has no protected Tasks`);
-      }
-      return { state: { ...state, active_wave_gate: registration }, value: registration };
-    });
-  }
-
   /** Lock, re-derive completion through the caller's pure domain function,
    * persist terminal history + advancement together, and return its receipt. */
   async commitActiveWaveGateCompletion(
@@ -573,11 +533,8 @@ export class StateManager {
         throw new Error("Completion result does not terminalize the exact locked active registration");
       }
       const activeSuite = state.active_wave_completion_suite;
-      const suiteArchivedExactly = activeSuite === undefined
-        ? terminal.schemaVersion === 1
-        : terminal.schemaVersion === 2 && terminal.completionSuite === activeSuite;
-      if (!suiteArchivedExactly) {
-        throw new Error("Completion must archive the exact active Wave completion suite using the matching history schema");
+      if (activeSuite === undefined || terminal.completionSuite !== activeSuite) {
+        throw new Error("Completion must archive the exact active Wave completion suite");
       }
       if (committed.value.graph.active_wave_gate !== undefined ||
           committed.value.graph.active_wave_completion_suite !== undefined) {
@@ -666,17 +623,3 @@ export class StateManager {
       }));
   }
 }
-
-/** @deprecated Legacy wave-gate compatibility migration — archived in
- *  ./core/legacy-archive (Section C). New completions use the registered
- *  Wave Gate authority (active_wave_gate); this type + derive path survive
- *  only for graphs that predate registration. Deprecation horizon: retire
- *  once no pre-registration graph can still be completed. */
-export {
-  deriveLegacyWaveGateCompatibilityAuthority,
-  findLegacyWaveGateCompletionReplay,
-};
-export type {
-  LegacyWaveGateCompatibilityAuthority,
-  LegacyWaveGateCompletionReplayError,
-};

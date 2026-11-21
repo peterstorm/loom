@@ -138,7 +138,6 @@ import {
 /** The helpers whose own segment may write guarded state (never a protected
  *  directory) — matched by `segmentInvokesHelper` below. */
 export const WHITELISTED_HELPERS: readonly string[] = [
-  "complete-wave-gate",
   "mark-tests-passed",
   "store-review-findings",
   "store-spec-check",

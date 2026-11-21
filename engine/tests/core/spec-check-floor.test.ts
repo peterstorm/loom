@@ -16,6 +16,7 @@ import {
 } from "../../src/core/requirement-coverage";
 import { epochSettledFloor } from "../../src/core/wave-review-authority";
 import type { CapturedSpecCheck, SpecCheck, TaskGraph, WaveReviewEpochAuthority } from "../../src/types";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 
 /**
@@ -298,6 +299,7 @@ describe("a persisted evidence failure carries its cause across a reload", () =>
 describe("settleSpecCheck aggregate command", () => {
   const state = (): TaskGraph => ({
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     current_wave: 5,
     phase_artifacts: {},
     skipped_phases: [],

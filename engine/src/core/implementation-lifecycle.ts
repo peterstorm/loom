@@ -86,7 +86,6 @@ function attestedTask(task: Task, proof: PendingTaskProof): Task {
     new_tests_required: undefined,
     proof,
     revalidation_required: undefined,
-    legacy_missing_proof: undefined,
   });
 }
 
@@ -115,7 +114,7 @@ export function armImplementationAttestation(
   if (task.implementation_attestation === true) {
     return lifecycleFailure({ kind: "already-attested", taskId: task.id });
   }
-  if (task.proof?.state === "satisfied") {
+  if (task.proof.state === "satisfied") {
     return lifecycleFailure({ kind: "proof-already-satisfied", taskId: task.id });
   }
   const proof = attestedProofFor(task);

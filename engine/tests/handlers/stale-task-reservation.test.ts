@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyActiveSubagent } from "../../src/machine";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const created: string[] = [];
 const previousDir = process.env.LOOM_SUBAGENT_DIR;
@@ -210,6 +211,7 @@ describe("Pi ordering parity", () => {
     );
     const state = {
       current_phase: "execute" as const,
+      verification_manifest: legacyDefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

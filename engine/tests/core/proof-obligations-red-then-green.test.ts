@@ -12,9 +12,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
 import {
@@ -128,6 +126,9 @@ const ERA_ROWS: readonly EraRow[] = [
  */
 const POPULATABLE_ERA_ROWS: readonly EraRow[] = ERA_ROWS.filter(({ manifest, era }) =>
   era === "not-owed" || manifest()?.affectedRunner !== undefined);
+
+/** The rows the State File loads: row (f)'s manifest-less execute graph is refused at load (ADR-0098). */
+const LOADABLE_ERA_ROWS: readonly EraRow[] = POPULATABLE_ERA_ROWS.filter(({ manifest }) => manifest() !== undefined);
 
 function authoredTask(id: string, newTests: "required" | "claimant" | "existing-tests-sufficient"): AuthoredTask {
   return {
@@ -422,8 +423,6 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
       dirtySetBaseline: [],
     });
     if (!authority.ok) throw new Error(authority.error.errors.join("; "));
-    const suite = createTaskCompletionSuiteAuthority(authority.value);
-    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
     return settleImplementationAttempt({
       id: "T1",
       status: "pending",
@@ -441,13 +440,7 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
       observedAt: "2026-10-16T00:01:00.000Z",
       evidence: JSON.parse(JSON.stringify({ ...observed(redThenGreen), filesModified: [] })),
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-    }, {
-      schemaVersion: 1,
-      kind: "task-completion-suite-result",
-      implementationAuthorityDigest: suite.value.implementationAuthorityDigest,
-      suiteDigest: suite.value.suiteDigest,
-      checks: [{ checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } }],
-    });
+    }, { kind: "accepted" });
   }
 
   it.each(ALL_GAPS.filter(({ kind }) => kind !== "ledger-unavailable"))("FR-009: the $kind gap mints its own receipt failure kind and retries", (gap) => {
@@ -478,12 +471,19 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     }
   });
 
-  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File obligation-match check accepts the populated graph for $row", ({ manifest }) => {
+  it.each(LOADABLE_ERA_ROWS)("FR-005: the State File obligation-match check accepts the populated graph for $row", ({ manifest }) => {
     const parsed = parseTaskGraph(wire(populated(manifest())));
     expect(parsed.ok, parsed.ok ? "" : parsed.error).toBe(true);
   });
 
-  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File check refuses obligations of the other era for $row", ({ manifest, era }) => {
+  it("ADR-0098: the State File refuses row (f)'s manifest-less execute graph rather than defaulting its era", () => {
+    expect(parseTaskGraph(wire(populated(undefined)))).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("legacy State File refused (ADR-0098): an execute-phase TaskGraph without verification_manifest"),
+    });
+  });
+
+  it.each(LOADABLE_ERA_ROWS)("FR-005: the State File check refuses obligations of the other era for $row", ({ manifest, era }) => {
     const raw = wire(populated(manifest()));
     const tasks = raw.tasks as Array<Record<string, unknown>>;
     const t1 = tasks.find((task) => task.id === "T1")!;
@@ -536,7 +536,7 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     });
   });
 
-  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File migration derives a proof-less pending Task's obligations under $row's era", ({ manifest, era }) => {
+  it.each(LOADABLE_ERA_ROWS)("FR-005: the State File migration derives a proof-less pending Task's obligations under $row's era", ({ manifest, era }) => {
     const raw = wire(populated(manifest()));
     const tasks = raw.tasks as Array<Record<string, unknown>>;
     delete tasks.find((task) => task.id === "T1")!.proof;
@@ -547,16 +547,11 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     expect(kinds(migrated?.proof?.obligations ?? [])).toEqual(expectedObligationKinds(era).T1);
   });
 
-  it.each(POPULATABLE_ERA_ROWS)("FR-005: revalidation re-derives a proof-less Task's obligations under $row's era", ({ manifest, era }) => {
+  it.each(POPULATABLE_ERA_ROWS)("FR-005: revalidation keeps a Task's frozen Proof under $row's era", ({ manifest }) => {
     const frozen = manifest();
     const graph = populated(frozen);
-    for (const [id, expected] of Object.entries(expectedObligationKinds(era))) {
-      const { proof: _cleared, status: _status, revalidation_required: _marker, ...metadata } = taskOf(graph, id);
-      const legacy: Task = { ...metadata, status: "completed", legacy_missing_proof: true };
-      const revalidated = returnToRevalidation(legacy, frozen);
-      expect(kinds(revalidated.proof?.obligations ?? []), id).toEqual(expected);
-      // A Task that still holds its Proof keeps it exactly.
-      expect(returnToRevalidation(taskOf(graph, id), frozen).proof).toEqual(taskOf(graph, id).proof);
+    for (const id of Object.keys(expectedObligationKinds("not-owed"))) {
+      expect(returnToRevalidation(taskOf(graph, id), frozen).proof, id).toEqual(taskOf(graph, id).proof);
     }
   });
 });

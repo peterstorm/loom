@@ -17,6 +17,7 @@ import { validateTaskExecutionBatch } from "../../../src/handlers/task-execution
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
 import { taskFixture, type TaskFixtureInput } from "../../fixtures/task-lifecycle";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
+import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 /** Exercise the production pure decision while preserving concise assertions. */
 function validateExecution(
@@ -55,6 +56,7 @@ function mkState(
 ): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

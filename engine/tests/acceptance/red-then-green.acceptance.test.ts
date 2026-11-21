@@ -21,11 +21,6 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  buildTaskLocalByteObservation,
-  NO_ENGINE_SKELETONS,
-  parseNewTestEvidence,
-} from "../../src/core/implementation-application";
-import {
   createImplementationAttemptAuthority,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
@@ -55,7 +50,6 @@ import {
 import {
   settleExactImplementation,
   type ExactImplementationSettlement,
-  type ExactImplementationSettlementPorts,
   type ExactImplementationTransportFacts,
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import { parseEvidenceLine } from "../../src/machine/evidence";
@@ -64,6 +58,7 @@ import { GREEN_RUN, RED_RUN, rawTestRun, type RawEvent } from "../fixtures/raw-t
 import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 import { agentCommandGraph, i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
+import { declaredFilesChangedPorts } from "../fixtures/declared-files-changed-ports";
 
 // --- Repository, files and runs ---
 
@@ -246,35 +241,6 @@ function reserved(graph: TaskGraph, taskId: string): Readonly<{ graph: TaskGraph
   };
 }
 
-const snapshots = (paths: readonly string[], changed: boolean) =>
-  [...paths].sort().map((artifact) => ({
-    artifact,
-    snapshot: changed ? { kind: "sha256" as const, digest: "b".repeat(64) } : { kind: "missing" as const },
-  }));
-
-/** Every declared file changed in this attempt, and new tests were written. */
-function ports(attempt: ImplementationAttemptAuthority, fileList: readonly string[]): ExactImplementationSettlementPorts {
-  return {
-    repository: {
-      root: ROOT,
-      authoritativeStatePath: `${ROOT}/.claude/state/active_task_graph.json`,
-      observeTaskLocal: () => buildTaskLocalByteObservation({
-        authority: attempt,
-        attemptBaseline: snapshots(fileList, false),
-        currentAttemptScope: snapshots(fileList, true),
-        proofBaseline: snapshots(fileList, false),
-        currentProofScope: snapshots(fileList, true),
-        parserModifiedPaths: [],
-        priorAttributedPaths: [],
-        repositoryChangedPaths: [...fileList],
-        siblingOwnedPaths: [],
-        engineSkeletons: NO_ENGINE_SKELETONS,
-      }),
-    },
-    newTests: { collect: () => ({ ok: true, value: parseNewTestEvidence(true, `new tests in ${fileList.join(", ")}`) }) },
-  };
-}
-
 type SettleOptions = Readonly<{
   transport?: "Claude" | "Pi";
   policy?: ProofEvaluationPolicy;
@@ -302,7 +268,7 @@ function settle(
     proofEvaluationPolicy: options.policy ?? TRUSTED_LEDGER_ONLY_POLICY,
     ledger: epoch,
   };
-  return settleExactImplementation(state, facts, ports(attempt, taskOf(state, taskId).file_list ?? []));
+  return settleExactImplementation(state, facts, declaredFilesChangedPorts(taskOf(state, taskId).file_list ?? []));
 }
 
 const failureKind = (gap: RedThenGreenGap): RedThenGreenFailureKind => `proof:red-then-green-unproven:${gap.kind}`;

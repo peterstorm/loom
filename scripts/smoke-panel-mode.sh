@@ -100,9 +100,14 @@ FAIL=0
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
+# An execute-phase State File carries its frozen manifest: the loader refuses
+# one without it (ADR-0098). Earlier phases carry none.
+MANIFEST_JSON="$(bun -e "import { legacyDefaultVerificationManifest } from '$LOOM_DIR/engine/src/core/verification-manifest.ts'; process.stdout.write(JSON.stringify(legacyDefaultVerificationManifest()))")"
+
 # Write the state file at the given phase (chmod dance mirrors StateManager).
 write_state() {
-  local phase="$1" plan_file="$2"
+  local phase="$1" plan_file="$2" manifest=""
+  if [ "$phase" = "execute" ]; then manifest="\"verification_manifest\": $MANIFEST_JSON,"; fi
   # Explicit if (not `[ -f ] && chmod || true`): a real chmod failure must abort
   # loudly under set -e, not be swallowed and surface three steps later as a
   # confusing phase mismatch. When the file is absent there is nothing to unlock.
@@ -110,6 +115,7 @@ write_state() {
   cat > "$STATE" <<JSON
 {
   "current_phase": "$phase",
+  $manifest
   "phase_artifacts": {},
   "skipped_phases": ["brainstorm", "specify", "clarify"],
   "spec_dir": "$SPEC_DIR_REL",

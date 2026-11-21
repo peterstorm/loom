@@ -105,8 +105,8 @@ observation explicitly, and engine-written bytes are subtracted before the chang
     attempt and never passes.
   - `reconcile-implementation-proof.ts` observes conformance over the Task's current bytes. A read
     failure aborts the reconcile without changing state.
-  - The authority-free Pi untrusted stop (`applyUntrustedStopResolution` in
-    `core/implementation-application.ts`) passes the named constant `LEGACY_STOP_CONFORMANCE`
+  - The authority-free Pi untrusted stop (applyUntrustedStopResolution in
+    `core/implementation-application.ts`, deleted by ADR-0098) passed the named constant LEGACY_STOP_CONFORMANCE
     (`not-owed`). That path always leaves the Task `pending` with `revalidation_required`, so the
     exact settlement or reconcile that follows judges it.
 - **Engine bytes subtracted (FR-012).** `buildTaskLocalByteObservation`
@@ -135,7 +135,7 @@ observation explicitly, and engine-written bytes are subtracted before the chang
 As AD-5 specified, `contractConformance` is a required field of `ObservedProofEvidence`, of
 `IncomingImplementationEvidence` and of the `reconcileTaskFromStoredEvidence` parameter. Every
 settlement path must decide it: an observed verdict from `observeContractConformance`, or the named
-`not-owed` constant `LEGACY_STOP_CONFORMANCE` on the Pi untrusted stop. A new settlement path that
+`not-owed` constant LEGACY_STOP_CONFORMANCE on the Pi untrusted stop (deleted by ADR-0098). A new settlement path that
 forgets to observe conformance fails to compile, so the risk Option 3 was rejected for cannot arise.
 Callers outside settlement, such as test fixtures, pass the shared `CONFORMANCE_NOT_OWED` constant
 (`core/skeleton/conformance-verdict.ts`) explicitly, and `parseObservedProofEvidence` refuses an

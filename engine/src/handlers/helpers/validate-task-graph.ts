@@ -505,7 +505,7 @@ function readFindingContainers(t: Record<string, unknown>) {
  * whole rule, and it used not to hold in two ways. A claim in
  * `critical_findings` with no counterpart in `findings` was deleted, silently,
  * by the repair the load-boundary diagnostic itself tells the operator to run —
- * and `complete-wave-gate` counts that view, so the deletion turned a blocking
+ * and the Wave Gate counts that view, so the deletion turned a blocking
  * wave into a passing one. A claim carried ONLY by a malformed `findings` entry
  * was deleted the same way, because conservation rested entirely on the views
  * still holding it and nothing reported the difference when they did not.

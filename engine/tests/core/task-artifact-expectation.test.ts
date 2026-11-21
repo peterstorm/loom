@@ -33,6 +33,7 @@ import type { Task, TaskGraph } from "../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN } from "../../src/types";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 describe("taskArtifactExpectation", () => {
   it("is preserved for a Distill Task, attested for an attestation Task, changed otherwise", () => {
@@ -143,6 +144,7 @@ function distillGraph(attempt: ImplementationAttemptAuthority): TaskGraph {
   });
   return {
     current_phase: "execute",
+    verification_manifest: legacyDefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -155,9 +157,8 @@ function distillGraph(attempt: ImplementationAttemptAuthority): TaskGraph {
 }
 
 /** The scope as settlement observes it: `now` against the attempt baseline "b" and the first Task baseline "a". */
-const distillBytes = (attempt: ImplementationAttemptAuthority, now: string, reported: readonly string[]) =>
+const distillBytes = (now: string, reported: readonly string[]) =>
   buildTaskLocalByteObservation({
-    authority: attempt,
     attemptBaseline: baseline("src/a.ts", "b"),
     currentAttemptScope: baseline("src/a.ts", now),
     // The cumulative delta is the sibling's implementation: "a" at the first baseline.
@@ -172,7 +173,7 @@ const distillBytes = (attempt: ImplementationAttemptAuthority, now: string, repo
 
 const settleDistill = (now: string, reported: readonly string[], testResult?: Task["test_result"]) => {
   const attempt = distillAttempt();
-  const bytes = distillBytes(attempt, now, reported);
+  const bytes = distillBytes(now, reported);
   const result = settleObservedImplementation(
     distillGraph(attempt),
     attempt,
