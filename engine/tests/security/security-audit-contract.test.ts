@@ -14,6 +14,7 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { z } from "zod/v4";
 import {
   PRIOR_STATUSES,
   SECURITY_INCOMPLETE_REASONS,
@@ -27,14 +28,14 @@ import {
   isOneOf,
   isWireRecord,
   parseCoverageRefs,
-  parsePriorRecordFacts,
   parseSecurityProfile,
   parseSecurityRunMetadata,
-  unknownFieldViolations,
-  wireStringList,
+  parseWire,
+  priorRecordFactsSchema,
+  stringListSchema,
+  wirePath,
   wireViolation,
   type PriorRecordFacts,
-  type WireViolation,
 } from "../../src/core/security-audit-contract";
 import { aRefs, aRunMetadata, ok } from "./fixtures";
 
@@ -189,40 +190,44 @@ describe("coverage identity", () => {
 });
 
 describe("the wire parsing kit", () => {
-  it("reads an absent string list as empty and a well-formed one as a fresh copy", () => {
-    const violations: WireViolation[] = [];
-    const source = ["a", "b"];
-    const parsed = wireStringList(source, "units[0].unresolved", violations);
-    expect(wireStringList(undefined, "units[0].unresolved", violations)).toEqual([]);
-    expect(parsed).toEqual(["a", "b"]);
-    expect(parsed).not.toBe(source);
-    expect(violations).toEqual([]);
+  const pair = z.strictObject({ name: z.string(), tags: stringListSchema });
+  const refusal = (raw: unknown, root = "$") => {
+    const parsed = parseWire(pair, raw, root);
+    return parsed.ok ? [] : parsed.error;
+  };
+
+  it("spells a path as the diagnostics do: `.key` for a field, `[i]` for an element, `$` for the root", () => {
+    expect(wirePath("$", [])).toBe("$");
+    expect(wirePath("", [])).toBe("$");
+    expect(wirePath("$", [0, "checks", 2, "agent_id"])).toBe("$[0].checks[2].agent_id");
+    expect(wirePath("", ["units", 0, "status"])).toBe("units[0].status");
+    expect(wirePath("critic", ["missingUnits", 1])).toBe("critic.missingUnits[1]");
   });
 
-  it("names a present-but-malformed list instead of reading it as empty", () => {
-    for (const malformed of ["a", 1, null, {}, [1], ["a", null]]) {
-      const violations: WireViolation[] = [];
-      expect(wireStringList(malformed, "units[0].fingerprints", violations), JSON.stringify(malformed)).toEqual([]);
-      expect(violations).toEqual([wireViolation("units[0].fingerprints", "expected an array of strings")]);
-    }
+  it("parses a well-formed document into its typed value", () => {
+    expect(parseWire(pair, { name: "a", tags: ["x"] })).toEqual({ ok: true, value: { name: "a", tags: ["x"] } });
+  });
+
+  it("names an absent field as required and a mistyped one by the type it expected", () => {
+    expect(refusal({ tags: [1] })).toEqual([
+      wireViolation("$.name", "required"),
+      wireViolation("$.tags[0]", "expected a string"),
+    ]);
+    expect(refusal("x", "seed")).toEqual([wireViolation("seed", "expected an object")]);
+    expect(refusal({ name: "a", tags: "x" })).toEqual([wireViolation("$.tags", "expected an array of strings")]);
+  });
+
+  it("names every undeclared key on its own path, in document order", () => {
+    expect(refusal({ zeta: 1, name: "a", tags: [], alpha: 2 })).toEqual([
+      wireViolation("$.zeta", "unknown field"),
+      wireViolation("$.alpha", "unknown field"),
+    ]);
   });
 
   it("calls only a JSON object a record", () => {
     expect(isWireRecord({})).toBe(true);
     expect(isWireRecord({ a: 1 })).toBe(true);
     for (const value of [null, [], "x", 1, undefined]) expect(isWireRecord(value), String(value)).toBe(false);
-  });
-});
-
-describe("the shared wire guards", () => {
-  it("reports unknown keys in document order, or sorted when the caller asks", () => {
-    const record = { zeta: 1, kept: 2, alpha: 3 };
-    expect(unknownFieldViolations(record, ["kept"], "$")).toEqual([
-      wireViolation("$.zeta", "unknown field"),
-      wireViolation("$.alpha", "unknown field"),
-    ]);
-    expect(unknownFieldViolations(record, ["kept"], "$", "sorted").map((violation) => violation.path)).toEqual(["$.alpha", "$.zeta"]);
-    expect(unknownFieldViolations({ kept: 1 }, ["kept"], "$")).toEqual([]);
   });
 
   it("admits exactly the members of a closed vocabulary", () => {
@@ -232,23 +237,24 @@ describe("the shared wire guards", () => {
   });
 });
 
-describe("parsePriorRecordFacts: a wire seed's prior facts, refused rather than thrown", () => {
+describe("prior record facts: a wire seed's prior facts, refused rather than thrown", () => {
+  const prior = (raw: unknown) => parseWire(priorRecordFactsSchema.nullable().default(null), raw, "prior");
+
   it("reads absent and null as no prior record, and a well-formed record as itself", () => {
-    expect(parsePriorRecordFacts(undefined)).toEqual({ ok: true, value: null });
-    expect(parsePriorRecordFacts(null)).toEqual({ ok: true, value: null });
-    expect(parsePriorRecordFacts({ verdict: "confirmed", sourceUnchanged: null })).toEqual({ ok: true, value: { verdict: "confirmed", sourceUnchanged: null } });
+    expect(prior(undefined)).toEqual({ ok: true, value: null });
+    expect(prior(null)).toEqual({ ok: true, value: null });
+    expect(prior({ verdict: "confirmed", sourceUnchanged: null })).toEqual({ ok: true, value: { verdict: "confirmed", sourceUnchanged: null } });
   });
 
   it.each([
     ["a carry-status token in place of a verdict", { verdict: "prior_confirmed_same_source", sourceUnchanged: true }, "prior.verdict"],
     ["a missing verdict", { sourceUnchanged: true }, "prior.verdict"],
-    ["an unexpected field", { verdict: "covered", sourceUnchanged: true, status: "covered" }, "prior"],
+    ["an unexpected field", { verdict: "covered", sourceUnchanged: true, status: "covered" }, "prior.status"],
     ["a non-boolean sourceUnchanged", { verdict: "covered", sourceUnchanged: "yes" }, "prior.sourceUnchanged"],
     ["a scalar", "confirmed", "prior"],
   ])("refuses %s with a named violation, never a pattern-match throw", (_case, raw, path) => {
-    const parsed = parsePriorRecordFacts(raw);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.ok ? null : parsed.error.path).toBe(path);
+    const parsed = prior(raw);
+    expect(parsed.ok ? [] : parsed.error.map((violation) => violation.path)).toEqual([path]);
   });
 });
 

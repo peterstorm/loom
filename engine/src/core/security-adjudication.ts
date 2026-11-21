@@ -24,6 +24,7 @@
  */
 
 import { match } from "ts-pattern";
+import { z } from "zod/v4";
 import { compareStrings } from "./ordering";
 import { catalogProfileOfAgent, parseLlmProfileId, type LlmProfileId } from "./model-profiles";
 import {
@@ -34,19 +35,16 @@ import {
   parseRequestId,
   parseSlotId,
   success,
-  type ArtifactDigest,
   type DomainResult,
-  type OrchestrationRunId,
-  type RequestId,
-  type SlotId,
 } from "./orchestration-contract/identity";
 import { SECURITY_VERIFICATION_PROGRAM } from "./orchestration-contract/programs";
 import {
-  isPositiveInteger,
-  isSecurityFingerprint,
+  expecting,
+  fingerprintSchema,
   isVisibleText,
-  isWireRecord,
-  unknownFieldViolations,
+  parseWire,
+  parsedBy,
+  positiveIntegerSchema,
   type WireViolation,
 } from "./security-audit-contract";
 import { catalogAgentOfOwner, coverageSettled, type CoverageLedger } from "./security-coverage";
@@ -75,57 +73,97 @@ export const catalogVerifierProfileProblem = (profile: LlmProfileId): string | n
 
 declare const missingFactBrand: unique symbol;
 /** The one fact a demoting vote names: visible prose, never blank. Only
- *  `isMissingFact` produces it, so adjudication reads a field that cannot be
+ *  the vote schema's `missingFact` produces it, so adjudication reads a field that cannot be
  *  blank by type instead of re-checking it. */
 export type MissingFact = string & Readonly<{ [missingFactBrand]: true }>;
 
 /** The vote grammar's one rule for a missing fact: visible prose. A blank
- *  string is refused by `parseVote` (it is not "no missing fact" — that is
- *  `null`), so nothing downstream normalizes it. */
-const isMissingFact = (value: unknown): value is MissingFact => isVisibleText(value);
+ *  string is refused (it is not "no missing fact" — that is `null`), so nothing
+ *  downstream normalizes it. Present on purpose: an absent fact is a verifier
+ *  that never answered the question, not one that answered "none". */
+const missingFactSchema = z
+  .custom<MissingFact>((value) => isVisibleText(value), {
+    error: (issue) => (issue.input === undefined ? "required (null when none)" : "expected null or visible prose"),
+  })
+  .nullable();
+
+/**
+ * The four fields a verifier itself decides about one fingerprint — no agent,
+ * profile or wave. Shared by the persisted ballot and the verifier's own result
+ * wire (`core/security-verification`), so the two cannot disagree about what a
+ * well-formed vote is.
+ *
+ * `missingFact` is load-bearing: an `advisory` vote WITH one demotes the claim
+ * to a lead, WITHOUT one it is rejected.
+ */
+export const verifierVoteShape = {
+  fingerprint: fingerprintSchema,
+  /** loom's refutation ballot: `critical` = the claim blocks; `advisory` = it
+   *  does not survive as a confirmed finding. */
+  vote: z.enum(["critical", "advisory"], expecting("expected critical or advisory")),
+  reason: z.custom<string>((value) => isVisibleText(value), expecting("requires visible prose")),
+  /** The one fact absent when the vote is advisory for lack of proof. */
+  missingFact: missingFactSchema,
+};
+export type VerifierVote = Readonly<z.output<z.ZodObject<typeof verifierVoteShape>>>;
+
+/** One identity field of a binding, read by the identity grammar's own parser:
+ *  its refusal is named by `message`, or by the parser's own message. */
+const boundBy = <T>(parse: (raw: unknown) => DomainResult<T, Readonly<{ message: string }>>, message?: string) =>
+  parsedBy((raw) => {
+    const parsed = parse(raw);
+    return parsed.ok ? parsed : failure(message ?? parsed.error.message);
+  });
 
 /**
  * Where a ballot came from, taken from AUTHORITY only (ADR-0067 D3): the
  * minted request the verifier spawn answered and the digest of its captured
  * transcript. Nothing here is read from the verifier's payload, so a ballot
  * cannot carry a role or profile its spawn did not have.
+ *
+ * The profile is the one the catalog assigns the verifier role: a binding
+ * naming another names a spawn that role never ran under — a tampered
+ * `verdicts.json`. If the catalog ever re-profiles the verifier, ballots cast
+ * under the old profile are refused, never counted under a profile the catalog
+ * no longer gives that role. A missing or malformed binding is a refusal (D5).
  */
-export type BallotBinding = Readonly<{
-  /** The program that issues every verifier spawn a ballot may come from
-   *  (owned by the orchestration contract's program vocabulary). */
-  program: typeof SECURITY_VERIFICATION_PROGRAM;
-  /** The verification run that issued the request. */
-  runId: OrchestrationRunId;
-  requestId: RequestId;
-  slotId: SlotId;
-  attempt: 1 | 2;
-  role: typeof SECURITY_VERIFIER_ROLE;
-  /** The catalog profile the request was MINTED under. */
-  profile: LlmProfileId;
-  /** SHA-256 of the captured transcript bytes the verdict was admitted from
-   *  (the capture receipt's digest). */
-  captureDigest: ArtifactDigest;
-}>;
-
-/** The four fields a verifier itself decides about one fingerprint — no agent,
- *  profile or wave. Only `parseVote` produces one from the wire. */
-export type VerifierVote = Readonly<{
-  fingerprint: string;
-  /** loom's refutation ballot: `critical` = the claim blocks; `advisory` = it
-   *  does not survive as a confirmed finding. */
-  vote: "critical" | "advisory";
-  reason: string;
-  /** The one fact absent when the vote is advisory for lack of proof. */
-  missingFact: MissingFact | null;
-}>;
+const ballotBindingSchema = z
+  .strictObject(
+    {
+      /** The program that issues every verifier spawn a ballot may come from
+       *  (owned by the orchestration contract's program vocabulary). */
+      program: z.literal(SECURITY_VERIFICATION_PROGRAM, expecting(`expected ${SECURITY_VERIFICATION_PROGRAM}`)),
+      /** The verification run that issued the request. */
+      runId: boundBy(parseOrchestrationRunId),
+      requestId: boundBy(parseRequestId),
+      slotId: boundBy(parseSlotId),
+      attempt: z.literal([1, 2], expecting("expected 1 or 2")),
+      role: z.literal(SECURITY_VERIFIER_ROLE, expecting(`expected ${SECURITY_VERIFIER_ROLE}`)),
+      /** The catalog profile the request was MINTED under. */
+      profile: boundBy(parseLlmProfileId, "expected a catalog profile").superRefine((profile, ctx) => {
+        const problem = catalogVerifierProfileProblem(profile);
+        if (problem !== null) ctx.addIssue({ code: "custom", message: problem });
+      }),
+      /** SHA-256 of the captured transcript bytes the verdict was admitted from
+       *  (the capture receipt's digest). */
+      captureDigest: boundBy(parseArtifactDigest, "expected a sha256 capture digest"),
+    },
+    { error: (issue) => (issue.code === "invalid_type" ? "expected the binding a verification run published" : undefined) },
+  )
+  .readonly();
+export type BallotBinding = z.output<typeof ballotBindingSchema>;
 
 /** One verifier's ballot about one fingerprint, bound to the spawn that cast it.
  *  `agent` and `profile` are read from `binding`, never from a payload. */
-export type VerificationVerdict = VerifierVote & Readonly<{
-  /** The audit wave the verification run was issued for. */
-  wave: number;
-  binding: BallotBinding;
-}>;
+const verificationVerdictSchema = z
+  .strictObject({
+    ...verifierVoteShape,
+    /** The audit wave the verification run was issued for. */
+    wave: positiveIntegerSchema,
+    binding: ballotBindingSchema,
+  })
+  .readonly();
+export type VerificationVerdict = z.output<typeof verificationVerdictSchema>;
 
 export type VerificationGap =
   | Readonly<{ kind: "unverified"; fingerprint: string }>
@@ -328,135 +366,40 @@ export type VerdictViolation = WireViolation;
 
 export type VerdictError = Readonly<{ kind: "invalid-verdicts"; violations: readonly VerdictViolation[] }>;
 
-/** The keys a persisted ballot carries in `verdicts.json`. */
-export const VERDICT_KEYS: readonly string[] = ["fingerprint", "vote", "reason", "missingFact", "wave", "binding"];
-
-/** The keys of a ballot's binding: every one read from authority at import. */
-export const BALLOT_BINDING_KEYS: readonly string[] = [
-  "program", "runId", "requestId", "slotId", "attempt", "role", "profile", "captureDigest",
-];
+/** A ballot's identity in `verdicts.json`: one request casts at most one
+ *  ballot per fingerprint. */
+const castKey = (verdict: VerificationVerdict): string =>
+  JSON.stringify([verdict.fingerprint, verdict.binding.runId, verdict.binding.requestId]);
 
 /**
- * Parse the bound ballots `verdicts.json` holds (ADR-0067 D3/D5).
- *
- * Fail-closed and total: an unknown key is a violation, every field is
- * checked, and a ballot WITHOUT a well-formed binding is a refusal — not an
- * unverified gap — because a ballot that cannot name the spawn that cast it is
- * exactly the self-reported ballot this shape exists to end. One request casts
- * at most one ballot per fingerprint. The result is sorted by (fingerprint,
- * run, request, wave) so the same ballots always produce the same bytes.
+ * The bound ballots `verdicts.json` holds (ADR-0067 D3/D5). Fail-closed: an
+ * unknown key is a violation, every field is checked, and a ballot WITHOUT a
+ * well-formed binding is a refusal — not an unverified gap — because a ballot
+ * that cannot name the spawn that cast it is exactly the self-reported ballot
+ * this shape exists to end.
+ */
+const verificationVerdictsSchema = z
+  .array(verificationVerdictSchema, expecting("expected a top-level array"))
+  .superRefine((verdicts, ctx) => {
+    const cast = new Set<string>();
+    verdicts.forEach((verdict, index) => {
+      const key = castKey(verdict);
+      if (cast.has(key)) {
+        ctx.addIssue({ code: "custom", path: [index], message: `request ${verdict.binding.requestId} already cast a ballot on ${verdict.fingerprint}` });
+      }
+      cast.add(key);
+    });
+  });
+
+/**
+ * Parse the bound ballots `verdicts.json` holds. Total: every violation of
+ * every ballot comes back, so one bad ballot never hides behind another's. The
+ * result is sorted by (fingerprint, run, request, wave) so the same ballots
+ * always produce the same bytes.
  */
 export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly VerificationVerdict[], VerdictError> {
-  if (!Array.isArray(raw)) {
-    return failure({ kind: "invalid-verdicts" as const, violations: [{ path: "verdicts", message: "expected a top-level array" }] });
-  }
-  const violations: VerdictViolation[] = [];
-  const verdicts: VerificationVerdict[] = [];
-  const cast = new Set<string>();
-  raw.forEach((entry: unknown, index: number) => {
-    const parsed = parseVerdict(entry, `verdicts[${index}]`);
-    if (!parsed.ok) {
-      violations.push(...parsed.error);
-      return;
-    }
-    const { fingerprint, binding } = parsed.value;
-    const key = JSON.stringify([fingerprint, binding.runId, binding.requestId]);
-    if (cast.has(key)) {
-      violations.push({ path: `verdicts[${index}]`, message: `request ${binding.requestId} already cast a ballot on ${fingerprint}` });
-      return;
-    }
-    cast.add(key);
-    verdicts.push(parsed.value);
-  });
-  if (violations.length > 0) return failure({ kind: "invalid-verdicts" as const, violations });
-  return success([...verdicts].sort(compareVerdicts));
-}
-
-/** One persisted ballot, or every violation it carries (accumulated per
- *  entry, so one bad ballot never hides behind another's). */
-function parseVerdict(entry: unknown, base: string): DomainResult<VerificationVerdict, readonly VerdictViolation[]> {
-  if (!isWireRecord(entry)) return failure([{ path: base, message: "expected an object" }]);
-  const local = unknownFieldViolations(entry, VERDICT_KEYS, base);
-  const vote = parseVote(entry, base);
-  if (!vote.ok) local.push(...vote.error);
-  const wave = isPositiveInteger(entry.wave) ? entry.wave : null;
-  if (wave === null) local.push({ path: `${base}.wave`, message: "expected a positive integer" });
-  const binding = parseBallotBinding(entry.binding, `${base}.binding`);
-  if (!binding.ok) return failure([...local, ...binding.error]);
-  if (local.length > 0 || !vote.ok || wave === null) return failure(local);
-  return success({ ...vote.value, wave, binding: binding.value });
-}
-
-/**
- * The four fields a verifier itself decides — fingerprint, vote, reason and
- * missing fact — parsed at `base` into a typed vote, or every violation they
- * carry. Shared by the persisted ballot and the verifier's own result wire
- * (`core/security-verification`), so the two cannot disagree about what a
- * well-formed vote is, and neither re-reads a field the parse already proved.
- *
- * `missingFact` is load-bearing: an `advisory` vote WITH one demotes the claim
- * to a lead, WITHOUT one it is rejected. A blank string is a violation, never
- * "no fact" (that is `null`).
- */
-export function parseVote(record: Readonly<Record<string, unknown>>, base: string): DomainResult<VerifierVote, readonly VerdictViolation[]> {
-  const local: VerdictViolation[] = [];
-  const refuse = (field: string, message: string): null => {
-    local.push({ path: `${base}.${field}`, message });
-    return null;
-  };
-  const fingerprint = isSecurityFingerprint(record.fingerprint) ? record.fingerprint : refuse("fingerprint", "invalid fingerprint");
-  const vote = record.vote === "critical" || record.vote === "advisory" ? record.vote : refuse("vote", "expected critical or advisory");
-  const reason = isVisibleText(record.reason) ? record.reason : refuse("reason", "requires visible prose");
-  const missingFact = parseMissingFact(record.missingFact);
-  if (!missingFact.ok) refuse("missingFact", missingFact.error);
-  return fingerprint === null || vote === null || reason === null || !missingFact.ok
-    ? failure(local)
-    : success({ fingerprint, vote, reason, missingFact: missingFact.value });
-}
-
-const parseMissingFact = (value: unknown): DomainResult<MissingFact | null, string> =>
-  value === null || isMissingFact(value) ? success(value) : failure("expected null or visible prose");
-
-/** A ballot's binding: every identity in its grammar, the program and role the
- *  closed verification vocabulary, the profile the one the catalog assigns the
- *  verifier role (a binding naming another profile names a spawn that role never
- *  ran under — a tampered `verdicts.json`), the capture digest a sha256. A
- *  missing or malformed binding is a refusal (D5). If the catalog ever re-profiles
- *  the verifier, ballots cast under the old profile are refused, never
- *  counted under a profile the catalog no longer gives that role. */
-export function parseBallotBinding(raw: unknown, base: string): DomainResult<BallotBinding, readonly VerdictViolation[]> {
-  if (!isWireRecord(raw)) return failure([{ path: base, message: "expected the binding a verification run published" }]);
-  const local = unknownFieldViolations(raw, BALLOT_BINDING_KEYS, base);
-  const runId = parseOrchestrationRunId(raw.runId);
-  const requestId = parseRequestId(raw.requestId);
-  const slotId = parseSlotId(raw.slotId);
-  const profile = parseLlmProfileId(raw.profile);
-  const captureDigest = parseArtifactDigest(raw.captureDigest);
-  if (raw.program !== SECURITY_VERIFICATION_PROGRAM) local.push({ path: `${base}.program`, message: `expected ${SECURITY_VERIFICATION_PROGRAM}` });
-  if (!runId.ok) local.push({ path: `${base}.runId`, message: runId.error.message });
-  if (!requestId.ok) local.push({ path: `${base}.requestId`, message: requestId.error.message });
-  if (!slotId.ok) local.push({ path: `${base}.slotId`, message: slotId.error.message });
-  if (raw.attempt !== 1 && raw.attempt !== 2) local.push({ path: `${base}.attempt`, message: "expected 1 or 2" });
-  if (raw.role !== SECURITY_VERIFIER_ROLE) local.push({ path: `${base}.role`, message: `expected ${SECURITY_VERIFIER_ROLE}` });
-  if (!profile.ok) local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
-  else {
-    const problem = catalogVerifierProfileProblem(profile.value);
-    if (problem !== null) local.push({ path: `${base}.profile`, message: problem });
-  }
-  if (!captureDigest.ok) local.push({ path: `${base}.captureDigest`, message: "expected a sha256 capture digest" });
-  const attempt = raw.attempt;
-  if (local.length > 0 || !runId.ok || !requestId.ok || !slotId.ok || !profile.ok || !captureDigest.ok ||
-      (attempt !== 1 && attempt !== 2)) {
-    return failure(local);
-  }
-  return success({
-    program: SECURITY_VERIFICATION_PROGRAM,
-    runId: runId.value,
-    requestId: requestId.value,
-    slotId: slotId.value,
-    attempt,
-    role: SECURITY_VERIFIER_ROLE,
-    profile: profile.value,
-    captureDigest: captureDigest.value,
-  });
+  const parsed = parseWire(verificationVerdictsSchema, raw, "verdicts");
+  return parsed.ok
+    ? success([...parsed.value].sort(compareVerdicts))
+    : failure({ kind: "invalid-verdicts" as const, violations: parsed.error });
 }

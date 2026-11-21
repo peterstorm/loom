@@ -20,12 +20,13 @@ import {
   type CoverageRefs,
   type SecurityAgentId,
   type SecurityRunMetadata,
+  type WireViolation,
 } from "../../src/core/security-audit-contract";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import { SECURITY_VERIFICATION_PROGRAM } from "../../src/core/orchestration-contract/programs";
 import { SECURITY_VERIFIER_ROLE } from "../../src/core/security-adjudication";
 import { VERIFICATION_SLOT_PREFIX, verificationRequestIds } from "../../src/core/security-verification";
-import type { CoverageSeed } from "../../src/core/security-coverage";
+import { parseLedger, type CoverageSeed } from "../../src/core/security-coverage";
 import type { ConfirmedFinding, NeedsValidationFinding, RejectedFinding } from "../../src/core/security-findings";
 import { NO_STACK_SIGNALS, STACK_SIGNAL_NAMES, STACK_SIGNAL_SHAPES, type StackSignals } from "../../src/core/security-lens-select";
 
@@ -36,6 +37,13 @@ const clone = <T>(value: T): T => structuredClone(value);
 export function ok<T>(result: DomainResult<T, unknown>): T {
   if (!result.ok) throw new Error(`expected success, got ${JSON.stringify(result.error)}`);
   return result.value;
+}
+
+/** Every violation `parseLedger` names in a document, `[]` when it parses: the
+ *  ledger's one parser read as a validator, for tests that judge raw documents. */
+export function ledgerViolations(raw: unknown): readonly WireViolation[] {
+  const parsed = parseLedger(raw);
+  return parsed.ok ? [] : parsed.error.violations;
 }
 
 /** An owner id through the grammar's one proof, as `assign` mints it and a
