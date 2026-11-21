@@ -340,6 +340,9 @@ export function isWaveComplete(state: TaskGraph, wave: number): boolean {
 
 export type IncomingImplementationEvidence = Readonly<{
   taskCompleted: boolean;
+  /** The attempt's test result and its evidence; absent when the transport
+   *  observed none (a Pi transcript without a structured verdict), which the
+   *  regression proof judges as `test-result-missing`. */
   testResult?: TaskTestResult;
   testEvidence?: string;
   /** One parsed ADT when the transport carried one; absent reads as the
@@ -406,18 +409,23 @@ export type NormalizedImplementationEvidence = Readonly<{
   newTests: NewTestEvidence;
 }>;
 
+/** A trusted stored verdict survives an incoming result that is untrusted or
+ *  absent (no test result observed): neither may replace it. */
 function shouldPreserveTrustedEvidence(
   task: Task,
   incoming: TaskTestResult | undefined,
   bytesChangedOrUnobservable: boolean,
 ): boolean {
-  return task.revalidation_required !== true && incoming?.verdict === "untrusted" && (
+  return task.revalidation_required !== true && (incoming === undefined || incoming.verdict === "untrusted") && (
     task.test_result?.verdict === "trusted-fail" ||
     (task.test_result?.verdict === "trusted-pass" && !bytesChangedOrUnobservable)
   );
 }
 
-/** One preservation rule shared by Claude and Pi, without provenance relabeling. */
+/** One preservation rule shared by Claude and Pi, without provenance relabeling.
+ *  The result is the Task's test evidence after this attempt: an absent field
+ *  means the attempt left none, and the settled Task records none (an earlier
+ *  attempt's result is never carried past an attempt that observed none). */
 export function normalizeImplementationEvidence(
   task: Task,
   incoming: IncomingImplementationEvidence,
@@ -516,10 +524,12 @@ function clearAttempt(task: Task): Task {
   };
 }
 
+/** The settled Task's evidence fields. Test evidence is written even when
+ *  absent, so an attempt that observed none clears its predecessor's. */
 function evidenceFields(evidence: NormalizedImplementationEvidence) {
   return {
-    ...(evidence.testResult === undefined ? {} : { test_result: evidence.testResult }),
-    ...(evidence.testEvidence === undefined ? {} : { test_evidence: evidence.testEvidence }),
+    test_result: evidence.testResult,
+    test_evidence: evidence.testEvidence,
     files_modified: evidence.cumulativeModifiedPaths,
     ...storedNewTestEvidence(evidence.newTests),
   };

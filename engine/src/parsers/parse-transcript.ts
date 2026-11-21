@@ -1,16 +1,12 @@
 /**
- * Extract plain text from a JSONL transcript.
- * Supports both Claude Code and pi formats (auto-detected or explicit).
+ * Extract plain text from a Claude Code JSONL transcript. Every reader here
+ * serves a Claude Code hook; a Pi child's messages are read by
+ * `pi/transcript-adapter.ts`. A Pi session file handed here reads as harness
+ * metadata only (its records are typed `session`/`message`), so it yields no
+ * text and no prompt — it fails closed.
  */
 
-import {
-  parseJsonl,
-  parsePiJsonl,
-  getContentBlocks,
-  detectFormat,
-  type ContentBlock,
-  type TranscriptFormat,
-} from "./types";
+import { parseJsonl, getContentBlocks, type ContentBlock } from "./types";
 import { claudeRecordKind } from "../core/claude-record-kind";
 import { isRecord } from "../core/plain-record";
 
@@ -31,7 +27,7 @@ function extractText(block: ContentBlock): string[] {
   return block.type === "tool_result" ? textContent(block.content) : [];
 }
 
-function parseClaudeTranscript(content: string): string {
+export function parseTranscript(content: string): string {
   const texts: string[] = [];
 
   for (const line of parseJsonl(content)) {
@@ -50,25 +46,6 @@ function parseClaudeTranscript(content: string): string {
   return texts.join("\n");
 }
 
-function parsePiTranscript(content: string): string {
-  const texts: string[] = [];
-
-  for (const entry of parsePiJsonl(content)) {
-    if (entry.type !== "message") continue;
-    const msg = entry.message;
-    if (!msg) continue;
-
-    texts.push(...textContent(msg.content));
-  }
-
-  return texts.join("\n");
-}
-
-export function parseTranscript(content: string, format?: TranscriptFormat): string {
-  const fmt = format ?? detectFormat(content);
-  return fmt === "pi" ? parsePiTranscript(content) : parseClaudeTranscript(content);
-}
-
 export type FirstUserPromptParse =
   | Readonly<{ ok: true; prompt: string }>
   | Readonly<{ ok: false; error: string }>;
@@ -84,11 +61,7 @@ function authoredPromptText(body: unknown): string | null {
 /** The first user-authored prompt only. Unlike general transcript extraction,
  * this is an attribution boundary: malformed JSON before the prompt and
  * user-role tool-result envelopes fail closed instead of being skipped. */
-export function parseFirstUserPrompt(
-  content: string,
-  format?: TranscriptFormat,
-): FirstUserPromptParse {
-  let resolvedFormat = format;
+export function parseFirstUserPrompt(content: string): FirstUserPromptParse {
   for (const [index, rawLine] of content.split("\n").entries()) {
     if (rawLine.trim() === "") continue;
     let parsed: unknown;
@@ -104,22 +77,6 @@ export function parseFirstUserPrompt(
     }
     // Only a message that is an object can carry a role; any other is no user prompt.
     const message = isRecord(parsed.message) ? parsed.message : null;
-
-    if (resolvedFormat === undefined) {
-      resolvedFormat = parsed.type === "session" && parsed.version !== undefined ? "pi" : "claude";
-    }
-
-    if (resolvedFormat === "pi") {
-      if (parsed.type !== "message" || message?.role !== "user") continue;
-      const body = message.content;
-      const prompt = authoredPromptText(body);
-      if (prompt === null) {
-        return promptFailure(`first Pi user prompt has unsupported content at line ${index + 1}`);
-      }
-      return prompt.trim() === ""
-        ? promptFailure(`first user prompt is empty at line ${index + 1}`)
-        : { ok: true, prompt };
-    }
 
     if (claudeRecordKind(parsed) === "harness") continue;
     if (message?.role !== "user") continue;

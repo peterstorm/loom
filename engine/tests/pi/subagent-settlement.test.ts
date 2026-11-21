@@ -200,27 +200,43 @@ describe("observeImplementationTranscript", () => {
   const BUN_PASS = "bun test v1.3.0\n 1 pass\n 0 fail\n 1 expect() calls\nRan 1 test across 1 file.\n";
 
   it("names a transcript that is not a Pi message array as malformed, with no log", () => {
-    const observed = observeImplementationTranscript("not messages", "T1");
+    const observed = observeImplementationTranscript("not messages", "T1", "/repo");
     expect(observed).toMatchObject({ kind: "malformed", log: [] });
     if (observed.kind === "malformed") {
       expect(observed.failureReason).toMatch(/^Pi transcript evidence capture failed: \S/);
     }
   });
 
-  it("accepts structured test evidence from a classified test run, with no fallback log", () => {
+  it("accepts structured test evidence from a classified test run, with no missing-evidence log", () => {
     const messages = bashCall("bun test engine/tests/pi/subagent-settlement.test.ts", BUN_PASS);
-    const observed = observeImplementationTranscript(messages, "T1");
-    expect(observed).toMatchObject({ kind: "accepted", log: [], test: { kind: "structured", evidence: { passed: true } } });
-    if (observed.kind === "accepted") expect(observed.resultMessages).toHaveLength(2);
+    const observed = observeImplementationTranscript(messages, "T1", "/repo");
+    expect(observed).toEqual({
+      kind: "accepted",
+      log: [],
+      writeTargets: [],
+      test: { kind: "structured", evidence: { passed: true, evidence: expect.stringContaining("1 pass") } },
+    });
   });
 
-  it("falls back to the transcript and logs why when no Bash call was a test run", () => {
-    const observed = observeImplementationTranscript(bashCall("ls", "file.ts\n"), "T1");
-    expect(observed).toMatchObject({ kind: "accepted", test: { kind: "fallback", evidence: { passed: false } } });
+  it("records no test result, and logs why, when no Bash call was a test run", () => {
+    const observed = observeImplementationTranscript(bashCall("ls", "file.ts\n"), "T1", "/repo");
+    expect(observed).toMatchObject({ kind: "accepted", test: { kind: "missing" } });
     expect(observed.log).toEqual([
       "loom(pi): T1 produced no structured test evidence (no Bash call was classified as a test run) — " +
-        "transcript fallback used; the wave gate will reject it",
+        "no test result recorded (test-result-missing); the wave gate will reject it",
     ]);
+  });
+
+  it("folds write targets from the same projection: every write, edit and multi-edit call, whatever its result", () => {
+    const observed = observeImplementationTranscript([
+      { role: "assistant", content: [
+        { type: "toolCall", id: "w", name: "write", arguments: { path: "src/a.ts" } },
+        { type: "toolCall", id: "e", name: "edit", arguments: { file_path: "src/b.ts" } },
+        { type: "toolCall", id: "m", name: "multi_edit", arguments: { edits: [{ path: "src/c.ts" }] } },
+      ] },
+      { role: "toolResult", toolCallId: "e", toolName: "edit", isError: true, content: [{ type: "text", text: "no match" }] },
+    ], "T1", "/repo");
+    expect(observed).toMatchObject({ kind: "accepted", writeTargets: ["src/a.ts", "src/b.ts", "src/c.ts"] });
   });
 });
 

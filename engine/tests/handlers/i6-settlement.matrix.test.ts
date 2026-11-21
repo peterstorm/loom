@@ -288,8 +288,7 @@ function settle(
     parserModifiedPaths: [],
     parserPathLabel: `${transport} fixture paths`,
     taskCompleted: true,
-    testResult: options.testResult ?? { verdict: "trusted-pass" },
-    testEvidence: `${transport} test evidence`,
+    test: { result: options.testResult ?? { verdict: "trusted-pass" }, evidence: `${transport} test evidence` },
     proofEvaluationPolicy: options.policy ?? (transport === "Pi" ? PI_STRUCTURED_EVIDENCE_POLICY : TRUSTED_LEDGER_ONLY_POLICY),
     ledger,
   }, declaredFilesChangedPorts(taskOf(state, taskId).file_list ?? [], options.newTestsWritten ?? true));

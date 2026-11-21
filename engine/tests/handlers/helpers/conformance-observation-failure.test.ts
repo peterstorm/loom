@@ -74,8 +74,7 @@ async function settleBrokenT4(break_: (repo: SkeletonRepo) => void): Promise<Rea
       parserModifiedPaths: [],
       parserPathLabel: "conformance failure result paths",
       taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      testEvidence: "conformance failure pass",
+      test: { result: { verdict: "trusted-pass" }, evidence: "conformance failure pass" },
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
       ledger: { kind: "read", events: [] },
     }, productionExactSettlementPorts(repo.root, repo.statePath));

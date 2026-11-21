@@ -5369,7 +5369,7 @@ describe("Pi extension review tool_result integration", () => {
     ["printf 'bun test\\n654 pass\\n'", "654 pass\n0 fail\n"],
     ["bun test | grep -v fail", "654 pass\n"],
     ["cd engine && bun test | grep -v fail", "654 pass\n"],
-  ] as const)("keeps transcript fallback untrusted for test-looking command: %s", async (command, output) => {
+  ] as const)("records no test result for a test-looking but unattributable command: %s", async (command, output) => {
     const task = await settleReservedPiAttempt({
       prefix: "loom-pi-fallback-",
       session: "019fca39-f989-7510-8e62-50dadbcad42d",
@@ -5381,12 +5381,10 @@ describe("Pi extension review tool_result integration", () => {
       ],
     });
     expect(task.status).toBe("pending");
-    expect(task.test_result).toEqual({
-      verdict: "untrusted",
-      passed: true,
-      label: "transcript-regex (fallback)",
-      provenance: "unverified",
-    });
+    // Pass-looking output the classifier cannot attribute to a runner proves
+    // nothing: no regex reading of it is recorded, so nothing claims a pass.
+    expect(task.test_result).toBeUndefined();
+    expect(task.test_evidence).toBeUndefined();
     expect(task.proof).not.toMatchObject({ state: "satisfied" });
   });
 

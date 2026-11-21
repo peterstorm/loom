@@ -15,7 +15,6 @@
  * decision about which diagnostics become orchestration processing errors.
  */
 
-import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
 import { settleUnavailableImplementation } from "../engine/src/core/implementation-application";
 import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
 import { observePhaseTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
@@ -46,7 +45,7 @@ import {
 } from "../engine/src/handlers/helpers/exact-implementation-settlement";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
-import { parsePiMessages, writtenPathsOf, type PiMessage } from "./transcript-adapter";
+import { parsePiMessages, piTranscriptToolCalls, piWriteTargets } from "./transcript-adapter";
 import { piSubagentFailureSignals, type PiSubagentResult } from "./subagent-result-batch";
 import { describeCause } from "./cleanup-actions";
 import {
@@ -326,7 +325,7 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
     const diagnostic = `${args.agentType} phase artifact extraction failed: ${parsed.errors.join("; ")}`;
     return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
   }
-  const writtenPaths = writtenPathsOf(parsed.value);
+  const writtenPaths = piWriteTargets(piTranscriptToolCalls(parsed.value, args.phaseArtifactBaseDir));
   try {
     const observedState = args.store.load();
     const prepared = preparePiPhaseResult(
@@ -370,20 +369,17 @@ type ModifiedPathRead =
   | Readonly<{ ok: true; filesModified: readonly string[] }>
   | Readonly<{ ok: false; message: string }>;
 
+/** The transcript's write targets as the canonical repository-relative,
+ *  deduplicated and sorted set settlement attributes to the attempt. */
 function readImplementationModifiedPaths(
   repository: RepositoryProbe,
-  resultMessages: readonly PiMessage[],
+  writeTargets: readonly string[],
   taskId: string,
 ): ModifiedPathRead {
-  const piJsonl = resultMessages.map((message) => JSON.stringify({ type: "message", message })).join("\n");
   try {
     return {
       ok: true,
-      filesModified: canonicalRepositoryPaths(
-        repository.root(),
-        parseFilesModified(piJsonl, "pi"),
-        "Pi transcript files_modified",
-      ),
+      filesModified: canonicalRepositoryPaths(repository.root(), writeTargets, "Pi transcript files_modified"),
     };
   } catch (error) {
     return {
@@ -449,8 +445,7 @@ function piSettlementFacts(
     parserModifiedPaths: modifiedPaths,
     parserPathLabel: "Pi transcript files_modified",
     taskCompleted: true,
-    testResult: implementationTestResult(transcript.test),
-    testEvidence: transcript.test.evidence.evidence,
+    test: implementationTestResult(transcript.test),
     proofEvaluationPolicy: PI_STRUCTURED_EVIDENCE_POLICY,
     ledger: args.ledger,
   };
@@ -458,10 +453,10 @@ function piSettlementFacts(
 
 async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Promise<PiResultOutcome> {
   const taskId = args.authority.taskId;
-  const transcript = observeImplementationTranscript(args.result.messages, taskId);
+  const transcript = observeImplementationTranscript(args.result.messages, taskId, args.repository.root());
   args.log.push(...transcript.log);
   if (transcript.kind === "malformed") return settleExactPiInfrastructure(args, transcript.failureReason);
-  const modified = readImplementationModifiedPaths(args.repository, transcript.resultMessages, taskId);
+  const modified = readImplementationModifiedPaths(args.repository, transcript.writeTargets, taskId);
   if (!modified.ok) return settleExactPiInfrastructure(args, modified.message);
   const settled = await settleAndPersistExactImplementation(
     args.store,

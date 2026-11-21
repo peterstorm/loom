@@ -480,8 +480,7 @@ export const runUpdateTaskStatus = async (
     parserModifiedPaths: filesModified,
     parserPathLabel: "Claude transcript files_modified",
     taskCompleted: true,
-    testResult: testEvidence.result,
-    testEvidence: testEvidence.evidence,
+    test: testEvidence,
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
     ledger: epochLedger,
   }, productionExactSettlementPorts(repositoryRoot, mgr.getPath()));

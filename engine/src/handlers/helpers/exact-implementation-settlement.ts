@@ -1,4 +1,5 @@
-import type { Task, TaskGraph, TaskTestResult } from "../../types";
+import type { Task, TaskGraph } from "../../types";
+import type { ResolvedTestEvidence } from "../../core/implementation-evidence";
 import {
   describeDistillSnapshotFailure,
   distillSettlementOutcome,
@@ -50,8 +51,14 @@ export type ExactImplementationTransportFacts = Readonly<{
   parserModifiedPaths: readonly string[];
   parserPathLabel: string;
   taskCompleted: boolean;
-  testResult: TaskTestResult;
-  testEvidence: string;
+  /**
+   * The test result this transport observed, with the evidence stored beside
+   * it, or `null` when it observed none: a Pi transcript without a structured
+   * verdict. Absence clears an earlier attempt's untrusted result and fails
+   * the regression proof as `test-result-missing`; it never erases a trusted
+   * verdict an untrusted result could not have replaced either.
+   */
+  test: ResolvedTestEvidence | null;
   proofEvaluationPolicy: ProofEvaluationPolicy;
   /**
    * The attempt epoch's ledger as this transport read it: Claude Code's
@@ -176,7 +183,8 @@ function judgeAttemptRedThenGreen(
       if (ledger.kind === "unreadable") {
         return { kind: "unavailable", reason: `${facts.transport} evidence ledger unreadable for ${task.id}: ${ledger.reason}` };
       }
-      const piStructured = facts.testResult.verdict === "untrusted" && facts.testResult.provenance === "pi-structured";
+      const result = facts.test?.result;
+      const piStructured = result?.verdict === "untrusted" && result.provenance === "pi-structured";
       const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline);
       return { kind: "judged", observation: judgeRedThenGreen(ledger.events, classification, repositoryRoot, piStructured, testEvidencePolicyAt(testEvidence, repositoryRoot)) };
     }
@@ -314,8 +322,7 @@ function observeAndSettle(context: SettlementContext, restoredAfter?: NonEmpty<s
         facts.observedAt,
         {
           taskCompleted: facts.taskCompleted,
-          testResult: facts.testResult,
-          testEvidence: facts.testEvidence,
+          ...(facts.test === null ? {} : { testResult: facts.test.result, testEvidence: facts.test.evidence }),
           ...evidence.value,
           ...(restoredAfter === undefined || scopeChanged.length > 0 ? {} : { restoredAfter }),
         },
