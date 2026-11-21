@@ -6,7 +6,9 @@
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { commandWords, shellWords } from "../../src/core/shell-command-head";
+import { commandWords, shellWords, splitFusedRedirect } from "../../src/core/shell-command-head";
+import { openQuoteAfter } from "../../src/core/shell-quoting";
+import { shellText } from "../fixtures/shell-text-arbitrary";
 
 describe("shellWords", () => {
   it.each([
@@ -100,5 +102,31 @@ describe("commandWords", () => {
     fc.assert(fc.property(fc.string({ maxLength: 60 }), (text) => {
       expect(commandWords(text)).toEqual(referenceCommandWords(text));
     }), { numRuns: 2000 });
+  });
+});
+
+describe("splitFusedRedirect", () => {
+  it.each([
+    ["a heredoc fused to its head", "bash<<'EOF'", { head: "bash", rest: "<<'EOF'" }],
+    ["an fd redirect", "2>/dev/null", { head: "2", rest: ">/dev/null" }],
+    ["an fd dup", "2>&1", { head: "2", rest: ">&1" }],
+    ["&> on its &", "x&>>log", { head: "x", rest: "&>>log" }],
+    ["a read-write open", "3<>f", { head: "3", rest: "<>f" }],
+    ["a quoted operator", "'a<<b'", null],
+    ["an escaped operator", "a\\>b", null],
+    ["a bare &", "a&b", null],
+  ])("%s", (_name, word, split) => {
+    expect(splitFusedRedirect(word)).toEqual(split);
+  });
+
+  it("cuts at the first unquoted redirect: the head holds none and the parts rebuild the word", () => {
+    fc.assert(fc.property(shellText, (word) => {
+      const split = splitFusedRedirect(word);
+      if (split === null) return;
+      expect(split.head + split.rest).toBe(word);
+      expect(splitFusedRedirect(split.head)).toBeNull();
+      expect(openQuoteAfter(split.head, 0)).toBeNull();
+      expect(split.rest).toMatch(/^(?:[<>]|&>)/);
+    }), { numRuns: 3000 });
   });
 });

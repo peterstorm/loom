@@ -564,7 +564,7 @@ Determinism is scoped to what Loom can observe and own ([Architecture §Honest l
 | Spawn gates | `core/validate-phase-order.ts`, `core/validate-task-execution.ts`, `core/validate-template-substitution.ts` |
 | Implementation brief & retry context | `core/implementation-retry.ts` (`renderImplementationRetryContext`), `handlers/pre-tool-use/implementation-brief-marker.ts` |
 | Direct-edit block, write grants | `core/block-direct-edits.ts`, `core/artifact-write-scope.ts`, `core/pi-write-grant-plan.ts`, `pi/write-grant.ts` |
-| State guard (Bash) | `core/guard-state-file.ts` over `core/shell-command-head.ts`, `core/shell-heredoc.ts`, `core/shell-substitution.ts` |
+| State guard (Bash) | `core/guard-state-file.ts` over `core/shell-quoting.ts` (the quote lexer), `core/shell-command-head.ts`, `core/shell-redirects.ts`, `core/shell-heredoc.ts`, `core/shell-substitution.ts` |
 | StateManager, engine revision pin, runtime revision | `engine/src/state-manager.ts`, `core/engine-revision-pin.ts`, `runtime-compatibility.ts` |
 | Run Directories, journal, effects | `orchestration/run-directory-handle.ts`, `orchestration/program-journal.ts`, `orchestration/effect-runner.ts` |
 | Request authority, rosters, minting | `core/orchestration-contract/roster.ts`, `core/model-profiles.ts` |

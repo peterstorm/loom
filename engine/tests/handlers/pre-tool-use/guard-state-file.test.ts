@@ -103,6 +103,15 @@ describe("guard-state-file — edge cases", () => {
     );
   });
 
+  it("a helper invocation is read in shell words, and a word holding whitespace never vouches", () => {
+    // One shell word spanning the whole invocation runs a command NAMED that text.
+    expect(guardDecision(`x'/bun cli.ts helper mark-tests-passed '; echo f > active_task_graph.json`)).toBe("block");
+    // A spaced word is a different reading of the line from a whitespace split: no trust.
+    expect(guardDecision(`bun '/a b/cli.ts' helper mark-tests-passed > active_task_graph.json`)).toBe("block");
+    expect(guardDecision(`bun \${X:-a b}/cli.ts helper mark-tests-passed > active_task_graph.json`)).toBe("block");
+    expect(guardDecision(`'bun' "cli.ts" 'helper' "mark-tests-passed" > active_task_graph.json`)).toBe("allow");
+  });
+
   it("a helper name in a comment does NOT bypass the guard", () => {
     expect(guardDecision('echo x >> active_task_graph.json # cleanup-state')).toBe("block");
     expect(guardDecision('# set-phase\necho x >> active_task_graph.json')).toBe("block");
@@ -392,6 +401,23 @@ describe("guard-state-file — edge cases", () => {
     // Precision: real fd dups stay allowed.
     expect(guardDecision("cat active_task_graph.json >&2")).toBe("allow");
     expect(guardDecision("cat active_task_graph.json 2>&1")).toBe("allow");
+  });
+
+  it("an escaped `\\>` binds nothing: the `&` after it runs the next command (escaped-operator bypass)", () => {
+    // The splitter read `>&` off the raw text, so `\>&` bound the `&` as an fd
+    // dup and `echo \>& rm <state>` was ONE read-only `echo` segment.
+    expect(guardDecision("echo \\>& rm .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo \\>| rm .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo '>'& rm .claude/state/active_task_graph.json")).toBe("block");
+  });
+
+  it("`>|` is one clobbering redirect, judged like `>`", () => {
+    expect(guardDecision("echo forged >| active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo forged 2>| .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision(`bun cli.ts helper set-phase execute >| ${SUBAGENT_DIR}/s.evidence.jsonl`)).toBe("block");
+    expect(guardDecision("cat active_task_graph.json >| /tmp/copy.json")).toBe(
+      guardDecision("cat active_task_graph.json > /tmp/copy.json"),
+    );
   });
 
   it("`cd` is NOT allowlisted — cwd relocation launders relative writes (round-16 bypass)", () => {

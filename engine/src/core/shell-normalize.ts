@@ -27,11 +27,10 @@
  * (`${x-w}`/`${x=w}`) have a SECOND bash output the colon forms don't: when the
  * var is set-but-empty they expand to EMPTY, and `.claude/stat${x-X}e` then
  * reassembles to `.claude/state` — a guarded literal the word-reveal view
- * conceals (the round-20 regression). The guard tests BOTH via the
- * `collapseVariants` cross-product — `referencesPattern` feeds the unset,
- * blanked, and completed forms through it, and the colonless empty output is
- * one enumerated view; colon forms stay reveal-only
- * (they can never expand to empty). The ALTERNATE forms (`${x:+w}`/`${x+w}`) are
+ * conceals (the round-20 regression). The guard tests BOTH: `collapseVariants`
+ * reads `normalizeShellVariants`, whose cross-product holds the colonless
+ * empty output as one enumerated view; colon forms stay reveal-only (they can
+ * never expand to empty). The ALTERNATE forms (`${x:+w}`/`${x+w}`) are
  * the MIRROR: they yield EMPTY on unset (the primary view deletes them, exactly
  * as before) but the WORD `w` on set (`:+` set-non-null, `+` set), and `w` can
  * carry a guarded literal (`${PWD:+.claude/state/…}` — always-set `PWD` makes
@@ -82,12 +81,12 @@ const SPECIAL_PARAM = /[0-9@*?$!#-]/;
  *         `colonless` (`${x-w}`/`${x=w}`) marks the forms with a SECOND output:
  *         EMPTY when the var is set-but-empty (the colon forms substitute `w` on
  *         unset AND null, so `w` is their ONLY value). The guard tests the empty
- *         output too — see referencesPattern's colonless-empty base.
+ *         output too — see normalizeShellVariants.
  *       · `form: "alternate"` (`${x:+w}`/`${x+w}`) is the MIRROR: EMPTY on unset
  *         (the primary view deletes it) but `w` on set (`:+` set-non-null, `+`
  *         set). `w` can carry a guarded literal (`${PWD:+.claude/state/…}`), so
  *         the guard must reveal it in a SECOND view or fail OPEN — see
- *         referencesPattern's alternate-reveal base. `colonless` is recorded for
+ *         normalizeShellVariants. `colonless` is recorded for
  *         completeness but does not change the matching view (both alternate
  *         forms output either empty or `w`).
  *
@@ -119,7 +118,7 @@ type ParamExpansion =
  *    - "alternate" (`:+`/`+`): the MIRROR — EMPTY on unset (the primary view)
  *      and the literal `word` on set (`:+` set-non-null, `+` set). `word` can
  *      carry a guarded literal (`${PWD:+.claude/state/…}`), so the guard also
- *      tests a view that reveals it — see NormalizeOptions `alternateFormsReveal`.
+ *      tests a view that reveals it — see RevealChoice.
  *      `:?`/`?` are NOT here: their `word` is a stderr error message, never
  *      substituted into the value. */
 const WORD_OPS = [
@@ -198,140 +197,77 @@ export interface NormalizedSpan {
 }
 
 /**
- * The two — and only two — coherent normalization modes, as a discriminated
- * union so the incoherent boolean-product configs the old
- * `{ stopAtWordBoundary; backtickQuotes? }` admitted are unrepresentable:
+ * The two — and only two — coherent normalization modes:
  *
- *   - `"matching-view"` (guard `collapseVariants`): consume to the end of `text`
- *     and treat an unquoted backtick as a LITERAL. Backticks stay literal
- *     because guarded patterns contain no backtick, so keeping the char is
- *     reveal-monotonic — it can only ever fail to hide a guarded token, never
- *     conceal one. (The front gate and placeholderFor run on UNFLATTENED text,
- *     so it is NOT that substitutions were already removed.)
- *   - `"redirect-word"` (evidence `readRedirectTarget`): stop (exclusive) at the
- *     first UNQUOTED word boundary (whitespace, `>` `<` `&` `(` `)` `|` `;`) and
- *     treat an unquoted backtick as a QUOTE so a `` >`cmd` `` target does not
- *     split mid-substitution.
- *
- * `stopAtWordBoundary` and `backtickQuotes` are derived from `mode` internally
- * (see `resolveMode`), so the two flags can never disagree.
- *
- * `colonlessDefaultsEmpty` (matching-view only) makes a colonless default form
- * (`${x-w}`/`${x=w}`) expand to EMPTY instead of revealing `w` — the guard's
- * SECOND bash output for these spans (the var is set-but-empty). The default
- * (flag absent/false) reveals `w`, keeping the guard and the evidence twin
- * point-wise identical for the primary view; the empty view is an ADDITIONAL
- * guard base (referencesPattern), not a redirect-word behavior.
- *
- * `alternateFormsReveal` (matching-view only) is the MIRROR for the alternate
- * forms (`${x:+w}`/`${x+w}`): it REVEALS `w` (recursively normalized) instead of
- * deleting the span — the guard's set-state output for these spans. The default
- * (flag absent/false) deletes them (the unset output), identical to the evidence
- * twin and to the pre-round-24 behavior; the reveal view is an ADDITIONAL guard
- * base, so a guarded literal carried in `w` (`${PWD:+.claude/state/…}`) cannot
- * slip past the front gate.
+ *   - `"matching-view"` (guard `collapseVariants`, through
+ *     `normalizeShellVariants`): consume to the end of `text` and treat an
+ *     unquoted backtick as a LITERAL. Backticks stay literal because guarded
+ *     patterns contain no backtick, so keeping the char is reveal-monotonic —
+ *     it can only ever fail to hide a guarded token, never conceal one. (The
+ *     front gate and placeholderFor run on UNFLATTENED text, so it is NOT that
+ *     substitutions were already removed.)
+ *   - `"redirect-word"` (evidence `readRedirectTarget`, through
+ *     `normalizeShellSpan`): stop (exclusive) at the first UNQUOTED word
+ *     boundary (whitespace, `>` `<` `&` `(` `)` `|` `;`) and treat an unquoted
+ *     backtick as a QUOTE so a `` >`cmd` `` target does not split
+ *     mid-substitution.
  */
-export type NormalizeOptions =
-  | {
-      readonly mode: "matching-view";
-      readonly colonlessDefaultsEmpty?: boolean;
-      readonly alternateFormsReveal?: boolean;
-    }
-  | { readonly mode: "redirect-word" };
+type NormalizeMode = "matching-view" | "redirect-word";
 
-/** Derive the two behavioral flags from the mode — the single place the mode↔
- *  flag mapping lives, so `matching-view`/`redirect-word` stay coherent. */
-function resolveMode(opts: NormalizeOptions): {
-  readonly stopAtWordBoundary: boolean;
-  readonly backtickQuotes: boolean;
-} {
-  return opts.mode === "redirect-word"
-    ? { stopAtWordBoundary: true, backtickQuotes: true }
-    : { stopAtWordBoundary: false, backtickQuotes: false };
+/**
+ * Which output one optional word form contributes to a view: true reveals its
+ * word `w`, false makes it EMPTY. Asked once per form, in text order, and only
+ * for the forms with two outputs — a colonless default (`${x-w}`/`${x=w}`:
+ * `w` on unset, EMPTY on set-but-empty) and an alternate form (`${x:+w}`/
+ * `${x+w}`: EMPTY on unset, `w` on set). A colon default's `w` is its only
+ * output and is always revealed.
+ */
+type RevealChoice = (form: "colonless-default" | "alternate") => boolean;
+
+/** Every variable unset: a colonless default yields its word, an alternate
+ *  form nothing. The evidence reader's one view. */
+const UNSET_VIEW: RevealChoice = (form) => form === "colonless-default";
+
+/**
+ * The value a `word`-form expansion contributes to the normalized view: its
+ * word, recursively normalized, unless `reveal` empties it. Always
+ * matching-view, so the guard and the evidence reader reveal an IDENTICAL word
+ * regardless of the caller's mode — the word is a whole sub-span, not a
+ * boundary-terminated fragment — and the same `reveal` threads into the word,
+ * so a form NESTED inside a revealed word (`${x:-${y-X}}`, `${x:-${PWD:+Y}}`)
+ * follows its own choice at any depth: bash's output reassembles a fragmented
+ * guarded literal beyond one nesting level. The single source of truth for
+ * the unquoted and double-quoted `$` call sites, so they cannot drift on the
+ * reveal rules (the concealment/fail-open bypass this file has fought for
+ * rounds).
+ */
+function wordContribution(
+  text: string,
+  pe: Extract<ParamExpansion, { kind: "word" }>,
+  reveal: RevealChoice,
+): string {
+  let shown = true;
+  if (pe.form === "alternate") shown = reveal("alternate");
+  else if (pe.colonless) shown = reveal("colonless-default");
+  return shown
+    ? normalizeShellSpanInternal(text.slice(pe.wordStart, pe.end - 1), 0, "matching-view", reveal).value
+    : "";
 }
 
 /**
  * Normalize the span of `text` starting at `start` to the literal characters
  * bash produces, applying every quote/escape/ANSI-C rule exactly once. The
- * decisions here are the shared contract; callers differ only by `opts.mode`
- * (see NormalizeOptions), which selects where a span ends and whether backticks
- * quote. Caveat: for double-quoted `\c` where `c` is a non-special char, bash
- * KEEPS the backslash (`"a\c"` → `a\c`) but this normalizer DROPS it (→ `ac`);
- * that over-normalizes — reveal-monotonic for the guard (can only expose a
- * guarded token, never hide one) but over-mints for the evidence twin.
+ * decisions here are the shared contract; callers differ only by `mode` (see
+ * NormalizeMode), which selects where a span ends and whether backticks quote,
+ * and by `reveal`, which selects the variable state. Caveat: for double-quoted
+ * `\c` where `c` is a non-special char, bash KEEPS the backslash (`"a\c"` →
+ * `a\c`) but this normalizer DROPS it (→ `ac`); that over-normalizes —
+ * reveal-monotonic for the guard (can only expose a guarded token, never hide
+ * one) but over-mints for the evidence reader.
  */
-/** Reveal the word of a `word`-form expansion (`${x:-w}` / `${x:+w}`) as the
- *  value bash substitutes, recursively normalized. Always matching-view so the
- *  guard and the evidence twin reveal an IDENTICAL word regardless of the
- *  caller's mode — the word is a whole sub-span, not a boundary-terminated
- *  fragment. Both set-state flags are threaded from the enclosing span so a
- *  default/alternate form NESTED inside a revealed word (`${x:-${y-X}}`,
- *  `${x:-${PWD:+Y}}`) follows the same hypothesis at any depth — bash's output
- *  reassembles a fragmented guarded literal beyond one nesting level. */
-type WordVariantCursor = { readonly mask: number; index: number };
-
-function nextVariantReveal(cursor: WordVariantCursor): boolean {
-  const reveal = (cursor.mask & (1 << cursor.index)) !== 0;
-  cursor.index += 1;
-  return reveal;
-}
-
-function revealWord(
-  text: string,
-  wordStart: number,
-  end: number,
-  colonlessEmpty: boolean,
-  alternateReveal: boolean,
-  variantCursor: WordVariantCursor | undefined,
-): string {
-  return normalizeShellSpanInternal(text.slice(wordStart, end - 1), 0, {
-    mode: "matching-view",
-    colonlessDefaultsEmpty: colonlessEmpty,
-    alternateFormsReveal: alternateReveal,
-  }, variantCursor).value;
-}
-
-/**
- * The value a `word`-form expansion contributes to the normalized view, by
- * family and the active set-state flags — the single source of truth for the
- * two normalizeShellSpan call sites (unquoted and double-quoted `$`) so they
- * cannot drift on the reveal rules, the concealment/fail-open bypass this file
- * has fought for rounds:
- *   - default (`${x:-w}`): reveal `w` (its unset output), EXCEPT a colonless
- *     default (`${x-w}`/`${x=w}`) under `colonlessEmpty`, which contributes
- *     nothing (its set-but-empty output).
- *   - alternate (`${x:+w}`): contribute nothing (its unset output), EXCEPT under
- *     `alternateReveal`, which reveals `w` (its set output).
- */
-function wordContribution(
-  text: string,
-  pe: Extract<ParamExpansion, { kind: "word" }>,
-  colonlessEmpty: boolean,
-  alternateReveal: boolean,
-  variantCursor: WordVariantCursor | undefined,
-): string {
-  let reveal: boolean;
-  if (pe.form === "alternate") {
-    reveal = variantCursor === undefined ? alternateReveal : nextVariantReveal(variantCursor);
-  } else if (pe.colonless) {
-    reveal = variantCursor === undefined ? !colonlessEmpty : nextVariantReveal(variantCursor);
-  } else {
-    reveal = true;
-  }
-  return reveal
-    ? revealWord(text, pe.wordStart, pe.end, colonlessEmpty, alternateReveal, variantCursor)
-    : "";
-}
-
-function normalizeShellSpanInternal(
-  text: string,
-  start: number,
-  opts: NormalizeOptions,
-  variantCursor: WordVariantCursor | undefined,
-): NormalizedSpan {
-  const { stopAtWordBoundary, backtickQuotes } = resolveMode(opts);
-  const colonlessEmpty = opts.mode === "matching-view" && opts.colonlessDefaultsEmpty === true;
-  const alternateReveal = opts.mode === "matching-view" && opts.alternateFormsReveal === true;
+function normalizeShellSpanInternal(text: string, start: number, mode: NormalizeMode, reveal: RevealChoice): NormalizedSpan {
+  const stopAtWordBoundary = mode === "redirect-word";
+  const backtickQuotes = mode === "redirect-word";
   let value = "";
   let quote: '"' | "'" | "`" | null = null;
   let i = start;
@@ -352,7 +288,7 @@ function normalizeShellSpanInternal(
       if (c === "$" && quote === '"') {
         const pe = paramExpansionEnd(text, i);
         if (pe.kind === "word") {
-          value += wordContribution(text, pe, colonlessEmpty, alternateReveal, variantCursor);
+          value += wordContribution(text, pe, reveal);
           i = pe.end - 1; continue;
         }
         if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -375,11 +311,9 @@ function normalizeShellSpanInternal(
     if (c === "$") {
       const pe = paramExpansionEnd(text, i);
       // `$name`/`${…}`: delete to unset→empty; word forms contribute `w` per
-      // family and the active set-state flags (see wordContribution) — default
-      // forms reveal `w`, alternate forms `${x:+w}` reveal it only under
-      // alternateFormsReveal, colonless defaults collapse under colonlessDefaultsEmpty.
+      // family and `reveal` (see wordContribution).
       if (pe.kind === "word") {
-        value += wordContribution(text, pe, colonlessEmpty, alternateReveal, variantCursor);
+        value += wordContribution(text, pe, reveal);
         i = pe.end - 1; continue;
       }
       if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -401,36 +335,44 @@ function normalizeShellSpanInternal(
   return { value, end: Math.min(i, text.length) };
 }
 
-export function normalizeShellSpan(
-  text: string,
-  start: number,
-  opts: NormalizeOptions,
-): NormalizedSpan {
-  return normalizeShellSpanInternal(text, start, opts, undefined);
+/**
+ * The redirect target word starting at `start`, normalized the way bash
+ * reads it with every variable unset (the evidence reader's one view): it
+ * ends (exclusive) at the first unquoted word boundary, and an unquoted
+ * backtick quotes.
+ */
+export function normalizeShellSpan(text: string, start: number): NormalizedSpan {
+  return normalizeShellSpanInternal(text, start, "redirect-word", UNSET_VIEW);
 }
 
 /**
- * Enumerate independent reveal/empty outcomes for every optional word-form
- * expansion encountered by the shared normalizer. Nested forms participate
+ * Every text bash may produce for `text` from `start` (matching-view): each
+ * optional word form (see RevealChoice) is an independent reveal/empty
+ * outcome, and the result holds every combination. Nested forms participate
  * only when their enclosing word is revealed. Treating syntax occurrences as
- * independent deliberately over-approximates bash variables that repeat: extra
- * views can only arm a guard, never conceal a real output. `null` means the
- * requested bound cannot cover the cross-product and callers must fail closed.
+ * independent deliberately over-approximates bash variables that repeat:
+ * extra views can only arm a guard, never conceal a real output. `null` means
+ * the requested bound cannot cover the cross-product and callers must fail
+ * closed.
  */
 export function normalizeShellVariants(
   text: string,
   start: number,
   maxVariants: number,
 ): readonly string[] | null {
-  const allRevealed: WordVariantCursor = { mask: -1, index: 0 };
-  normalizeShellSpanInternal(text, start, { mode: "matching-view" }, allRevealed);
-  const variantCount = 2 ** allRevealed.index;
+  let forms = 0;
+  normalizeShellSpanInternal(text, start, "matching-view", () => {
+    forms += 1;
+    return true; // every enclosing word revealed: count every form that can be asked
+  });
+  const variantCount = 2 ** forms;
   if (!Number.isSafeInteger(variantCount) || variantCount > maxVariants) return null;
 
   const values = new Set<string>();
   for (let mask = 0; mask < variantCount; mask += 1) {
-    const cursor: WordVariantCursor = { mask, index: 0 };
-    values.add(normalizeShellSpanInternal(text, start, { mode: "matching-view" }, cursor).value);
+    let asked = 0;
+    const reveal: RevealChoice = () => (mask & (1 << asked++)) !== 0;
+    values.add(normalizeShellSpanInternal(text, start, "matching-view", reveal).value);
   }
   return Object.freeze([...values]);
 }
