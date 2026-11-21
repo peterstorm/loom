@@ -17,7 +17,7 @@ import {
   createImplementationAttemptContext,
   deriveImplementationRetryDisposition,
 } from "../src/core/implementation-retry";
-import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 import { value } from "./fixtures/parse-result";
 import { observedEvidence } from "./fixtures/task-lifecycle";
 
@@ -77,7 +77,7 @@ const graph = (task: Record<string, unknown>, overrides: Record<string, unknown>
   plan_file: null,
   tasks: [task],
   wave_gates: {},
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   ...overrides,
 });
 

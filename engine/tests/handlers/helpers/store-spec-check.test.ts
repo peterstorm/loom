@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { execSync, spawnSync } from "node:child_process";
 import type { TaskGraph } from "../../../src/types";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -40,7 +40,7 @@ describe("store-spec-check helper", () => {
     statePath = join(stateDir, "active_task_graph.json");
     const graph: TaskGraph = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

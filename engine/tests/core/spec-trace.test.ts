@@ -5,7 +5,7 @@ import {
 } from "../../src/core/spec-trace";
 import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
 import { parseTaskGraph } from "../../src/state-manager";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const task = (
   id: string,
@@ -71,7 +71,7 @@ describe("Requirement trace v2", () => {
     const graph = {
       spec_trace_version: 2,
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       plan_title: "trace",

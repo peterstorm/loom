@@ -33,7 +33,7 @@ import { buildContextPacket, encodeByteSection } from "../../../src/core/context
 import { capturedSpecCheck } from "../../../src/core/spec-check";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../src/core/wave-frozen-source";
 import { observedWorkspace } from "../../fixtures/reviewed-workspace";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const DIGEST = (fill: string): ArtifactDigest => {
   const parsed = parseArtifactDigest(fill.repeat(64));
@@ -107,7 +107,7 @@ describe("registered Wave spec-check scope", () => {
     const graph: TaskGraph = {
       spec_trace_version: 2,
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -193,7 +193,7 @@ describe("registered Wave spec-check scope", () => {
     const parsed = parseTaskGraph({
       spec_trace_version: 2,
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -368,7 +368,7 @@ describe("registered Wave spec-check scope", () => {
     const parsed = parseTaskGraph({
       spec_trace_version: 2,
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -437,7 +437,7 @@ describe("registered Wave spec-check scope", () => {
     const parsed = parseTaskGraph({
       spec_trace_version: 2,
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -494,7 +494,7 @@ describe("registered Wave spec-check scope", () => {
     const parsed = parseTaskGraph({
       spec_trace_version: 2,
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -536,7 +536,7 @@ describe("Wave reviewer slot identity projection", () => {
   const graph = parseTaskGraph({
     spec_trace_version: 2,
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],
@@ -638,7 +638,7 @@ describe("Wave frozen source authority", () => {
   const parsedRunId = parseOrchestrationRunId("run.frozen-source");
   if (!parsedRunId.ok) throw new Error(parsedRunId.error.message);
   const parsedGraph = parseTaskGraph({
-    spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+    spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, wave_gates: {},
     tasks: [
       taskFixture({ id: "T1", description: "first", agent: "code-implementer-agent", wave: 1,
@@ -751,7 +751,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
     const parsedGraph = parseTaskGraph({
       spec_trace_version: 2,
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -813,7 +813,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
     const created = createRunDirectory(runsRoot, "run.subject");
     if (!created.ok) throw new Error(created.error.message);
     const parsedGraph = parseTaskGraph({
-      spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {},
+      spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {},
       skipped_phases: [], spec_file: specFileIn(spec), plan_file: null, wave_gates: {},
       tasks: [taskFixture({
         id: "T1", description: "implements FR-001", agent: "code-implementer-agent", wave: 1,
@@ -930,7 +930,7 @@ describe("Wave spec-check authority guards", () => {
 
   const graphWith = (specFile: string | null, modified: readonly string[] = ["src/a.ts"]) => {
     const parsed = parseTaskGraph({
-      spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {},
+      spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {},
       skipped_phases: [], spec_file: specFile, plan_file: null, wave_gates: {},
       tasks: [taskFixture({
         id: "T1", description: "implements FR-001", agent: "code-implementer-agent", wave: 1,

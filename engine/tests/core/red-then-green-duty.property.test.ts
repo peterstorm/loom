@@ -28,7 +28,7 @@ import {
 import { redThenGreenStatusView, type NotOwedReason } from "../../src/core/red-then-green-status";
 import { rosterScopeProblems, type ScopeAuthority, type ScopedTask } from "../../src/core/task-scope-rules";
 import { isTestFileBySuffixes } from "../../src/core/test-file-classification";
-import { legacyDefaultVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import {
   COVERED_BY_ACCEPTANCE_CONTRACT,
   NEW_TEST_WAIVER_REASONS,
@@ -82,7 +82,7 @@ const policy: fc.Arbitrary<VerificationPolicy> = fc.record({
 });
 
 const manifest: fc.Arbitrary<FrozenVerificationManifest | undefined> =
-  fc.constantFrom(I6_MANIFEST, legacyDefaultVerificationManifest(), undefined);
+  fc.constantFrom(I6_MANIFEST, preI6DefaultVerificationManifest(), undefined);
 
 const contracts = fc.array(
   fc.record({ id: fc.constantFrom("CT-1", "CT-2", "CT-3"), contractTask: fc.constantFrom(...TASK_IDS, "T9") }),

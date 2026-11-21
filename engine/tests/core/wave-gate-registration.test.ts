@@ -18,7 +18,7 @@ import {
   protectedGraphFixture,
   taskFixture,
 } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const base = graphFixture([
   taskFixture({ id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, depends_on: [] }),
@@ -178,7 +178,7 @@ describe("installWaveGateRegistration", () => {
     });
     const abandonedGraphRaw = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 8,
       phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
       tasks: [

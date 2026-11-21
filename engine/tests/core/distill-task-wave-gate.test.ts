@@ -51,7 +51,7 @@ import {
   siblingTaskFixture,
   type DistillTaskFixtureInput,
 } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -84,7 +84,7 @@ const distill = (
 ): Task => distillTaskFixture({ id, wave: 1, scope: siblingIds.map(fileOf), status, files_modified: [], ...extra });
 
 const graphOf = (tasks: readonly Task[], overrides: Record<string, unknown> = {}): TaskGraph => protectedGraphFixture({
-  spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+  spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
   spec_file: null, plan_file: PLAN_FILE, wave_gates: {}, executing_tasks: [],
   tasks,
   ...overrides,

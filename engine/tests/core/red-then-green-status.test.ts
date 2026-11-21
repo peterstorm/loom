@@ -45,7 +45,7 @@ import {
 } from "../../src/core/red-then-green-status";
 import { UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { classifyTaskFiles } from "../../src/core/test-file-classification";
-import { legacyDefaultVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import { COVERED_BY_ACCEPTANCE_CONTRACT } from "../../src/core/verification-policy";
 import type { Evidence } from "../../src/machine/types";
 import type { Task, TaskGraph } from "../../src/types";
@@ -183,7 +183,7 @@ describe("redThenGreenStatusView: duty", () => {
   });
 
   it("is not owed because the TaskGraph predates I6, with no manifest or one frozen without a classification", () => {
-    for (const manifest of [undefined, legacyDefaultVerificationManifest()]) {
+    for (const manifest of [undefined, preI6DefaultVerificationManifest()]) {
       const graph = graphOf([requiredTask("T1", "not-owed")], manifest);
       expect(redThenGreenDuty(taskOf(graph, "T1"), graph.verification_manifest)).toEqual({ kind: "not-owed" });
       expect(redThenGreenStatusView(input(graph, "T1"))).toMatchObject({

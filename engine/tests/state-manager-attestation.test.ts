@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import { parseTaskGraph } from "../src/state-manager";
 import { derivePendingTaskProof, type TaskProof } from "../src/core/proof-obligations";
 import type { VerificationPolicy } from "../src/core/verification-policy";
-import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 
 const ATTESTED_POLICY: VerificationPolicy = Object.freeze({
   regression: Object.freeze({ kind: "required" as const }),
@@ -40,7 +40,7 @@ const attestationProof = (artifacts: readonly string[] = ["src/a.ts"], policy = 
 
 const graphWith = (task: Record<string, unknown>): unknown => ({
   current_phase: "execute",
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   current_wave: 1,
   phase_artifacts: {},
   skipped_phases: [],

@@ -22,7 +22,7 @@ import {
 } from "../../src/core/plan-design-review";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract/identity";
 import { value } from "../fixtures/parse-result";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -156,7 +156,7 @@ describe("standalone lifecycle", () => {
     const previous = process.env.LOOM_STATE_PATH;
     writeFileSync(graphPath, JSON.stringify({
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,
@@ -245,7 +245,7 @@ describe("an agent outside Loom's catalog is not phase work", () => {
   const executing = (): PhaseOrderDeps => ({
     loadState: () => ({
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

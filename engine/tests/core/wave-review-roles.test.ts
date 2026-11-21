@@ -50,7 +50,7 @@ import type { Task, TaskCommonMetadata, TaskGraph } from "../../src/types";
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
 import { activeWaveGateFixture, graphFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const V4 = WAVE_REVIEWER_PROTOCOL_V4;
 const DIGEST_A = "a".repeat(64);
@@ -247,7 +247,7 @@ describe("the issued review is threaded through every roster comparison", () => 
 
   it("the locked install reads the narrowing from the registration and refuses one whose basis or derived roster no longer holds", () => {
     const task: Task = { ...implemented(), review_basis: basisAcceptance(implemented()) };
-    const graph: TaskGraph = { ...graphFixture([task]), current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1 };
+    const graph: TaskGraph = { ...graphFixture([task]), current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1 };
     const registration = activeWaveGateFixture({ runId: "run.next", wave: 1, authorityDigest: waveGateAuthorityDigest(1, ["T1"], graph) });
     const held: NarrowedTaskReview = { ...narrowed, basis: { ...narrowed.basis, headSha: task.review_basis!.head_sha } };
     expect(installWaveGateRegistration(graph, registration, { taskIds: ["T1"], narrowedReviews: [held] }).kind).toBe("installed");

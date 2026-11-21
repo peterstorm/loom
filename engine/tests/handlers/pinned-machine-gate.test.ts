@@ -23,7 +23,7 @@ import { PIN_MACHINES_COMMAND } from "../../src/core/machine-integrity";
 import { bindMachineAgent, machineBindingPath } from "../../src/machine";
 import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
 import markActive from "../../src/handlers/subagent-start/mark-subagent-active";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 vi.mock("../../src/core/machine-pins", () => ({
   SHIPPED_MACHINE_PINS: Object.freeze({
@@ -39,7 +39,7 @@ const savedEnv = { machines: process.env.LOOM_MACHINES_DIR, state: process.env.L
 
 beforeAll(() => {
   writeFileSync(statePath, JSON.stringify({
-    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, current_wave: 1, executing_tasks: [],
     tasks: [], wave_gates: {},
   }, null, 2));

@@ -8,7 +8,7 @@ import type { SpecParseError } from "../../src/core/parse-spec";
 import type { SettledFloor } from "../../src/core/requirement-coverage";
 import { epochSettledFloor } from "../../src/core/wave-review-authority";
 import { parseSpecCheckOutput, reconcileSpecCheck, specCheckNeedsReapplication } from "../../src/core/spec-check";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const DIGEST = "a".repeat(64);
 const REQUIRED = 'Task "T1" claim "FR-999" — names no entry in the Spec Index';
@@ -16,7 +16,7 @@ const CURRENT = { kind: "settled", count: 1, criticalFindings: [REQUIRED] } as c
 const UNPROJECTED = { kind: "unprojected", reason: "spec file was unavailable" } as const;
 const graph = (fields: Readonly<Record<string, unknown>> = {}) => ({
   current_phase: "execute",
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   current_wave: 1,
   phase_artifacts: {},
   skipped_phases: [],

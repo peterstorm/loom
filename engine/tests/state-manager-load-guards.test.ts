@@ -22,7 +22,7 @@ import type { AcceptedReviewAuthority } from "../src/types";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   freezeVerificationManifest,
   type FrozenVerificationManifest,
 } from "../src/core/verification-manifest";
@@ -101,7 +101,7 @@ const validTask = {
 } as const;
 
 const graph = (overrides: Record<string, unknown> = {}) => ({
-  current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
+  current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,
@@ -877,7 +877,7 @@ describe("parseTaskGraph protected completion authority", () => {
     const parsed = parseTaskGraph(graph({ current_wave: 1, active_wave_gate: activeWaveGate() }));
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
-      expect(parsed.value.verification_manifest).toEqual(legacyDefaultVerificationManifest());
+      expect(parsed.value.verification_manifest).toEqual(preI6DefaultVerificationManifest());
       expect(parsed.value.active_wave_completion_suite).toBeUndefined();
     }
     expect(errorOf(graph({ current_wave: 1, active_wave_gate: activeWaveGate(), verification_manifest: undefined })))
@@ -904,7 +904,7 @@ describe("parseTaskGraph protected completion authority", () => {
   });
 
   it("uses the legacy default manifest authority when the legacy-compatible field is absent", () => {
-    const receipt = acceptedReceipt(legacyDefaultVerificationManifest());
+    const receipt = acceptedReceipt(preI6DefaultVerificationManifest());
     expect(parseTaskGraph(graph({
       current_wave: 1,
       active_wave_gate: activeWaveGate(),

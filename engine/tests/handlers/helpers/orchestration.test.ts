@@ -61,7 +61,7 @@ import {
 } from "../../../src/runtime-compatibility";
 import { executingGraphFixture, protectedGraphFixture, satisfiedProof, trustedPassEvidence } from "../../fixtures/task-lifecycle";
 import { issuedDescriptorWavePayload } from "../../fixtures/wave-reviewer-payload";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -170,7 +170,7 @@ function passedSpecCheckEpoch(runId: string, batchEpoch: string, planFile: strin
 
 function executeGraph(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     spec_dir: ".claude/specs/x",
     phase_artifacts: {},
@@ -553,7 +553,7 @@ describe("prepareOrphanedWaveGateRecovery", () => {
 
   function graph(): TaskGraph {
     return {
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       spec_dir: ".claude/specs/x",
       phase_artifacts: {},
@@ -1770,7 +1770,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
       tasks: [{
         id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1, status: "implemented", proof,
         depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], test_result: { verdict: "trusted-pass" },
@@ -1833,7 +1833,7 @@ describe("orchestration CLI", () => {
     });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [task("T1"), task("T2")],
     }));
     const runsRoot = join(root, "runs");
@@ -1882,7 +1882,7 @@ describe("orchestration CLI", () => {
     };
     const graph = {
       spec_trace_version: 2,
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: canonicalSpec(root), plan_file: null, wave_gates: {},
       tasks: [blockedReviewTarget("T10", proof, finding, { spec_anchors: ["FR-001", "AS-001"], spec_contributions: [] })],
     };
@@ -2057,7 +2057,7 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       spec_trace_version: 2,
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {}, tasks: [{
         id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -2225,7 +2225,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -2303,7 +2303,7 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       spec_trace_version: 2,
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: specPath, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "claims an undefined Requirement", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -2369,7 +2369,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "attempt-one rejection", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -2438,7 +2438,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "mixed retry target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -2518,7 +2518,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "orphan recovery target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -2731,7 +2731,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {},
       tasks: [{
         id: "T1", description: "restart target", agent: "code-implementer-agent", wave: 1,
@@ -2991,7 +2991,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "partial restart", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -3077,7 +3077,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "valid retry", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -3125,7 +3125,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
         id: "T1", description: "completion crash window", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
@@ -3153,7 +3153,7 @@ describe("orchestration CLI", () => {
     // durably wrote the retired graph with completion history, but the terminal
     // checkpoint write never happened. The run directory has NO checkpoint.
     const crashGraph = {
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null,
       wave_gates: {
         "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
@@ -3216,7 +3216,7 @@ describe("orchestration CLI", () => {
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
     const graph = {
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {},
       ...passedSpecCheckEpoch("run.wave-upheld-tally", "a".repeat(64), null),
       tasks: [blockedReviewTarget("T1", proof, finding)],
@@ -3285,7 +3285,7 @@ describe("orchestration CLI", () => {
     };
     const planFile = modelFreePlan(root);
     const graph = {
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: planFile, wave_gates: {},
       ...passedSpecCheckEpoch("run.wave-refuted-tally", "b".repeat(64), planFile),
       tasks: [blockedReviewTarget("T1", proof, finding)],
@@ -3337,7 +3337,7 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     const planFile = modelFreePlan(root);
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: planFile, wave_gates: {},
       ...passedSpecCheckEpoch("run.wave-lint-block", "b".repeat(64), planFile),
       tasks: [{
@@ -3742,7 +3742,7 @@ describe("orchestration CLI", () => {
     };
     const planFile = modelFreePlan(root);
     writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: planFile, wave_gates: {},
       ...passedSpecCheckEpoch("run.wave-retired-refutation", "c".repeat(64), planFile),
       tasks: [blockedReviewTarget("T1", proof, finding)],
@@ -4351,7 +4351,7 @@ describe("orchestration CLI", () => {
       writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
       writeFileSync(statePath, JSON.stringify({
-        current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
         spec_trace_version: 2, spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {},
         tasks: [{
           id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
@@ -4815,7 +4815,7 @@ describe("orchestration CLI", () => {
       writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
       writeFileSync(statePath, JSON.stringify({
-        current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
         spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
           id: "T1", description: "abandon stamp target", agent: "code-implementer-agent", wave: 1,
           status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],

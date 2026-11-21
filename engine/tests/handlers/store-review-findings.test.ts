@@ -18,7 +18,7 @@ import { distillTaskFixture, satisfiedProof } from "../fixtures/task-lifecycle";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { Task } from "../../src/types";
 import { findingId } from "../fixtures/finding-id";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src", "cli.ts");
 
@@ -219,7 +219,7 @@ describe("store-review-findings CLI — an override must land or say why not", (
 
   const graph = () => ({
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

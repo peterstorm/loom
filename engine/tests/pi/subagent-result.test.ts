@@ -17,7 +17,7 @@ import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-
 import { taskFixture, observedEvidence } from "../fixtures/task-lifecycle";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import {
   authorizeImplementationSpawn,
   createImplementationAttemptContext,
@@ -119,7 +119,7 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
     current_wave: 1,
     executing_tasks: [],
     wave_gates: {},
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     tasks: [{
       id: "T1",
       description: "a task",

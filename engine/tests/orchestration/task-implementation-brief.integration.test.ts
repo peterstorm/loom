@@ -6,7 +6,7 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { ownerObligation } from "../fixtures/owner-obligation";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { satisfiedProof } from "../fixtures/task-lifecycle";
 
 const roots: string[] = [];
@@ -33,7 +33,7 @@ function graphWith(
   if (typeof plan === "string") writeFileSync(join(root, ".claude", "plans", "plan.md"), plan);
   const path = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(path, JSON.stringify({
-    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 2, phase_artifacts: {}, skipped_phases: [],
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 2, phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: plan === undefined ? null : ".claude/plans/plan.md", wave_gates: {},
     ...(stamp === undefined ? {} : { owner_obligations: stamp }),
     // A same-Wave edge is legal only as an audited add-dependency edit (ADR-0081).

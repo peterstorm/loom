@@ -12,7 +12,7 @@ import validateTaskExecution, { createValidateTaskExecutionHandler } from "../..
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../../src/types";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const returning = (result: HookResult, calls: string[], name: string) => ({
   name,
@@ -78,7 +78,7 @@ describe("validate-task-execution — no reservation behind a veto", () => {
     roots.push(root);
     const statePath = join(root, "active_task_graph.json");
     const graph: TaskGraph = {
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
       tasks: [taskFixture({ id: "T1", description: "task T1", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [] })],
       wave_gates: { "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false } },
       current_wave: 1, executing_tasks: [],

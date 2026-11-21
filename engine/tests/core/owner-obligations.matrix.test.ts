@@ -93,7 +93,7 @@ import type { ArtifactDigest } from "../../src/core/orchestration-contract";
 import {
   authorizeWaveCompletionSuite,
   freezeVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
@@ -238,7 +238,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     mkdirSync(join(root, ".claude", "plans"), { recursive: true });
     writeFileSync(join(root, PLAN_FILE), "# Plan: matrix\n");
     const parsed = parseTaskGraph({
-      spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: PLAN_FILE, wave_gates: {},
       ...(stamp === undefined ? {} : { owner_obligations: stamp }),
       tasks: [taskFixture({
@@ -398,8 +398,8 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
   const loads = (value: TaskGraph, owner: OwnerCheckAuthority | null): boolean => {
     const written = {
       ...value,
-      verification_manifest: legacyDefaultVerificationManifest(),
-      active_wave_completion_suite: receiptUnder(owner, legacyDefaultVerificationManifest()),
+      verification_manifest: preI6DefaultVerificationManifest(),
+      active_wave_completion_suite: receiptUnder(owner, preI6DefaultVerificationManifest()),
     };
     return parseTaskGraph(JSON.parse(JSON.stringify(written))).ok;
   };

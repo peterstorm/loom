@@ -102,7 +102,7 @@ bad()  { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
 # An execute-phase State File carries its frozen manifest: the loader refuses
 # one without it (ADR-0098). Earlier phases carry none.
-MANIFEST_JSON="$(bun -e "import { legacyDefaultVerificationManifest } from '$LOOM_DIR/engine/src/core/verification-manifest.ts'; process.stdout.write(JSON.stringify(legacyDefaultVerificationManifest()))")"
+MANIFEST_JSON="$(bun -e "import { preI6DefaultVerificationManifest } from '$LOOM_DIR/engine/src/core/verification-manifest.ts'; process.stdout.write(JSON.stringify(preI6DefaultVerificationManifest()))")"
 
 # Write the state file at the given phase (chmod dance mirrors StateManager).
 write_state() {

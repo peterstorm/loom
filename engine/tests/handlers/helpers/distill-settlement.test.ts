@@ -47,7 +47,7 @@ import {
 } from "../../fixtures/distill-settlement";
 import { value } from "../../fixtures/parse-result";
 import { protectedGraphFixture, siblingTaskFixture, taskFixture } from "../../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const ROOT = "/fixture";
 const SCOPE = ["src/a.ts", "src/b.ts"] as const;
@@ -110,7 +110,7 @@ function graphWith(attempt: ImplementationAttemptAuthority, agent: string): Task
   });
   return {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

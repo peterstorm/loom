@@ -9,7 +9,7 @@ import type { Task, TaskGraph } from "../../src/types";
 import type { PlanModels } from "../../src/core/parse-plan-models";
 import { value } from "../fixtures/parse-result";
 import { satisfiedProof } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 function waveTask(fileList: string[]): Task {
   return {
@@ -158,7 +158,7 @@ describe("Wave Gate lifecycle wiring (check 7 is actually in the gate)", () => {
   it("reads the architecture phase artifact as the plan when plan_file is null", () => {
     const graph: TaskGraph = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: { architecture: "arch-plan.md" },
       skipped_phases: [],
       spec_file: null,

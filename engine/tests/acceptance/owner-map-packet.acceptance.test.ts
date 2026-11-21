@@ -37,7 +37,7 @@ import { ownerObligation } from "../fixtures/owner-obligation";
 import { CLOCK, FEES, FEES_CLOCK_PLAN_FILE, FEES_CLOCK_PLAN_TEXT, someParagraph } from "../fixtures/owner-families";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import { taskFixture } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -65,7 +65,7 @@ function projectWithPlan(): string {
 /** A Wave 1 graph whose one Task changes INV-1's sibling, stamped with `obligations`. */
 function stampedGraph(obligations: readonly OwnerObligation[]): TaskGraph {
   const parsed = parseTaskGraph({
-    spec_trace_version: 2, current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+    spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: PLAN_FILE, wave_gates: {},
     owner_obligations: obligations,
     tasks: [taskFixture({

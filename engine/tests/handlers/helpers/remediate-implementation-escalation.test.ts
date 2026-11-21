@@ -21,7 +21,7 @@ import {
 } from "../../fixtures/implementation-escalation";
 import { parseTaskGraph } from "../../../src/state-manager";
 import type { Task } from "../../../src/types";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 import { reserveLiveAttempt } from "../../fixtures/task-lifecycle";
 
 
@@ -49,7 +49,7 @@ const installState = (taskFields: Record<string, unknown>): string | null => {
   const { terminal_receipt: _terminalReceipt, ...persistedFields } = taskFields;
   const graph = {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     plan_title: "Remediation plan",

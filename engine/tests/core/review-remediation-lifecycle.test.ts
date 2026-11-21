@@ -97,7 +97,7 @@ import { parseTaskGraph } from "../../src/state-manager";
 import type { HeadSha, PacketId } from "../../src/core/review-packet";
 import type { PriorFindingVerdict, ReviewRun, Task, TaskGraph } from "../../src/types";
 import { findingId } from "../fixtures/finding-id";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 // Branded as parsePacketId/parseHeadSha would mint them, so these fixtures
 // bind exactly the way the production call site does.
@@ -209,7 +209,7 @@ function applyAgent(
 function graph(task: Task): TaskGraph {
   return {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     plan_title: "review lifecycle",

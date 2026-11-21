@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import { parseNewTestEvidence, type TaskGraph, type Task } from "../../../src/types";
 import { pendingTaskProof, satisfiedProof } from "../../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -28,7 +28,7 @@ function makeTmpDir(): string {
 function graphWith(task: Partial<Task>): TaskGraph {
   return {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

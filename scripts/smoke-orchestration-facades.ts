@@ -15,7 +15,7 @@ import { DESKTOP_VLLM_ROUTE } from "../engine/src/core/model-profiles";
 import { startRouteStub } from "./route-stub";
 import { CONFORMANCE_NOT_OWED } from "../engine/src/core/skeleton/conformance-verdict";
 import { parseIssuedTaskIdentity } from "../engine/src/core/spawn-task-text";
-import { legacyDefaultVerificationManifest } from "../engine/src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../engine/src/core/verification-manifest";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = join(ROOT, "engine", "src", "cli.ts");
@@ -713,7 +713,7 @@ function waveState(planFile: string, specFile: string): Record<string, unknown> 
     spec_trace_version: 2,
     current_phase: "execute",
     // An execute-phase State File carries its frozen manifest; the loader refuses one without it (ADR-0098).
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],

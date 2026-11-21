@@ -11,7 +11,7 @@ import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy } from "../src
 import { validateFull } from "../src/handlers/helpers/validate-task-graph";
 import { parseTaskGraph } from "../src/state-file-wire";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 
 const STORED_DISTILL_POLICY = serializeVerificationPolicy(DISTILL_VERIFICATION_POLICY);
 const REQUIRED_POLICY = { regression: { kind: "required" }, new_tests: { kind: "required" } };
@@ -51,7 +51,7 @@ const distill = (overrides: Readonly<Record<string, unknown>> = {}): Record<stri
 
 const graphOf = (...tasks: readonly Record<string, unknown>[]): unknown => JSON.parse(JSON.stringify({
   current_phase: "execute",
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,

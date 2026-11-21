@@ -24,7 +24,7 @@ import {
   taskFixture,
   executingGraphFixture,
 } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const TYPES = "src/payload-contract.ts";
 const ACCEPTANCE = "tests/payload.acceptance.test.ts";
@@ -71,7 +71,7 @@ function populated(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return protectedGraphFixture({
     spec_trace_version: 2,
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

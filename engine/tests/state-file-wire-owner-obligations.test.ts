@@ -22,7 +22,7 @@ import {
 import { authorizeWaveCompletionSuite, defaultVerificationManifest } from "../src/core/verification-manifest";
 import type { ActiveWaveGateRegistration, OwnerObligation, TaskGraph } from "../src/types";
 import { ownerObligation } from "./fixtures/owner-obligation";
-import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 
 const VERIFIED: OwnerObligation = ownerObligation({
   invariant: "INV-1",
@@ -48,7 +48,7 @@ const EXEMPT: OwnerObligation = ownerObligation({
 });
 
 const graph = (extra: Readonly<Record<string, unknown>> = {}): Record<string, unknown> => ({
-  current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
+  current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,

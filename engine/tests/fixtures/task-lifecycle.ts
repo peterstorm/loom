@@ -14,7 +14,7 @@ import type { RedThenGreenObservation } from "../../src/core/red-then-green-type
 import { labelledValue } from "./parse-result";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { completedWaveGateEntry, type CompletedWaveGateInput } from "./accepted-wave-completion-suite";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import {
   parseActiveWaveGateRegistration,
   parseCompletedWaveGateRegistration,
@@ -58,7 +58,7 @@ export function withExecuteManifest(raw: unknown): unknown {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
   const graph = raw as Record<string, unknown>;
   return graph.current_phase === "execute" && graph.verification_manifest === undefined
-    ? { ...graph, verification_manifest: legacyDefaultVerificationManifest() }
+    ? { ...graph, verification_manifest: preI6DefaultVerificationManifest() }
     : raw;
 }
 
@@ -184,7 +184,7 @@ export function graphFixture(tasks: readonly Task[]): TaskGraph {
     current_wave: 1,
     tasks: [...tasks],
     wave_gates: {},
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
   };
 }
 
@@ -429,7 +429,7 @@ export function reserveLiveAttempt(statePath: string): void {
 export function reviewBlockedWaveGraph<T>(tasks: readonly T[]) {
   return {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

@@ -42,7 +42,7 @@ import {
 import { returnToRevalidation } from "../../src/core/task-revalidation";
 import {
   defaultVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { parseVerificationPolicy, type VerificationPolicy } from "../../src/core/verification-policy";
@@ -115,7 +115,7 @@ const ERA_ROWS: readonly EraRow[] = [
   { row: "(b) an operator schema-2 manifest without testFileSuffixes", manifest: () => fromSource({ schemaVersion: 2 }), era: "owed-if-new-tests" },
   { row: "(c) an operator schema-1 manifest", manifest: () => fromSource({ schemaVersion: 1 }), era: "owed-if-new-tests" },
   { row: "(d) no manifest file (defaultVerificationManifest())", manifest: () => defaultVerificationManifest(), era: "owed-if-new-tests" },
-  { row: "(e) a pre-feature frozen manifest", manifest: () => legacyDefaultVerificationManifest(), era: "not-owed" },
+  { row: "(e) a pre-feature frozen manifest", manifest: () => preI6DefaultVerificationManifest(), era: "not-owed" },
   { row: "(f) a pre-feature graph with no verification_manifest", manifest: () => undefined, era: "not-owed" },
 ];
 
@@ -169,7 +169,7 @@ function populated(manifest: FrozenVerificationManifest | undefined): TaskGraph 
       planTitle: "Era plan",
       validatedPlanFile: "plan.md",
       tasks: roster.value,
-      verificationManifest: manifest ?? legacyDefaultVerificationManifest(),
+      verificationManifest: manifest ?? preI6DefaultVerificationManifest(),
       specIndex: { kind: "unavailable", reason: { kind: "no-spec-file" } },
       observedSpecFile: null,
       force: false,

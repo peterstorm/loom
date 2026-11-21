@@ -34,7 +34,7 @@ import {
   authorizeImplementationSpawn,
   createImplementationAttemptContext,
 } from "../../src/core/implementation-retry";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const roots: string[] = [];
 const previousDir = process.env.LOOM_SUBAGENT_DIR;
@@ -116,7 +116,7 @@ function modernGraph(
   });
   const graph: TaskGraph = {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -261,7 +261,7 @@ describe("Claude implementation authority sidecar", () => {
       wave: 1, status: "pending", depends_on: [], file_list: [],
     });
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, current_wave: 1,
       executing_tasks: [], tasks: [unreserved], wave_gates: {},
     }, null, 2));
@@ -369,7 +369,7 @@ describe("Claude implementation authority sidecar", () => {
     const statePath = join(dir, "custom-state.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

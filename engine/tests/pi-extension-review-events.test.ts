@@ -41,7 +41,7 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../src/runtime-compatibility";
-import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -136,7 +136,7 @@ cpSync(join(fixturePiAgentDirectory(), "models.json"), join(piAgentDir, "models.
 
 const initialGraph = () => ({
   current_phase: "execute",
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,

@@ -16,7 +16,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 const ZERO_FLOOR = parseSettledFloor({ kind: "settled", count: 0 });
 if (ZERO_FLOOR === null) throw new Error("zero-floor fixture must parse");
 import { parseOrchestrationRunId, parseSlotId } from "../../src/core/orchestration-contract";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 describe("parseSpecCheckOutput (pure)", () => {
   it("parses all severity levels", () => {
@@ -310,7 +310,7 @@ describe("handler reads file content (not path)", () => {
     const statePath = join(tmpDir, "active_task_graph.json");
     const state = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,
@@ -374,7 +374,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       if (!runId.ok || !slotId.ok) throw new Error("invalid transcript failure authority fixture");
       writeFileSync(statePath, JSON.stringify({
         spec_trace_version: 2,
-        current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
         spec_file: null, plan_file: null, current_wave: 5, tasks: [], wave_gates: {},
         active_wave_gate: {
           schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 5,
@@ -465,7 +465,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     const slotId = parseSlotId("wave-slot:spec-check");
     if (!runId.ok || !slotId.ok) throw new Error("invalid authority fixture");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, current_wave: 1, tasks: [], wave_gates: {},
       active_wave_gate: {
         schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 1,
@@ -529,7 +529,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     if (!runId.ok || !slotId.ok) throw new Error("invalid authority fixture");
     writeFileSync(statePath, JSON.stringify({
       spec_trace_version: 2,
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       spec_file: specPath, plan_file: planPath, current_wave: 1, tasks: [], wave_gates: {},
       active_wave_gate: {
         schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 1,
@@ -588,7 +588,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     const initial = {
       spec_trace_version: 2,
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,
@@ -653,7 +653,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     else if (input.transcript !== null) writeFileSync(transcriptPath, input.transcript);
     const gate = registeredSpecCheckWave(input.wave, input.label);
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, current_wave: input.wave, tasks: [], wave_gates: {},
       ...gate.fields, ...input.extra,
     }));
@@ -864,7 +864,7 @@ describe("the Requirement Coverage Projection is enforced, not merely rendered",
     if (!runId.ok || !slotId.ok) throw new Error("invalid floor authority fixture");
     writeFileSync(statePath, JSON.stringify({
       spec_trace_version: 2,
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       spec_file: specPath, plan_file: null, current_wave: 5,
       tasks: [{
         id: "T1", description: "claims an undefined Requirement", agent: "code-implementer-agent",
@@ -955,7 +955,7 @@ describe("round-6: the reported party selects no Wave", () => {
     const gate = registeredSpecCheckWave(3, "spec-wrong-wave");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

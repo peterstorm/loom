@@ -16,14 +16,14 @@ import {
 } from "../../src/core/engine-revision-pin";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { EngineRevisionPin, TaskGraph } from "../../src/types";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const REV_A = engineRevisionOf(`sha256:${"a".repeat(64)}`);
 const REV_B = engineRevisionOf(`sha256:${"b".repeat(64)}`);
 const REV_C = engineRevisionOf(`sha256:${"c".repeat(64)}`);
 
 const graph = (engine_revision?: EngineRevisionPin): TaskGraph => ({
-  current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
+  current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
   tasks: [], wave_gates: {}, ...(engine_revision === undefined ? {} : { engine_revision }),
 });
 const adopted = (state: TaskGraph, revision: string, reason = "the fix for #196 is on main"): TaskGraph => {

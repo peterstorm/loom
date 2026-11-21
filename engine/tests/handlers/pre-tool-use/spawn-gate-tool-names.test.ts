@@ -24,14 +24,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SUBAGENT_SPAWN_TOOLS } from "../../../src/core/tool-vocabulary";
 import type { HookHandler } from "../../../src/types";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const REPO_ROOT = resolve(__dirname, "../../../..");
 
 /** A graph that puts T9 a wave ahead of the current one — a clean wave-order block. */
 const TASK_GRAPH = JSON.stringify({
   current_phase: "execute",
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,

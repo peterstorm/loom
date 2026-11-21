@@ -10,7 +10,7 @@ import { matchRoster } from "../../src/core/spec-trace";
 import { prepareSpecTraceUpgrade } from "../../src/core/spec-trace-migration";
 import type { SpecTraceOwnership, TaskGraph } from "../../src/types";
 import { pendingTaskProof } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const LABEL = "Roster test";
 
@@ -76,7 +76,7 @@ function legacyGraph(): TaskGraph {
   });
   return {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],

@@ -21,7 +21,7 @@ import {
 } from "../../../src/handlers/helpers/exact-implementation-settlement";
 import type { TaskGraph, TaskTestResult } from "../../../src/types";
 import { taskFixture } from "../../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 function authority(reservationId = "shared-exact"): ImplementationAttemptAuthority {
   const parsed = createImplementationAttemptAuthority({
@@ -57,7 +57,7 @@ function graph(attempt: ImplementationAttemptAuthority, newTestsRequired = false
   });
   return {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

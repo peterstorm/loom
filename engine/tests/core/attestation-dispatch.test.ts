@@ -29,7 +29,7 @@ const statusDeps: StatusDeps = {
 
 const graphWith = (tasks: readonly Record<string, unknown>[]): unknown => ({
   current_phase: "execute",
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   current_wave: 1,
   phase_artifacts: {},
   skipped_phases: [],
@@ -140,7 +140,7 @@ describe("attestation dispatch emission", () => {
 import { createImplementationAttemptAuthority, settleImplementationAttempt, parseIsoInstant, parseReservationId, type ImplementationAttemptSettlementReceipt } from "../../src/core/implementation-completion";
 import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { observedEvidence } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
   const instant = parseIsoInstant("2026-09-19T00:00:00.000Z");

@@ -17,7 +17,7 @@ import { SPAWN_VETOES } from "../../../src/handlers/pre-tool-use/spawn-vetoes";
 import validateTaskExecution, { createValidateTaskExecutionHandler } from "../../../src/handlers/pre-tool-use/validate-task-execution";
 import { hookSuccessStdout, preToolUseRewriteResult, type HookHandler, type PreToolUseInput } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 import { satisfiedProof } from "../../fixtures/task-lifecycle";
 
 const MARKER = "LOOM_IMPLEMENTATION_BRIEF: T2";
@@ -167,7 +167,7 @@ function activeGraph(): string {
   writeFileSync(plan, "# Plan\n");
   const path = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(path, JSON.stringify({
-    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 2, phase_artifacts: {}, skipped_phases: ["plan-alignment"],
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 2, phase_artifacts: {}, skipped_phases: ["plan-alignment"],
     spec_file: null, plan_file: plan, executing_tasks: [],
     wave_gates: {
       "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },

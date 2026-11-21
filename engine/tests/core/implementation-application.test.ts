@@ -30,7 +30,7 @@ import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdic
 import { authorizeImplementationSpawn, deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import type { Task, TaskGraph } from "../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../src/types";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const digest = (value: string) => value.repeat(64).slice(0, 64);
 const baseline = (path: string, value: string | null) => [{
@@ -102,7 +102,7 @@ function pendingTask(
 function graph(task: Task): TaskGraph {
   return {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -1020,7 +1020,7 @@ describe("isWaveComplete — the wave-completion predicate shared by engine and 
     taskFixture({ id, description: "impl", agent: "code-implementer-agent", wave, status, depends_on: [] });
   const waveGraph = (tasks: readonly Task[]): TaskGraph => ({
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

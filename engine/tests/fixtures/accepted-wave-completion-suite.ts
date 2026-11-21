@@ -2,7 +2,7 @@ import { evaluateAsRecorded, greenCompletionSuiteResult } from "./completion-sui
 import { labelledValue } from "./parse-result";
 import {
   authorizeWaveCompletionSuite,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import type { AcceptedWaveCompletionReceipt } from "../../src/core/completion-suite";
@@ -24,7 +24,7 @@ export const COMPLETION_SUITE_WORKSPACE: WaveWorkspaceObservation = Object.freez
  *  existed), so Proofs derived without a red-then-green duty stay exact. */
 export function acceptedWaveCompletionSuite(
   active: NonNullable<TaskGraph["active_wave_gate"]>,
-  manifest: FrozenVerificationManifest = legacyDefaultVerificationManifest(),
+  manifest: FrozenVerificationManifest = preI6DefaultVerificationManifest(),
 ): AcceptedWaveCompletionReceipt {
   const authorized = authorizeWaveCompletionSuite(manifest, active, SUITE_WORKSPACE_DIGEST, null);
   if (!authorized.ok) throw new Error(authorized.error.errors.join("; "));

@@ -28,7 +28,7 @@ import type { Task } from "../../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../../src/types";
 import { taskFixture, observedEvidence } from "../../fixtures/task-lifecycle";
 import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 /**
  * The failed Proof of a no-new-tests Task over `fileList` whose attempt
@@ -159,7 +159,7 @@ function poisonedRecoveryRepository(label: string, artifact: string, declared: s
  */
 function gatedRecoveryGraph(task: Record<string, unknown>) {
   return {
-    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
     spec_check: {
       wave: 2, run_at: "before recovery", verdict: "PASSED",
@@ -340,7 +340,7 @@ describe("directory artifact packet recovery", () => {
     const { root, historical, poisonedStart, packet, packetRelative, statePath } =
       poisonedRecoveryRepository("loom-proof-directory-recovery-", "src/feature/a.ts", "src/feature");
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
       wave_gates: {},
       tasks: [{

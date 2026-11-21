@@ -20,7 +20,7 @@ import {
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy } from "../../src/core/verification-policy";
@@ -240,7 +240,7 @@ describe("population adds no Distill Task", () => {
   });
 
   it("when the frozen manifest carries no Test-File Classification", () => {
-    expect(distillTasksOf(populated({ verificationManifest: legacyDefaultVerificationManifest() }))).toEqual([]);
+    expect(distillTasksOf(populated({ verificationManifest: preI6DefaultVerificationManifest() }))).toEqual([]);
   });
 
   it("and its result says why: the plan it derived, or the reason it derived none", () => {
@@ -251,8 +251,8 @@ describe("population adds no Distill Task", () => {
     };
 
     expect(planOf(operatorManifest({ distillPass: "off" }))).toEqual({ kind: "not-planned", reason: "pass-off" });
-    expect(planOf(legacyDefaultVerificationManifest())).toEqual({ kind: "not-planned", reason: "no-frozen-classification" });
-    expect(distillPlanNote(planOf(legacyDefaultVerificationManifest()))).toContain("No distill pass");
+    expect(planOf(preI6DefaultVerificationManifest())).toEqual({ kind: "not-planned", reason: "no-frozen-classification" });
+    expect(distillPlanNote(planOf(preI6DefaultVerificationManifest()))).toContain("No distill pass");
     expect(distillPlanNote(planOf(operatorManifest({ distillPass: "off" })))).toBeNull();
     expect(planOf(defaultVerificationManifest())).toMatchObject({
       kind: "planned",

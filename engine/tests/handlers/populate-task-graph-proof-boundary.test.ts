@@ -6,7 +6,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { git, write } from "../fixtures/git-repository";
 import type { TaskGraph } from "../../src/types";
 import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 /**
  * Population's proof boundary: an absent boundary is reported in the
@@ -58,7 +58,7 @@ function project(repository: boolean): Readonly<{ dir: string; statePath: string
   mkdirSync(dirname(statePath), { recursive: true });
   const state: TaskGraph = {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

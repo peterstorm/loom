@@ -45,7 +45,7 @@ import { deriveAgentTranscriptPath } from "../../src/utils/agent-transcript-path
 import { parseTaskGraph } from "../../src/state-manager";
 import type { Task } from "../../src/types";
 import { fixFull, validateFull } from "../../src/handlers/helpers/validate-task-graph";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 
 // ---------------------------------------------------------------------------
@@ -124,7 +124,7 @@ describe("deduplicateFindingIds restores the postcondition it exists for", () =>
         (ordinals) => {
           const graph = {
             current_phase: "execute",
-            verification_manifest: legacyDefaultVerificationManifest(),
+            verification_manifest: preI6DefaultVerificationManifest(),
             phase_artifacts: {},
             plan_title: "t",
             plan_file: ".claude/plans/p.md",
@@ -285,7 +285,7 @@ describe("view-only claims that cannot be given identity are reported, not vanis
   it("--fix emits an operator note naming the dropped claim and its consequence", () => {
     const repaired = fixFull({
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       tasks: [{
         id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
@@ -448,7 +448,7 @@ describe("chooseSource keeps claim identity and marker severity in lockstep", ()
 describe("the load boundary proves wave_gates and spec_check, not just tasks", () => {
   const graph = (extra: Record<string, unknown>) => ({
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     tasks: [],
     ...extra,

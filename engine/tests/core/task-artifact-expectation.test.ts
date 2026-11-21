@@ -33,7 +33,7 @@ import type { Task, TaskGraph } from "../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN } from "../../src/types";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import { taskFixture } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 describe("taskArtifactExpectation", () => {
   it("is preserved for a Distill Task, attested for an attestation Task, changed otherwise", () => {
@@ -144,7 +144,7 @@ function distillGraph(attempt: ImplementationAttemptAuthority): TaskGraph {
   });
   return {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

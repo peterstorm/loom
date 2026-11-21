@@ -15,7 +15,7 @@ import type { TaskId } from "../src/core/task-id";
 import { acceptedWaveCompletionSuite as acceptedCompletionSuite } from "./fixtures/accepted-wave-completion-suite";
 import { findingId } from "./fixtures/finding-id";
 import { executingGraphFixture, protectedGraphFixture, trustedPassEvidence, satisfiedProof } from "./fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -116,7 +116,7 @@ describe("StateManager", () => {
     const newState: TaskGraph = {
       ...minimalGraph(),
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       tasks: [{
         id: "T1",
         description: "test",
@@ -207,7 +207,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
   };
   const validGraph = {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -1290,7 +1290,7 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
   };
   const graph = (task: Record<string, unknown>) => ({
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     tasks: [{ ...validTask, ...task }],
     wave_gates: {},
@@ -1374,7 +1374,7 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
 describe("protected Wave Gate abandonment stamp (orchestration abandon → tombstone → supersede)", () => {
   const waveGraph = {
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],

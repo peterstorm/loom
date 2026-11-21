@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { parseNewTestEvidence, type TaskGraph, type Task, type WaveGate } from "../../src/types";
 import { evaluateProofObligations } from "../../src/core/proof-obligations";
 import { pendingTaskProof, observedEvidence } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 /**
  * E2E integration test: simulates full hook lifecycle with real filesystem.
@@ -150,7 +150,7 @@ describe("E2E: hook pipeline state machine", () => {
 
     const initialState: TaskGraph = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: ".claude/specs/test/spec.md",
@@ -289,7 +289,7 @@ describe("E2E: edge cases", () => {
   it("single task, single wave — simplest happy path", () => {
     const state: TaskGraph = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,
@@ -309,7 +309,7 @@ describe("E2E: edge cases", () => {
   it("3 waves with linear deps", () => {
     const state: TaskGraph = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

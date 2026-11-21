@@ -55,7 +55,7 @@ import {
   type TaskFixtureInput,
 } from "../fixtures/task-lifecycle";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import { waveGateAuthorityDigest } from "../../src/core/wave-review-authority";
 import {
@@ -286,7 +286,7 @@ describe("checkSpecAlignment (pure)", () => {
     criticalFindings: overrides.criticalFindings ?? [],
   });
   const mkState = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
-    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -423,7 +423,7 @@ describe("evaluateWaveGate + applyGateDecision — checks run on the locked stat
   };
 
   const mkGraph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
-    current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -892,7 +892,7 @@ function registeredGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
     },
     tasks: [baseTask],
     wave_gates: {},
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     active_wave_gate: {
       schemaVersion: 1,
       kind: "active-wave-gate",
@@ -1046,7 +1046,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("malformed authority keeps every category present but unavailable and returns only blocked", () => {
     const malformed = parseTaskGraph({
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       tasks: [], wave_gates: {}, active_wave_gate: { schemaVersion: 99 },
     });
     expect(malformed.ok).toBe(false);
@@ -2078,7 +2078,7 @@ describe("protected active Wave Gate registration", () => {
   it("rejects nonterminal active authority that contradicts Phase, current Wave, or terminal history and blocks status", () => {
     const terminalHistory = completedWaveGateEntry({ runId: "completed-wave-run", wave: 1 });
     const raw = {
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(),
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -2126,7 +2126,7 @@ describe("protected active Wave Gate registration", () => {
     const path = join(root, "active_task_graph.json");
     const taskIds = ["T1"];
     const initial: TaskGraph = {
-      current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, tasks: [baseTask], wave_gates: {},
     };
     const exactRegistration = {

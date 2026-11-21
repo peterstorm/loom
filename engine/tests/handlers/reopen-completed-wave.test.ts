@@ -26,7 +26,7 @@ import {
 import type { WaveReviewContextAuthority } from "../../src/core/wave-review-authority";
 import { parseReopenRequest } from "../../src/core/wave-reopening-request";
 import { completedWaveGateFixture, taskFixture, observedEvidence } from "../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
@@ -79,7 +79,7 @@ const laterWaveAttempt = (): ImplementationAttemptAuthority => value(createImple
 const graph = (tasks: readonly Task[] = [task("T19", 3), task("T22", 3), pendingTask("T23", 4)]): TaskGraph => ({
   current_phase: "execute", current_wave: 4, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
   tasks, wave_gates: { "3": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   wave_gate_history: [{ ...completedWaveGateFixture({ runId: "wave-run", wave: 3, authorityDigest: digest }), completionReceipt: receipt } as never],
 });
 /** A reopening payload as the helper's parser admits it. */

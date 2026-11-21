@@ -13,7 +13,7 @@ import {
   authorizeImplementationSpawn,
   createImplementationAttemptContext,
 } from "../../src/core/implementation-retry";
-import { legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 function authority(reservation: string) {
   const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
@@ -63,7 +63,7 @@ describe("Pi exact implementation authority correlation", () => {
     const context = initialContext(attempt, "Task ID: T1");
     const graph: TaskGraph = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,
@@ -126,7 +126,7 @@ describe("Pi exact implementation authority correlation", () => {
     const replacementContext = initialContext(replacement, "Task ID: T1 replacement");
     const graph: TaskGraph = {
       current_phase: "execute",
-      verification_manifest: legacyDefaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

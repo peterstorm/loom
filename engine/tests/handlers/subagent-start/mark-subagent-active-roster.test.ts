@@ -38,7 +38,7 @@ import {
 } from "../../../src/core/implementation-retry";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../../src/types";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 
 const uniq = `roster-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
@@ -69,7 +69,7 @@ if (!createdAuthority.ok) throw new Error(createdAuthority.error.errors.join("; 
 const rosterAdmission = authorizeImplementationSpawn({ id: "T1" }, "Task ID: T1");
 if (!rosterAdmission.ok) throw new Error(rosterAdmission.error);
 const modernGraph: TaskGraph = {
-  current_phase: "execute", verification_manifest: legacyDefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+  current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
   spec_file: null, plan_file: null, current_wave: 1, executing_tasks: ["T1"],
   tasks: [taskFixture({
     id: "T1", description: "roster", agent: "code-implementer-agent",

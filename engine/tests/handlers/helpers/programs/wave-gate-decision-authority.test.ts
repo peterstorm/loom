@@ -54,7 +54,7 @@ import { capturedSpecCheck } from "../../../../src/core/spec-check";
 import type { TaskGraph } from "../../../../src/types";
 import { findingId } from "../../../fixtures/finding-id";
 import { satisfiedProof, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
-import { legacyDefaultVerificationManifest } from "../../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../../src/core/verification-manifest";
 
 const RUN_ID = "run.wave-decision";
 const DIGEST = "a".repeat(64);
@@ -87,7 +87,7 @@ const TASKS = [task("T1", "prefer a named predicate"), task("T2", "tighten the e
 
 const graph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
   current_phase: "execute",
-  verification_manifest: legacyDefaultVerificationManifest(),
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,
@@ -635,7 +635,7 @@ describe("Wave review epoch installation", () => {
       };
       const beforeActive: TaskGraph = {
         current_phase: "execute",
-        verification_manifest: legacyDefaultVerificationManifest(),
+        verification_manifest: preI6DefaultVerificationManifest(),
         current_wave: 1,
         phase_artifacts: {},
         skipped_phases: [],

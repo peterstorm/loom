@@ -13,7 +13,7 @@ import { ORCHESTRATION_OPERATIONS } from "../../../src/handlers/helpers/orchestr
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../../src/handler-routes";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
-import { legacyDefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 import { satisfiedProof } from "../../fixtures/task-lifecycle";
 
 const cleanup: string[] = [];
@@ -33,7 +33,7 @@ function installState(): string {
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   writeFileSync(statePath, JSON.stringify({
     current_phase: "execute",
-    verification_manifest: legacyDefaultVerificationManifest(),
+    verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],
