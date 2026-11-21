@@ -1,14 +1,14 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseJunitTestcases } from "../../src/core/structured-test-report";
+import { readTestReport, reportTestcases } from "../../src/core/structured-test-report";
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const probe = readFileSync(join(__dirname, "..", "fixtures", "junit", "vitest-acceptance-probe.xml"));
 
-describe("parseJunitTestcases — the per-testcase projection of a JUnit report", () => {
+describe("reportTestcases — the per-testcase projection of a JUnit report", () => {
   it("projects every testcase of a real Vitest report with its file, outcome and failure type", () => {
-    const parsed = parseJunitTestcases(new Uint8Array(probe));
+    const parsed = reportTestcases(readTestReport(new Uint8Array(probe)));
     expect(parsed).toEqual({
       ok: true,
       value: [
@@ -51,7 +51,7 @@ describe("parseJunitTestcases — the per-testcase projection of a JUnit report"
   </testcase>
   <testcase name="AS-003 replays" classname="com.acme.OrderAcceptanceTest$Nested"/>
 </testsuite>`;
-    expect(parseJunitTestcases(bytes(surefire))).toEqual({
+    expect(reportTestcases(readTestReport(bytes(surefire)))).toEqual({
       ok: true,
       value: [
         { file: "com.acme.OrderAcceptanceTest", classname: "com.acme.OrderAcceptanceTest", name: "AS-001 submits", outcome: "failed", failureType: "org.opentest4j.AssertionFailedError" },
@@ -63,7 +63,7 @@ describe("parseJunitTestcases — the per-testcase projection of a JUnit report"
 
   it("identifies a real Bun testcase by its file attribute: classname is the describe chain, or empty at top level", () => {
     const bun = readFileSync(join(__dirname, "..", "fixtures", "bun-1.4.2-mixed.junit.xml"));
-    expect(parseJunitTestcases(new Uint8Array(bun))).toEqual({
+    expect(reportTestcases(readTestReport(new Uint8Array(bun)))).toEqual({
       ok: true,
       value: [
         { file: "src/b.test.ts", classname: "ok", name: "passes", outcome: "passed", failureType: null },
@@ -78,7 +78,7 @@ describe("parseJunitTestcases — the per-testcase projection of a JUnit report"
     const node = `<testsuites><testsuite name="s" tests="1" failures="0" skipped="1">
 <testcase name="todo" classname="t.test.ts"><skipped type="todo"/><failure type="Error"/></testcase>
 </testsuite></testsuites>`;
-    expect(parseJunitTestcases(bytes(node))).toMatchObject({ ok: true, value: [{ name: "todo", outcome: "skipped" }] });
+    expect(reportTestcases(readTestReport(bytes(node)))).toMatchObject({ ok: true, value: [{ name: "todo", outcome: "skipped" }] });
   });
 
   it.each([
@@ -86,13 +86,13 @@ describe("parseJunitTestcases — the per-testcase projection of a JUnit report"
     ["malformed XML", "<testsuites><testsuite>", "malformed-counts"],
     ["counts that disagree with the testcases", `<testsuite name="s" tests="5" failures="0"><testcase name="a" classname="c"/></testsuite>`, "malformed-counts"],
   ])("refuses %s with a named reason", (_name, text, reason) => {
-    expect(parseJunitTestcases(bytes(text))).toMatchObject({ ok: false, error: { kind: "invalid-structured-test-report", reason } });
+    expect(reportTestcases(readTestReport(bytes(text)))).toMatchObject({ ok: false, error: { kind: "invalid-structured-test-report", reason } });
   });
 
   it("refuses a testcase that names no file (neither a file attribute nor a classname) instead of inventing one", () => {
     for (const testcase of ['<testcase name="a"/>', '<testcase name="a" classname=""/>', '<testcase name="a" classname="" file=" "/>', '<testcase classname="c" file="f"/>']) {
       const report = `<testsuite name="s" tests="1" failures="0">${testcase}</testsuite>`;
-      expect(parseJunitTestcases(bytes(report)), testcase).toMatchObject({ ok: false, error: { reason: "malformed-testcase" } });
+      expect(reportTestcases(readTestReport(bytes(report))), testcase).toMatchObject({ ok: false, error: { reason: "malformed-testcase" } });
     }
   });
 });

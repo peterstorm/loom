@@ -18,9 +18,6 @@ export {
   type TestRunJudge,
 } from "./advance";
 export {
-  parseVitestJson,
-  parseJunitXml,
-  mergeSummaries,
   judgeTestRun,
   type TestVerdict,
   type TrustedTestVerdict,

@@ -133,7 +133,7 @@ describe("findReport — Bun JUnit artifacts", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it("parses an explicit fresh Bun JUnit artifact via parseJunitXml", () => {
+  it("parses an explicit fresh Bun JUnit artifact via declaredSummary", () => {
     writeFileSync(join(cwd, "report.xml"), '<testsuites><testsuite tests="7" failures="1" errors="1"/></testsuites>');
 
     expect(findReport(

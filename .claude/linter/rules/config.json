@@ -3,6 +3,10 @@
     {
       "path": "engine/tests/fixtures/security/upstream/",
       "reason": "vendored upstream security-audit validators, byte-pinned by MANIFEST.json and run as-is — rewriting them to loom's rules would break the pin"
+    },
+    {
+      "path": "engine/tests/fixtures/legacy-structured-test-report.ts",
+      "reason": "the retired two-reader structured-test-report module, frozen verbatim as the differential oracle for readTestReport (test-report-read.differential.test.ts): its copies of the kept XML grammar and brand casts are the point — rewriting it to loom's rules would stop it being the old code"
     }
   ],
   "requireGovernance": [

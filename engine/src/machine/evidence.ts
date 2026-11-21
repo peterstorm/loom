@@ -10,7 +10,7 @@
 
 import { match } from "ts-pattern";
 import { AGENT_COMMAND_ORIGIN, type Epoch, type Evidence, type EvidenceRecord, type FileWriteVia, type TestReportSummary, type TestRunOrigin } from "./types";
-import { parseReportSource, parseReportSummary } from "./test-report";
+import { parseReportSource, parseReportSummary } from "../core/structured-test-report";
 import { parseSandboxReceiptValue } from "../core/security-sandbox";
 import { parseEngineRunBinding } from "../core/engine-test-run";
 import { hasExactKeys, isRecord } from "../core/plain-record";

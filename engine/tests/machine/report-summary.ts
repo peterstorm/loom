@@ -9,7 +9,7 @@
  * in the fixture rather than silently demoting to null.
  */
 
-import { parseReportSummary } from "../../src/machine/test-report";
+import { parseReportSummary } from "../../src/core/structured-test-report";
 import type { TestReportSummary } from "../../src/machine/types";
 
 export function reportSummary(

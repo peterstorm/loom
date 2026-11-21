@@ -20,7 +20,8 @@ import type {
 import { parseArtifactDigest } from "../core/orchestration-contract";
 import {
   MAX_STRUCTURED_REPORT_BYTES,
-  parseStructuredTestReportBytes,
+  readTestReport,
+  reportCounts,
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
 import { sha256Bytes } from "../core/digest";
@@ -1240,7 +1241,7 @@ function remediationReportObservation(
     outcome: report.outcome,
     bytes: report.bytes,
     mode: report.mode,
-    parsedReportFacts: parseStructuredTestReportBytes(report.bytes),
+    parsedReportFacts: reportCounts(readTestReport(report.bytes)),
   });
 }
 

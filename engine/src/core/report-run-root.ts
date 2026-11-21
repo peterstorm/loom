@@ -26,7 +26,8 @@ import { failure, success, type DomainResult } from "./orchestration-contract/id
 import { normalizePlanPath } from "./plan-path-match";
 import { repositoryRelative } from "./report-file-attribution";
 import {
-  parseJunitTestcases,
+  readTestReport,
+  reportTestcases,
   type JunitTestcasesResult,
   type ReportTestcase,
 } from "./structured-test-report";
@@ -59,7 +60,7 @@ const underRunRoot = (testcase: ReportTestcase, runRoot: RunRoot): ReportTestcas
 
 /** Parse a JUnit report whose runner ran in `runRoot` (see the module comment). */
 export function parseJunitTestcasesUnder(bytes: Uint8Array, runRoot: RunRoot): JunitTestcasesResult {
-  const parsed = parseJunitTestcases(bytes);
+  const parsed = reportTestcases(readTestReport(bytes));
   return parsed.ok
     ? { ok: true, value: Object.freeze(parsed.value.map((testcase) => underRunRoot(testcase, runRoot))) }
     : parsed;
