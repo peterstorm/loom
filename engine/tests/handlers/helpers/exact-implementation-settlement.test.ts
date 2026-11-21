@@ -81,8 +81,7 @@ function facts(
     parserModifiedPaths: [],
     parserPathLabel: `${transport} fixture paths`,
     taskCompleted: true,
-    testResult,
-    testEvidence: `${transport} evidence`,
+    test: { result: testResult, evidence: `${transport} evidence` },
     proofEvaluationPolicy: transport === "Claude"
       ? TRUSTED_LEDGER_ONLY_POLICY
       : PI_STRUCTURED_EVIDENCE_POLICY,

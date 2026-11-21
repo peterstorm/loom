@@ -86,6 +86,10 @@ _Avoid_: Review cache, accepted result fallback, global witness map
 The Pi child's handler that records its tool calls into the parent session's Evidence Ledger, under the child's own Epoch. Only a child holding a valid parent-issued **Write Grant** records; any other child records nothing and says so. It adds no live phase gate on Pi.
 _Avoid_: Pi transcript converter, Pi evidence bridge
 
+**Pi Transcript Projection**:
+The one reading of a finished Pi child's messages: each tool call it made, in call order, under the same Pi tool vocabulary the **Pi Ledger Recorder** and the write guard use, paired with the first result after it that names its id, or unfinished. Settlement reads a child's write targets and its structured test result only as folds over it; a run with no structured test result records none, never a regex reading of the transcript.
+_Avoid_: Claude JSONL lowering, transcript fallback, files-modified parser (for Pi)
+
 ### Emission
 
 **Payload Producer**:
@@ -123,6 +127,7 @@ _Avoid_: startup notification, readiness flag, parent hash check
 - A Pi spawn batch has exactly one **Spawn Claims Ledger**; an **Orphaned Spawn Claim** belongs to none
 - A session's TaskGraph pointer has one **Session TaskGraph Pointer Lease Registry** with one lease per binder
 - A session and review root have at most one current run in the **Trusted Review Witness Aggregate**
+- A finished Pi implementation child has exactly one **Pi Transcript Projection**; its write targets and test result are folds over it
 - A **Payload Producer** has one or two producer kinds; each kind has exactly one **Emission Tool**
 - An ingested payload has exactly one **Emission Source**
 - Emission is enabled only on a **Qualified Emission Route** and only past the **Readiness Barrier**

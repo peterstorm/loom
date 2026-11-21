@@ -59,8 +59,8 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 617 src files / ~168.9k lines TS; `engine/tests/` holds 945 TS files / ~260.4k lines (fixtures and helpers included), of which 827 test files are executed (803 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
-| `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
+| `engine/` | The engine: 617 src files / ~168.8k lines TS; `engine/tests/` holds 944 TS files / ~260.5k lines (fixtures and helpers included), of which 826 test files are executed (802 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `pi/` | Pi adapter: 40 modules / 13.3k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
@@ -957,7 +957,7 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **827 executed test files / ~260.4k lines** — 803 under `engine/tests/` (945 TS files there
+- **826 executed test files / ~260.5k lines** — 802 under `engine/tests/` (944 TS files there
   including fixtures and helpers; core 304 test files, handlers 189, pi 50,
   linter 47, orchestration 38, utils 35, machine 30, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
@@ -1001,9 +1001,11 @@ unusually candid; this section adds what the scans found beyond it.
 after it classifies; a quoted or substituted directory never matches). But
 `npm --prefix <dir> run verify` — the exact invocation loom's own root `package.json`
 prints — is **still not classified**: the head starts with `npm --prefix`, which
-matches neither a bare `npm run` head nor a test pattern. Its pass is therefore
-untrusted (`untrusted-regression-pass`). Safe-side by design (unclassified ⇒
-untrusted), and engine-run graphs sidestep it entirely (§4.6); the agent-command path
+matches neither a bare `npm run` head nor a test pattern. Under Claude Code its pass is
+therefore untrusted (`untrusted-regression-pass`); under Pi it proves no test result at
+all (`test-result-missing` — the Pi path has no regex fallback). Safe-side by design
+(unclassified ⇒ untrusted or absent), and engine-run graphs sidestep it entirely
+(§4.6); the agent-command path
 still cannot mint trusted evidence from that spelling.
 
 ### 8.2 The evidence ledger sees only what command text names
@@ -1401,8 +1403,9 @@ NPX_PREFIX_OPTION live here), harness-tool-call-types, ledger
 session-registry (adapter), test-report (trust judgment), parse-machine, mermaid,
 task-graph-pointer, types.
 
-**parsers/** — parse-transcript, parse-bash-test-output, parse-files-modified,
-parse-phase-artifacts, parse-subagent-{start,stop,lifecycle}-input.
+**parsers/** — parse-transcript, parse-bash-test-output, parse-files-modified
+(Claude Code JSONL only; a Pi session file reads as harness records and attributes
+nothing), parse-phase-artifacts, parse-subagent-{start,stop,lifecycle}-input.
 
 **orchestration/** — run-directory-handle (2.2k, anchored handle), program-journal,
 effect-runner, harness-capture-runtime, capture-attestation-store,
@@ -1446,7 +1449,7 @@ task-addition-operations, and the rest of the whitelisted-helper surface
 
 ## Appendix C — `pi/` module-by-module
 
-extension.ts (registration shell, 717 ln); spawn machinery (spawn-{claims,
+extension.ts (registration shell, 718 ln); spawn machinery (spawn-{claims,
 claim-shell, graph, lifecycle, preparation, reservation}, reserved-{slot,results},
 subagent-{process,result,result-batch,result-route,settlement,stop}); emission
 machinery (emission-{tool,readiness,readiness-gate,readiness-protocol,
@@ -1456,4 +1459,6 @@ readiness-sequence,launch-bridge}, interactive-{rpc,subagent}); capability machi
 (review-capture, review-run-authority, trusted-review-witness); adapters
 (implementation-brief-expansion, rules-gate — twin of the Claude hook over one core,
 lint-coverage — twin over one shell, ask-user-question, resources, session-model-env,
-tool-input, transcript-adapter).
+tool-input, transcript-adapter — the one Pi transcript projection: messages →
+`HarnessToolCall`s paired with results through core/harness-tool-call's Pi vocabulary,
+folded into write targets and structured test evidence; no regex fallback).

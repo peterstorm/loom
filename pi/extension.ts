@@ -116,7 +116,8 @@ import {
   type PiEmissionReadinessHost,
   type PiEmissionReadinessRegistration,
 } from "./emission-readiness";
-import { piBashCommand, piWriteTargetPaths, replacePiSpawnTask } from "./tool-input";
+import { piBashCommand, replacePiSpawnTask } from "./tool-input";
+import { piWriteTargetPaths } from "../engine/src/core/harness-tool-call";
 import { piBashAuthorityDecision } from "./subagent-authority-gate";
 import { currentPiProcessMarker, markPiParentEnvironment, unmarkedSubagentLaunchNotice } from "./subagent-process";
 import {

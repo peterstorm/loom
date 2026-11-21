@@ -401,6 +401,47 @@ describe("shared evidence preservation", () => {
       expect(normalized.testEvidence).toBe(expected === "untrusted" ? "fallback" : "trusted history");
     },
   );
+
+  it.each([
+    ["untrusted", false, undefined],
+    ["trusted-fail", true, "trusted-fail"],
+    ["trusted-pass", false, "trusted-pass"],
+    ["trusted-pass", true, undefined],
+  ] as const)(
+    "an attempt that observed no test result leaves stored %s (bytesChanged=%s) as %s",
+    (stored, bytesChanged, expected) => {
+      const attempt = authority();
+      const task = pendingTask(attempt, {
+        test_result: stored === "untrusted"
+          ? { verdict: "untrusted", passed: true, label: "earlier attempt", provenance: "pi-structured" }
+          : { verdict: stored },
+        test_evidence: "earlier attempt",
+      });
+      const bytes = observedBytes({
+        currentAttemptScope: baseline("src/a.ts", bytesChanged ? digest("b") : digest("a")),
+      });
+      const normalized = normalizeImplementationEvidence(task, completedEvidence, bytes);
+      expect(normalized.testResult?.verdict).toBe(expected);
+      expect(normalized.testEvidence).toBe(expected === undefined ? undefined : "earlier attempt");
+    },
+  );
+
+  it("never carries an earlier attempt's untrusted result past a settlement that observed none", () => {
+    const attempt = authority();
+    const result = expectApplied(settleObservedImplementation(
+      graph(pendingTask(attempt, {
+        test_result: { verdict: "untrusted", passed: true, label: "earlier attempt", provenance: "pi-structured" },
+        test_evidence: "earlier attempt",
+      })),
+      attempt,
+      "2026-08-24T00:01:00.000Z" as never,
+      completedEvidence,
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(),
+    ));
+    expect(result.state.tasks[0]?.test_result).toBeUndefined();
+    expect(result.state.tasks[0]?.test_evidence).toBeUndefined();
+  });
 });
 
 describe("exact transition application", () => {

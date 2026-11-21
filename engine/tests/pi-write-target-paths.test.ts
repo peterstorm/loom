@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { piWriteTargetPaths } from "../../pi/tool-input";
+import { piWriteTargetPaths } from "../src/core/harness-tool-call";
 
 const paths = (input: unknown): readonly string[] => {
   const parsed = piWriteTargetPaths(input);

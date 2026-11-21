@@ -228,8 +228,7 @@ describe("modern implementation attempt registration", () => {
       parserModifiedPaths,
       parserPathLabel: "integration result paths",
       taskCompleted,
-      testResult: { verdict: "trusted-pass" },
-      testEvidence: "focused integration pass",
+      test: { result: { verdict: "trusted-pass" }, evidence: "focused integration pass" },
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
       ledger: { kind: "read", events: [] },
     }, productionExactSettlementPorts(repo.root, repo.statePath)).application.state);

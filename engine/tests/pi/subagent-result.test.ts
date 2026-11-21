@@ -1573,8 +1573,9 @@ describe("applyImplementationPiResult", () => {
 
 
   /**
-   * The wave gate rejects the transcript fallback, so a null structured verdict
-   * is a latent blocker the operator should hear about at the point it happens.
+   * A Pi run with no structured test evidence records no test result, which
+   * the wave gate rejects, so a null structured verdict is a latent blocker
+   * the operator should hear about at the point it happens.
    */
   it("explains a well-formed transcript that produced no structured test evidence", async () => {
     const modern = modernize(implementationGraph({ attempt_artifact_baseline: [] }), process.cwd(), "pi-no-structured");
@@ -1597,7 +1598,7 @@ describe("applyImplementationPiResult", () => {
     expect(logged).toContain("repository probe for T1 reports a non-Git working directory");
   });
 
-  it("keeps transcript-regex fallback unverified and blocks regression-required completion", async () => {
+  it("records no test result for a pass-looking non-test command and blocks regression-required completion", async () => {
     const modern = modernize(implementationGraph({
       file_list: [],
       attempt_artifact_baseline: [],
@@ -1634,16 +1635,15 @@ describe("applyImplementationPiResult", () => {
     });
 
     const task = store.current().tasks[0]!;
-    expect(task.test_result).toMatchObject({
-      verdict: "untrusted",
-      passed: false,
-      provenance: "unverified",
-    });
+    // Output that reads like a pass, from a command no classifier calls a test
+    // run, proves nothing: no result is recorded, not a degraded one.
+    expect(task.test_result).toBeUndefined();
+    expect(task.test_evidence).toBeUndefined();
     expect(task.status).toBe("pending");
     expect(task.proof).toMatchObject({ state: "failed" });
-    // Exact authority observes the completion; the unverified fallback alone fails the regression duty.
+    // Exact authority observes the completion; the missing result alone fails the regression duty.
     expect(task.proof.state === "failed" ? task.proof.failures : []).toEqual([
-      { kind: "untrusted-regression-tests-failed", label: "transcript-regex (fallback)" },
+      { kind: "test-result-missing" },
     ]);
   });
 
@@ -1916,7 +1916,9 @@ describe("applyImplementationPiResult", () => {
       });
 
       const task = store.current().tasks[0]!;
-      expect(task.test_result).toMatchObject({ verdict: "untrusted", passed: false });
+      // The child ran no test command: no test result is recorded, and the
+      // waived regression duty does not need one.
+      expect(task.test_result).toBeUndefined();
       expect(task.new_test_observation).toMatchObject({
         kind: "written",
         written: true,

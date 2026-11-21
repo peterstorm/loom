@@ -12,9 +12,8 @@
  * port its caller injects.
  */
 
-import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
-import { readPersistedOutput } from "../engine/src/utils/persisted-output";
-import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
+import type { TestEvidence } from "../engine/src/core/test-evidence";
+import type { ResolvedTestEvidence } from "../engine/src/core/implementation-evidence";
 import { match } from "ts-pattern";
 import {
   decidePhaseResult,
@@ -46,12 +45,13 @@ import type { LedgerObservation } from "../engine/src/core/red-then-green-types"
 import { parseAgentType, type SessionId, type SessionRegistry } from "../engine/src/machine";
 import { piChildEvidence } from "./evidence-recorder";
 import {
-  messagesToClaudeJsonl,
   parsePiMessages,
   piStructuredTestDiagnostics,
   piStructuredTestResult,
+  piTranscriptToolCalls,
+  piWriteTargets,
   type PiMessage,
-  type PiTranscriptResult,
+  type PiTranscriptToolCall,
 } from "./transcript-adapter";
 import {
   decidePiSpecCheckAuthority,
@@ -96,16 +96,6 @@ export const transcriptTextOf = (messages: readonly PiMessage[]): string =>
     .filter((message) => message.role === "assistant" || message.role === "toolResult")
     .flatMap((message) => message.content.flatMap((block) => block.type === "text" ? [block.text] : []))
     .join("\n");
-
-/** The errors of the FIRST failed result, or none when all succeeded. */
-function firstFailureErrors(
-  ...results: readonly PiTranscriptResult<unknown>[]
-): readonly string[] {
-  for (const result of results) {
-    if (!result.ok) return result.errors;
-  }
-  return [];
-}
 
 // ---------------------------------------------------------------------------
 // Phase agents
@@ -317,96 +307,80 @@ export function retireCompletedImplementation(
   };
 }
 
+/**
+ * What an implementation transcript proves about its tests: a structured
+ * verdict from a paired, attributable test run, or nothing. There is no
+ * third, weaker reading: transcript text that merely looks like a runner
+ * summary is not evidence, so a transcript without a structured verdict
+ * records no test result and the regression proof fails as
+ * `test-result-missing`.
+ */
 export type ImplementationTestObservation =
   | Readonly<{ kind: "structured"; evidence: TestEvidence }>
-  | Readonly<{ kind: "fallback"; evidence: TestEvidence }>;
+  | Readonly<{ kind: "missing" }>;
 
 export type ImplementationTranscriptObservation =
   | Readonly<{ kind: "malformed"; failureReason: string; log: readonly string[] }>
   | Readonly<{
       kind: "accepted";
-      resultMessages: readonly PiMessage[];
+      /** Every path the transcript's file-tool calls targeted (`piWriteTargets`). */
+      writeTargets: readonly string[];
       test: ImplementationTestObservation;
       log: readonly string[];
     }>;
 
-function missingStructuredEvidenceLog(taskId: string, messages: unknown):
-  | Readonly<{ ok: true; value: string }>
-  | Readonly<{ ok: false; errors: readonly string[] }> {
-  const trace = piStructuredTestDiagnostics(messages);
-  if (!trace.ok) return trace;
-  const summary = trace.value.classifiedCommands.length === 0
+function missingStructuredEvidenceLog(taskId: string, calls: readonly PiTranscriptToolCall[]): string {
+  const trace = piStructuredTestDiagnostics(calls);
+  const summary = trace.classifiedCommands.length === 0
     ? "no Bash call was classified as a test run"
-    : `verdict=${trace.value.verdict}, classified=[${trace.value.classifiedCommands.join(" | ")}]`;
-  return {
-    ok: true,
-    value: `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; ` +
-      `the wave gate will reject it`,
-  };
+    : `verdict=${trace.verdict}, classified=[${trace.classifiedCommands.join(" | ")}]`;
+  return `loom(pi): ${taskId} produced no structured test evidence (${summary}) — no test result recorded ` +
+    `(test-result-missing); the wave gate will reject it`;
 }
 
-/** Parse an implementation transcript into accepted test evidence, or the reason it is malformed. */
-export function observeImplementationTranscript(messages: unknown, taskId: string): ImplementationTranscriptObservation {
-  const log: string[] = [];
+/**
+ * Parse an implementation transcript once and fold its projected tool calls
+ * into the write targets and test evidence settlement reads, or name why it is
+ * malformed. `cwd` is the directory its relative paths are read against.
+ */
+export function observeImplementationTranscript(
+  messages: unknown,
+  taskId: string,
+  cwd: string,
+): ImplementationTranscriptObservation {
   const parsedMessages = parsePiMessages(messages);
   if (!parsedMessages.ok) {
     return {
       kind: "malformed",
       failureReason: `Pi transcript evidence capture failed: ${parsedMessages.errors.join("; ")}`,
-      log,
+      log: [],
     };
   }
-
-  const adaptedTranscript = messagesToClaudeJsonl(parsedMessages.value);
-  const structuredEvidence = piStructuredTestResult(parsedMessages.value);
-  const diagnostics = structuredEvidence.ok && structuredEvidence.value === null
-    ? missingStructuredEvidenceLog(taskId, messages)
-    : null;
-  if (diagnostics?.ok) log.push(diagnostics.value);
-  if (!adaptedTranscript.ok || !structuredEvidence.ok || diagnostics?.ok === false) {
-    const errors = firstFailureErrors(
-      adaptedTranscript,
-      structuredEvidence,
-      ...(diagnostics === null ? [] : [diagnostics]),
-    );
-    return {
-      kind: "malformed",
-      failureReason: `Pi transcript evidence capture failed: ${errors.join("; ")}`,
-      log,
-    };
-  }
-
-  const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value, readPersistedOutput));
-  const test: ImplementationTestObservation = structuredEvidence.value === null
-    ? { kind: "fallback", evidence: transcriptEvidence }
-    : {
-        kind: "structured",
-        evidence: testEvidenceOf(structuredEvidence.value.passed, structuredEvidence.value.evidence),
-      };
+  const calls = piTranscriptToolCalls(parsedMessages.value, cwd);
+  const structured = piStructuredTestResult(calls);
   return {
     kind: "accepted",
-    resultMessages: parsedMessages.value,
-    test,
-    log,
+    writeTargets: piWriteTargets(calls),
+    test: structured === null ? { kind: "missing" } : { kind: "structured", evidence: structured },
+    log: structured === null ? [missingStructuredEvidenceLog(taskId, calls)] : [],
   };
 }
 
-/** The untrusted test result an implementation observation contributes, labelled by provenance. */
-export function implementationTestResult(test: ImplementationTestObservation) {
-  const { evidence } = test;
-  return test.kind === "structured"
-    ? {
-        verdict: "untrusted" as const,
+/** The untrusted, provenance-labelled test result an implementation
+ *  observation contributes, or `null` when it proves none. */
+export function implementationTestResult(test: ImplementationTestObservation): ResolvedTestEvidence | null {
+  return match(test)
+    .with({ kind: "structured" }, ({ evidence }): ResolvedTestEvidence => ({
+      result: {
+        verdict: "untrusted",
         passed: evidence.passed,
         label: `pi-structured: ${evidence.evidence || "test tool result"}`,
-        provenance: "pi-structured" as const,
-      }
-    : {
-        verdict: "untrusted" as const,
-        passed: evidence.passed,
-        label: "transcript-regex (fallback)",
-        provenance: "unverified" as const,
-      };
+        provenance: "pi-structured",
+      },
+      evidence: evidence.evidence,
+    }))
+    .with({ kind: "missing" }, () => null)
+    .exhaustive();
 }
 
 /**
