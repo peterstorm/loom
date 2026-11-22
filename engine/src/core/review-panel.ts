@@ -118,7 +118,7 @@ export function parseReviewLens(raw: unknown): ReviewLens | null {
  * (N extra agents per wave against a subscription rate-limit window).
  * Revisit once the false-positive rate is measured.
  */
-export const VERIFIED_SEVERITY: FindingSeverity = "critical";
+export const VERIFIED_SEVERITY = "critical" satisfies FindingSeverity;
 
 const SENSITIVE_PATH =
   /auth|crypt|secret|token|password|credential|jwt|oauth|session|security|sanitiz|escap|injection/i;
@@ -254,7 +254,7 @@ export function waveFindingId(taskId: string, finding: Finding): WaveFindingId {
 /** The finding set a Refutation Panel adjudicates, scoped to one wave (or the standalone subject). */
 export interface FindingBrief {
   readonly wave: number;
-  readonly severity: FindingSeverity;
+  readonly severity: typeof VERIFIED_SEVERITY;
   readonly taskIds: readonly string[];
   readonly findings: readonly BriefFinding[];
 }

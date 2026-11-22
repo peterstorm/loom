@@ -426,7 +426,10 @@ const bounded = (max: number) => z.string().min(1).max(max);
 const safePathSchema = bounded(4_096).refine(isSafeSourcePath, "expected a repository-relative source path");
 /** A commit a diff scope names: a 40- (SHA-1) or 64-hex (SHA-256) object id. */
 export const SCOPE_REF_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
-const digestSchema = z.string().regex(SCOPE_REF_PATTERN);
+/** A commit object id, branded by the one parse that proves the pattern, so a
+ *  diff scope's refs carry the rule in their type. */
+export const commitIdSchema = z.string().regex(SCOPE_REF_PATTERN).brand<"CommitId">();
+export type CommitId = z.output<typeof commitIdSchema>;
 
 const scopePathsSchema = z.array(safePathSchema).min(1).max(SECURITY_AUDIT_LIMITS.units).readonly();
 
@@ -438,7 +441,7 @@ const scopePathsSchema = z.array(safePathSchema).min(1).max(SECURITY_AUDIT_LIMIT
 export const securityScopeSchema = z
   .discriminatedUnion("kind", [
     z.strictObject({ paths: scopePathsSchema, kind: z.literal("tree"), baseRef: z.null(), headRef: z.null() }),
-    z.strictObject({ paths: scopePathsSchema, kind: z.literal("diff"), baseRef: digestSchema, headRef: digestSchema }),
+    z.strictObject({ paths: scopePathsSchema, kind: z.literal("diff"), baseRef: commitIdSchema, headRef: commitIdSchema }),
   ])
   .readonly();
 export type SecurityScope = z.infer<typeof securityScopeSchema>;

@@ -18,8 +18,10 @@ import {
 import { artifactCovers } from "./path-coverage";
 import {
   parseCanonicalArtifactBaseline,
+  observedByteScope,
   parseImplementationObservation,
   settleImplementationAttempt,
+  unavailableByteScope,
   type ImplementationAttemptAuthority,
   type ImplementationCompletionError,
   type ImplementationCompletionFailure,
@@ -165,10 +167,6 @@ function compareExactBaselines(
     : freeze({ ok: false, errors: frozenArray(compared.errors) });
 }
 
-function unavailableReason(errors: readonly string[]): string {
-  const joined = errors.join("; ").trim();
-  return (joined === "" ? "Task-local byte observation is unavailable" : joined).slice(0, 4_096);
-}
 
 /** The current declared-artifact digest of `path`, or null when it is missing. */
 const currentDigestOf = (scope: readonly DeclaredArtifactBaseline[], path: string): string | null => {
@@ -236,9 +234,8 @@ export function buildTaskLocalByteObservation(
   ];
   if (errors.length > 0 || !attempt.ok || !proof.ok || !reopen.ok || !parserPaths.ok || !priorPaths.ok ||
       !repositoryPaths.ok || !siblingPaths.ok) {
-    const reason = unavailableReason(errors);
     return unavailableTaskLocalByteObservation(
-      reason,
+      errors.join("; "),
       priorPaths.ok ? priorPaths.value : frozenArray([]),
     );
   }
@@ -269,9 +266,6 @@ export function buildTaskLocalByteObservation(
   const unresolvedRepositoryPaths = frozenArray(repositoryChanged.filter((path) =>
     !covered(allowed, path) && !covered(siblingPaths.value, path)
   ));
-  const outside = frozenArray(
-    [...new Set([...rawOutside, ...unresolvedRepositoryPaths])].sort(compareStrings),
-  );
   // Attribution is per declared artifact: a write below a directory artifact
   // attributes the directory, never the raw leaf path.
   const attributedAttempt = attributedChangedArtifacts(attempt.changed, parserPaths.value);
@@ -284,12 +278,8 @@ export function buildTaskLocalByteObservation(
   const cumulative = frozenArray(
     [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proofChanged])].sort(compareStrings),
   );
-  const [firstOutside, ...restOutside] = outside;
-  const byteScope: TaskByteScopeOutcome = firstOutside === undefined
-    ? freeze({ kind: "accepted" })
-    : freeze({ kind: "out-of-scope-writes", paths: nonEmptyOf(firstOutside, ...restOutside) });
   return freeze({
-    byteScope,
+    byteScope: observedByteScope([...rawOutside, ...unresolvedRepositoryPaths]),
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     attemptScopeChangedPaths: attempt.changed,
     cumulativeModifiedPaths: cumulative,
@@ -309,7 +299,7 @@ export function unavailableTaskLocalByteObservation(
   cumulativeModifiedPaths: readonly ReviewPath[] = frozenArray([]),
 ): TaskLocalByteObservation {
   return freeze({
-    byteScope: freeze({ kind: "observation-unavailable", reason: unavailableReason([reason]) }),
+    byteScope: unavailableByteScope(reason),
     attributedAttemptChangedPaths: frozenArray([]),
     attemptScopeChangedPaths: frozenArray([]),
     cumulativeModifiedPaths: frozenArray(cumulativeModifiedPaths),
@@ -319,13 +309,6 @@ export function unavailableTaskLocalByteObservation(
     unresolvedRepositoryPaths: frozenArray([]),
     invalidationBytesChanged: true,
   });
-}
-
-export function cumulativeModifiedPaths(
-  previous: readonly string[] | undefined,
-  current: readonly string[],
-): string[] {
-  return [...new Set([...(previous ?? []), ...current])].sort();
 }
 
 function tasksAreImplementationComplete(tasks: readonly Task[]): boolean {
@@ -781,7 +764,7 @@ export function settleUnavailableImplementation(
     schemaVersion: 1,
     kind: "implementation-observation-unavailable",
     observedAt,
-    failure: { kind: "observation-unavailable", message: unavailableReason([reason]) },
+    failure: { kind: "observation-unavailable", message: unavailableByteScope(reason).reason },
   });
   return observation.ok
     ? settleAndApply(state, authority, observation.value, bytes)

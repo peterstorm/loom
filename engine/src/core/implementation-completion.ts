@@ -379,18 +379,60 @@ export function parseImplementationAttemptAuthority(raw: unknown): Parsed<Implem
   });
 }
 
+declare const TASK_BYTE_SCOPE_OUTCOME: unique symbol;
+
+/** The brand only `observedByteScope` and `unavailableByteScope` mint. */
+type MintedByteScope = Readonly<{ [TASK_BYTE_SCOPE_OUTCOME]: true }>;
+
 /**
  * What the engine observed of one attempt's bytes against the Task's allowed
  * scope (the current `attempt_artifact_baseline`, declared plus previously
  * attributed): every changed path inside it, the paths written outside it, or
- * no trustworthy observation at all. The shell mints it in process from the
- * attempt's byte observation and the oracle settles it as given; it is never
- * persisted.
+ * no trustworthy observation at all. It is never persisted: the shell mints it
+ * in process from the attempt's byte observation, through `observedByteScope`
+ * or `unavailableByteScope` alone, and the oracle settles it as given. The
+ * brand carries what those constructors hold: out-of-scope paths sorted and
+ * each named once, and an unavailable reason non-blank and at most
+ * `MAX_REASON_LENGTH` characters, so the receipt and the failure message
+ * cannot differ by call site.
  */
 export type TaskByteScopeOutcome =
-  | Readonly<{ kind: "accepted" }>
-  | Readonly<{ kind: "out-of-scope-writes"; paths: readonly [ReviewPath, ...ReviewPath[]] }>
-  | Readonly<{ kind: "observation-unavailable"; reason: string }>;
+  | (Readonly<{ kind: "accepted" }> & MintedByteScope)
+  | (Readonly<{ kind: "out-of-scope-writes"; paths: readonly [ReviewPath, ...ReviewPath[]] }> & MintedByteScope)
+  | UnavailableByteScope;
+
+/** The byte-scope outcome of an attempt whose bytes could not be observed. */
+export type UnavailableByteScope = Readonly<{ kind: "observation-unavailable"; reason: string }> & MintedByteScope;
+
+const DEFAULT_UNAVAILABLE_REASON = "Task-local byte observation is unavailable";
+
+/**
+ * The byte-scope outcome of an observed attempt: `accepted` when nothing was
+ * written outside its scope, else the paths written outside it, sorted and
+ * each named once.
+ */
+export function observedByteScope(outside: readonly ReviewPath[]): TaskByteScopeOutcome {
+  const [first, ...rest] = [...new Set(outside)].sort(compareStrings);
+  const paths: readonly [ReviewPath, ...ReviewPath[]] | null = first === undefined ? null : Object.freeze([first, ...rest]);
+  const outcome: Readonly<{ kind: "accepted" }> | Readonly<{ kind: "out-of-scope-writes"; paths: readonly [ReviewPath, ...ReviewPath[]] }> =
+    paths === null ? freeze({ kind: "accepted" }) : freeze({ kind: "out-of-scope-writes", paths });
+  // The brand's minting point: the paths are canonical by construction.
+  return outcome as TaskByteScopeOutcome;
+}
+
+/**
+ * The byte-scope outcome of an attempt whose bytes could not be observed. The
+ * reason is the text trimmed, or a default when it is blank, cut to at most
+ * `MAX_REASON_LENGTH` characters.
+ */
+export function unavailableByteScope(reason: string): UnavailableByteScope {
+  const trimmed = reason.trim();
+  // The brand's minting point: the reason is non-blank and bounded by construction.
+  return freeze({
+    kind: "observation-unavailable",
+    reason: (trimmed === "" ? DEFAULT_UNAVAILABLE_REASON : trimmed).slice(0, MAX_REASON_LENGTH),
+  }) as UnavailableByteScope;
+}
 
 /** A semantic failure: the attempt wrote outside the Task's allowed scope. */
 export type TaskByteScopeViolation = Readonly<{

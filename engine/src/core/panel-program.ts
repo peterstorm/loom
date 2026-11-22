@@ -13,6 +13,7 @@
 import { PANEL_LENSES, architectureCriterion, type PanelLens } from "./panel-contract";
 import type { LlmProfileId } from "./model-profiles";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
+import { parseErr, parseOk, type LineParseResult } from "./parse-result";
 import type { NonEmpty } from "./orchestration-contract";
 
 const mapNonEmpty = <Input, Output>(
@@ -59,10 +60,14 @@ export type HeadlessSpawnRequest = Readonly<SpawnRequestFields & {
  */
 export type SpawnRequest = InteractiveSpawnRequest | HeadlessSpawnRequest;
 
-export type ArchitectureEngineOperation =
-  | "architecture-prepare-candidates"
-  | "architecture-prepare-judges"
-  | "architecture-aggregate";
+/** The architecture panel's engine operations: the vocabulary the type and the journal parser share. */
+const ARCHITECTURE_OPERATIONS = Object.freeze([
+  "architecture-prepare-candidates",
+  "architecture-prepare-judges",
+  "architecture-aggregate",
+] as const);
+
+export type ArchitectureEngineOperation = (typeof ARCHITECTURE_OPERATIONS)[number];
 
 export type EngineOperationAction = Readonly<{
   type: "engine-operation";
@@ -561,61 +566,54 @@ const PANEL_PROGRAM_JOURNAL_SCHEMA_VERSION = 1;
 /** The format tag a journal may carry. The spelling is wire data: journals written with it stay readable. */
 const PANEL_PROGRAM_JOURNAL_FORMAT = "legacy-panel-program";
 
-const ARCHITECTURE_OPERATIONS: readonly ArchitectureEngineOperation[] = [
-  "architecture-prepare-candidates",
-  "architecture-prepare-judges",
-  "architecture-aggregate",
-];
-
 /** A parsed journal: the dispatch input and the event prefix to replay. */
 export type ArchitecturePanelJournal = Readonly<{
   input: ArchitectureProgramInput;
   events: readonly ArchitectureProgramEvent[];
 }>;
 
-export type ArchitecturePanelJournalParse =
-  | Readonly<{ ok: true; value: ArchitecturePanelJournal }>
-  | Readonly<{ ok: false; error: string }>;
-
 const isStrings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((entry) => typeof entry === "string");
 
-function parseJournalLenses(value: unknown): readonly PanelLens[] | null {
-  if (!Array.isArray(value)) return null;
+const JOURNAL_INPUT_SHAPE = "architecture input requires exact PanelLens candidateLenses[] and judgeCriteria[]";
+
+/** The journal's candidate lenses: strings, each a `PanelLens`; the first that is not one is named. */
+function parseJournalLenses(value: unknown): LineParseResult<readonly PanelLens[]> {
+  if (!isStrings(value)) return parseErr(JOURNAL_INPUT_SHAPE);
   const parsed: PanelLens[] = [];
   for (const entry of value) {
     const lens = PANEL_LENSES.find((candidate) => candidate === entry);
-    if (lens === undefined) return null;
+    if (lens === undefined) return parseErr(`unknown architecture design lens: ${entry}`);
     parsed.push(lens);
   }
-  return Object.freeze(parsed);
+  return parseOk(Object.freeze(parsed));
 }
 
-function parseJournalEvent(raw: unknown, index: number): ArchitectureProgramEvent | string {
-  if (!isRecord(raw)) return `events[${index}] must be an object`;
-  const errorField = (): Readonly<{ error?: string }> | string =>
-    raw.error === undefined ? {}
-      : typeof raw.error === "string" ? { error: raw.error }
-      : `events[${index}].error must be a string`;
+function parseJournalEvent(raw: unknown, index: number): LineParseResult<ArchitectureProgramEvent> {
+  if (!isRecord(raw)) return parseErr(`events[${index}] must be an object`);
+  const errorField = (): LineParseResult<Readonly<{ error?: string }>> =>
+    raw.error === undefined ? parseOk({})
+      : typeof raw.error === "string" ? parseOk({ error: raw.error })
+      : parseErr(`events[${index}].error must be a string`);
   if (raw.type === "spawn-outcome") {
     if (typeof raw.requestId !== "string" || (raw.attempt !== 1 && raw.attempt !== 2)
       || (raw.outcome !== "succeeded" && raw.outcome !== "failed")) {
-      return `events[${index}] is not a valid spawn-outcome`;
+      return parseErr(`events[${index}] is not a valid spawn-outcome`);
     }
     const error = errorField();
-    if (typeof error === "string") return error;
-    return Object.freeze({ type: "spawn-outcome" as const, requestId: raw.requestId, attempt: raw.attempt, outcome: raw.outcome, ...error });
+    if (!error.ok) return error;
+    return parseOk(Object.freeze({ type: "spawn-outcome" as const, requestId: raw.requestId, attempt: raw.attempt, outcome: raw.outcome, ...error.value }));
   }
   if (raw.type === "engine-outcome") {
     const operationId = ARCHITECTURE_OPERATIONS.find((operation) => operation === raw.operationId);
     if (operationId === undefined || (raw.outcome !== "succeeded" && raw.outcome !== "failed")) {
-      return `events[${index}] is not a valid architecture engine-outcome`;
+      return parseErr(`events[${index}] is not a valid architecture engine-outcome`);
     }
     const error = errorField();
-    if (typeof error === "string") return error;
-    return Object.freeze({ type: "engine-outcome" as const, operationId, outcome: raw.outcome, ...error });
+    if (!error.ok) return error;
+    return parseOk(Object.freeze({ type: "engine-outcome" as const, operationId, outcome: raw.outcome, ...error.value }));
   }
-  return `events[${index}].type must be spawn-outcome or engine-outcome`;
+  return parseErr(`events[${index}].type must be spawn-outcome or engine-outcome`);
 }
 
 /**
@@ -624,45 +622,37 @@ function parseJournalEvent(raw: unknown, index: number): ArchitectureProgramEven
  * this journal when present. Never throws: a hostile value comes back as a
  * diagnostic that carries the thrown cause.
  */
-export function parseArchitecturePanelJournal(raw: unknown): ArchitecturePanelJournalParse {
+export function parseArchitecturePanelJournal(raw: unknown): LineParseResult<ArchitecturePanelJournal> {
   try {
     if (!isRecord(raw) || !isRecord(raw.input) || !Array.isArray(raw.events)) {
-      return { ok: false, error: "Panel program requires {input, events: []}" };
+      return parseErr("Panel program requires {input, events: []}");
     }
     if (raw.schemaVersion !== undefined && raw.schemaVersion !== PANEL_PROGRAM_JOURNAL_SCHEMA_VERSION) {
-      return { ok: false, error: `Unsupported legacy panel journal schemaVersion: ${String(raw.schemaVersion)}` };
+      return parseErr(`Unsupported legacy panel journal schemaVersion: ${String(raw.schemaVersion)}`);
     }
     if (raw.format !== undefined && raw.format !== PANEL_PROGRAM_JOURNAL_FORMAT) {
-      return { ok: false, error: `Unsupported panel journal format: ${String(raw.format)}` };
+      return parseErr(`Unsupported panel journal format: ${String(raw.format)}`);
     }
     if (raw.panel !== undefined && raw.panel !== "architecture") {
-      return { ok: false, error: `Panel journal declares '${String(raw.panel)}' but was opened as 'architecture'` };
+      return parseErr(`Panel journal declares '${String(raw.panel)}' but was opened as 'architecture'`);
     }
     const candidateLenses = parseJournalLenses(raw.input.candidateLenses);
-    if (candidateLenses === null || !isStrings(raw.input.judgeCriteria)) {
-      const unknownLens = isStrings(raw.input.candidateLenses)
-        ? raw.input.candidateLenses.find((lens) => !(PANEL_LENSES as readonly string[]).includes(lens))
-        : undefined;
-      return unknownLens === undefined
-        ? { ok: false, error: "architecture input requires exact PanelLens candidateLenses[] and judgeCriteria[]" }
-        : { ok: false, error: `unknown architecture design lens: ${unknownLens}` };
-    }
+    if (!candidateLenses.ok) return candidateLenses;
+    const judgeCriteria = raw.input.judgeCriteria;
+    if (!isStrings(judgeCriteria)) return parseErr(JOURNAL_INPUT_SHAPE);
     const events: ArchitectureProgramEvent[] = [];
     for (const [index, rawEvent] of raw.events.entries()) {
       const parsed = parseJournalEvent(rawEvent, index);
-      if (typeof parsed === "string") return { ok: false, error: parsed };
-      events.push(parsed);
+      if (!parsed.ok) return parsed;
+      events.push(parsed.value);
     }
-    return {
-      ok: true,
-      value: Object.freeze({
-        input: Object.freeze({ candidateLenses, judgeCriteria: Object.freeze([...raw.input.judgeCriteria]) }),
-        events: Object.freeze(events),
-      }),
-    };
+    return parseOk(Object.freeze({
+      input: Object.freeze({ candidateLenses: candidateLenses.value, judgeCriteria: Object.freeze([...judgeCriteria]) }),
+      events: Object.freeze(events),
+    }));
   } catch (error) {
     // Bind the thrown cause: a shape TypeError is a real journal defect the
     // operator must be able to tell apart from a parser drift.
-    return { ok: false, error: `Panel program journal could not be safely inspected: ${error instanceof Error ? error.message : String(error)}` };
+    return parseErr(`Panel program journal could not be safely inspected: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
