@@ -7,7 +7,7 @@ import { capturedSpecCheck } from "../../src/core/spec-check";
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { describe, expect, it } from "vitest";
 import type { TaskGraph } from "../../src/types";
@@ -743,6 +743,31 @@ describe("applyFailedPiResult", () => {
     ]);
   });
 
+  // Only a FAILED authority-less result stays log-only with nothing
+  // executing: it produced no work, so there is nothing left unrecorded.
+  it.each([
+    ["no reservation", undefined],
+    ["a reservation that carries no attempt authority", slot({ agentType: "code-implementer-agent", taskId: "T1" })],
+  ] as const)("logs, without a processing error, a failed implementation with %s when no Task is executing", async (_name, reservedSlot) => {
+    const idle = graph({ executing_tasks: [] });
+    const store = fakeStore(idle);
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 1 }),
+      reservedSlot,
+      now: NOW,
+    });
+
+    expect(store.current()).toEqual(parsedGraph(idle));
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log).toEqual([
+      expect.stringMatching(
+        /^loom\(pi\): code-implementer-agent failed before evidence capture completed \(.*\) without implementation attempt authority and no Task is executing — nothing settled$/,
+      ),
+    ]);
+  });
+
   it("marks an exactly reserved failed spec-check as evidence_capture_failed and clears its obsolete block", async () => {
     const fixture = graphWithSpecCheckAuthority();
     const store = fakeStore({
@@ -1379,6 +1404,40 @@ describe("applyImplementationPiResult", () => {
   /** A repository probe pointed at a root, with `isRepo` under test control. */
   const repositoryAt = (root: string, isRepo = true) => ({ root: () => root, isRepo: () => isRepo });
 
+  /**
+   * Run `body` against a fresh Git repository whose one committed file is an
+   * empty test at `testPath`, as the project directory; the prior project
+   * directory is restored and the repository removed afterwards.
+   */
+  const withCommittedTestRepository = async (
+    prefix: string,
+    testPath: string,
+    body: (repositoryRoot: string) => Promise<void>,
+  ): Promise<void> => {
+    const repositoryRoot = canonicalTempDir(prefix);
+    const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    mkdirSync(join(repositoryRoot, dirname(testPath)), { recursive: true });
+    execFileSync("git", ["init"], { cwd: repositoryRoot, stdio: "ignore" });
+    writeFileSync(join(repositoryRoot, testPath), "export {};\n");
+    execFileSync("git", ["add", testPath], { cwd: repositoryRoot, stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
+      { cwd: repositoryRoot, stdio: "ignore" },
+    );
+    process.env.CLAUDE_PROJECT_DIR = repositoryRoot;
+    try {
+      await body(repositoryRoot);
+    } finally {
+      if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
+      rmSync(repositoryRoot, { recursive: true, force: true });
+    }
+  };
+
+  /** A test body the child wrote: one new test method with one assertion. */
+  const ONE_NEW_TEST = 'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n';
+
   const implementationGraph = (taskOverrides: Record<string, unknown> = {}): TaskGraph => {
     const base = graph({ executing_tasks: ["T1"] });
     const overridden = { ...base.tasks[0]!, ...taskOverrides } as TaskGraph["tasks"][number];
@@ -1482,7 +1541,13 @@ describe("applyImplementationPiResult", () => {
     ]);
   });
 
-  it("settles nothing and reports no failure for an unbound result when no Task is executing", async () => {
+  // A completed result with no authority is finished work no Task status
+  // records (a duplicate or late result after its slot was retired): it must
+  // reach Pi as a processing error, never pass as a clean result.
+  it.each([
+    ["no reservation", undefined],
+    ["a reservation that carries no attempt authority", slot({ agentType: "code-implementer-agent", taskId: "T1" })],
+  ] as const)("reports a completed result with %s as unrecorded when no Task is executing", async (_name, reservedSlot) => {
     const idle = { ...implementationGraph(), executing_tasks: [] };
     const store = fakeStore(idle);
 
@@ -1491,12 +1556,32 @@ describe("applyImplementationPiResult", () => {
       repository: repositoryAt(process.cwd()),
       agentType: "code-implementer-agent",
       result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: assistantText("Done.") }),
-      reservedSlot: undefined,
+      reservedSlot,
     });
 
+    const unrecorded = "loom(pi): code-implementer-agent completed without implementation attempt authority and " +
+      "no Task is executing — nothing settled; its Task status was NOT recorded";
     expect(store.current()).toEqual(parsedGraph(idle));
-    expect(applied.processingErrors).toEqual([]);
-    expect(applied.log.join("\n")).toContain("no Task is executing — nothing settled");
+    expect(applied).toEqual({ processingErrors: [unrecorded], log: [unrecorded] });
+  });
+
+  it("preserves an executing attempt a completed result's authority-less reservation does not hold", async () => {
+    const executing = parallelExecutingGraph();
+    const store = fakeStore(executing);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: assistantText("Done.") }),
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
+    });
+
+    expect(store.current()).toEqual(parsedGraph(executing));
+    expect(applied.processingErrors).toEqual([
+      "loom(pi): code-implementer-agent completed without exact implementation attempt authority — " +
+        "2 executing attempt(s) preserved",
+    ]);
   });
 
   it("retires an exact modern reservation from an already-completed Task", async () => {
@@ -1759,7 +1844,9 @@ describe("applyImplementationPiResult", () => {
       reservedSlot: modern.reservedSlot,
     });
 
-    expect(applied.processingErrors).toEqual([expect.stringContaining("Task identity mismatch")]);
+    expect(applied.processingErrors).toEqual([
+      `Pi result Task identity mismatch: returned=${_label === "wrong" ? "T2" : "missing"}, reserved=T1`,
+    ]);
     expect(store.current().executing_tasks).toEqual([]);
     expect(store.current().tasks[0]).toMatchObject({
       status: "pending",
@@ -1770,6 +1857,51 @@ describe("applyImplementationPiResult", () => {
       }],
     });
     expect(store.current().tasks[0]?.test_result).toBeUndefined();
+  });
+
+  // A failed new-test collection is an observation the shell could not make:
+  // the exact settlement must report it to Pi as a processing error and
+  // release the attempt as infrastructure-blocked, never pass silently.
+  it("reports a new-test collection failure as a processing error and releases the exact attempt", async () => {
+    const testPath = "tests/uncollectable.test.ts";
+    await withCommittedTestRepository("loom-pi-new-tests-uncollectable-", testPath, async (repositoryRoot) => {
+      const modern = modernize(implementationGraph({
+        file_list: [testPath],
+        attempt_artifact_baseline: [],
+        // A revision Git cannot resolve: the new-test diff since it fails.
+        start_sha: "not-a-git-revision",
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+      }), repositoryRoot, "pi-new-tests-uncollectable");
+      const store = fakeStore(modern.graph);
+      writeFileSync(join(repositoryRoot, testPath), ONE_NEW_TEST);
+
+      const applied = await applyImplementationPiResult({
+        store,
+        repository: repositoryAt(repositoryRoot),
+        agentType: "code-implementer-agent",
+        result: result({ agent: "code-implementer-agent", messages: [writeCall(testPath)] }),
+        reservedSlot: modern.reservedSlot,
+      });
+
+      expect(applied.processingErrors).toEqual([
+        expect.stringMatching(/^Pi new-test observation unavailable: diff-since: .*not-a-git-revision/),
+      ]);
+      expect(applied.log).toContain(`loom(pi): ${applied.processingErrors[0]}`);
+      expect(store.current().executing_tasks).toEqual([]);
+      expect(store.current().tasks[0]).toMatchObject({
+        status: "pending",
+        revalidation_required: true,
+        implementation_attempt_history: [{
+          authorityDigest: implementationAuthorityOf(modern.reservedSlot)?.authorityDigest,
+          transition: "infrastructure-blocked",
+        }],
+      });
+      expect(store.current().tasks[0]?.active_implementation_attempt).toBeUndefined();
+      expect(store.current().tasks[0]?.new_test_observation).toBeUndefined();
+    });
   });
 
   it("preserves a replacement when a stale successful Pi authority arrives", async () => {
@@ -1875,21 +2007,8 @@ describe("applyImplementationPiResult", () => {
   });
 
   it("accepts attributed new-test evidence without regression evidence when explicit policy waives only regression", async () => {
-    const repositoryRoot = canonicalTempDir("loom-pi-inverse-policy-");
-    const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const testPath = "tests/inverse-policy.test.ts";
-    mkdirSync(join(repositoryRoot, "tests"), { recursive: true });
-    execFileSync("git", ["init"], { cwd: repositoryRoot, stdio: "ignore" });
-    writeFileSync(join(repositoryRoot, testPath), "export {};\n");
-    execFileSync("git", ["add", testPath], { cwd: repositoryRoot, stdio: "ignore" });
-    execFileSync(
-      "git",
-      ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
-      { cwd: repositoryRoot, stdio: "ignore" },
-    );
-    process.env.CLAUDE_PROJECT_DIR = repositoryRoot;
-
-    try {
+    await withCommittedTestRepository("loom-pi-inverse-policy-", testPath, async (repositoryRoot) => {
       const modern = modernize(implementationGraph({
         file_list: [testPath],
         attempt_artifact_baseline: [],
@@ -1899,10 +2018,7 @@ describe("applyImplementationPiResult", () => {
         },
       }), repositoryRoot, "pi-inverse-policy");
       const store = fakeStore(modern.graph);
-      writeFileSync(
-        join(repositoryRoot, testPath),
-        'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n',
-      );
+      writeFileSync(join(repositoryRoot, testPath), ONE_NEW_TEST);
 
       await applyImplementationPiResult({
         store,
@@ -1940,10 +2056,6 @@ describe("applyImplementationPiResult", () => {
           expect.objectContaining({ kind: "regression-test-pass" }),
         );
       }
-    } finally {
-      if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
-      else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
-      rmSync(repositoryRoot, { recursive: true, force: true });
-    }
+    });
   });
 });

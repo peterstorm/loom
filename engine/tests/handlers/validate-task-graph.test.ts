@@ -14,7 +14,8 @@ import { distillTaskFixture } from "../fixtures/task-lifecycle";
 import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const PERSISTED_LIFECYCLE = {
-  current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+  current_phase: "execute",
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
 } as const;
@@ -693,7 +694,8 @@ describe("fixFull repairs findings WITH their derived views", () => {
   };
 
   const graphOf = (task: Record<string, unknown>) => ({
-    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+    current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     tasks: [task],
   });
@@ -957,7 +959,8 @@ describe("fixFull repairs findings WITH their derived views", () => {
     // The point of the repair path: a graph parseTaskGraph refuses must become
     // one it accepts, or the operator is stuck with no way forward.
     const broken = {
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+      current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       tasks: [{
         id: "T1", description: "repair findings", agent: "code-implementer-agent",
@@ -979,7 +982,8 @@ describe("fixFull repairs findings WITH their derived views", () => {
     ];
     for (const task of rejected) {
       const graph = {
-        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+        current_phase: "execute",
+        verification_manifest: preI6DefaultVerificationManifest(),
         phase_artifacts: {},
         tasks: [{
           description: "repair findings", agent: "code-implementer-agent",

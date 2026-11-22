@@ -31,6 +31,7 @@ import {
   renderExactPiSettlement,
   renderFailedReviewEvidence,
   renderReviewEvidence,
+  reservedAuthorityIsCurrent,
   retireCompletedImplementation,
   transcriptTextOf,
   type LockedReviewEvidenceApplication,
@@ -105,7 +106,7 @@ describe("retireCompletedImplementation", () => {
 
   it("retires a completed Task's reservation under its current authority without touching its input", () => {
     const completed = completedGraph();
-    const retired = retireCompletedImplementation(completed, "T1", authority);
+    const retired = retireCompletedImplementation(completed, authority);
     expect(retired.retired).toBe(true);
     expect(retired.state.executing_tasks).toEqual(["T2"]);
     for (const field of ATTEMPT_FIELDS) expect(retired.state.tasks[0]?.[field]).toBeUndefined();
@@ -115,13 +116,26 @@ describe("retireCompletedImplementation", () => {
     expect(completed.tasks[0]?.active_implementation_attempt).toBe(authority);
   });
 
-  it.each<readonly [string, () => TaskGraph, string, ImplementationAttemptAuthority]>([
-    ["a still-pending Task", () => attemptGraph(authority), "T1", authority],
-    ["a completed Task whose current attempt is another authority", completedGraph, "T1", attemptAuthority("T1", "pi-other")],
-    ["a missing Task", completedGraph, "T9", authority],
-  ])("keeps the reservation of %s", (_name, build, taskId, expected) => {
+  it.each<readonly [string, () => TaskGraph, ImplementationAttemptAuthority]>([
+    ["a still-pending Task", () => attemptGraph(authority), authority],
+    ["a completed Task whose current attempt is another authority", completedGraph, attemptAuthority("T1", "pi-other")],
+    ["a missing Task", completedGraph, attemptAuthority("T9", "pi-t9")],
+  ])("keeps the reservation of %s", (_name, build, expected) => {
     const state = build();
-    expect(retireCompletedImplementation(state, taskId, expected)).toEqual({ state, retired: false });
+    expect(retireCompletedImplementation(state, expected)).toEqual({ state, retired: false });
+  });
+});
+
+describe("reservedAuthorityIsCurrent", () => {
+  const authority = attemptAuthority("T1", "pi-t1");
+
+  it.each<readonly [string, ImplementationAttemptAuthority, boolean]>([
+    ["the Task's current attempt", authority, true],
+    ["another attempt of the same Task", attemptAuthority("T1", "pi-other"), false],
+    ["a Task that holds no attempt", attemptAuthority("T2", "pi-t1"), false],
+    ["a Task the graph does not hold", attemptAuthority("T9", "pi-t1"), false],
+  ])("judges %s by the authority's own Task and digest", (_name, candidate, current) => {
+    expect(reservedAuthorityIsCurrent(attemptGraph(authority), candidate)).toBe(current);
   });
 });
 
@@ -130,13 +144,13 @@ describe("clearCurrentReservedAuthority", () => {
 
   it("leaves every attempt field in place for an authority whose digest is not the Task's current attempt", () => {
     const state = attemptGraph(authority);
-    const cleared = clearCurrentReservedAuthority(state, "T1", attemptAuthority("T1", "pi-other"));
+    const cleared = clearCurrentReservedAuthority(state, attemptAuthority("T1", "pi-other"));
     expect(cleared.tasks[0]).toEqual(state.tasks[0]);
   });
 
   it("releases exactly the matching Task's attempt state without touching its input or other Tasks", () => {
     const state = attemptGraph(authority);
-    const cleared = clearCurrentReservedAuthority(state, "T1", authority);
+    const cleared = clearCurrentReservedAuthority(state, authority);
     for (const field of ATTEMPT_FIELDS) expect(cleared.tasks[0]?.[field]).toBeUndefined();
     expect(cleared.tasks[1]).toBe(state.tasks[1]);
     expect(state.tasks[0]?.active_implementation_attempt).toBe(authority);
@@ -199,12 +213,9 @@ describe("observeImplementationTranscript", () => {
   ];
   const BUN_PASS = "bun test v1.3.0\n 1 pass\n 0 fail\n 1 expect() calls\nRan 1 test across 1 file.\n";
 
-  it("names a transcript that is not a Pi message array as malformed, with no log", () => {
+  it("names a transcript that is not a Pi message array as malformed, and carries nothing else", () => {
     const observed = observeImplementationTranscript("not messages", "T1", "/repo");
-    expect(observed).toMatchObject({ kind: "malformed", log: [] });
-    if (observed.kind === "malformed") {
-      expect(observed.failureReason).toMatch(/^Pi transcript evidence capture failed: \S/);
-    }
+    expect(observed).toEqual({ kind: "malformed", failureReason: expect.stringMatching(/^Pi transcript evidence capture failed: \S/) });
   });
 
   it("accepts structured test evidence from a classified test run, with no missing-evidence log", () => {
@@ -220,11 +231,22 @@ describe("observeImplementationTranscript", () => {
 
   it("records no test result, and logs why, when no Bash call was a test run", () => {
     const observed = observeImplementationTranscript(bashCall("ls", "file.ts\n"), "T1", "/repo");
+    expect(observed).toMatchObject({
+      kind: "accepted",
+      test: { kind: "missing" },
+      log: [
+        "loom(pi): T1 produced no structured test evidence (no Bash call was classified as a test run) — " +
+          "no test result recorded (test-result-missing); the wave gate will reject it",
+      ],
+    });
+    if (observed.kind === "accepted") expect(observed.log).toHaveLength(1);
+  });
+
+  it("names the classified commands and verdict when a test run minted no structured evidence", () => {
+    const observed = observeImplementationTranscript(bashCall("bun test &", BUN_PASS), "T1", "/repo");
     expect(observed).toMatchObject({ kind: "accepted", test: { kind: "missing" } });
-    expect(observed.log).toEqual([
-      "loom(pi): T1 produced no structured test evidence (no Bash call was classified as a test run) — " +
-        "no test result recorded (test-result-missing); the wave gate will reject it",
-    ]);
+    if (observed.kind !== "accepted") return;
+    expect(observed.log).toEqual([expect.stringContaining("classified=[bun test &]")]);
   });
 
   it("folds write targets from the same projection: every write, edit and multi-edit call, whatever its result", () => {

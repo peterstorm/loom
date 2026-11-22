@@ -23,6 +23,7 @@ import {
   createImplementationAttemptAuthority,
   parseIsoInstant,
   parseReservationId,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
@@ -351,7 +352,7 @@ describe("modern implementation attempt registration", () => {
         }),
         proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
       },
-      { kind: "accepted" },
+      observedByteScope([]),
     );
     if (!settled.ok || settled.value.kind !== "retry-required") {
       throw new Error("retry receipt fixture failed");

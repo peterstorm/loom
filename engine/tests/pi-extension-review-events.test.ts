@@ -6385,12 +6385,12 @@ describe("Pi extension review tool_result integration", () => {
     expect(specCheck.critical_count).toBeUndefined();
   });
 
-  it("settles nothing when an implementation result holds no attempt authority and no Task is executing", async () => {
+  it("settles nothing, and reports the unrecorded work to Pi, when an implementation result holds no attempt authority and no Task is executing", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      await pi.emit("tool_result", {
+      const responses = await pi.emit("tool_result", {
         toolName: "subagent",
         content: [],
         details: {
@@ -6400,8 +6400,13 @@ describe("Pi extension review tool_result integration", () => {
           }],
         },
       }, context);
-      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
-        .toContain("code-implementer-agent completed without implementation attempt authority and no Task is executing — nothing settled");
+      const unrecorded = "code-implementer-agent completed without implementation attempt authority and " +
+        "no Task is executing — nothing settled; its Task status was NOT recorded";
+      expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain(unrecorded);
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining(unrecorded) })],
+      }));
     } finally {
       stderr.mockRestore();
     }

@@ -6,9 +6,9 @@ import updateTaskStatus, { isMachineBound, runUpdateTaskStatus } from "../../src
 import { resolveTestEvidence } from "../../src/core/implementation-evidence";
 import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completion";
 import { extractTestEvidence, type TestEvidence } from "../../src/core/test-evidence";
-import { legacyTestsPassedNote } from "../../src/types";
-import type { TaskGraph } from "../../src/types";
+import type { HookResult, TaskGraph } from "../../src/types";
 import { parseTaskGraph } from "../../src/state-file-wire";
+import type { ImplementationAuthorityObservation } from "../../src/implementation-attempt-sidecar";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { ARMED_ARTIFACT, armedClaudeImplementation, writesTranscript } from "../fixtures/claude-implementation-attempt";
 
@@ -60,34 +60,6 @@ import type { Evidence, LoadedMachine } from "../../src/machine";
 import { reportSummary } from "../machine/report-summary";
 import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
 import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
-
-describe("legacyTestsPassedNote (pure)", () => {
-  it("flags a pre-refactor task carrying tests_passed without test_result", () => {
-    const note = legacyTestsPassedNote({ id: "T1", tests_passed: true });
-    expect(note).toContain("legacy tests_passed found on task T1");
-    expect(note).toContain("re-run task or regenerate graph");
-    expect(note).toContain("replaced by test_result");
-  });
-
-  it("flags the legacy field regardless of its value (presence, not truthiness)", () => {
-    expect(legacyTestsPassedNote({ id: "T1", tests_passed: false })).not.toBeNull();
-    expect(legacyTestsPassedNote({ id: "T1", tests_passed: null })).not.toBeNull();
-  });
-
-  it("stays silent when test_result is present alongside the stray field, or the field is absent", () => {
-    expect(
-      legacyTestsPassedNote({ id: "T1", tests_passed: true, test_result: { verdict: "trusted-pass" } }),
-    ).toBeNull();
-    expect(legacyTestsPassedNote({ id: "T1", test_result: { verdict: "trusted-pass" } })).toBeNull();
-    expect(legacyTestsPassedNote({ id: "T1" })).toBeNull();
-  });
-
-  it("handles non-object and id-less input without throwing", () => {
-    expect(legacyTestsPassedNote(null)).toBeNull();
-    expect(legacyTestsPassedNote("task")).toBeNull();
-    expect(legacyTestsPassedNote({ tests_passed: true })).toContain("<unknown>");
-  });
-});
 
 describe("extractTestEvidence (pure)", () => {
   it("detects Maven BUILD SUCCESS", () => {
@@ -642,6 +614,7 @@ describe("update-task-status — transcript path resolution", () => {
 
   afterEach(() => {
     for (const undo of cleanup.splice(0)) undo();
+    vi.unstubAllEnvs();
   });
 
   /** Regression waived, new tests waived: the declared-artifact obligation alone decides. */
@@ -672,12 +645,7 @@ describe("update-task-status — transcript path resolution", () => {
     const attempt = await armed("derived");
     const { projectSlug } = await import("../../src/utils/agent-transcript-path");
     const configDir = join(attempt.root, ".claude", "config");
-    const previousConfig = process.env.CLAUDE_CONFIG_DIR;
-    process.env.CLAUDE_CONFIG_DIR = configDir;
-    cleanup.push(() => {
-      if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-      else process.env.CLAUDE_CONFIG_DIR = previousConfig;
-    });
+    vi.stubEnv("CLAUDE_CONFIG_DIR", configDir);
     const dir = join(configDir, "projects", projectSlug(attempt.root), attempt.sessionId, "subagents");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `agent-${attempt.agentId}.jsonl`), writesTranscript("Implemented the thing.", [ARMED_ARTIFACT]));
@@ -733,34 +701,93 @@ describe("update-task-status — transcript path resolution", () => {
     expect(graph.tasks[0]).toMatchObject({ status: "pending", revalidation_required: true });
   }, 30_000);
 
-  it("names the no-op when a stop carries no attempt authority and nothing is executing", async () => {
-    const statePath = join(canonicalTempDir("loom-uts-idle-"), "graph.json");
+  it("settles a non-consuming infrastructure receipt when the attempt's transcript is a Pi session, never an empty write set", async () => {
+    const attempt = await armed("pi-session");
+    writeFileSync(attempt.transcript, [
+      JSON.stringify({ type: "session", version: 3, id: "pi-session" }),
+      writesTranscript("Implemented the thing.", [ARMED_ARTIFACT]),
+    ].join("\n"));
+    writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
+
+    const result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: [] }, attempt.observation);
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("transcript is a Pi session") });
+    if (result.kind === "error") expect(result.message).toContain("T1 received an exact non-consuming infrastructure Oracle receipt");
+    const graph = attempt.read();
+    expect(graph.executing_tasks).toEqual([]);
+    expect(graph.tasks[0]).toMatchObject({ status: "pending", revalidation_required: true });
+  }, 30_000);
+
+  /** A session whose TaskGraph holds T1 with nothing executing, and the graph's bytes before the stop. */
+  async function idleSession(label: string) {
+    const statePath = join(canonicalTempDir(`loom-uts-${label}-`), "graph.json");
     cleanup.push(() => rmSync(dirname(statePath), { recursive: true, force: true }));
     writeFileSync(statePath, JSON.stringify(graphFixture([
       taskFixture({ id: "T1", description: "a task", agent: "code-implementer-agent", wave: 1, depends_on: [] }),
     ])));
     const { SUBAGENT_DIR } = await import("../../src/config");
-    const session = `uts-idle-${process.pid}-${Date.now()}`;
+    const session = `uts-${label}-${process.pid}-${Date.now()}`;
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
     const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
     writeFileSync(pointer, statePath);
     cleanup.push(() => rmSync(pointer, { force: true }));
-    const before = readFileSync(statePath);
+    const stdin = JSON.stringify({ session_id: session, agent_id: "a-1", agent_type: "code-implementer-agent" });
+    return { statePath, stdin, before: readFileSync(statePath) };
+  }
 
+  /** Run the stop with stderr captured. */
+  async function stopCapturingStderr(run: () => Promise<HookResult>) {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    let text = "";
     try {
-      const result = await updateTaskStatus(JSON.stringify({
-        session_id: session, agent_id: "a-1", agent_type: "code-implementer-agent",
-      }), []);
-      expect(result.kind).toBe("passthrough");
-      text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      const result = await run();
+      return { result, text: stderrSpy.mock.calls.map((c) => String(c[0])).join("") };
     } finally {
       stderrSpy.mockRestore();
     }
+  }
 
+  it("names the no-op when a stop carries no attempt authority and nothing is executing", async () => {
+    const idle = await idleSession("idle");
+
+    const { result, text } = await stopCapturingStderr(() => updateTaskStatus(idle.stdin, []));
+
+    expect(result.kind).toBe("passthrough");
     expect(text, "a no-op this consequential must never be silent").toContain("code-implementer-agent");
     expect(text).toContain("stopped without implementation attempt authority and no Task is executing; nothing was settled");
-    expect(readFileSync(statePath).equals(before)).toBe(true);
+    expect(readFileSync(idle.statePath).equals(idle.before)).toBe(true);
   });
+
+  it("names the absent sidecar in the no-op when nothing is executing", async () => {
+    const idle = await idleSession("absent");
+    const observation: ImplementationAuthorityObservation = {
+      kind: "authority-unavailable",
+      failure: { kind: "missing-sidecar", message: "implementation sidecar directory is absent" },
+    };
+
+    const { result, text } = await stopCapturingStderr(() =>
+      runUpdateTaskStatus(idle.stdin, [], { kind: "snapshot", events: [] }, observation));
+
+    expect(result.kind).toBe("passthrough");
+    expect(text).toContain("no Task is executing; nothing was settled: implementation sidecar directory is absent");
+    expect(readFileSync(idle.statePath).equals(idle.before)).toBe(true);
+  });
+
+  it.each(["malformed-sidecar", "unreadable-sidecar", "invalid-sidecar-identity"] as const)(
+    "refuses a %s stop as an error even when nothing is executing, so the lost settlement stays visible",
+    async (kind) => {
+      const idle = await idleSession(kind);
+      const observation: ImplementationAuthorityObservation = {
+        kind: "authority-unavailable",
+        failure: { kind, message: `the sidecar is ${kind}` },
+      };
+
+      const result = await runUpdateTaskStatus(idle.stdin, [], { kind: "snapshot", events: [] }, observation);
+
+      expect(result).toEqual({
+        kind: "error",
+        message: `update-task-status: ${kind}: the sidecar is ${kind}; no Task is executing and nothing was settled`,
+      });
+      expect(readFileSync(idle.statePath).equals(idle.before)).toBe(true);
+    },
+  );
 });

@@ -31,7 +31,7 @@ import {
   type BunConsoleFixtureKind,
 } from "../../scripts/bun-console-probe";
 import { parseBunVersion } from "../../scripts/bun-version-pin";
-import { bunRunSummary, declaredSummary, parseBunConsoleCollectionErrors, readTestReportText, type TestFileResult } from "../../src/core/structured-test-report";
+import { bunRunSummary, testRunSummary, parseBunConsoleCollectionErrors, readTestReportText, type TestFileResult } from "../../src/core/structured-test-report";
 import { optionalBunFixture } from "../fixtures/bun-console-fixtures";
 import { REPOSITORY } from "../fixtures/repository-roots";
 
@@ -81,7 +81,7 @@ describe.runIf(INSTALLED_RELEASE !== null)(`the installed Bun (${INSTALLED_RELEA
 
   it("joins its JUnit report and its console to Bun's own totals (5 tests, 2 failing)", () => {
     const summary = bunRunSummary(
-      declaredSummary(readTestReportText(capture.recordings["mixed.junit.xml"]), "junit-xml"),
+      testRunSummary(readTestReportText(capture.recordings["mixed.junit.xml"]), "junit-xml"),
       parseBunConsoleCollectionErrors(capture.recordings["mixed.console.txt"]),
     );
     expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });

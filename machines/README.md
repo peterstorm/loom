@@ -61,7 +61,7 @@ A matrix test feeds the same tool-call fixtures through both adapters and assert
 
 ### When a test run is trusted
 
-A `TestRun` is trusted only when ground truth confirms it. A non-zero exit is a trustworthy failure on its own. A zero exit is trusted when a report artifact was parsed, and it counts as a pass only when that report shows at least one test and no failures; a zero-test report is a trusted non-pass, because nothing ran.
+A `TestRun` is trusted only when ground truth confirms it. A non-zero exit is a trustworthy failure on its own. A zero exit is trusted when a report artifact was parsed, and it counts as a pass only when that report shows at least one executed test and no failures; a report where nothing executed (no test, or every test skipped, pending or todo) is a trusted non-pass, because nothing ran ([ADR-0100](../docs/adr/ADR-0100-a-testrun-passes-only-when-a-test-executed.md)).
 
 At SubagentStop a trusted run yields `{ verdict: "trusted-pass" }` or `{ verdict: "trusted-fail" }`. The transcript fallback yields `{ verdict: "untrusted", passed, label }`, and the label names how weak it is (`low-trust`, `degraded`, `fallback`, `snapshot-read-failed`), so an untrusted pass cannot pass for a trusted one. The `helper-reported` label is a separate untrusted source, minted only by the `store-test-evidence` helper from agent stdin.
 

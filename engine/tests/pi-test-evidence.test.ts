@@ -1,21 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   parsePiMessages,
-  piStructuredTestDiagnostics,
-  piStructuredTestResult,
+  piTranscriptEvidence,
   piTranscriptToolCalls,
   type PiMessage,
+  type PiTranscriptEvidence,
   type PiTranscriptResult,
-  type PiTranscriptToolCall,
 } from "../../pi/transcript-adapter";
 
-/** Production order: parse the harness payload once, project it, then fold. */
-function folded<T>(messages: unknown, fold: (calls: readonly PiTranscriptToolCall[]) => T): PiTranscriptResult<T> {
-  const parsed = parsePiMessages(messages);
-  return parsed.ok ? { ok: true, value: fold(piTranscriptToolCalls(parsed.value, "/repo")) } : parsed;
-}
-const structuredResult = (messages: unknown) => folded(messages, piStructuredTestResult);
-const structuredDiagnostics = (messages: unknown) => folded(messages, piStructuredTestDiagnostics);
+/** One reading of the message-level entry point settlement itself crosses. */
+const reading = <K extends keyof PiTranscriptEvidence>(key: K) =>
+  (messages: unknown): PiTranscriptResult<PiTranscriptEvidence[K]> => {
+    const evidence = piTranscriptEvidence(messages, "/repo");
+    return evidence.ok ? { ok: true, value: evidence.value[key] } : evidence;
+  };
+const structuredResult = reading("testResult");
+const structuredDiagnostics = reading("testDiagnostics");
 
 type PiToolResultMessage = Extract<PiMessage, { role: "toolResult" }>;
 
@@ -340,10 +340,12 @@ describe("Pi structured test evidence", () => {
       content: "654 pass\n0 fail\n",
     };
 
-    expect(folded([testRun("")[0], unknownMessage], (calls) => calls)).toEqual({
-      ok: true,
-      value: [{ kind: "unfinished", tool: "Bash", input: { command: "bun test src/domain/calendar.test.ts" } }],
-    });
+    const parsed = parsePiMessages([testRun("")[0], unknownMessage]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(piTranscriptToolCalls(parsed.value, "/repo")).toEqual(
+      [{ kind: "unfinished", tool: "Bash", input: { command: "bun test src/domain/calendar.test.ts" } }],
+    );
     expect(structuredResult([testRun("")[0], unknownMessage])).toEqual({ ok: true, value: null });
   });
 

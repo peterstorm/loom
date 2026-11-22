@@ -8,27 +8,23 @@
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { parseIssuedTaskIdentity, type TaskIdentity } from "../../src/core/spawn-task-text";
+import type { TaskIdentity } from "../../src/core/spawn-task-text";
 import { parseRunDirectoryReference } from "../../src/orchestration/run-directory-handle";
 import {
   explicitRun,
   failed,
   ok,
   resolveIssuingRun,
+  resolveIssuingSessionBinding,
   type BindingResult,
   type IssuingRunReads,
   type RunLocation,
   type SessionRunBinding,
 } from "../../src/orchestration/session-run-bindings";
+import { canonicalTaskIdentity as identity } from "../fixtures/issued-task-identity";
 
 const RUNS_ROOT = "/runs";
 const digest = (fill: string): string => fill.repeat(64);
-
-function identity(requestId: string, contextDigest: string): TaskIdentity {
-  const parsed = parseIssuedTaskIdentity(`LOOM_REQUEST_ID: ${requestId}\nLOOM_CONTEXT_DIGEST: ${contextDigest}`);
-  if (parsed.kind !== "bound") throw new Error(`fixture identity is not canonical: ${JSON.stringify(parsed)}`);
-  return { requestId: parsed.requestId, contextDigest: parsed.contextDigest };
-}
 
 /** A bound run: its binding (request ids only, as the registry records) and what it issued. */
 type FakeRun = Readonly<{ binding: SessionRunBinding; issued: readonly TaskIdentity[] }>;
@@ -89,24 +85,24 @@ describe("explicitRun", () => {
 describe("resolveIssuingRun", () => {
   it("returns an explicit run without reading anything", () => {
     expect(resolveIssuingRun({ runsRoot: "/r", runDirectory: "/r/run.x" }, neverRead, [ALPHA], "claude-code"))
-      .toEqual({ ok: true, value: { kind: "explicit", run: { runsRoot: "/r", runDirectory: "/r/run.x" } } });
+      .toEqual({ ok: true, value: { runsRoot: "/r", runDirectory: "/r/run.x" } });
   });
 
-  it("resolves the one binding that issued the request under its context", () => {
+  it("resolves the run of the one binding that issued the request under its context", () => {
     const issuing = fakeRun("issuing", [ALPHA]);
-    const resolved = resolveIssuingRun(null, reads([issuing, fakeRun("other", [BETA])]), [ALPHA], "pi");
-    expect(resolved).toEqual({ ok: true, value: {
-      kind: "session-binding",
-      run: { runsRoot: issuing.binding.runsRoot, runDirectory: issuing.binding.runDirectory },
-      binding: issuing.binding,
-    } });
+    const runs = [issuing, fakeRun("other", [BETA])];
+    expect(resolveIssuingRun(null, reads(runs), [ALPHA], "pi")).toEqual({
+      ok: true,
+      value: { runsRoot: issuing.binding.runsRoot, runDirectory: issuing.binding.runDirectory },
+    });
+    expect(resolveIssuingSessionBinding(reads(runs), [ALPHA], "pi")).toEqual({ ok: true, value: issuing.binding });
   });
 
   it("tells apart two bindings issuing one request id by the context digest", () => {
     const first = fakeRun("first", [ALPHA]);
     const second = fakeRun("second", [ALPHA_OTHER_CONTEXT]);
-    const resolved = resolveIssuingRun(null, reads([first, second]), [ALPHA_OTHER_CONTEXT], "claude-code");
-    expect(resolved).toMatchObject({ ok: true, value: { kind: "session-binding", binding: second.binding } });
+    const resolved = resolveIssuingSessionBinding(reads([first, second]), [ALPHA_OTHER_CONTEXT], "claude-code");
+    expect(resolved).toEqual({ ok: true, value: second.binding });
   });
 
   it("refuses a request id its binding lists under a context digest that run never issued", () => {
@@ -130,8 +126,8 @@ describe("resolveIssuingRun", () => {
       ok: false, message: expect.stringContaining("no Pi session run binding contains"),
     });
     const together = fakeRun("both", [ALPHA, BETA]);
-    expect(resolveIssuingRun(null, reads([together]), [ALPHA, BETA], "pi"))
-      .toMatchObject({ ok: true, value: { binding: together.binding } });
+    expect(resolveIssuingSessionBinding(reads([together]), [ALPHA, BETA], "pi"))
+      .toEqual({ ok: true, value: together.binding });
   });
 
   it("opens only the runs whose binding lists every requested id", () => {
@@ -172,10 +168,9 @@ describe("resolveIssuingRun", () => {
 
   it("never resolves to a run that did not issue every identity under its exact context", () => {
     fc.assert(fc.property(fc.subarray(pool), batches, (runs, identities) => {
-      const resolved = resolveIssuingRun(null, reads(runs), identities, "pi");
-      if (!resolved.ok || resolved.value.kind !== "session-binding") return;
-      const { binding } = resolved.value;
-      const run = runs.find((candidate) => candidate.binding === binding);
+      const resolved = resolveIssuingSessionBinding(reads(runs), identities, "pi");
+      if (!resolved.ok) return;
+      const run = runs.find((candidate) => candidate.binding === resolved.value);
       for (const wanted of identities) expect(run?.issued).toContainEqual(wanted);
     }));
   });

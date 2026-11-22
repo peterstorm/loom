@@ -9,9 +9,14 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { failing, passing, report } from "../../fixtures/red-then-green-status-fixtures";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
-import { parseEpoch, type EvidenceRecord } from "../../../src/machine";
+import type { EvidenceRecord } from "../../../src/machine";
 import { AGENT_COMMAND_ORIGIN } from "../../../src/machine/types";
-import { armedClaudeImplementation, writesTranscript } from "../../fixtures/claude-implementation-attempt";
+import {
+  ARMED_EPOCH,
+  REGRESSION_ONLY,
+  armedClaudeImplementation,
+  writesTranscript,
+} from "../../fixtures/claude-implementation-attempt";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 
 const OWN_TEST = "tests/own.test.ts";
@@ -27,10 +32,7 @@ afterEach(() => {
 async function settle(siblingStatus: "pending" | "implemented") {
   const armed = await armedClaudeImplementation({
     label: `regression-scope-${siblingStatus}`,
-    verificationPolicy: {
-      regression: { kind: "required" },
-      newTests: { kind: "waived", reason: "existing-tests-sufficient" },
-    },
+    verificationPolicy: REGRESSION_ONLY,
     fileList: [OWN_TEST],
     siblings: [taskFixture({
       id: "T2", description: "impl", agent: "code-implementer-agent", wave: 1, status: siblingStatus,
@@ -39,10 +41,8 @@ async function settle(siblingStatus: "pending" | "implemented") {
   });
   disposals.push(armed.dispose);
   writeFileSync(armed.transcript, writesTranscript("Ran the suite.", []));
-  const epoch = parseEpoch(`${armed.agentId}:code-implementer-agent`);
-  if (epoch === null) throw new Error("the armed Agent epoch must parse");
   const snapshot: readonly EvidenceRecord[] = [{
-    epoch,
+    epoch: ARMED_EPOCH,
     event: {
       kind: "TestRun",
       origin: AGENT_COMMAND_ORIGIN,

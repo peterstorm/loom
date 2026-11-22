@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { authorityMarkedPrompt as markedPrompt, canonicalTaskIdentity } from "../fixtures/issued-task-identity";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../src/orchestration/context-packets";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
@@ -13,7 +14,6 @@ import {
   resolveClaudeStopRun,
   type ClaudeRunContext,
 } from "../../src/orchestration/claude-run-authority";
-import { parseIssuedTaskIdentity, type TaskIdentity } from "../../src/core/spawn-task-text";
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import captureOrchestrationResult, { establishClaudeStopRun } from "../../src/handlers/subagent-stop/capture-orchestration-result";
 import { projectSlug } from "../../src/utils/agent-transcript-path";
@@ -94,20 +94,9 @@ async function stagedRun(name: string, requestIds: readonly string[], contextLab
 /** A context digest no staged run issued. */
 const FOREIGN_DIGEST = "f".repeat(64);
 
-/** The authority markers `renderSpawnTaskText` writes, then the instruction. */
-const markedPrompt = (requestId: string, contextDigest: string, body = "Review."): string =>
-  `LOOM_REQUEST_ID: ${requestId}\nLOOM_CONTEXT_DIGEST: ${contextDigest}\n${body}`;
-
 /** The prompt the engine issued for `request`. */
 const issuedPrompt = (request: AgentRequestAuthority, body = "Review."): string =>
   markedPrompt(request.requestId, request.contextDigest, body);
-
-/** A canonical identity, parsed through the production marker parser. */
-function identityOf(requestId: string, contextDigest: string = FOREIGN_DIGEST): TaskIdentity {
-  const parsed = parseIssuedTaskIdentity(markedPrompt(requestId, contextDigest));
-  if (parsed.kind !== "bound") throw new Error(`fixture identity is not canonical: ${JSON.stringify(parsed)}`);
-  return { requestId: parsed.requestId, contextDigest: parsed.contextDigest };
-}
 
 async function bind(run: StagedRun, requestIds: readonly string[] = run.requests.map(({ requestId }) => requestId)) {
   const registered = await registerSessionRunBinding(bindingDirectory, SESSION, {
@@ -487,12 +476,12 @@ describe("resolveClaudeStopRun", () => {
 
 describe("resolveClaudeSpawnRun", () => {
   it("requires a session id to resolve a marker without explicit authority", () => {
-    expect(resolveClaudeSpawnRun(context({ sessionId: undefined }), identityOf("request:alpha:1")))
+    expect(resolveClaudeSpawnRun(context({ sessionId: undefined }), canonicalTaskIdentity("request:alpha:1", FOREIGN_DIGEST)))
       .toMatchObject({ ok: false, message: expect.stringContaining("no session_id") });
   });
 
   it("returns the explicit run without consulting bindings", () => {
-    expect(resolveClaudeSpawnRun(context({ runsRoot: "/r", runDirectory: "/r/run.x", sessionId: undefined }), identityOf("request:alpha:1")))
+    expect(resolveClaudeSpawnRun(context({ runsRoot: "/r", runDirectory: "/r/run.x", sessionId: undefined }), canonicalTaskIdentity("request:alpha:1", FOREIGN_DIGEST)))
       .toEqual({ ok: true, value: { runsRoot: "/r", runDirectory: "/r/run.x" } });
   });
 });

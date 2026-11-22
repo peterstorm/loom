@@ -2,15 +2,17 @@ import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 
 import { parseFirstUserPrompt, parseTranscript } from "../../src/parsers/parse-transcript";
-import { parseFilesModified } from "../../src/parsers/parse-files-modified";
+import { parseFilesModified, PI_SESSION_REFUSAL } from "../../src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
 import { readPersistedOutput } from "../../src/utils/persisted-output";
 
 /** The production persisted-output reader, bound once: no test here is about it. */
 const parseBashOutput = (jsonl: string): string => parseBashTestOutput(jsonl, readPersistedOutput);
 import { parsePhaseArtifacts } from "../../src/parsers/parse-phase-artifacts";
-import { parseSubagentStartStdin } from "../../src/parsers/parse-subagent-start-input";
-import { parseSubagentStopStdin } from "../../src/parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../src/parsers/parse-subagent-lifecycle-input";
+
+const parseSubagentStartStdin = (stdin: string) => parseSubagentLifecycleStdin("SubagentStart", stdin);
+const parseSubagentStopStdin = (stdin: string) => parseSubagentLifecycleStdin("SubagentStop", stdin);
 
 describe("Claude Code harness records", () => {
   // Claude Code writes request telemetry beside the conversation. Its
@@ -19,7 +21,7 @@ describe("Claude Code harness records", () => {
   const fixture = readFileSync(new URL("../fixtures/claude-harness-records-transcript.jsonl", import.meta.url), "utf8");
 
   it("contribute no modified files", () => {
-    expect(parseFilesModified(fixture)).toEqual(["/repo/src/real.ts"]);
+    expect(parseFilesModified(fixture)).toEqual({ ok: true, value: ["/repo/src/real.ts"] });
   });
 
   it("contribute no test output", () => {
@@ -93,7 +95,7 @@ describe("parseFirstUserPrompt", () => {
     expect(parseFirstUserPrompt(content)).toEqual({ ok: true, prompt: "Review Task T1" });
   });
 
-  it("reads no prompt from a Pi session file: its records are harness metadata, so it fails closed", () => {
+  it("reads no prompt or write set from a Pi session file: each reader fails closed", () => {
     // Every reader here serves a Claude Code hook. A Pi session handed to one
     // is never read as Pi (that dialect is gone): its `session`/`message`
     // records classify as harness records and attribute nothing.
@@ -105,7 +107,13 @@ describe("parseFirstUserPrompt", () => {
     expect(parseFirstUserPrompt(content)).toEqual({ ok: false, error: "transcript contains no user-authored prompt" });
     expect(parseTranscript(content)).toBe("");
     const write = JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "write", arguments: { path: "/tmp/pi.ts" } }] } });
-    expect(parseFilesModified(`${header}\n${write}`)).toEqual([]);
+    // A Pi session's write set is refused, never read as an empty one.
+    expect(parseFilesModified(`${header}\n${write}`)).toEqual({ ok: false, error: PI_SESSION_REFUSAL });
+    // Wherever the header sits, and beside Claude records.
+    const claudeWrite = '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/a.ts"}}]}}';
+    expect(parseFilesModified(`${claudeWrite}\n${header}`)).toEqual({ ok: false, error: PI_SESSION_REFUSAL });
+    // A record typed session without a version is no Pi header.
+    expect(parseFilesModified(`${JSON.stringify({ type: "session" })}\n${claudeWrite}`)).toEqual({ ok: true, value: ["/tmp/a.ts"] });
   });
 
   it("fails closed when malformed JSON precedes a later valid user prompt", () => {
@@ -208,22 +216,19 @@ describe("parseFilesModified", () => {
   it("extracts Write file paths", () => {
     const content =
       '{"message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/test.ts"}}]}}';
-    const result = parseFilesModified(content);
-    expect(result).toEqual(["/tmp/test.ts"]);
+    expect(parseFilesModified(content)).toEqual({ ok: true, value: ["/tmp/test.ts"] });
   });
 
   it("extracts Edit file paths", () => {
     const content =
       '{"message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/tmp/other.ts"}}]}}';
-    const result = parseFilesModified(content);
-    expect(result).toEqual(["/tmp/other.ts"]);
+    expect(parseFilesModified(content)).toEqual({ ok: true, value: ["/tmp/other.ts"] });
   });
 
   it("ignores non-file-modifying tools", () => {
     const content =
       '{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}';
-    const result = parseFilesModified(content);
-    expect(result).toEqual([]);
+    expect(parseFilesModified(content)).toEqual({ ok: true, value: [] });
   });
 
   it("deduplicates files", () => {
@@ -231,8 +236,7 @@ describe("parseFilesModified", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/test.ts"}}]}}',
       '{"message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/tmp/test.ts"}}]}}',
     ].join("\n");
-    const result = parseFilesModified(content);
-    expect(result).toEqual(["/tmp/test.ts"]);
+    expect(parseFilesModified(content)).toEqual({ ok: true, value: ["/tmp/test.ts"] });
   });
 });
 
