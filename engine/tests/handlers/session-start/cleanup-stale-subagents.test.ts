@@ -36,12 +36,19 @@ import {
   type SessionId,
 } from "../../../src/machine";
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../fixtures/pi-session";
-import { PERSISTENT_SUBAGENT_DIR_ENTRIES, PERSISTENT_SUBAGENT_STORES } from "../../../src/config";
+import { OPEN_RUN_GRACE_MS, PERSISTENT_SUBAGENT_DIR_ENTRIES, PERSISTENT_SUBAGENT_STORES } from "../../../src/config";
+import type { BoundRunObservation } from "../../../src/orchestration/bound-run-liveness";
+import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
+import type { SessionRunBinding } from "../../../src/orchestration/session-run-bindings";
 
 const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
 
-/** Injected operations for a directory holding no readable TaskGraph pointer. */
-const NO_POINTERS = { readText: () => null, exists: () => false } as const;
+/** Injected operations for a directory holding no readable TaskGraph pointer and binding no run. */
+const NO_POINTERS = {
+  readText: () => null,
+  exists: () => false,
+  observeBoundRun: (): BoundRunObservation => ({ kind: "absent" }),
+} as const;
 
 const session = (raw: string): SessionId => {
   const parsed = parseSessionId(raw);
@@ -497,6 +504,7 @@ describe("sweepStaleSessions (fs)", () => {
         mtime: () => 10,
         readText: () => { throw new Error("EACCES read"); },
         exists: () => { throw new Error("must not probe a graph it could not read"); },
+        observeBoundRun: () => { throw new Error("no run registry here to observe"); },
         remove: (path) => { removed.push(path); },
       });
 
@@ -522,6 +530,123 @@ describe("sweepStaleSessions (fs)", () => {
         expect(existsSync(join(privateDir, "idle-other.evidence.jsonl"))).toBe(false);
       } finally {
         rmSync(privateDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // A standalone review's subagents resolve their issuing run through the
+  // session's run binding registry; sweeping it an hour into an idle wait
+  // refused the run's completion ("cannot bind completed result for
+  // unregistered run"). The registry now keeps its session while a run it
+  // names is open, for at most OPEN_RUN_GRACE_MS past the idle TTL.
+  describe("a session whose run binding names an open run", () => {
+    const REGISTRY = "s-run.orchestration-runs.json";
+    const LEDGER = "s-run.evidence.jsonl";
+    const registryText = (runs: readonly string[], harness = "claude-code"): string => JSON.stringify({
+      schemaVersion: 1, kind: "session-run-bindings", harness, sessionId: "s-run",
+      bindings: runs.map((run) => ({
+        runId: run, runsRoot: "/runs", runDirectory: join("/runs", run), requestIds: ["req-1"], resultDigest: null,
+      })),
+    });
+    const sweepWith = (
+      text: string | Error,
+      observe: (binding: SessionRunBinding) => BoundRunObservation,
+      mtime = 10,
+    ) => {
+      const removed: string[] = [];
+      const observed: string[] = [];
+      const diagnostics = sweepStaleSessions("/tracking", 100, {
+        probeDirectory: () => ({ kind: "present", entries: [REGISTRY, LEDGER, "s-idle.evidence.jsonl"] }),
+        mtime: () => mtime,
+        readText: (path) => {
+          if (!path.endsWith(REGISTRY)) return null;
+          if (text instanceof Error) throw text;
+          return text;
+        },
+        exists: () => false,
+        observeBoundRun: (binding) => { observed.push(binding.runId); return observe(binding); },
+        remove: (path) => { removed.push(path); },
+      }, null, 100 - OPEN_RUN_GRACE_MS);
+      return { removed: removed.map((path) => path.slice("/tracking/".length)).sort(), observed, diagnostics };
+    };
+    const OPEN: BoundRunObservation = { kind: "observed", liveness: { kind: "open" } };
+    const FINISHED: BoundRunObservation = { kind: "observed", liveness: { kind: "finished", because: "terminal-state" } };
+
+    it("keeps the whole session while any run it names is open", () => {
+      const swept = sweepWith(registryText(["run-a", "run-b"]), (binding) => binding.runId === "run-b" ? OPEN : FINISHED);
+      expect(swept.removed).toEqual(["s-idle.evidence.jsonl"]);
+      expect(swept.observed).toEqual(["run-a", "run-b"]);
+      expect(swept.diagnostics).toEqual([]);
+    });
+
+    it("reads a registry either harness published", () => {
+      expect(sweepWith(registryText(["run-a"], "pi"), () => OPEN).removed).toEqual(["s-idle.evidence.jsonl"]);
+    });
+
+    it("releases the session once every run is finished or gone", () => {
+      const swept = sweepWith(registryText(["run-a", "run-b"]), (binding) => binding.runId === "run-a" ? FINISHED : { kind: "absent" });
+      expect(swept.removed).toEqual([LEDGER, REGISTRY, "s-idle.evidence.jsonl"].sort());
+      expect(swept.diagnostics).toEqual([]);
+    });
+
+    it("an unreadable run keeps the session and is reported; every binding is still observed", () => {
+      const swept = sweepWith(registryText(["run-a", "run-b"]), () => ({ kind: "unreadable", cause: "EACCES checkpoint" }));
+      expect(swept.removed).toEqual(["s-idle.evidence.jsonl"]);
+      expect(swept.diagnostics).toEqual([
+        { operation: "read", path: join("/runs", "run-a"), cause: "EACCES checkpoint" },
+        { operation: "read", path: join("/runs", "run-b"), cause: "EACCES checkpoint" },
+      ]);
+    });
+
+    it("an unreadable registry keeps the session and is reported", () => {
+      const swept = sweepWith(new Error("EACCES read"), () => { throw new Error("must not observe an unread registry"); });
+      expect(swept.removed).toEqual(["s-idle.evidence.jsonl"]);
+      expect(swept.diagnostics).toEqual([{ operation: "read", path: join("/tracking", REGISTRY), cause: "EACCES read" }]);
+    });
+
+    it("a malformed registry binds nothing and is reported", () => {
+      for (const text of ["x\n", JSON.stringify({ kind: "session-run-bindings", harness: "emacs" })]) {
+        const swept = sweepWith(text, () => { throw new Error("must not observe a malformed registry"); });
+        expect(swept.removed, text).toEqual([LEDGER, REGISTRY, "s-idle.evidence.jsonl"].sort());
+        expect(swept.diagnostics, text).toHaveLength(1);
+        expect(swept.diagnostics[0]).toMatchObject({ operation: "parse", path: join("/tracking", REGISTRY) });
+      }
+    });
+
+    it("an open run keeps its session no longer than the grace bound", () => {
+      const swept = sweepWith(registryText(["run-a"]), () => { throw new Error("must not observe past the grace"); }, 100 - OPEN_RUN_GRACE_MS - 1);
+      expect(swept.removed).toEqual([LEDGER, REGISTRY, "s-idle.evidence.jsonl"].sort());
+    });
+
+    it("on real files: the open run's session survives, the finished run's is swept", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "loom-sweep-runs-"));
+      const runs = mkdtempSync(join(tmpdir(), "loom-sweep-runs-root-"));
+      try {
+        const open = createRunDirectory(runs, "run-open");
+        const done = createRunDirectory(runs, "run-done");
+        if (!open.ok || !done.ok) throw new Error("fixture runs did not open");
+        await open.value.registerProgram({ kind: "standalone-review" });
+        await done.value.registerProgram({ kind: "standalone-review" });
+        await done.value.writeCheckpoint(JSON.stringify({ kind: "done" }));
+        const old = new Date(Date.now() - 12 * 3_600_000);
+        for (const [session, run] of [["s-open", "run-open"], ["s-done", "run-done"]] as const) {
+          writeFileSync(join(dir, `${session}.orchestration-runs.json`), JSON.stringify({
+            schemaVersion: 1, kind: "session-run-bindings", harness: "claude-code", sessionId: session,
+            bindings: [{ runId: run, runsRoot: runs, runDirectory: join(runs, run), requestIds: ["req-1"], resultDigest: null }],
+          }));
+          writeFileSync(join(dir, `${session}.evidence.jsonl`), "x\n");
+          for (const name of [`${session}.orchestration-runs.json`, `${session}.evidence.jsonl`]) utimesSync(join(dir, name), old, old);
+        }
+
+        expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([]);
+
+        expect(existsSync(join(dir, "s-open.orchestration-runs.json"))).toBe(true);
+        expect(existsSync(join(dir, "s-open.evidence.jsonl"))).toBe(true);
+        expect(existsSync(join(dir, "s-done.orchestration-runs.json"))).toBe(false);
+        expect(existsSync(join(dir, "s-done.evidence.jsonl"))).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(runs, { recursive: true, force: true });
       }
     });
   });

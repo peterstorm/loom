@@ -21,15 +21,32 @@
  *   - a session bound to a TaskGraph file that still exists, through its
  *     `<session>.task_graph` pointer. Once the graph is cleaned up, the
  *     session's files age out normally.
- * When either fact cannot be read (SessionStart input without a usable
- * `session_id`, a malformed pointer) the sweep says so in its diagnostics: a
- * silent miss would bring back the deleted-ledger failure with no trace.
+ * A third kind is kept for a bounded time: a session whose Session Run
+ * Binding registry (`<session>.orchestration-runs.json`) names a run that is
+ * still open (`core/run-liveness.ts`). Its subagents' hooks resolve their
+ * issuing run through that registry, and the run's `done` records its result
+ * into it, so sweeping it mid-run refuses every later capture and completion
+ * ("cannot bind completed result for unregistered run"). The protection lasts
+ * `OPEN_RUN_GRACE_MS` past the idle TTL, because a run that never proves its
+ * end in a file (a panel, a blocked run nobody resumes) must not keep its
+ * session forever.
+ * When any of these facts cannot be read (SessionStart input without a usable
+ * `session_id`, a malformed pointer or registry, an unreadable Run Directory)
+ * the sweep says so in its diagnostics: a silent miss would bring back the
+ * deleted-ledger failure with no trace.
  */
 
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { match } from "ts-pattern";
 import { passthroughResult, type HookHandler } from "../../types";
-import { PERSISTENT_SUBAGENT_DIR_ENTRIES, STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
+import { OPEN_RUN_GRACE_MS, PERSISTENT_SUBAGENT_DIR_ENTRIES, STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
+import { observeBoundRun, type BoundRunObservation } from "../../orchestration/bound-run-liveness";
+import {
+  ORCHESTRATION_RUNS_SUFFIX,
+  parsePublishedSessionRunBindingRegistry,
+  type SessionRunBinding,
+} from "../../orchestration/session-run-bindings";
 import {
   parseCanonicalTaskGraphPointer,
   parseSessionId,
@@ -124,6 +141,8 @@ export type StaleSessionOperations = Readonly<{
   /** A file's text, or null when it does not exist; any other failure throws. */
   readText: (path: string) => string | null;
   exists: (path: string) => boolean;
+  /** Whether the run a Session Run Binding names is still open; never throws. */
+  observeBoundRun: (binding: SessionRunBinding) => BoundRunObservation;
   remove: (path: string) => void;
 }>;
 
@@ -155,6 +174,7 @@ const REAL_STALE_SESSION_OPERATIONS: StaleSessionOperations = Object.freeze({
   mtime: (path) => statSync(path).mtimeMs,
   readText: readOptionalText,
   exists: existsSync,
+  observeBoundRun,
   remove: (path) => rmSync(path, { recursive: true, force: true }),
 });
 
@@ -189,6 +209,12 @@ export function isDeadStatFailure(error: unknown): boolean {
   return typeof code === "string" && DEAD_ENTRY_STAT_CODES.has(code);
 }
 
+/** The session a tracking entry belongs to when it ends with `suffix`, else null. */
+function sessionNamedBy(entry: string, suffix: string): string | null {
+  const session = entry.endsWith(suffix) ? entry.slice(0, -suffix.length) : "";
+  return session === "" ? null : session;
+}
+
 /**
  * Shell: the session groups bound to a TaskGraph that still exists. A
  * malformed pointer binds nothing (it ages out like any stale file) and is
@@ -202,8 +228,8 @@ function graphBoundSessions(
   diagnostics: StaleCleanupDiagnostic[],
 ): readonly SessionGroupKey[] {
   return entries.flatMap((entry) => {
-    const session = entry.endsWith(TASK_GRAPH_POINTER_SUFFIX) ? entry.slice(0, -TASK_GRAPH_POINTER_SUFFIX.length) : "";
-    if (session === "") return [];
+    const session = sessionNamedBy(entry, TASK_GRAPH_POINTER_SUFFIX);
+    if (session === null) return [];
     const path = join(dir, entry);
     let raw: string | null;
     try {
@@ -222,12 +248,101 @@ function graphBoundSessions(
   });
 }
 
-/** Shell: returns every failed operation with its exact path and cause. */
+/** Shell: whether one binding keeps its session. An unreadable run may be open, so it keeps it and is reported. */
+function bindingKeepsSession(
+  binding: SessionRunBinding,
+  operations: StaleSessionOperations,
+  diagnostics: StaleCleanupDiagnostic[],
+): boolean {
+  return match(operations.observeBoundRun(binding))
+    .with({ kind: "absent" }, () => false)
+    .with({ kind: "observed" }, ({ liveness }) => liveness.kind === "open")
+    .with({ kind: "unreadable" }, ({ cause }) => {
+      diagnostics.push(diagnostic("read", binding.runDirectory, cause));
+      return true;
+    })
+    .exhaustive();
+}
+
+/** The registry's JSON, or null after reporting why it is not JSON. */
+function registryJson(path: string, raw: string, diagnostics: StaleCleanupDiagnostic[]): Readonly<{ json: unknown }> | null {
+  try {
+    return { json: JSON.parse(raw) as unknown };
+  } catch (error) {
+    diagnostics.push(diagnostic("parse", path, error));
+    return null;
+  }
+}
+
+/**
+ * Shell: the session groups among `entries` whose run binding registry names
+ * an open run. Mirrors the pointer rules: a malformed registry binds nothing
+ * (it ages out) and is reported; an unreadable one may be live, so it protects
+ * its session and is reported. Every binding is observed, so each unreadable
+ * run is reported even when an earlier one already kept the session.
+ */
+function sessionsWithOpenRuns(
+  dir: string,
+  entries: readonly string[],
+  operations: StaleSessionOperations,
+  diagnostics: StaleCleanupDiagnostic[],
+): readonly SessionGroupKey[] {
+  return entries.flatMap((entry) => {
+    const session = sessionNamedBy(entry, ORCHESTRATION_RUNS_SUFFIX);
+    if (session === null) return [];
+    const path = join(dir, entry);
+    let raw: string | null;
+    try {
+      raw = operations.readText(path);
+    } catch (error) {
+      diagnostics.push(diagnostic("read", path, error));
+      return [sessionGroupKey(session)];
+    }
+    if (raw === null) return [];
+    const parsed = registryJson(path, raw, diagnostics);
+    if (parsed === null) return [];
+    const registry = parsePublishedSessionRunBindingRegistry(parsed.json, session);
+    if (!registry.ok) {
+      diagnostics.push(diagnostic("parse", path, registry.message));
+      return [];
+    }
+    const kept = registry.value.bindings.map((binding) => bindingKeepsSession(binding, operations, diagnostics));
+    return kept.includes(true) ? [sessionGroupKey(session)] : [];
+  });
+}
+
+/**
+ * Shell: the sessions kept by what they are bound to: a TaskGraph that still
+ * exists, or an open run. Only a registry whose session the idle cutoff would
+ * sweep and the open-run cutoff still covers is worth reading: every other
+ * session is kept or swept whatever its runs say.
+ */
+function boundSessions(
+  dir: string,
+  mtimes: ReadonlyMap<string, number>,
+  cutoffs: Readonly<{ idle: number; openRun: number }>,
+  alreadyProtected: ReadonlySet<SessionGroupKey>,
+  operations: StaleSessionOperations,
+  diagnostics: StaleCleanupDiagnostic[],
+): readonly SessionGroupKey[] {
+  const graphBound = graphBoundSessions(dir, [...mtimes.keys()], operations, diagnostics);
+  const protectedSoFar = new Set([...alreadyProtected, ...graphBound]);
+  const pastGrace = new Set(staleEntries(mtimes, cutoffs.openRun, protectedSoFar));
+  const withinGrace = staleEntries(mtimes, cutoffs.idle, protectedSoFar).filter((entry) => !pastGrace.has(entry));
+  return [...graphBound, ...sessionsWithOpenRuns(dir, withinGrace, operations, diagnostics)];
+}
+
+/**
+ * Shell: returns every failed operation with its exact path and cause. A
+ * session idle past `cutoffMs` is swept unless it is protected; one whose run
+ * binding names an open run is kept until it is idle past `openRunCutoffMs`.
+ */
 export function sweepStaleSessions(
   dir: string,
   cutoffMs: number,
   operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
   startingSession: SessionId | null = null,
+  openRunCutoffMs: number = cutoffMs - OPEN_RUN_GRACE_MS,
 ): readonly StaleCleanupDiagnostic[] {
   const directory = operations.probeDirectory(dir);
   if (directory.kind === "absent") return Object.freeze([]);
@@ -262,7 +377,8 @@ export function sweepStaleSessions(
       diagnostics.push(diagnostic("stat", path, error));
     }
   }
-  for (const session of graphBoundSessions(dir, [...mtimes.keys()], operations, diagnostics)) {
+  const cutoffs = { idle: cutoffMs, openRun: openRunCutoffMs };
+  for (const session of boundSessions(dir, mtimes, cutoffs, protectedSessions, operations, diagnostics)) {
     protectedSessions.add(session);
   }
   for (const entry of staleEntries(mtimes, cutoffMs, protectedSessions)) {

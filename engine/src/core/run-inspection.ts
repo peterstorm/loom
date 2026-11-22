@@ -154,26 +154,40 @@ function checkpointStateLabel(
   rawRegistration: unknown,
   remediationOutcome: RemediationInspectionLabel | null,
 ): string | null {
-  const record = (value: unknown): Record<string, unknown> | null =>
-    typeof value === "object" && value !== null && !Array.isArray(value)
-      ? value as Record<string, unknown>
-      : null;
-  const text = (value: unknown): string | null => typeof value === "string" && value !== "" ? value : null;
-  const root = record(raw);
+  const stateName = checkpointStateName(program, raw);
+  if (program !== "remediation" || stateName !== "done") return stateName;
+  const registrationVersion = asRecord(rawRegistration)?.["schemaVersion"];
+  return registrationVersion === 1 || registrationVersion === 2 ? remediationOutcome : null;
+}
+
+const asRecord = (value: unknown): Readonly<Record<string, unknown>> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Readonly<Record<string, unknown>>
+    : null;
+
+const asText = (value: unknown): string | null => typeof value === "string" && value !== "" ? value : null;
+
+/**
+ * The state name a program's parsed checkpoint records, read where that
+ * program's writer puts it (see `checkpointStateLabel`), or null when the
+ * checkpoint carries none. The inspection label and `runLiveness`
+ * (`run-liveness.ts`) both read through it, so they cannot disagree on where
+ * a program keeps its state.
+ */
+export function checkpointStateName(program: InspectableProgram, raw: unknown): string | null {
+  const root = asRecord(raw);
   if (root === null) return null;
   return match(program)
-    .with("standalone-review", "standalone-disposition", "wave-gate", () => text(root["kind"]))
-    .with("remediation", () => {
-      const registrationVersion = record(rawRegistration)?.["schemaVersion"];
-      const state = record(root["state"]);
-      const stateName = text(state?.["state"]);
-      if (stateName !== "done") return stateName;
-      return registrationVersion === 1 || registrationVersion === 2
-        ? remediationOutcome
-        : null;
-    })
-    .with("architecture", "refutation", () => text(record(record(root["data"])?.["state"])?.["stage"]))
+    .with("standalone-review", "standalone-disposition", "wave-gate", () => asText(root["kind"]))
+    .with("remediation", () => asText(asRecord(root["state"])?.["state"]))
+    .with("architecture", "refutation", () => asText(asRecord(asRecord(root["data"])?.["state"])?.["stage"]))
     .exhaustive();
+}
+
+/** The program a stored `program.json` registers, or null when this build cannot read its kind. */
+export function inspectableProgramOf(rawRegistration: unknown): InspectableProgram | null {
+  const kind = asRecord(rawRegistration)?.["kind"];
+  return isInspectableProgram(kind) ? kind : null;
 }
 
 /** The rejection diagnostics the event log carries, by request id. */
@@ -251,10 +265,10 @@ const mapFact = <A, B>(fact: ObservedFact<A>, project: (value: A) => B): Observe
 export function deriveRunInspection(observation: RunInspectionObservation): RunInspection {
   const program = mapFact(observation.programRegistration, (raw): InspectedProgram => {
     if (raw === null) return Object.freeze({ kind: "unregistered" as const });
-    const kind = typeof raw === "object" ? (raw as Record<string, unknown>)["kind"] : undefined;
-    return isInspectableProgram(kind)
-      ? Object.freeze({ kind: "registered" as const, program: kind })
-      : Object.freeze({ kind: "unrecognized" as const });
+    const kind = inspectableProgramOf(raw);
+    return kind === null
+      ? Object.freeze({ kind: "unrecognized" as const })
+      : Object.freeze({ kind: "registered" as const, program: kind });
   });
 
   return Object.freeze({

@@ -141,6 +141,23 @@ export function parseSessionRunBindingRegistry(
   return ok(sessionRunBindingRegistry(expectedHarness, sessionId, bindings));
 }
 
+/**
+ * Parse one registry as the harness it names published it. Only for a reader
+ * that judges the session's runs rather than granting authority from them:
+ * the SessionStart sweep, which runs for both harnesses over one directory.
+ * Every authority reader names its own harness through
+ * `parseSessionRunBindingRegistry`.
+ */
+export function parsePublishedSessionRunBindingRegistry(
+  raw: unknown,
+  expectedSessionId: string,
+): BindingResult<SessionRunBindingRegistry> {
+  const harness = typeof raw === "object" && raw !== null ? (raw as Readonly<Record<string, unknown>>)["harness"] : undefined;
+  return isSessionBindingHarness(harness)
+    ? parseSessionRunBindingRegistry(raw, expectedSessionId, harness)
+    : failed("session run binding registry names no harness this build knows");
+}
+
 /** The registry lock sits beside its registry, named from the same suffix so the two cannot drift. */
 const REGISTRY_LOCK_SUFFIX = ORCHESTRATION_RUNS_SUFFIX.replace(/\.json$/, ".lock");
 
