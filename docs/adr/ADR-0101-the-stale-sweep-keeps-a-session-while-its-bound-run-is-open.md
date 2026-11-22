@@ -53,8 +53,9 @@ Two facts limit what the sweep can know:
   reads them through `checkpointStateName`, the same reader run inspection uses.
 - **Observation is a synchronous shell.** `orchestration/bound-run-liveness.ts` `observeBoundRun(binding)`
   answers `absent` (the Run Directory is gone, so the binding names nothing), `observed`, or `unreadable`
-  (something is there but cannot be read). A recorded result digest needs no read. The handle gains
-  `readCheckpointNow`, a synchronous read over the same bytes `readCheckpoint` returns.
+  (something is there but cannot be read). A recorded result digest needs no read.
+  `orchestration/run-directory-handle.ts` gains the exported `readCheckpointNow(handle)`, a synchronous read
+  over the same bytes the handle's `readCheckpoint` returns.
 - **The sweep mirrors the pointer rules.** It reads a registry only when the idle TTL would sweep its session
   and the grace still covers it. Then: an unreadable registry protects its session and is reported (`read`); a
   malformed one binds nothing and is reported (`parse`); an unreadable run protects its session and is
