@@ -43,8 +43,7 @@ const wire = (fingerprint: string, overrides: Parameters<typeof aVerdict>[0] = {
 /** Ballots as adjudication receives them: through the ballot parser. */
 const ballots = (...wires: readonly VerdictWire[]): readonly VerificationVerdict[] => ok(parseVerificationVerdicts(wires));
 
-/** One unit, assigned to `agentId` and — unless `settle` is false — settled
- *  covered by it: the ledger shape `adjudicateRun` derives its INV-S3 facts from. */
+/** One planned, unassigned unit for the `/export` idor cell. */
 const seededUnit = () => ok(seedCoverageUnit(aSeed({
   refs: aRefs({ surface: "http:GET /export", boundary: "tenant", subsystem: "reports", attack_class: "idor" }),
   starting_paths: ["src/export.ts"],
@@ -52,6 +51,8 @@ const seededUnit = () => ok(seedCoverageUnit(aSeed({
   selected_companion_blocks: [],
 })));
 
+/** One unit, assigned to `agentId` and — unless `settle` is false — settled
+ *  covered by it: the ledger shape `adjudicateRun` derives its INV-S3 facts from. */
 const ledgerOwnedBy = (agentId: string, settle = true): CoverageLedger => {
   const seeded = seededUnit();
   const assigned = ok(assignUnits([seeded], [{ coverageId: seeded.coverage_id, agentId }]));

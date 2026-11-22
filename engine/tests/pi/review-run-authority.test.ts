@@ -4,13 +4,27 @@
  * at its own seam: every refusing step names itself, in the order the
  * sequence runs (registration read → parse → program kind → classification →
  * publication). The authenticated arm needs a real published Run Directory and
- * is driven end to end by the extension suites.
+ * is driven end to end by the extension suites. The marker boundary
+ * (`piTaskIdentity`) and the issuing-run resolution (`piIssuingRun`) that
+ * both Pi shells cross before it are pinned here too.
  */
 
-import { describe, expect, it } from "vitest";
-import { authenticatePiIssuedReviewRequest, piIssuedSpawnRequestRefusal } from "../../../pi/review-run-authority";
-import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  authenticatePiIssuedReviewRequest,
+  piIssuedSpawnRequestRefusal,
+  piIssuingRun,
+  piTaskIdentity,
+} from "../../../pi/review-run-authority";
+import { createRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
+import { registerSessionRunBinding, type RunLocation } from "../../src/orchestration/session-run-bindings";
 import type { AgentRequestAuthority, RequestId } from "../../src/core/orchestration-contract";
+import type { TaskIdentity } from "../../src/core/spawn-task-text";
+import { agentRequestAuthority } from "../fixtures/agent-request-authority";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { withEnvOverlaySync } from "../fixtures/env-overlay";
 
 const RUN_ID = "run.review-run-authority";
 const WAVE_GATE_V1 = Object.freeze({
@@ -115,5 +129,123 @@ describe("piIssuedSpawnRequestRefusal (the spawn admission's rendering)", () => 
     expect(refusalFor(WAVE_GATE_V1)).toBe("reviewer request reservations are unavailable");
     expect(piIssuedSpawnRequestRefusal(requestId, { kind: "registration-unreadable", message: "registration EACCES" }))
       .toBe("registration EACCES");
+  });
+});
+
+const ISSUED_REQUEST = "request:reviewer:1";
+const ISSUED_DIGEST = "a".repeat(64);
+const markers = (lines: readonly string[]): string => [...lines, "Review the issued request"].join("\n");
+const ITEM = "Pi spawn item 1/code-reviewer";
+
+describe("piTaskIdentity (Pi's throw-on-refusal marker boundary)", () => {
+  it("names no identity for a task that carries no markers", () => {
+    expect(piTaskIdentity("Review the change", ITEM)).toBeNull();
+  });
+
+  it("returns the bound identity of canonical markers", () => {
+    expect(piTaskIdentity(markers([`LOOM_REQUEST_ID: ${ISSUED_REQUEST}`, `LOOM_CONTEXT_DIGEST: ${ISSUED_DIGEST}`]), ITEM))
+      .toEqual({ requestId: ISSUED_REQUEST, contextDigest: ISSUED_DIGEST });
+  });
+
+  it.each([
+    [
+      "two different request ids",
+      [`LOOM_REQUEST_ID: ${ISSUED_REQUEST}`, "LOOM_REQUEST_ID: request:reviewer:2", `LOOM_CONTEXT_DIGEST: ${ISSUED_DIGEST}`],
+      "task issuance identity is incomplete or contradictory",
+    ],
+    [
+      "a request id without its digest",
+      [`LOOM_REQUEST_ID: ${ISSUED_REQUEST}`],
+      "task issuance identity is incomplete or contradictory",
+    ],
+    [
+      "a non-canonical context digest",
+      [`LOOM_REQUEST_ID: ${ISSUED_REQUEST}`, "LOOM_CONTEXT_DIGEST: NOT-A-DIGEST"],
+      "task LOOM_CONTEXT_DIGEST marker is not canonical",
+    ],
+  ] as const)("throws, naming the item, for %s", (_name, lines, reason) => {
+    expect(() => piTaskIdentity(markers(lines), ITEM))
+      .toThrow(new RegExp(`^${ITEM} carries unusable authority markers: ${reason}`));
+  });
+});
+
+describe("piIssuingRun (the one open-and-read of the run that issued a Pi task)", () => {
+  const SESSION = "019fca39-f989-7510-8e62-50dadbcad4aa";
+  const parsedIdentity = piTaskIdentity(markers([`LOOM_REQUEST_ID: ${ISSUED_REQUEST}`, `LOOM_CONTEXT_DIGEST: ${ISSUED_DIGEST}`]), ITEM);
+  if (parsedIdentity === null) throw new Error("fixture identity is unbound");
+  const identity: TaskIdentity = parsedIdentity;
+  const cleanups: (() => void)[] = [];
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup();
+  });
+
+  const tempDir = (prefix: string): string => {
+    const dir = canonicalTempDir(prefix);
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    return dir;
+  };
+
+  /** A run that reserved the canonical reviewer request. */
+  async function issuingRun(name: string): Promise<RunLocation> {
+    const runsRoot = tempDir(`loom-pi-issuing-${name}-`);
+    const created = createRunDirectory(runsRoot, `run.${name}`);
+    if (!created.ok) throw new Error(created.error.message);
+    const reserved = await created.value.reserveRequest(agentRequestAuthority(`run.${name}`));
+    if (!reserved.ok) throw new Error(reserved.error.message);
+    return { runsRoot, runDirectory: join(runsRoot, `run.${name}`) };
+  }
+
+  async function bindAll(subagents: string, runs: readonly RunLocation[]): Promise<void> {
+    for (const run of runs) {
+      const registered = await registerSessionRunBinding(subagents, SESSION, {
+        runId: run.runDirectory.split("/").pop(),
+        ...run,
+        requestIds: [ISSUED_REQUEST],
+        resultDigest: null,
+      }, "pi");
+      if (!registered.ok) throw new Error(registered.message);
+    }
+  }
+
+  const resolveIn = (subagents: string, explicit: RunLocation | null) =>
+    withEnvOverlaySync({ LOOM_SUBAGENT_DIR: subagents }, () => piIssuingRun(SESSION, explicit, [identity]));
+
+  it("refuses, instead of picking one, when two session bindings both issued the identity", async () => {
+    const subagents = tempDir("loom-pi-issuing-bindings-");
+    await bindAll(subagents, [await issuingRun("first"), await issuingRun("second")]);
+    expect(() => resolveIn(subagents, null)).toThrow(
+      `multiple Pi session run bindings contain issued request/context authority ${ISSUED_REQUEST}@${ISSUED_DIGEST}`,
+    );
+  });
+
+  it("refuses when no session binding issued the identity", () => {
+    expect(() => resolveIn(tempDir("loom-pi-issuing-empty-"), null)).toThrow(
+      `no Pi session run binding contains issued request/context authority ${ISSUED_REQUEST}@${ISSUED_DIGEST}`,
+    );
+  });
+
+  it("returns the one issuing binding with the run it opened and the requests it read", async () => {
+    const subagents = tempDir("loom-pi-issuing-one-");
+    const run = await issuingRun("only");
+    await bindAll(subagents, [run]);
+    const resolved = resolveIn(subagents, null);
+    expect(resolved.binding).toMatchObject({ runId: "run.only", requestIds: [ISSUED_REQUEST], resultDigest: null });
+    expect(resolved.handle.runId).toBe("run.only");
+    expect(resolved.issued.map(({ requestId }) => requestId)).toEqual([ISSUED_REQUEST]);
+  });
+
+  it("opens an explicit run without reading the session's bindings, binding every request it issued", async () => {
+    const run = await issuingRun("explicit");
+    // A binding directory that does not exist would refuse a session read.
+    const resolved = resolveIn(join(tempDir("loom-pi-issuing-unread-"), "missing", "subagents"), run);
+    expect(resolved.binding).toMatchObject({ runId: "run.explicit", requestIds: [ISSUED_REQUEST], resultDigest: null });
+    expect(resolved.handle.runId).toBe("run.explicit");
+    expect(resolved.issued.map(({ requestId }) => requestId)).toEqual([ISSUED_REQUEST]);
+  });
+
+  it("throws when the explicit run cannot be opened", () => {
+    const runsRoot = tempDir("loom-pi-issuing-absent-");
+    expect(() => resolveIn(tempDir("loom-pi-issuing-unused-"), { runsRoot, runDirectory: join(runsRoot, "run.absent") }))
+      .toThrow(/run directory does not exist/);
   });
 });

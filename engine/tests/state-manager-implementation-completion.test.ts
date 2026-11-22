@@ -2,6 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   createImplementationAttemptAuthority,
   parseImplementationObservation,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
   type TaskId,
@@ -110,7 +111,7 @@ function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = tru
     attempt,
     attempt,
     observation,
-    { kind: "accepted" },
+    observedByteScope([]),
   );
   if (!settled.ok || settled.value.kind === "ignored") throw new Error("fixture must settle");
   return settled.value.receipt;
@@ -128,7 +129,7 @@ function infrastructureReceiptFor(attempt: ImplementationAttemptAuthority) {
     kind: "implementation-observation-unavailable",
     observedAt: "2026-08-23T00:02:00.000Z",
     failure: { kind: "observation-unavailable", message: "legacy transport failure" },
-  }, { kind: "accepted" });
+  }, observedByteScope([]));
   if (!settled.ok || settled.value.kind !== "infrastructure-blocked") {
     throw new Error("legacy infrastructure receipt fixture failed");
   }
@@ -157,11 +158,12 @@ describe("Task lifecycle migration", () => {
   );
 
   it.each(["legacy_execution_reservation", "legacy_missing_proof", "new_tests_written", "new_test_evidence", "unresolved_repository_paths"])(
-    "refuses a Task carrying the retired %s field",
+    "refuses a Task carrying the retired %s field, and loads the same Task without it",
     (field) => {
       expect(errorOf(graph({ ...baseTask(), proof: pendingProof(), [field]: true }))).toContain(
         legacyRefusal(`Task "T1" carrying ${field}`),
       );
+      expect(parseTaskGraph(graph({ ...baseTask(), proof: pendingProof() })).ok).toBe(true);
     },
   );
 

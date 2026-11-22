@@ -14,6 +14,8 @@ import { describe, expect, it } from "vitest";
 import {
   piToolCall,
   piTranscriptTool,
+  piWriteTargetPaths,
+  WRITE_TARGET_KEYS,
   writeTargetPathOf,
 } from "../../src/core/harness-tool-call";
 import {
@@ -255,7 +257,7 @@ describe("piTranscriptTool — the transcript's reading of the Pi tool table", (
   });
 });
 
-describe("writeTargetPathOf — the probe order the ??= assignment encodes", () => {
+describe("writeTargetPathOf — the probe order over WRITE_TARGET_KEYS", () => {
   it("a non-string winner FAILS instead of deferring to a later string key", () => {
     // `path` holds a non-nullish non-string: it wins the probe at key 1, and
     // the string test rejects it — the later `file_path` string is never
@@ -270,5 +272,18 @@ describe("writeTargetPathOf — the probe order the ??= assignment encodes", () 
     // cannot displace an earlier non-nullish one.
     expect(writeTargetPathOf({ path: null, file_path: "real.md" })).toBe("real.md");
     expect(writeTargetPathOf({ file_path: "real.md", filePath: "shadow.md" })).toBe("real.md");
+  });
+
+  it("agrees with piWriteTargetPaths on every own-target input: the two share one reading", () => {
+    const keyValue = fc.option(fc.oneof(fc.string(), fc.integer(), fc.constant(null)), { nil: undefined });
+    const input = fc.record({ path: keyValue, file_path: keyValue, filePath: keyValue }, { requiredKeys: [] });
+    fc.assert(fc.property(input, (args) => {
+      const own = writeTargetPathOf(args);
+      const guarded = piWriteTargetPaths(args);
+      // An input with a target key present is read by its own target alone, so
+      // the guard proves exactly the path the transcript attributes, or neither does.
+      if (WRITE_TARGET_KEYS.some((key) => key in args)) expect(guarded.ok ? guarded.value : null).toEqual(own === null ? null : [own]);
+      else expect(own).toBeNull();
+    }));
   });
 });

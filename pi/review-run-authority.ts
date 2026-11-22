@@ -44,9 +44,11 @@ import {
 } from "../engine/src/core/spawn-task-text";
 import {
   explicitRun,
-  readIssuedIdentities,
+  failed,
+  ok,
   readSessionRunBindings,
-  resolveIssuingRun,
+  resolveIssuingSessionBinding,
+  type BindingResult,
   type RunLocation,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
@@ -79,35 +81,68 @@ function piExplicitRun(): RunLocation | null {
   return explicit.value;
 }
 
-/** An explicit run as the session binding Pi's capture path carries: every request it issued. */
-function explicitRunBinding(run: RunLocation): SessionRunBinding {
-  const opened = openRegisteredRunDirectory(run.runsRoot, run.runDirectory);
-  if (!opened.ok) throw new Error(opened.error.message);
-  const issued = opened.value.readIssuedRequests();
-  if (!issued.ok) throw new Error(issued.error.message);
-  return Object.freeze({
-    ...opened.value.identity,
-    requestIds: Object.freeze(issued.value.map(({ requestId }) => requestId)),
-    resultDigest: null,
-  });
-}
+/** An open Run Directory and the requests it issued, as read when it was opened. */
+type PiOpenedRun = Readonly<{ handle: RunDirHandle; issued: readonly AgentRequestAuthority[] }>;
 
 /**
- * The run binding that issued every one of `identities`, through the shared
- * `resolveIssuingRun`: `explicit` when set, otherwise exactly one of this Pi
- * session's bindings. Throws on any refusal (Pi's fail-spawn boundary).
+ * The run that issued a Pi task's identities, opened once, with its binding:
+ * the run identity Pi's reservations and review witnesses carry.
  */
-export function piIssuingRunBinding(
+export type PiIssuingRun = PiOpenedRun & Readonly<{ binding: SessionRunBinding }>;
+
+/** Open a registered run and read its issued requests — Pi's one open-and-read. */
+function openPiRun(run: RunLocation): BindingResult<PiOpenedRun> {
+  const opened = openRegisteredRunDirectory(run.runsRoot, run.runDirectory);
+  if (!opened.ok) return failed(opened.error.message);
+  const issued = opened.value.readIssuedRequests();
+  return issued.ok ? ok(Object.freeze({ handle: opened.value, issued: issued.value })) : failed(issued.error.message);
+}
+
+const runKey = ({ runsRoot, runDirectory }: RunLocation): string => `${runsRoot}\0${runDirectory}`;
+
+/**
+ * The run that issued every one of `identities`, opened once: `explicit` when
+ * set (its binding lists every request it issued), otherwise exactly one of
+ * this Pi session's bindings through the shared `resolveIssuingSessionBinding`.
+ * The session decision's issued-identities read is this same open-and-read,
+ * kept per run, so the handle returned is the one whose issued requests
+ * proved the identities — no second open can observe a different run.
+ * Throws on any refusal (Pi's fail-spawn boundary).
+ */
+export function piIssuingRun(
   rawSessionId: string,
   explicit: RunLocation | null,
   identities: readonly TaskIdentity[],
-): SessionRunBinding {
-  const resolved = resolveIssuingRun(explicit, {
+): PiIssuingRun {
+  const unwrap = <T>(result: BindingResult<T>): T => {
+    if (!result.ok) throw new Error(result.message);
+    return result.value;
+  };
+  if (explicit !== null) {
+    const run = unwrap(openPiRun(explicit));
+    return Object.freeze({
+      ...run,
+      binding: Object.freeze({
+        ...run.handle.identity,
+        requestIds: Object.freeze(run.issued.map(({ requestId }) => requestId)),
+        resultDigest: null,
+      }),
+    });
+  }
+  // Every run the decision opens, by location: the winner is one of them.
+  const opened = new Map<string, PiOpenedRun>();
+  const binding = unwrap(resolveIssuingSessionBinding({
     bindings: () => readSessionRunBindings(subagentDir(), rawSessionId, "pi"),
-    issuedIdentities: readIssuedIdentities,
-  }, identities, "pi");
-  if (!resolved.ok) throw new Error(resolved.message);
-  return resolved.value.kind === "explicit" ? explicitRunBinding(resolved.value.run) : resolved.value.binding;
+    issuedIdentities: (run) => {
+      const read = openPiRun(run);
+      if (!read.ok) return read;
+      opened.set(runKey(run), read.value);
+      return ok(read.value.issued);
+    },
+  }, identities, "pi"));
+  const run = opened.get(runKey(binding));
+  if (run === undefined) throw new Error(`Pi issuing run ${binding.runId} was resolved without being opened`);
+  return Object.freeze({ ...run, binding });
 }
 
 type PiRegisteredReviewProgram =
@@ -313,16 +348,12 @@ export function readPiIssuedSpawnRequest(
 ): ReturnType<SpawnAdmissionPorts["readIssuedRequest"]> {
   if (sessionId === null) return failure({ message: "Pi session identity is unavailable" });
   try {
-    const binding = piIssuingRunBinding(sessionId, piExplicitRun(), [{ requestId, contextDigest }]);
-    const opened = openRegisteredRunDirectory(binding.runsRoot, binding.runDirectory);
-    if (!opened.ok) return failure({ message: opened.error.message });
-    const issued = opened.value.readIssuedRequests();
-    if (!issued.ok) return failure({ message: issued.error.message });
-    const matches = issued.value.filter((candidate) => candidate.requestId === requestId);
+    const { handle, issued } = piIssuingRun(sessionId, piExplicitRun(), [{ requestId, contextDigest }]);
+    const matches = issued.filter((candidate) => candidate.requestId === requestId);
     if (matches.length !== 1 || matches[0].contextDigest !== contextDigest || matches[0].role !== agent) {
       return failure({ message: `no unique reserved ${agent} request ${requestId} binds context ${contextDigest}` });
     }
-    const authenticated = authenticatePiIssuedReviewRequest(opened.value, matches[0]);
+    const authenticated = authenticatePiIssuedReviewRequest(handle, matches[0]);
     return authenticated.kind === "authenticated"
       ? qualifyRoute(authenticated.classified, authenticated.published.authority)
       : failure({ message: piIssuedSpawnRequestRefusal(requestId, authenticated) });
@@ -392,14 +423,10 @@ export async function recordPiSpawnCorrelators(
   if (marked.length !== itemAdmissions.length) {
     throw new Error("Pi orchestration spawn batch must not mix request-bound and unbound items");
   }
-  const runBinding = piIssuingRunBinding(rawSessionId, explicit, marked);
-  const opened = openRegisteredRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
-  if (!opened.ok) throw new Error(opened.error.message);
-  const issued = opened.value.readIssuedRequests();
-  if (!issued.ok) throw new Error(issued.error.message);
-  const captured = opened.value.readCapturedAttempts();
+  const { binding: runBinding, handle, issued } = piIssuingRun(rawSessionId, explicit, marked);
+  const captured = handle.readCapturedAttempts();
   if (!captured.ok) throw new Error(captured.error.message);
-  const available = issued.value.filter(
+  const available = issued.filter(
     (request) => !captured.value.has(captureKey(request.slotId, request.attempt)),
   );
   const consumed = new Set<string>();
@@ -414,7 +441,7 @@ export async function recordPiSpawnCorrelators(
     if (request === undefined || consumed.has(request.requestId)) {
       throw new Error(`issued request ${exactRequestId} is unavailable for Pi spawn item ${index + 1}/${item.agent}`);
     }
-    const captureRejection = opened.value.readCaptureRejection(request);
+    const captureRejection = handle.readCaptureRejection(request);
     if (!captureRejection.ok) throw new Error(captureRejection.error.message);
     if (captureRejection.value !== null) {
       const retryAuthority = request.attempt === 1
@@ -436,7 +463,7 @@ export async function recordPiSpawnCorrelators(
     // judges this child by the route it was dispatched on, not by whatever the
     // routing context resolves to when the result arrives.
     const expectation = admission.emissionExpectation;
-    const recorded = await opened.value.recordHarnessCorrelator({
+    const recorded = await handle.recordHarnessCorrelator({
       schemaVersion: 1,
       harness: "pi",
       nativeId,
@@ -463,7 +490,7 @@ export async function recordPiSpawnCorrelators(
     } else {
       const canonical = canonicalSpawnTaskText(
         renderSpawnTask(
-          opened.value,
+          handle,
           request,
           REVIEWER_RESULT_INSTRUCTION,
           { standalone: hasStandaloneReviewContext(item.task) },

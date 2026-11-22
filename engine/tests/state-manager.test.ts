@@ -14,7 +14,7 @@ import { capturedSpecCheck } from "../src/core/spec-check";
 import type { TaskId } from "../src/core/task-id";
 import { acceptedWaveCompletionSuite as acceptedCompletionSuite } from "./fixtures/accepted-wave-completion-suite";
 import { findingId } from "./fixtures/finding-id";
-import { executingGraphFixture, protectedGraphFixture, trustedPassEvidence, satisfiedProof } from "./fixtures/task-lifecycle";
+import { executingGraphFixture, protectedGraphFixture, trustedPassEvidence, satisfiedProof, waveGateAbandonmentFixture } from "./fixtures/task-lifecycle";
 import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 
 function makeTmpDir(): string {
@@ -426,31 +426,40 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }).ok).toBe(true);
   });
 
-  it("preserves unknown extra fields (legacy tests_passed still visible downstream)", () => {
+  it("refuses a Task field no Task type names, rather than carrying it as raw JSON", () => {
     const parsed = parseTaskGraph({
       ...validGraph,
       tasks: [{ ...validTask, tests_passed: true }],
       updated_at: "2026-01-01",
     });
+    expect(parsed).toEqual({
+      ok: false,
+      error: 'tasks[0] ("T1"): unknown Task field "tests_passed"; the State File stores only the fields this engine writes',
+    });
+  });
+
+  it("refuses a TaskGraph field no TaskGraph type names, and keeps every known one", () => {
+    expect(parseTaskGraph({ ...validGraph, notes: "hand-edited" })).toEqual({
+      ok: false,
+      error: 'unknown TaskGraph field "notes"; the State File stores only the fields this engine writes',
+    });
+    const parsed = parseTaskGraph({ ...validGraph, updated_at: "2026-01-01" });
     expect(parsed.ok).toBe(true);
-    if (parsed.ok) {
-      expect((parsed.value.tasks[0] as unknown as Record<string, unknown>).tests_passed).toBe(true);
-      expect(parsed.value.updated_at).toBe("2026-01-01");
-    }
+    if (parsed.ok) expect(parsed.value.updated_at).toBe("2026-01-01");
   });
 
   it("recursively copies and freezes nested Task and Wave Gate data", () => {
     const executingTasks = ["T1"];
     const dependsOn: string[] = [];
     const fileList = ["src/a.ts"];
-    const labels = ["original"];
     const gateNotes = ["pending"];
     // An executing Task holds exact attempt authority (ADR-0098).
     const reserved = executingGraphFixture(
       protectedGraphFixture({ ...validGraph, tasks: [{ ...validTask, file_list: ["src/a.ts"] }] }),
       ["T1"],
     ).tasks[0]!;
-    const rawTask = { ...reserved, depends_on: dependsOn, file_list: fileList, metadata: { labels } };
+    const anchorHashes: Record<string, string> = { "FR-001": "original" };
+    const rawTask = { ...reserved, depends_on: dependsOn, file_list: fileList, spec_anchor_hashes: anchorHashes };
     const rawGate = {
       impl_complete: false,
       tests_passed: null,
@@ -470,11 +479,10 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     executingTasks.push("T99");
     dependsOn.push("T99");
     fileList.push("src/foreign.ts");
-    labels.push("mutated");
+    anchorHashes["FR-001"] = "mutated";
     gateNotes.push("mutated");
 
-    const task = parsed.value.tasks[0] as unknown as Record<string, unknown>;
-    const taskMetadata = task.metadata as Readonly<{ labels: readonly string[] }>;
+    const task = parsed.value.tasks[0]!;
     const gate = parsed.value.wave_gates["1"] as unknown as Record<string, unknown>;
     const gateMetadata = gate.metadata as Readonly<{ notes: readonly string[] }>;
     const executingTaskId: TaskId = parsed.value.executing_tasks![0]!;
@@ -482,12 +490,11 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     expect(parsed.value.executing_tasks).toEqual(["T1"]);
     expect(task.depends_on).toEqual([]);
     expect(task.file_list).toEqual(["src/a.ts"]);
-    expect(taskMetadata.labels).toEqual(["original"]);
+    expect(task.spec_anchor_hashes).toEqual({ "FR-001": "original" });
     expect(gateMetadata.notes).toEqual(["pending"]);
     expect(Object.isFrozen(parsed.value.executing_tasks)).toBe(true);
     expect(Object.isFrozen(task.depends_on)).toBe(true);
-    expect(Object.isFrozen(taskMetadata)).toBe(true);
-    expect(Object.isFrozen(taskMetadata.labels)).toBe(true);
+    expect(Object.isFrozen(task.spec_anchor_hashes)).toBe(true);
     expect(Object.isFrozen(gateMetadata.notes)).toBe(true);
   });
 
@@ -1481,6 +1488,12 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     return parsed.value;
   };
 
+  /** Abandon `run.first` under `/runs` as terminally blocked, with no successor, except where `overrides` say otherwise. */
+  const abandon = (mgr: StateManager, overrides: Partial<Parameters<typeof waveGateAbandonmentFixture>[0]> = {}) =>
+    mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, waveGateAbandonmentFixture({
+      runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null, ...overrides,
+    })));
+
   it("stamps the operator's abandonment, replays idempotently, and refuses conflicting stamps", async () => {
     const dir = makeTmpDir();
     const statePath = join(dir, "active_task_graph.json");
@@ -1496,16 +1509,12 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       }));
       expect(mgr.load().active_wave_completion_suite).toBeDefined();
 
-      const foreignRoot = await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/other-runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
-      }));
+      const foreignRoot = await abandon(mgr, { runsRoot: "/other-runs" });
       expect(foreignRoot).toEqual({ kind: "not-targeted", reason: "authority-mismatch" });
       expect(mgr.load().active_wave_gate?.terminalOutcome).toBeNull();
       expect(mgr.load().active_wave_completion_suite).toBeDefined();
 
-      const stamped = await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
-      }));
+      const stamped = await abandon(mgr);
       expect(stamped).toMatchObject({ kind: "stamped", registration: { terminalOutcome: tombstone() } });
       if (stamped.kind !== "stamped") throw new Error("abandonment fixture did not stamp");
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
@@ -1513,23 +1522,17 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
 
       // Exact replay: same decision, no rewrite.
       const before = readFileSync(statePath, "utf-8");
-      const replay = await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
-      }));
+      const replay = await abandon(mgr);
       expect(replay).toEqual({ kind: "replayed", registration: stamped.registration });
       expect(readFileSync(statePath, "utf-8")).toBe(before);
 
       // A conflicting reason is refused and leaves the stamp intact.
-      const conflicting = await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.first"), reason: "a different story", supersededBy: null,
-      }));
+      const conflicting = await abandon(mgr, { reason: "a different story" });
       expect(conflicting).toEqual({ kind: "not-targeted", reason: "terminal-conflict" });
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
 
       // A foreign run id and an absent registration are no-ops.
-      expect(await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.other"), reason: "gate terminally blocked", supersededBy: null,
-      }))).toEqual({ kind: "not-targeted", reason: "authority-mismatch" });
+      expect(await abandon(mgr, { runId: runId("run.other") })).toEqual({ kind: "not-targeted", reason: "authority-mismatch" });
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1547,9 +1550,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     try {
       const mgr = new StateManager(statePath);
       const before = readFileSync(statePath, "utf-8");
-      expect(await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
-      }))).toEqual({ kind: "not-targeted", reason: "registration-absent" });
+      expect(await abandon(mgr)).toEqual({ kind: "not-targeted", reason: "registration-absent" });
       expect(readFileSync(statePath, "utf-8")).toBe(before);
       expect(mgr.load().active_wave_gate).toBeUndefined();
     } finally {
@@ -1570,9 +1571,8 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     try {
       const mgr = new StateManager(statePath);
       const before = readFileSync(statePath, "utf-8");
-      expect(await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.done"), reason: "a different story", supersededBy: null,
-      }))).toEqual({ kind: "not-targeted", reason: "terminal-conflict" });
+      expect(await abandon(mgr, { runId: runId("run.done"), reason: "a different story" }))
+        .toEqual({ kind: "not-targeted", reason: "terminal-conflict" });
       expect(readFileSync(statePath, "utf-8")).toBe(before);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1588,9 +1588,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     try {
       const mgr = new StateManager(statePath);
       await registerActiveWaveGate(mgr, activeRegistration("run.first", mgr.load()), { taskIds: ["T1"] });
-      await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
-      }));
+      await abandon(mgr);
 
       // The abandoned run's review evidence must not survive into the successor.
       await mgr.update((locked) => ({
@@ -1644,9 +1642,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
           advisory_findings: ["retain original finding"],
         })),
       }));
-      await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.first"), reason: "reviewed bytes changed", supersededBy: null,
-      }));
+      await abandon(mgr, { reason: "reviewed bytes changed" });
       const abandoned = mgr.load();
       const before = readFileSync(statePath, "utf-8");
       const successor = activeRegistration("run.second", abandoned);
@@ -1695,9 +1691,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
           },
         })),
       }));
-      await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
-      }));
+      await abandon(mgr);
 
       await registerActiveWaveGate(mgr, activeRegistration("run.second", mgr.load()), { taskIds: ["T1"] });
       const installed = mgr.load();
@@ -1719,9 +1713,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     try {
       const mgr = new StateManager(statePath);
       await registerActiveWaveGate(mgr, activeRegistration("run.first", mgr.load()), { taskIds: ["T1"] });
-      await mgr.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-        runsRoot: "/runs", runId: runId("run.first"), reason: "replaced", supersededBy: runId("run.expected"),
-      }));
+      await abandon(mgr, { reason: "replaced", supersededBy: runId("run.expected") });
 
       await expect(registerActiveWaveGate(mgr, activeRegistration("run.other", mgr.load()), { taskIds: ["T1"] }))
         .rejects.toThrow("authorizes successor run.expected, not run.other");

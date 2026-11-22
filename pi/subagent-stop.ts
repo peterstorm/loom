@@ -92,7 +92,7 @@ import {
 import { piSpawnRosterId } from "./tool-input";
 import type { PiEmissionLaunchBridge } from "./emission-launch-bridge";
 import {
-  piIssuingRunBinding,
+  piIssuingRun,
   piResultAuthorityProblem,
   piTaskIdentity,
   recordPiRequestCaptureRejection,
@@ -508,7 +508,7 @@ async function finalizeReservedImplementations(
           );
           continue;
         }
-        const retired = retireCompletedImplementation(state, item.taskId, item.authority);
+        const retired = retireCompletedImplementation(state, item.authority);
         if (retired.retired) {
           state = retired.state;
           logs.push(`retired completed/missing implementation reservation for ${item.taskId}`);
@@ -743,7 +743,7 @@ async function processPiResult(
   // the reservation is where a spawn-time explicit run was carried.
   const durableRunBinding = reservation?.orchestrationRunBinding ??
     (markers !== null && resultSessionId !== null
-      ? piIssuingRunBinding(resultSessionId, null, [markers])
+      ? piIssuingRun(resultSessionId, null, [markers]).binding
       : null);
   const runBound = durableRunBinding !== null ||
     process.env[RUNS_ROOT_ENV] !== undefined || process.env[RUN_DIR_ENV] !== undefined;

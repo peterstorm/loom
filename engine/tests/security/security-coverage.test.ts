@@ -27,6 +27,7 @@ import {
   coverageComplete,
   coverageSettled,
   deferPlannedUnits,
+  deferUnit,
   incompleteReasonSource,
   mergeCritic,
   parseCoverageSeeds,
@@ -54,7 +55,7 @@ import {
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import { AGENT_POLICIES } from "../../src/core/model-profiles";
 import { isSecurityAgentId, SECURITY_AUDIT_LIMITS, type SecurityAgentId } from "../../src/core/security-audit-contract";
-import { HUNTER_AGENT as HUNTER, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ledgerViolations, ok } from "./fixtures";
+import { HUNTER_AGENT as HUNTER, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ledgerViolations, nSeeds, ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const FIXTURES = join(import.meta.dirname, "..", "fixtures", "security", "upstream");
@@ -482,7 +483,7 @@ describe("parseLedger returns its own proof, never the caller's array", () => {
   });
 
   it("returns only branded owner ids: a stored owner the grammar refuses is named, at every owner site the ledger type declares", () => {
-    // `parseLedger` narrows to `CoverageLedger` once `parseLedger` is silent.
+    // `parseLedger` narrows to `CoverageLedger` only when it reports no violations.
     // `OWNER_SITES` is keyed by every path whose type is a SecurityAgentId, so
     // a new owner field fails to compile here until it is proved refused.
     const unit = seed();
@@ -909,5 +910,110 @@ describe("an archived attempt's local artifacts are spent as they are read", () 
     };
     const violations = ledgerViolations([{ ...unit, wave: 2, attempts: [attempt] }]);
     expect(violations).toContainEqual({ path: "$[0].attempts[0].local_checks[1].artifact", message: "an archived artifact cannot be reused" });
+  });
+});
+
+/**
+ * Every transition parses the unit it rebuilds and the ledger it grows, so a
+ * transition can never hand back a ledger the next `parseLedger` refuses.
+ */
+describe("transitions refuse what the next read would refuse", () => {
+  /** An archived covered attempt at `wave`, run by `agent`. */
+  const attemptAt = (wave: number, agent: SecurityAgentId): CoverageAttempt => ({
+    wave,
+    status: "covered" as const,
+    agent_id: agent,
+    reviewed_paths: ["src/reports/controller.ts"],
+    local_checks: evidence(agent, "x").checks,
+    result_fingerprints: [],
+    unresolved: [],
+    reassignment_reason: "critic: walk it again",
+  });
+  /** The owner of a unit's `n`th attempt, as `assignUnits` mints it. */
+  const ownerOf = (n: number): SecurityAgentId => (n === 1 ? HUNTER : anAgentId(`${HUNTER}--${n}`));
+  const reassign = (ledger: CoverageLedger, coverageId: string) =>
+    mergeCritic(ledger, { missingUnits: [], reassignIds: [coverageId], resolvedPriorLeads: [], stop: false },
+      { wave: 2, reassignmentReasons: { [coverageId]: "critic: again" } });
+
+  it("assign refuses a wave that does not follow the unit's archived attempts", () => {
+    const unit = seed();
+    const reworked: CoverageLedger = [{ ...unit, wave: 3, attempts: [attemptAt(2, HUNTER)] }];
+    expect(ledgerViolations(reworked)).toEqual([]);
+    for (const wave of [1, 2]) {
+      const refused = assignUnits(reworked, [{ coverageId: unit.coverage_id, agentId: HUNTER, wave }]);
+      expect(refused.ok ? null : refused.error, `wave ${wave}`).toEqual({
+        kind: "invalid-coverage-operation",
+        violations: [{ path: "$[0].attempts[0].wave", message: `archived wave must precede current wave ${wave}` }],
+      });
+    }
+    // The wave the unit already holds is the one that follows its history.
+    expect(ok(assignUnits(reworked, [{ coverageId: unit.coverage_id, agentId: HUNTER }])).assigned[0]?.wave).toBe(3);
+  });
+
+  it("assign refuses the whole batch when one assignment's wave is refused, leaving the ledger as it was", () => {
+    const a = seed({ refs: aRefs({ surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" }) });
+    const b = { ...seed({ refs: aRefs({ surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" }) }), wave: 3, attempts: [attemptAt(2, HUNTER)] };
+    const ledger = sortLedger([a, b]);
+    const before = JSON.stringify(ledger);
+    const refused = assignUnits(ledger, [
+      { coverageId: a.coverage_id, agentId: HUNTER, wave: 1 },
+      { coverageId: b.coverage_id, agentId: HUNTER, wave: 2 },
+    ]);
+    expect(refused.ok).toBe(false);
+    expect(refusedPaths(refused as DomainResult<unknown, CoverageError>)).toEqual([`$[${ledger.indexOf(b)}].attempts[0].wave`]);
+    expect(JSON.stringify(ledger)).toBe(before);
+  });
+
+  it("merge refuses a proposal past the unit ceiling, and accepts the one that reaches it", () => {
+    const full = ok(parseCoverageSeeds(nSeeds(SECURITY_AUDIT_LIMITS.units - 1)));
+    const proposal = (subsystem: string) => ({
+      refs: aRefs({ subsystem }), startingPaths: ["src/extra.ts"], ordinaryAttackClassBlock: null,
+      selectedCompanionBlocks: ["WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes"], excludedBlocks: [],
+    });
+    const critic = (subsystems: readonly string[]): CoverageCriticResult =>
+      ({ missingUnits: subsystems.map(proposal), reassignIds: [], resolvedPriorLeads: [], stop: false });
+
+    const reached = ok(mergeCritic(full, critic(["extra-1"]), { wave: 1, reassignmentReasons: {} }));
+    expect(reached.ledger).toHaveLength(SECURITY_AUDIT_LIMITS.units);
+    expect(parseLedger(JSON.parse(JSON.stringify(reached.ledger))).ok).toBe(true);
+
+    const refused = mergeCritic(full, critic(["extra-1", "extra-2"]), { wave: 1, reassignmentReasons: {} });
+    expect(refused.ok ? null : refused.error).toEqual({
+      kind: "invalid-coverage-operation",
+      violations: [{ path: "missingUnits", message: `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units` }],
+    });
+  });
+
+  it("merge refuses a reassignment that would archive past the attempts ceiling", () => {
+    const unit = seed();
+    const limit = SECURITY_AUDIT_LIMITS.attemptsPerUnit;
+    const history = Array.from({ length: limit }, (_unused, k) => attemptAt(k + 1, ownerOf(k + 1)));
+    const atCeiling: CoverageLedger = [{ ...unit, wave: limit + 1, attempts: history }];
+    expect(ledgerViolations(atCeiling)).toEqual([]);
+    const hunted = settled(assigned(atCeiling, unit.coverage_id, HUNTER, limit + 1), unit.coverage_id, ownerOf(limit + 1), "tenant-scope/cache-key", limit + 1);
+
+    const refused = reassign(hunted, unit.coverage_id);
+    expect(refused.ok ? null : refused.error).toEqual({
+      kind: "invalid-coverage-operation",
+      violations: [{ path: "$[0].attempts", message: "too many archived attempts" }],
+    });
+  });
+
+  it("merge refuses to archive a hand-built unit its schema refuses, rather than carry it forward", () => {
+    const unit = seed();
+    const [hunted] = settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key");
+    const drifted: CoverageLedger = [{ ...hunted!, surface: "something else" }];
+    // The semantic fields disagree with the refs the id is derived from: the unit is named.
+    expect(refusedPaths(reassign(drifted, unit.coverage_id) as DomainResult<unknown, CoverageError>)).toEqual(["$[0]"]);
+  });
+
+  it("deferral refuses a hand-built planned unit its schema refuses, rather than carry it forward", () => {
+    const unit = seed();
+    const drifted: CoverageLedger = [{ ...unit, surface: "something else" }];
+    expect(refusedPaths(deferPlannedUnits(drifted, "critic_budget_exhausted"))).toEqual(["$[0]"]);
+    expect(refusedPaths(deferUnit(drifted, unit.coverage_id, "critic_budget_exhausted") as DomainResult<unknown, CoverageError>))
+      .toEqual(["$[0]"]);
+    // The unit as seeded defers, through the same parse.
+    expect(ledgerViolations(ok(deferUnit([unit], unit.coverage_id, "critic_budget_exhausted")))).toEqual([]);
   });
 });

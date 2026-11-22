@@ -45,13 +45,9 @@ import type { LedgerObservation } from "../engine/src/core/red-then-green-types"
 import { parseAgentType, type SessionId, type SessionRegistry } from "../engine/src/machine";
 import { piChildEvidence } from "./evidence-recorder";
 import {
-  parsePiMessages,
-  piStructuredTestDiagnostics,
-  piStructuredTestResult,
-  piTranscriptToolCalls,
-  piWriteTargets,
+  piTranscriptEvidence,
   type PiMessage,
-  type PiTranscriptToolCall,
+  type PiStructuredTestDiagnostics,
 } from "./transcript-adapter";
 import {
   decidePiSpecCheckAuthority,
@@ -247,26 +243,24 @@ export function reduceLockedPiPhaseResult(
 // Implementation agents
 // ---------------------------------------------------------------------------
 
-/** Whether the reserved implementation authority is still the Task's current attempt (exact digest match). */
+/** Whether the reserved implementation authority is still its Task's current attempt (exact digest match). */
 export function reservedAuthorityIsCurrent(
   state: TaskGraph,
-  taskId: string,
-  expected: ImplementationAttemptAuthority,
+  authority: ImplementationAttemptAuthority,
 ): boolean {
-  const task = state.tasks.find((candidate) => candidate.id === taskId);
-  return task?.active_implementation_attempt?.authorityDigest === expected.authorityDigest;
+  const task = state.tasks.find((candidate) => candidate.id === authority.taskId);
+  return task?.active_implementation_attempt?.authorityDigest === authority.authorityDigest;
 }
 
-/** Release the Task's attempt state, only when it still carries exactly the reserved authority. */
+/** Release the authority's Task's attempt state, only when it still carries exactly that authority. */
 export function clearCurrentReservedAuthority(
   state: TaskGraph,
-  taskId: string,
-  expected: ImplementationAttemptAuthority,
+  authority: ImplementationAttemptAuthority,
 ): TaskGraph {
   return {
     ...state,
     tasks: state.tasks.map((task) =>
-      task.id === taskId && task.active_implementation_attempt?.authorityDigest === expected.authorityDigest
+      task.id === authority.taskId && task.active_implementation_attempt?.authorityDigest === authority.authorityDigest
         ? {
             ...task,
             active_implementation_attempt: undefined,
@@ -282,21 +276,22 @@ export function clearCurrentReservedAuthority(
 /**
  * Retire a reservation whose Task is already completed, under the slot's exact
  * authority: release the attempt and executing membership, and drop the
- * completed Task's repository baseline.
+ * completed Task's repository baseline. The authority names its own Task, so
+ * no second Task id can disagree with it.
  */
 export function retireCompletedImplementation(
   state: TaskGraph,
-  taskId: string,
-  expected: ImplementationAttemptAuthority,
+  authority: ImplementationAttemptAuthority,
 ): Readonly<{ state: TaskGraph; retired: boolean }> {
+  const { taskId } = authority;
   const task = state.tasks.find((candidate) => candidate.id === taskId);
-  if (task?.status !== "completed" || !reservedAuthorityIsCurrent(state, taskId, expected)) {
+  if (task?.status !== "completed" || !reservedAuthorityIsCurrent(state, authority)) {
     return { state, retired: false };
   }
   const cleared = clearCurrentReservedAuthority({
     ...state,
     executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
-  }, taskId, expected);
+  }, authority);
   return {
     state: {
       ...cleared,
@@ -320,7 +315,7 @@ export type ImplementationTestObservation =
   | Readonly<{ kind: "missing" }>;
 
 export type ImplementationTranscriptObservation =
-  | Readonly<{ kind: "malformed"; failureReason: string; log: readonly string[] }>
+  | Readonly<{ kind: "malformed"; failureReason: string }>
   | Readonly<{
       kind: "accepted";
       /** Every path the transcript's file-tool calls targeted (`piWriteTargets`). */
@@ -329,8 +324,7 @@ export type ImplementationTranscriptObservation =
       log: readonly string[];
     }>;
 
-function missingStructuredEvidenceLog(taskId: string, calls: readonly PiTranscriptToolCall[]): string {
-  const trace = piStructuredTestDiagnostics(calls);
+function missingStructuredEvidenceLog(taskId: string, trace: PiStructuredTestDiagnostics): string {
   const summary = trace.classifiedCommands.length === 0
     ? "no Bash call was classified as a test run"
     : `verdict=${trace.verdict}, classified=[${trace.classifiedCommands.join(" | ")}]`;
@@ -339,30 +333,26 @@ function missingStructuredEvidenceLog(taskId: string, calls: readonly PiTranscri
 }
 
 /**
- * Parse an implementation transcript once and fold its projected tool calls
- * into the write targets and test evidence settlement reads, or name why it is
- * malformed. `cwd` is the directory its relative paths are read against.
+ * Read an implementation transcript through `piTranscriptEvidence` (parse
+ * once, project, fold) into the write targets and test evidence settlement
+ * reads, or name why it is malformed. `cwd` is the directory its relative
+ * paths are read against.
  */
 export function observeImplementationTranscript(
   messages: unknown,
   taskId: string,
   cwd: string,
 ): ImplementationTranscriptObservation {
-  const parsedMessages = parsePiMessages(messages);
-  if (!parsedMessages.ok) {
-    return {
-      kind: "malformed",
-      failureReason: `Pi transcript evidence capture failed: ${parsedMessages.errors.join("; ")}`,
-      log: [],
-    };
+  const evidence = piTranscriptEvidence(messages, cwd);
+  if (!evidence.ok) {
+    return { kind: "malformed", failureReason: `Pi transcript evidence capture failed: ${evidence.errors.join("; ")}` };
   }
-  const calls = piTranscriptToolCalls(parsedMessages.value, cwd);
-  const structured = piStructuredTestResult(calls);
+  const { writeTargets, testResult, testDiagnostics } = evidence.value;
   return {
     kind: "accepted",
-    writeTargets: piWriteTargets(calls),
-    test: structured === null ? { kind: "missing" } : { kind: "structured", evidence: structured },
-    log: structured === null ? [missingStructuredEvidenceLog(taskId, calls)] : [],
+    writeTargets,
+    test: testResult === null ? { kind: "missing" } : { kind: "structured", evidence: testResult },
+    log: testResult === null ? [missingStructuredEvidenceLog(taskId, testDiagnostics)] : [],
   };
 }
 

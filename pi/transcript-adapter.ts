@@ -3,7 +3,8 @@
  * harness's message list, `piTranscriptToolCalls` projects it onto the
  * harness-neutral `HarnessToolCall` vocabulary (each call paired with its
  * result), and every reading of what the child did — its write targets, its
- * structured test verdict — is a fold over that one projection. The emission
+ * structured test verdict — is a fold over that one projection, composed in
+ * that order from raw messages by `piTranscriptEvidence`. The emission
  * scan and the final-payload candidates read the raw transcript by their own
  * documented postures.
  */
@@ -471,7 +472,7 @@ function* structuredTestPairs(calls: readonly PiTranscriptToolCall[]): Generator
 }
 
 /** Why the projected calls did, or did not, mint a structured test verdict. */
-export function piStructuredTestDiagnostics(calls: readonly PiTranscriptToolCall[]): PiStructuredTestDiagnostics {
+function piStructuredTestDiagnostics(calls: readonly PiTranscriptToolCall[]): PiStructuredTestDiagnostics {
   const classifiedCommands: string[] = [];
   let attributedPairs = 0;
   let verdict: PiStructuredTestDiagnostics["verdict"] = "no-test-command";
@@ -530,6 +531,38 @@ export function piStructuredTestResult(calls: readonly PiTranscriptToolCall[]): 
     latest = testEvidenceOf(event.attributed.attributed === 0 && parsedEvidence.passed, parsedEvidence.evidence);
   }
   return latest;
+}
+
+/** What one implementation transcript proves, every reading folded from the one projection. */
+export type PiTranscriptEvidence = Readonly<{
+  /** Every path the transcript's file-tool calls targeted (`piWriteTargets`). */
+  writeTargets: readonly string[];
+  /** The latest attributable test run's structured verdict, or `null` when none proves one. */
+  testResult: TestEvidence | null;
+  /** Why the projection did, or did not, mint `testResult`. */
+  testDiagnostics: PiStructuredTestDiagnostics;
+}>;
+
+/**
+ * The message-level reading of an implementation transcript, in the one
+ * production order: parse the harness payload once (`parsePiMessages`),
+ * project it against `cwd` (`piTranscriptToolCalls`), then fold the write
+ * targets, the structured test verdict and its diagnostics from that same
+ * projection. Settlement and the evidence-classification tests both cross
+ * this seam, so the order cannot drift between them.
+ */
+export function piTranscriptEvidence(messages: unknown, cwd: string): PiTranscriptResult<PiTranscriptEvidence> {
+  const parsed = parsePiMessages(messages);
+  if (!parsed.ok) return parsed;
+  const calls = piTranscriptToolCalls(parsed.value, cwd);
+  return Object.freeze({
+    ok: true as const,
+    value: Object.freeze({
+      writeTargets: piWriteTargets(calls),
+      testResult: piStructuredTestResult(calls),
+      testDiagnostics: piStructuredTestDiagnostics(calls),
+    }),
+  });
 }
 
 /**

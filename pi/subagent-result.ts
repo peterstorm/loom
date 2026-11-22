@@ -110,26 +110,41 @@ async function settleCompletedImplementation(
   authority: ImplementationAttemptAuthority,
 ): Promise<boolean> {
   return store.updateAndReturn((state) => {
-    const retired = retireCompletedImplementation(state, authority.taskId, authority);
+    const retired = retireCompletedImplementation(state, authority);
     return { state: retired.state, value: retired.retired };
   });
 }
+
+/** How the authority-less implementation child ended: its process failed, or it completed work. */
+type UnauthorizedImplementationEnd = "failed" | "completed";
 
 /**
  * An implementation result whose slot carries no exact attempt authority
  * settles nothing. Every executing Task carries an attempt (the State File
  * refuses any other, ADR-0098), so an executing Task belongs to an exact
- * reservation this result does not hold and is preserved; with nothing
- * executing there is nothing the result could settle.
+ * reservation this result does not hold and is preserved — a processing
+ * error. With nothing executing, a FAILED result had nothing to settle and
+ * stays log-only; a COMPLETED one is finished work (a duplicate or late
+ * result, say, after its slot was retired) that no Task status records, so
+ * it is reported to Pi as a processing error rather than passing as clean.
  */
-function unauthorizedImplementationOutcome(store: TaskGraphStore, subject: string): PiResultOutcome {
+function unauthorizedImplementationOutcome(
+  store: TaskGraphStore,
+  end: UnauthorizedImplementationEnd,
+  subject: string,
+): PiResultOutcome {
   const executing = store.load().executing_tasks ?? [];
-  return executing.length === 0
-    ? outcome([`loom(pi): ${subject} without implementation attempt authority and no Task is executing — nothing settled`])
-    : processingFailure(
-        `loom(pi): ${subject} without exact implementation attempt authority — ` +
-          `${executing.length} executing attempt(s) preserved`,
-      );
+  if (executing.length > 0) {
+    return processingFailure(
+      `loom(pi): ${subject} without exact implementation attempt authority — ` +
+        `${executing.length} executing attempt(s) preserved`,
+    );
+  }
+  const nothingSettled =
+    `loom(pi): ${subject} without implementation attempt authority and no Task is executing — nothing settled`;
+  return end === "failed"
+    ? outcome([nothingSettled])
+    : processingFailure(`${nothingSettled}; its Task status was NOT recorded`);
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +182,7 @@ async function settleFailedExactImplementation(
 
 async function applyFailedImplementationResult(args: FailedImplementationArgs): Promise<PiResultOutcome> {
   const authority = implementationAuthorityOf(args.slot);
-  if (authority === null) return unauthorizedImplementationOutcome(args.store, args.failure);
+  if (authority === null) return unauthorizedImplementationOutcome(args.store, "failed", args.failure);
   if (await settleCompletedImplementation(args.store, authority)) {
     return outcome([`loom(pi): ${authority.taskId} failed after completion; retired exact completed/missing reservation`]);
   }
@@ -390,15 +405,20 @@ function readImplementationModifiedPaths(
   }
 }
 
-type ExactPiSettlementArgs = ImplementationPiResultArgs & Readonly<{
+/**
+ * The exact settlement's input once the slot's authority is proven: the
+ * reserved slot itself is dropped, so the authority — which names its own
+ * Task — is the one identity source, and no slot can disagree with it.
+ */
+type ExactPiSettlementArgs = Omit<ImplementationPiResultArgs, "reservedSlot"> & Readonly<{
   authority: ImplementationAttemptAuthority;
   observedAt: IsoInstant;
-  log: string[];
 }>;
 
 async function settleExactPiInfrastructure(
   args: ExactPiSettlementArgs,
   reason: string,
+  priorLog: readonly string[] = [],
 ): Promise<PiResultOutcome> {
   const settled = await args.store.updateAndReturn((state): Readonly<{ state: TaskGraph; value: LockedPiSettlement }> => {
     const application = settleUnavailableImplementation(state, args.authority, args.observedAt, reason);
@@ -407,7 +427,7 @@ async function settleExactPiInfrastructure(
       value: { application, infrastructureReason: reason },
     };
   });
-  return renderExactPiSettlement(args.authority.taskId, args.log, settled);
+  return renderExactPiSettlement(args.authority.taskId, priorLog, settled);
 }
 
 function piExactSettlementPorts(args: ExactPiSettlementArgs): ExactImplementationSettlementPorts {
@@ -454,36 +474,35 @@ function piSettlementFacts(
 async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Promise<PiResultOutcome> {
   const taskId = args.authority.taskId;
   const transcript = observeImplementationTranscript(args.result.messages, taskId, args.repository.root());
-  args.log.push(...transcript.log);
   if (transcript.kind === "malformed") return settleExactPiInfrastructure(args, transcript.failureReason);
   const modified = readImplementationModifiedPaths(args.repository, transcript.writeTargets, taskId);
-  if (!modified.ok) return settleExactPiInfrastructure(args, modified.message);
+  if (!modified.ok) return settleExactPiInfrastructure(args, modified.message, transcript.log);
   const settled = await settleAndPersistExactImplementation(
     args.store,
     piSettlementFacts(args, transcript, modified.filesModified),
     piExactSettlementPorts(args),
   );
-  return renderExactPiSettlement(taskId, args.log, settled);
+  return renderExactPiSettlement(taskId, transcript.log, settled);
 }
 
 /** Resolve one Pi implementation result through the exact attempt authority its slot carries. */
 export async function applyImplementationPiResult(args: ImplementationPiResultArgs): Promise<PiResultOutcome> {
-  const authority = implementationAuthorityOf(args.reservedSlot);
-  if (authority === null) return unauthorizedImplementationOutcome(args.store, `${args.agentType} completed`);
+  const { reservedSlot, ...unslotted } = args;
+  const authority = implementationAuthorityOf(reservedSlot);
+  if (authority === null) return unauthorizedImplementationOutcome(args.store, "completed", `${args.agentType} completed`);
   if (await settleCompletedImplementation(args.store, authority)) {
     return outcome([`loom(pi): ${authority.taskId} stopped; retired exact completed/missing reservation`]);
   }
   const observedAt = parseIsoInstant(new Date().toISOString(), "Pi implementation observation instant");
   if (!observedAt.ok) return outcome(observedAt.error.errors, observedAt.error.errors);
-  const exactArgs: ExactPiSettlementArgs = { ...args, authority, observedAt: observedAt.value, log: [] };
+  const exactArgs: ExactPiSettlementArgs = { ...unslotted, authority, observedAt: observedAt.value };
+  // An implementation slot's Task is its authority's Task (`parseReservedSlot`),
+  // so the returned Task id has exactly one identity to match.
   const returnedTaskId = extractTaskId(args.result.task);
-  const reservedTaskId = args.reservedSlot?.taskId ?? null;
-  if (returnedTaskId === null || reservedTaskId === null ||
-      returnedTaskId !== reservedTaskId || returnedTaskId !== authority.taskId) {
+  if (returnedTaskId !== authority.taskId) {
     return settleExactPiInfrastructure(
       exactArgs,
-      `Pi result Task identity mismatch: returned=${returnedTaskId ?? "missing"}, ` +
-        `reserved=${reservedTaskId ?? "missing"}, authority=${authority.taskId}`,
+      `Pi result Task identity mismatch: returned=${returnedTaskId ?? "missing"}, reserved=${authority.taskId}`,
     );
   }
   return applyExactImplementationPiResult(exactArgs);

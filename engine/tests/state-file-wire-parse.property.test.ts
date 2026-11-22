@@ -8,6 +8,8 @@
  *    on every write.
  * 2. A Task field of the wrong type is refused with an error naming that
  *    field, whatever valid graph it sits in.
+ * 3. A key no Task or TaskGraph field names is refused by name: the loaded
+ *    graph is built from parsed fields only, so nothing rides along as raw JSON.
  */
 
 import { describe, expect, it } from "vitest";
@@ -43,6 +45,10 @@ const arbExtras: fc.Arbitrary<Readonly<Record<string, unknown>>> = fc.record({
   spec_anchor_hashes: fc.constant({}),
   failure_reason: fc.string({ maxLength: 8 }),
   start_sha: fc.constant("c".repeat(40)),
+  test_evidence: fc.string({ maxLength: 8 }),
+  retry_count: fc.nat({ max: 5 }),
+  reserved_at: fc.constant("2026-11-21T08:00:00.000Z"),
+  spec_anchors: fc.uniqueArray(fc.constantFrom("FR-001", "FR-002"), { maxLength: 2 }),
 }, { requiredKeys: [] });
 
 const arbTaskShape: fc.Arbitrary<TaskShape> = fc.record({
@@ -87,6 +93,21 @@ describe("parseTaskGraph is a fixed point under serialization", () => {
       expect(JSON.stringify(second.value)).toBe(written);
     }), { numRuns: 200, seed: 20261121 });
   });
+
+  // The loaded graph is assembled from parsed fields in the parser's own
+  // order, so its serialization, and every digest taken over it, does not
+  // depend on the order the file wrote its top-level and Task keys in.
+  it("loads the same bytes whatever order the file wrote its keys in", () => {
+    const reversed = (record: Readonly<Record<string, unknown>>) => Object.fromEntries(Object.entries(record).reverse());
+    fc.assert(fc.property(arbValidGraph, (raw) => {
+      const tasks = raw.tasks as Record<string, unknown>[];
+      const shuffled = reversed({ ...raw, tasks: tasks.map(reversed) });
+      const inOrder = parseTaskGraph(raw);
+      const outOfOrder = parseTaskGraph(shuffled);
+      if (!inOrder.ok || !outOfOrder.ok) throw new Error("generated graph refused");
+      expect(JSON.stringify(outOfOrder.value)).toBe(JSON.stringify(inOrder.value));
+    }), { numRuns: 200, seed: 20261122 });
+  });
 });
 
 /** One Task field set to a value of the wrong type. */
@@ -122,6 +143,19 @@ const WRONG_TYPES: readonly (readonly [field: string, wrong: unknown])[] = [
   ["implementation_attempt_history", 5],
   ["skeleton_outcomes", 5],
   ["artifact_baseline_recovered_from", 5],
+  ["recovered_artifact_writes", 5],
+  ["new_tests_required", "yes"],
+  ["review_run", 5],
+  ["review_error", 5],
+  ["review_evidence_failures", 5],
+  ["spec_anchors", 5],
+  ["spec_anchors", [""]],
+  ["test_evidence", 5],
+  ["reserved_at", 5],
+  ["start_sha", 5],
+  ["failure_reason", 5],
+  ["retry_count", "1"],
+  ["retry_count", -1],
 ];
 
 describe("storedTaskErrors, the all-errors mode", () => {
@@ -170,5 +204,44 @@ describe("a Task field of the wrong type is refused by name", () => {
         expect(parsed.error).toContain(field);
       },
     ), { numRuns: 400, seed: 20261121 });
+  });
+});
+
+/** A key no Task or TaskGraph field names: every field is snake_case without an `x_` prefix. */
+const arbUnknownKey = fc.stringMatching(/^[a-z]{1,10}$/).map((word) => `x_${word}`);
+
+describe("a key no Task or TaskGraph field names is refused by name", () => {
+  it("refuses an unknown Task key in any valid graph", () => {
+    fc.assert(fc.property(arbValidGraph, fc.nat(), arbUnknownKey, fc.jsonValue(), (raw, pick, key, value) => {
+      const tasks = raw.tasks as Record<string, unknown>[];
+      const index = pick % tasks.length;
+      const mutated = { ...raw, tasks: tasks.map((task, at) => at === index ? { ...task, [key]: value } : task) };
+      const parsed = parseTaskGraph(mutated);
+      if (parsed.ok) throw new Error(`an unknown Task key ${key} loaded`);
+      expect(parsed.error).toBe(
+        `tasks[${index}] ("T${index + 1}"): unknown Task field ${JSON.stringify(key)}; the State File stores only the fields this engine writes`,
+      );
+    }), { numRuns: 200, seed: 20261122 });
+  });
+
+  it("refuses an unknown TaskGraph key in any valid graph", () => {
+    fc.assert(fc.property(arbValidGraph, arbUnknownKey, fc.jsonValue(), (raw, key, value) => {
+      expect(parseTaskGraph({ ...raw, [key]: value })).toEqual({
+        ok: false,
+        error: `unknown TaskGraph field ${JSON.stringify(key)}; the State File stores only the fields this engine writes`,
+      });
+    }), { numRuns: 200, seed: 20261122 });
+  });
+
+  it("loads every generated Task field it was given, and no other", () => {
+    fc.assert(fc.property(arbValidGraph, (raw) => {
+      const parsed = parseTaskGraph(raw);
+      if (!parsed.ok) throw new Error(`generated graph refused: ${parsed.error}`);
+      const tasks = raw.tasks as Record<string, unknown>[];
+      parsed.value.tasks.forEach((task, index) => {
+        expect(Object.keys(task).sort()).toEqual(Object.keys(tasks[index]!).sort());
+      });
+      expect(Object.keys(parsed.value).sort()).toEqual(Object.keys(raw).sort());
+    }), { numRuns: 200, seed: 20261122 });
   });
 });

@@ -14,9 +14,11 @@
 
 import {
   canonicalCoverageId,
+  commitIdSchema,
   isSecurityAgentId,
   parseCoverageRefs,
   parseSecurityRunMetadata,
+  type CommitId,
   type CoverageRefs,
   type SecurityAgentId,
   type SecurityRunMetadata,
@@ -52,6 +54,11 @@ export function ledgerViolations(raw: unknown): readonly WireViolation[] {
 export function anAgentId(raw: string): SecurityAgentId {
   if (!isSecurityAgentId(raw)) throw new Error(`the agent-id grammar refused ${JSON.stringify(raw)}`);
   return raw;
+}
+
+/** A commit id through the one parse that brands it. */
+export function aCommitId(raw: string): CommitId {
+  return commitIdSchema.parse(raw);
 }
 
 /** The catalog hunter. `assignUnits` refuses an agent the Agent Catalog cannot

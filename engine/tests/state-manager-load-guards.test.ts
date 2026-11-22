@@ -101,7 +101,8 @@ const validTask = {
 } as const;
 
 const graph = (overrides: Record<string, unknown> = {}) => ({
-  current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+  current_phase: "execute",
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,
