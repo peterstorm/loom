@@ -35,7 +35,7 @@ import {
   WRITE_GRANT_AGENT_NAMESPACE,
 } from "../../machine";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
-import { parseSubagentStartStdin } from "../../parsers/parse-subagent-start-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 import { StateManager } from "../../state-manager";
 import { removeImplementationAttemptSidecar } from "../../implementation-attempt-sidecar";
 import { rollbackTaskExecutionRegistration } from "../task-execution";
@@ -74,7 +74,7 @@ export function observeActiveTaskGraph(
 }
 
 const handler: HookHandler = async (stdin) => {
-  const parsedInput = parseSubagentStartStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStart", stdin);
 
   // Resolve all TaskGraph authority before publishing roster, sidecar,
   // machine, directory, or pointer capabilities. Only proven absence permits

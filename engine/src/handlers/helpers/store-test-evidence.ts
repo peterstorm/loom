@@ -28,21 +28,24 @@ const handler: HookHandler = async (stdin, args) => {
   // locked update so a concurrently-written trusted verdict is honored.
   type StoreOutcome = "missing" | "requires-agent-revalidation" | "trusted-verdict-skipped" | "stored";
   let storeOutcome: StoreOutcome = "missing";
-  await mgr.update((s) => ({
-    ...s,
-    tasks: s.tasks.map((t) => {
-      if (t.id !== taskId) return t;
-      const verdict = t.test_result?.verdict;
-      if (t.revalidation_required === true) {
-        storeOutcome = "requires-agent-revalidation";
-        return t;
-      }
-      if (verdict === "trusted-pass" || verdict === "trusted-fail") {
-        storeOutcome = "trusted-verdict-skipped";
-        return t;
-      }
-      storeOutcome = "stored";
-      return {
+  // Only a stored outcome returns a new graph: a refusal hands back the loaded
+  // graph itself, so the atomic write keeps the file's bytes untouched.
+  await mgr.update((s) => {
+    const target = s.tasks.find((t) => t.id === taskId);
+    if (target === undefined) return s;
+    const verdict = target.test_result?.verdict;
+    if (target.revalidation_required === true) {
+      storeOutcome = "requires-agent-revalidation";
+      return s;
+    }
+    if (verdict === "trusted-pass" || verdict === "trusted-fail") {
+      storeOutcome = "trusted-verdict-skipped";
+      return s;
+    }
+    storeOutcome = "stored";
+    return {
+      ...s,
+      tasks: s.tasks.map((t) => t.id !== taskId ? t : {
         ...t,
         // Evidence storage is not positive completion authority. The
         // Implementation Completion Oracle alone may change Task lifecycle.
@@ -55,9 +58,9 @@ const handler: HookHandler = async (stdin, args) => {
         },
         test_evidence: evidenceMatch?.[1] ?? "",
         ...storedNewTestEvidence(parseNewTestEvidence(newWritten, newEvidenceMatch?.[1] ?? "")),
-      };
-    }),
-  }));
+      }),
+    };
+  });
 
   // A --task that matches nothing is a silent success otherwise: the caller
   // believes evidence was stored while the graph is untouched.

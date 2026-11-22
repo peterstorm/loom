@@ -20,7 +20,7 @@ import {
   type SessionRegistry,
 } from "../../machine";
 import { removeImplementationAttemptSidecar } from "../../implementation-attempt-sidecar";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
@@ -36,7 +36,7 @@ export const runCleanupSubagentFlag = async (
   // where a bare JSON.parse throw would surface as an uncontextualized
   // "Hook error". Malformed input means the roster entry and any binding
   // cannot be released — say so; the liveness TTL eventually reaps them.
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     return {
       kind: "error" as const,

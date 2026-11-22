@@ -34,7 +34,7 @@ import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-
 import { parseFirstUserPrompt } from "../../parsers/parse-transcript";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { stripNamespace } from "../../utils/strip-namespace";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 
 /** A reviewer's output was discarded: report it and fail the evidence command. */
 const discarded = (message: string): HookResult => {
@@ -64,7 +64,7 @@ export function unavailableReviewerResolution(
 }
 
 const handler: HookHandler = async (stdin) => {
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     return {
       kind: "error",

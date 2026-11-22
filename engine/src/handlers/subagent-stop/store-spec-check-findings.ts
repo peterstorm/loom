@@ -9,7 +9,7 @@ import {
   specCheckAuthorityProblem,
   type SpecCheckRequestAuthority,
 } from "../../core/spec-check";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
 import { passthroughResult, type HookHandler, type HookResult } from "../../types";
@@ -118,7 +118,7 @@ export const runStoreSpecCheckFindings = async (
   _args: string[],
   requestAuthority?: SpecCheckRequestAuthority,
 ): Promise<HookResult> => {
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     return {
       kind: "error",
