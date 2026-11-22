@@ -19,6 +19,7 @@ import { SUBAGENT_DIR } from "../../../src/config";
 import type { EvidenceRecord, Requirement } from "../../../src/machine";
 import { reportSummary } from "../../machine/report-summary";
 import { executingGraphFixture, graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import type { Task } from "../../../src/types";
 import {
   ARMED_ARTIFACT,
   ARMED_EPOCH,
@@ -111,9 +112,14 @@ describe("capVerdictForMachineCompletion (pure)", () => {
   });
 });
 
-/** Arms T1, changes the declared artifact as its transcript says, and stops the Agent. */
-async function stopArmedImplementation(label: string, events: readonly EvidenceRecord[]) {
-  const armed = await armedClaudeImplementation({ label, verificationPolicy: REGRESSION_ONLY });
+/** Arms T1 (beside any unregistered Wave 1 `siblings`), changes the declared
+ *  artifact as its transcript says, and stops the Agent. */
+async function stopArmedImplementation(
+  label: string,
+  events: readonly EvidenceRecord[],
+  siblings: readonly Task[] = [],
+) {
+  const armed = await armedClaudeImplementation({ label, verificationPolicy: REGRESSION_ONLY, siblings });
   disposals.push(armed.dispose);
   writeFileSync(join(armed.root, ARMED_ARTIFACT), "export const value = 2;\n");
   writeFileSync(armed.transcript, writesTranscript("Changed the artifact.", [ARMED_ARTIFACT]));
@@ -143,6 +149,11 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
       passed: true,
       label: "machine-incomplete: TestRunPassed ≥ 2", provenance: "unverified" as const,
     });
+    // The settlement released the attempt, and an incomplete Task never
+    // completes its Wave's implementation.
+    expect(state.tasks[0].active_implementation_attempt).toBeUndefined();
+    expect(state.executing_tasks).toEqual([]);
+    expect(state.wave_gates["1"].impl_complete).toBe(false);
   }, 30000);
 
   it("control: requirements met → the trusted-pass persists untouched", async () => {
@@ -152,6 +163,25 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
     expect(result.kind, JSON.stringify(result)).toBe("passthrough");
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
     expect(state.tasks[0].status).toBe("implemented");
+    expect(state.executing_tasks).toEqual([]);
+    expect(state.wave_gates["1"].impl_complete).toBe(true);
+  }, 30000);
+
+  it("a trusted-pass on T1 leaves impl_complete=false while a sibling is pending", async () => {
+    writeStrictMachine();
+    const sibling = taskFixture({ id: "T2", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [] });
+    const { result, state } = await stopArmedImplementation(
+      "sibling-pending",
+      [{ epoch, event: pass }, { epoch, event: pass }],
+      [sibling],
+    );
+
+    expect(result.kind, JSON.stringify(result)).toBe("passthrough");
+    const byId = (id: string) => state.tasks.find((task: { id: string }) => task.id === id);
+    expect(byId("T1").status).toBe("implemented");
+    expect(byId("T2").status).toBe("pending");
+    expect(state.executing_tasks).toEqual([]);
+    expect(state.wave_gates["1"].impl_complete).toBe(false);
   }, 30000);
 });
 
@@ -167,8 +197,12 @@ describe("locked implementation settlement failures", () => {
       kind: "error",
       message: expect.stringContaining("unsafe modified-file evidence for T1"),
     });
+    if (result.kind === "error") {
+      expect(result.message).toContain("T1 received an exact non-consuming infrastructure Oracle receipt");
+    }
     const persisted = JSON.parse(readFileSync(armed.statePath, "utf-8"));
     expect(persisted.tasks[0]).toMatchObject({ status: "pending", revalidation_required: true });
+    expect(persisted.tasks[0].failure_reason).toContain("unsafe modified-file evidence for T1");
     expect(persisted.tasks[0].active_implementation_attempt).toBeUndefined();
     expect(persisted.tasks[0].implementation_attempt_history).toContainEqual(expect.objectContaining({
       transition: "infrastructure-blocked",

@@ -6,36 +6,23 @@
  * `files_modified` would silently shrink the Wave Gate lint set.
  */
 
-import { parseJsonl, getContentBlocks } from "./types";
+import { conversationLines, getContentBlocks, isPiSessionHeader, jsonlRecords } from "./types";
 import { FILE_MODIFYING_TOOLS } from "../core/tool-vocabulary";
-import { isRecord } from "../core/plain-record";
-
-/** The write targets a Claude Code transcript records, sorted and distinct, or why it is not one. */
-export type FilesModifiedResult =
-  | Readonly<{ ok: true; value: readonly string[] }>
-  | Readonly<{ ok: false; error: string }>;
+import { parseErr, parseOk, type LineParseResult } from "../core/parse-result";
 
 export const PI_SESSION_REFUSAL =
   "transcript is a Pi session (it carries a session header record); the Claude reader never reads Pi write targets";
 
-/** Whether one JSONL line is a Pi session header: `{"type":"session","version":…}`. */
-function isPiSessionHeader(line: string): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line) as unknown;
-  } catch {
-    return false; // Not a JSON record, so no session header; the Claude reader skips it too.
-  }
-  return isRecord(parsed) && parsed.type === "session" && parsed.version !== undefined;
-}
-
-export function parseFilesModified(content: string): FilesModifiedResult {
-  if (content.split("\n").some((line) => line.trim() !== "" && isPiSessionHeader(line))) {
-    return Object.freeze({ ok: false, error: PI_SESSION_REFUSAL });
+/** The write targets a Claude Code transcript records, sorted and distinct, or why it is not one. */
+export function parseFilesModified(content: string): LineParseResult<readonly string[]> {
+  // Each line is parsed once: the Pi refusal and the write scan read the same records.
+  const records = jsonlRecords(content);
+  if (records.some(isPiSessionHeader)) {
+    return Object.freeze(parseErr<readonly string[]>(PI_SESSION_REFUSAL));
   }
   const files = new Set<string>();
 
-  for (const line of parseJsonl(content)) {
+  for (const line of conversationLines(records)) {
     for (const block of getContentBlocks(line)) {
       if (block.type !== "tool_use") continue;
 
@@ -51,5 +38,5 @@ export function parseFilesModified(content: string): FilesModifiedResult {
     }
   }
 
-  return Object.freeze({ ok: true, value: Object.freeze([...files].sort()) });
+  return Object.freeze(parseOk<readonly string[]>(Object.freeze([...files].sort())));
 }

@@ -10,7 +10,7 @@
  */
 
 import { rmSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   authenticatePiIssuedReviewRequest,
@@ -198,7 +198,7 @@ describe("piIssuingRun (the one open-and-read of the run that issued a Pi task)"
   async function bindAll(subagents: string, runs: readonly RunLocation[]): Promise<void> {
     for (const run of runs) {
       const registered = await registerSessionRunBinding(subagents, SESSION, {
-        runId: run.runDirectory.split("/").pop(),
+        runId: basename(run.runDirectory),
         ...run,
         requestIds: [ISSUED_REQUEST],
         resultDigest: null,

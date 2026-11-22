@@ -8,7 +8,9 @@ import {
   rollbackTaskExecutionRegistration,
 } from "../../src/handlers/task-execution";
 import {
+  applyTaskExecutionAuthorityBatch,
   createTaskExecutionAuthorityBatch,
+  proveStaleReservations,
   rollbackTaskExecutionAuthorityBatch,
   taskExecutionRegistrationError,
 } from "../../src/core/validate-task-execution";
@@ -586,6 +588,41 @@ describe("modern implementation attempt registration", () => {
         transition: "infrastructure-blocked",
       }),
     ]);
+  });
+
+  it("refuses to reclaim a held authority that no longer parses, instead of leaving its Task reserved", () => {
+    const state = graph([taskFixture({
+      id: "T1", description: "one", agent: "code-implementer-agent",
+      wave: 1, status: "pending", depends_on: [], file_list: ["src/a.ts"],
+    })]);
+    const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const instant = parseIsoInstant("2026-01-01T00:00:00.000Z");
+    const later = parseIsoInstant("2026-01-02T00:00:00.000Z");
+    const reservation = parseReservationId("corrupt-authority");
+    if (!instant.ok || !later.ok || !reservation.ok) throw new Error("corrupt-authority fixture failed");
+    const batch = createTaskExecutionAuthorityBatch(
+      state, [spawn("T1")], ["T1"], [reservation.value], "1".repeat(40), instant.value,
+      new Map([["T1", { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] }]]),
+    );
+    if (!batch.ok) throw new Error(batch.error);
+    // Same authorityDigest, other body: the digest no longer matches its canonical authority.
+    const corrupt: ImplementationAttemptAuthority = { ...batch.plans[0]!.authority, reservedAt: later.value };
+    const held: TaskGraph = {
+      ...state,
+      executing_tasks: ["T1"],
+      tasks: [{
+        ...state.tasks[0]!,
+        active_implementation_attempt: corrupt,
+        attempt_artifact_baseline: baseline,
+        attempt_repository_baseline: [],
+        reserved_at: instant.value,
+      }],
+    };
+
+    expect(() => rollbackTaskExecutionAuthorityBatch(held, [corrupt], instant.value))
+      .toThrow(/Cannot reclaim the implementation attempt of T1: .*authorityDigest does not match/);
+    expect(() => applyTaskExecutionAuthorityBatch(held, [], proveStaleReservations(held, new Set(["T1"])), instant.value))
+      .toThrow(/Cannot reclaim the implementation attempt of T1/);
   });
 
   it("an exact rollback cannot clear a late replacement for the same Task", () => {

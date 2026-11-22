@@ -115,7 +115,7 @@ function isWaveImplComplete(state: TaskGraph, wave: number): boolean {
     .every((t) => t.status === "implemented" || t.status === "completed");
 }
 
-/** Simulate complete-wave-gate: mark wave complete, advance */
+/** Simulate Wave Gate completion: mark the wave's implemented Tasks completed, close its gate, advance current_wave */
 function completeWaveGate(path: string, wave: number) {
   updateState(path, (s) => ({
     ...s,

@@ -82,7 +82,7 @@ const ABANDONED = activeWaveGateFixture({
 /** Wave 1 current: implemented T1 and T2, their Distill Task T9, an abandoned gate; pending T3 in Wave 2 with its own pending Distill Task T10. */
 const paused = (distillStatus: TaskStatus = "implemented", overrides: Record<string, unknown> = {}): TaskGraph =>
   protectedGraphFixture({
-    spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+    spec_trace_version: 2, current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, current_wave: 1, executing_tasks: [],
     tasks: [
       authored("T1", 1, "implemented"),
@@ -427,7 +427,7 @@ describe("Contract Revision sweeps the current Wave's Distill Task back", () => 
 
   /** Wave 1 (the contract Wave) completed; Wave 2 current with claimant T2, bystander T3 and their Distill Task T9. */
   const populated = (claimant: TaskStatus, distillStatus: TaskStatus): TaskGraph => protectedGraphFixture({
-    spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+    spec_trace_version: 2, current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
     tasks: [
       authored("T1", 1, "completed", { file_list: [TYPES, ACCEPTANCE] }),

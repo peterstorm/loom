@@ -1,8 +1,8 @@
 /**
  * The Pi transcript projection (`piTranscriptToolCalls`) and the folds over
- * it (`piWriteTargets`, `piStructuredTestResult`): one reading of the Pi tool
- * vocabulary (`engine/src/core/harness-tool-call.ts`) for every question a
- * settlement asks of a child's transcript.
+ * it (`piWriteTargets`, `piUnprovableWriteCalls`, `piStructuredTestResult`):
+ * one reading of the Pi tool vocabulary (`engine/src/core/harness-tool-call.ts`)
+ * for every question a settlement asks of a child's transcript.
  *
  * The reference readers below are the transcript readers this projection
  * replaced, kept as test oracles only: the projection must catch every write
@@ -21,6 +21,7 @@ import {
 import {
   piStructuredTestResult,
   piTranscriptToolCalls,
+  piUnprovableWriteCalls,
   piWriteTargets,
   type PiMessage,
   type PiTranscriptToolCall,
@@ -216,6 +217,33 @@ describe("piWriteTargets — a fold over the projection", () => {
         { type: "toolCall", id: "w3", name: "write", arguments: {} },
       ],
     }]))).toEqual([]);
+  });
+});
+
+describe("piUnprovableWriteCalls — the write calls piWriteTargets cannot name", () => {
+  it("names no call of a transcript whose every write call names its target", () => {
+    fc.assert(fc.property(callsArb, fc.boolean(), (calls, parallel) => {
+      expect(piUnprovableWriteCalls(project(transcriptOf(specsOf(calls), parallel)))).toEqual([]);
+    }));
+  });
+
+  it("names each unprovable write call by tool, position and refusal, while the provable call keeps its target", () => {
+    const projected = project([{
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "r1", name: "read", arguments: {} },
+        { type: "toolCall", id: "e1", name: "edit", arguments: { path: "kept.ts" } },
+        { type: "toolCall", id: "m1", name: "multi_edit", arguments: { edits: [{ path: "a.ts" }, {}] } },
+        { type: "toolCall", id: "w1", name: "write", arguments: { path: 42, file_path: "shadow.ts" } },
+        { type: "toolCall", id: "w2", name: "write", arguments: {} },
+      ],
+    }]);
+    expect(piWriteTargets(projected)).toEqual(["kept.ts"]);
+    expect(piUnprovableWriteCalls(projected)).toEqual([
+      "MultiEdit call #3: write input.edits[1] must name one non-empty path, file_path, or filePath target",
+      "Write call #4: write input must name one non-empty path, file_path, or filePath target",
+      "Write call #5: write input must contain a target or a non-empty edits array",
+    ]);
   });
 });
 

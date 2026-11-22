@@ -1,23 +1,32 @@
 /**
- * The State File load boundary as two properties over generated graphs.
+ * The State File load boundary over generated graphs.
  *
- * 1. Parsing is a fixed point under serialization: the graph a valid State
- *    File loads as, written back as JSON and loaded again, is the same graph,
- *    byte for byte. Every writer persists `parseTaskGraph`'s output, so a
- *    parse that changed its own output on the next load would drift the file
- *    on every write.
- * 2. A Task field of the wrong type is refused with an error naming that
- *    field, whatever valid graph it sits in.
- * 3. A key no Task or TaskGraph field names is refused by name: the loaded
- *    graph is built from parsed fields only, so nothing rides along as raw JSON.
+ * - Parsing is a fixed point under serialization: the graph a valid State
+ *   File loads as, written back as JSON and loaded again, is the same graph,
+ *   byte for byte, including a Task's nested authority fields. Every writer
+ *   persists `parseTaskGraph`'s output, so a parse that changed its own output
+ *   on the next load would drift the file on every write. The loaded bytes do
+ *   not depend on the order the file wrote its keys in.
+ * - `storedTaskErrors`, the all-errors mode, reports every findings rule
+ *   beside the one refusal the parse stops at, once each.
+ * - A Task field of the wrong type is refused with an error naming that
+ *   field, whatever valid graph it sits in.
+ * - A key no Task or TaskGraph field names is refused by name, and a valid
+ *   graph loads exactly the fields it was given: the loaded graph is built
+ *   from parsed fields only, so nothing rides along as raw JSON.
  */
 
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { match } from "ts-pattern";
 import { parseStoredTask, parseTaskGraph, storedTaskErrors } from "../src/state-file-wire";
 import { redThenGreenScope } from "../src/core/proof-obligations";
-import type { Task, TaskStatus } from "../src/types";
-import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
+import { settleUnavailableImplementation } from "../src/core/implementation-application";
+import { parseIsoInstant } from "../src/core/implementation-completion";
+import { authorizeImplementationSpawn, createImplementationAttemptContext } from "../src/core/implementation-retry";
+import { REVIEWER_PROTOCOL_V2 } from "../src/core/reviewer-contract";
+import type { Task, TaskGraph, TaskStatus } from "../src/types";
+import { executingGraphFixture, graphFixture, taskFixture, type TaskFixtureInput } from "./fixtures/task-lifecycle";
 
 type TaskShape = Readonly<{
   status: TaskStatus;
@@ -57,29 +66,171 @@ const arbTaskShape: fc.Arbitrary<TaskShape> = fc.record({
   extras: arbExtras,
 });
 
-/** A valid execute-phase graph: Tasks in Waves 1..n, each depending only on earlier Waves. */
-const arbValidGraph = fc.array(
-  fc.record({ wave: fc.integer({ min: 1, max: 3 }), shape: arbTaskShape, dependsOnEarlier: fc.boolean() }),
-  { minLength: 1, maxLength: 5 },
-).map((drafts) => {
+/**
+ * The nested authority one generated Task may carry. Each value is built by
+ * the fixture builder or the engine command that writes it, so a generated
+ * graph holds only shapes the engine itself persists.
+ */
+const NESTED_AUTHORITIES = [
+  "none",
+  "verification-policy",
+  "attestation",
+  "artifact-baseline",
+  "issued-review-packet",
+  "review-run",
+  "accepted-review",
+  "executing-attempt",
+  "settled-attempt",
+] as const;
+type NestedAuthority = (typeof NESTED_AUTHORITIES)[number];
+
+type TaskDraft = Readonly<{ wave: number; shape: TaskShape; dependsOnEarlier: boolean; authority: NestedAuthority }>;
+
+/** An attempt authority lives only on a pending Task the graph lists as executing. */
+const holdsAttempt = (authority: NestedAuthority): boolean =>
+  authority === "executing-attempt" || authority === "settled-attempt";
+
+/** The Task fields an authority adds before the fixture derives the Task's Proof. */
+function authorityInput(authority: NestedAuthority): Partial<TaskFixtureInput> {
+  return match(authority)
+    .with("verification-policy", () => ({
+      verification_policy: {
+        regression: { kind: "required" as const },
+        new_tests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+      },
+    }))
+    // Attestation mode dispatches no new work, so its policy waives new tests.
+    .with("attestation", () => ({
+      implementation_attestation: true as const,
+      verification_policy: {
+        regression: { kind: "required" as const },
+        new_tests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+      },
+    }))
+    .otherwise(() => ({}));
+}
+
+/** The review and baseline authority an engine writer stamps on a built Task. */
+function authorityFields(authority: NestedAuthority, task: Task): Readonly<Record<string, unknown>> {
+  // A review scope is stored sorted and unique.
+  const scope = task.file_list?.length ? [...task.file_list].sort() : ["src/a.ts"];
+  return match(authority)
+    .with("artifact-baseline", () => ({
+      artifact_baseline: (task.file_list ?? []).map((artifact) => ({ artifact, snapshot: { kind: "missing" } })),
+    }))
+    .with("issued-review-packet", () => ({
+      issued_review_packets: [{
+        task_id: task.id, packet_id: "b".repeat(64), packet_path: `.claude/reviews/${task.id}.json`,
+        base_sha: "a".repeat(40), head_sha: "c".repeat(40), scope,
+      }],
+    }))
+    .with("review-run", () => ({
+      review_status: "pending",
+      review_generation: 2,
+      review_run: {
+        generation: 2, packet_id: "b".repeat(64), head_sha: "2".repeat(40), expected_agents: ["code-reviewer"],
+        prior_finding_ids: [], evidence: [],
+        slot_authority: [{ agent: "code-reviewer", slot_id: "review-slot:current", attempted: 1 }],
+      },
+    }))
+    .with("accepted-review", () => ({
+      review_status: "passed",
+      review_generation: 1,
+      accepted_review_authority: {
+        generation: 1, packet_id: "a".repeat(64), head_sha: "b".repeat(40), scope,
+        run_id: "run.current", authority_digest: "a".repeat(64),
+        reviewer_protocol: REVIEWER_PROTOCOL_V2, subject_digest: "f".repeat(64),
+      },
+    }))
+    .otherwise(() => ({}));
+}
+
+const SETTLED_AT = (() => {
+  const instant = parseIsoInstant("2026-11-21T09:00:00.000Z", "fixture settlement instant");
+  if (!instant.ok) throw new Error(instant.error.errors.join("; "));
+  return instant.value;
+})();
+
+/**
+ * Register each executing Task's attempt the way a modern implementation
+ * dispatch does: its `active_implementation_context` and protocol-2 retry
+ * lineage, which any attempt history the Task later keeps requires.
+ */
+function withDispatchLineage(graph: TaskGraph): TaskGraph {
+  return {
+    ...graph,
+    tasks: graph.tasks.map((task) => {
+      const authority = task.active_implementation_attempt;
+      if (authority === undefined) return task;
+      const prompt = `Task ID: ${task.id}`;
+      const admission = authorizeImplementationSpawn({ id: task.id }, prompt);
+      if (!admission.ok) throw new Error(admission.error);
+      return {
+        ...task,
+        active_implementation_context: createImplementationAttemptContext({ authority, prompt, admission }),
+        implementation_retry_protocol: 2,
+        implementation_retry_history_start: 0,
+      };
+    }),
+  };
+}
+
+/**
+ * Settle each listed Task's executing attempt as the engine does when its
+ * observation is unavailable: the attempt is released into the Task's
+ * `implementation_attempt_history` and the Task awaits revalidation.
+ */
+function settleAttempts(graph: TaskGraph, taskIds: readonly string[]): TaskGraph {
+  return taskIds.reduce((state, taskId) => {
+    const authority = state.tasks.find((task) => task.id === taskId)?.active_implementation_attempt;
+    if (authority === undefined) throw new Error(`fixture Task ${taskId} holds no attempt`);
+    const settled = settleUnavailableImplementation(state, authority, SETTLED_AT, "fixture observation unavailable");
+    if (settled.kind === "error") throw new Error(`fixture settlement of ${taskId} failed: ${JSON.stringify(settled.error)}`);
+    return settled.state;
+  }, graph);
+}
+
+/** An execute-phase graph of `drafts`: Tasks in Waves 1..n, each depending only on earlier Waves. */
+function graphOfDrafts(drafts: readonly TaskDraft[]): Record<string, unknown> {
   const ordered = [...drafts].sort((left, right) => left.wave - right.wave);
-  const tasks: Task[] = ordered.map(({ wave, shape, dependsOnEarlier }, index) => {
+  const tasks: Task[] = ordered.map(({ wave, shape, dependsOnEarlier, authority }, index) => {
     const earlier = ordered.findIndex((draft) => draft.wave < wave);
     const dependsOn = dependsOnEarlier && earlier >= 0 && earlier < index ? [`T${earlier + 1}`] : [];
-    return taskFixture({
+    // An attesting Task changes no declared file, while the fixture's default
+    // satisfied Proof records every declared file as changed: it declares none.
+    const files = authority === "attestation" ? [] : shape.files;
+    const task = taskFixture({
       id: `T${index + 1}`,
       description: `Task ${index + 1}`,
       agent: "code-implementer-agent",
       wave,
       depends_on: dependsOn,
-      file_list: [...shape.files],
-      ...(shape.files.length > 0 ? { files_modified: [shape.files[0]] } : {}),
-      status: shape.status,
+      file_list: [...files],
+      ...(files.length > 0 ? { files_modified: [files[0]] } : {}),
+      status: holdsAttempt(authority) ? "pending" : shape.status,
       ...shape.extras,
+      ...authorityInput(authority),
     });
+    return { ...task, ...authorityFields(authority, task) } as Task;
   });
-  return JSON.parse(JSON.stringify(graphFixture(tasks))) as Record<string, unknown>;
-});
+  const idsWhere = (holds: (authority: NestedAuthority) => boolean) =>
+    ordered.flatMap(({ authority }, index) => holds(authority) ? [`T${index + 1}`] : []);
+  const attempting = idsWhere(holdsAttempt);
+  const base: TaskGraph = graphFixture(tasks);
+  const executing = attempting.length === 0 ? base : withDispatchLineage(executingGraphFixture(base, attempting));
+  const settled = settleAttempts(executing, idsWhere((authority) => authority === "settled-attempt"));
+  return JSON.parse(JSON.stringify(settled)) as Record<string, unknown>;
+}
+
+const arbDraft = (authority: fc.Arbitrary<NestedAuthority>): fc.Arbitrary<TaskDraft> =>
+  fc.record({ wave: fc.integer({ min: 1, max: 3 }), shape: arbTaskShape, dependsOnEarlier: fc.boolean(), authority });
+
+/** A valid execute-phase graph whose Tasks carry scalar fields only. */
+const arbValidGraph = fc.array(arbDraft(fc.constant("none")), { minLength: 1, maxLength: 5 }).map(graphOfDrafts);
+
+/** A valid execute-phase graph whose Tasks may each carry one nested authority. */
+const arbAuthorityGraph = fc.array(arbDraft(fc.constantFrom(...NESTED_AUTHORITIES)), { minLength: 1, maxLength: 5 })
+  .map(graphOfDrafts);
 
 describe("parseTaskGraph is a fixed point under serialization", () => {
   it("loads, writes and reloads every valid graph unchanged", () => {
@@ -94,12 +245,36 @@ describe("parseTaskGraph is a fixed point under serialization", () => {
     }), { numRuns: 200, seed: 20261121 });
   });
 
+  // The nested authority fields are rebuilt field by field by their own
+  // parsers, the likeliest place for a parse that drops or reshapes a value
+  // on its own output.
+  it("generates every nested authority field the next property relies on", () => {
+    const generated = new Set(fc.sample(arbAuthorityGraph, { numRuns: 200, seed: 20261123 })
+      .flatMap((raw) => (raw.tasks as Record<string, unknown>[]).flatMap((task) => Object.keys(task))));
+    for (const field of [
+      "proof", "verification_policy", "implementation_attestation", "artifact_baseline", "issued_review_packets",
+      "review_run", "accepted_review_authority", "active_implementation_attempt", "active_implementation_context",
+      "implementation_attempt_history",
+    ]) expect(generated).toContain(field);
+  });
+
+  it("loads, writes and reloads a Task carrying each nested authority field unchanged", () => {
+    fc.assert(fc.property(arbAuthorityGraph, (raw) => {
+      const first = parseTaskGraph(raw);
+      if (!first.ok) throw new Error(`generated graph refused: ${first.error}`);
+      const written = JSON.stringify(first.value);
+      const second = parseTaskGraph(JSON.parse(written));
+      if (!second.ok) throw new Error(`reloaded graph refused: ${second.error}`);
+      expect(JSON.stringify(second.value)).toBe(written);
+    }), { numRuns: 200, seed: 20261123 });
+  });
+
   // The loaded graph is assembled from parsed fields in the parser's own
   // order, so its serialization, and every digest taken over it, does not
   // depend on the order the file wrote its top-level and Task keys in.
   it("loads the same bytes whatever order the file wrote its keys in", () => {
     const reversed = (record: Readonly<Record<string, unknown>>) => Object.fromEntries(Object.entries(record).reverse());
-    fc.assert(fc.property(arbValidGraph, (raw) => {
+    fc.assert(fc.property(fc.oneof(arbValidGraph, arbAuthorityGraph), (raw) => {
       const tasks = raw.tasks as Record<string, unknown>[];
       const shuffled = reversed({ ...raw, tasks: tasks.map(reversed) });
       const inOrder = parseTaskGraph(raw);
@@ -201,7 +376,8 @@ describe("a Task field of the wrong type is refused by name", () => {
         const mutated = { ...raw, tasks: tasks.map((task, at) => at === index ? { ...task, [field]: wrong } : task) };
         const parsed = parseTaskGraph(mutated);
         if (parsed.ok) throw new Error(`a wrong-typed ${field} loaded`);
-        expect(parsed.error).toContain(field);
+        // The field itself, not a longer one containing it (`findings` in `critical_findings`).
+        expect(parsed.error).toMatch(new RegExp(`(?<![a-z_])${field}(?![a-z_])`));
       },
     ), { numRuns: 400, seed: 20261121 });
   });

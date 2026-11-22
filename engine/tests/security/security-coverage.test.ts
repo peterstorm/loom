@@ -17,10 +17,12 @@
 import fc from "fast-check";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { match } from "ts-pattern";
 import { describe, expect, it } from "vitest";
 import {
   COVERAGE_STATUSES,
   HUNTER_RESULT_KIND,
+  TERMINAL_DISPOSITIONS,
   admitArtifactNonce,
   assignUnits,
   catalogAgentOfOwner,
@@ -50,6 +52,7 @@ import {
   type CoverageUnit,
   type CriticError,
   type LocalCheck,
+  type TerminalDisposition,
   type UnitResult,
 } from "../../src/core/security-coverage";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
@@ -1015,5 +1018,114 @@ describe("transitions refuse what the next read would refuse", () => {
       .toEqual(["$[0]"]);
     // The unit as seeded defers, through the same parse.
     expect(ledgerViolations(ok(deferUnit([unit], unit.coverage_id, "critic_budget_exhausted")))).toEqual([]);
+  });
+
+  /**
+   * The ledger-wide invariants (sorted, each cell and id once, the unit
+   * ceiling) have no single enforcement point: each transition upholds them for
+   * what it changes. This is their guard: any run of transitions hands back only
+   * ledgers `parseLedger` accepts, whichever of them a step refuses.
+   */
+  describe("every ledger a run of transitions produces is one parseLedger accepts", () => {
+    type InFlightUnit = Extract<CoverageUnit, Readonly<{ status: "in_progress" }>>;
+    /** One step of a run. Its choices are indices, read modulo what the ledger
+     *  holds when the step runs, so every step names something it can act on. */
+    type Step =
+      | Readonly<{ kind: "assign"; pick: number }>
+      | Readonly<{ kind: "settle"; pick: number; status: TerminalDisposition; tag: number }>
+      | Readonly<{ kind: "merge"; wave: number; cells: readonly number[]; reassign: readonly number[]; resolve: readonly number[] }>
+      | Readonly<{ kind: "defer" }>;
+
+    const step: fc.Arbitrary<Step> = fc.oneof(
+      fc.record({ kind: fc.constant("assign" as const), pick: fc.nat() }),
+      fc.record({ kind: fc.constant("settle" as const), pick: fc.nat(), status: fc.constantFrom(...TERMINAL_DISPOSITIONS), tag: fc.nat({ max: 3 }) }),
+      fc.record({
+        kind: fc.constant("merge" as const),
+        wave: fc.integer({ min: 1, max: 4 }),
+        // `nSeeds` fills subsystem-0..k-1: a low index proposes a cell the
+        // ledger already holds (deduped), a high one a new cell.
+        cells: fc.array(fc.nat({ max: 7 }), { maxLength: 3 }),
+        reassign: fc.array(fc.nat(), { maxLength: 2 }),
+        resolve: fc.array(fc.nat(), { maxLength: 2 }),
+      }),
+      fc.constant({ kind: "defer" as const }),
+    );
+
+    const pickOf = <T,>(items: readonly T[], pick: number): T | undefined => items[pick % Math.max(items.length, 1)];
+    const isInFlight = (unit: CoverageUnit): unit is InFlightUnit => unit.status === "in_progress";
+    const isSettled = (unit: CoverageUnit): boolean => TERMINAL_DISPOSITIONS.some((status) => status === unit.status);
+    const accepted = (result: DomainResult<CoverageLedger, unknown>): CoverageLedger | null => (result.ok ? result.value : null);
+
+    /** The ledger a step hands back, or null when it refused or had nothing to act on. */
+    const applied = (ledger: CoverageLedger, next: Step): CoverageLedger | null =>
+      match(next)
+        .with({ kind: "assign" }, ({ pick }) => {
+          const unit = pickOf(ledger.filter((candidate) => candidate.status === "planned"), pick);
+          if (unit === undefined) return null;
+          const result = assignUnits(ledger, [{ coverageId: unit.coverage_id, agentId: HUNTER }]);
+          return result.ok ? result.value.ledger : null;
+        })
+        .with({ kind: "settle" }, ({ pick, status, tag }) => {
+          const unit = pickOf(ledger.filter(isInFlight), pick);
+          if (unit === undefined) return null;
+          const fingerprint = `cell-${tag}/finding`;
+          return accepted(recordUnitResult(ledger, {
+            coverageId: unit.coverage_id,
+            wave: unit.wave,
+            ...evidence(unit.agent_id, fingerprint),
+            status,
+            fingerprints: status === "candidate" ? [fingerprint] : [],
+            // An even tag leaves a second fact behind, so resolving the lead can
+            // succeed; an odd one makes the lead the blocked unit's last fact.
+            unresolved: status === "blocked"
+              ? [`prior/lead-${tag}`, ...(tag % 2 === 0 ? ["the cache configuration is not in the repository"] : [])]
+              : [],
+          }));
+        })
+        .with({ kind: "merge" }, ({ wave, cells, reassign, resolve }) => {
+          const settledIds = ledger.filter(isSettled).map((unit) => unit.coverage_id);
+          const reassignIds = reassign.flatMap((pick) => pickOf(settledIds, pick) ?? []);
+          const leads = ledger.flatMap((unit) =>
+            unit.unresolved.filter((fact) => fact.startsWith("prior/")).map((fact) => ({ fact, owner: unit.coverage_id })));
+          const resolved = resolve.flatMap((pick) => pickOf(leads, pick) ?? []);
+          const result = mergeCritic(ledger, {
+            missingUnits: cells.map((cell) => ({
+              refs: aRefs({ subsystem: `subsystem-${cell}` }),
+              startingPaths: [`src/subsystem-${cell}/entry.ts`],
+              ordinaryAttackClassBlock: null,
+              selectedCompanionBlocks: ["WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes"],
+              excludedBlocks: [],
+            })),
+            reassignIds,
+            resolvedPriorLeads: resolved.map(({ fact }) => fact),
+            stop: false,
+          }, {
+            wave,
+            reassignmentReasons: Object.fromEntries(reassignIds.map((id) => [id, "critic: walk it again"])),
+            priorLeadOwners: Object.fromEntries(resolved.map(({ fact, owner }) => [fact, owner])),
+          });
+          return result.ok ? result.value.ledger : null;
+        })
+        .with({ kind: "defer" }, () => accepted(deferPlannedUnits(ledger, "critic_budget_exhausted")))
+        .exhaustive();
+
+    it("holds for any run of assign, settle, critic merge and deferral steps", () => {
+      const landed = new Set<Step["kind"]>();
+      fc.assert(
+        fc.property(fc.integer({ min: 1, max: 4 }), fc.array(step, { maxLength: 12 }), (units, steps) => {
+          let ledger = ok(parseCoverageSeeds(nSeeds(units)));
+          for (const next of steps) {
+            const result = applied(ledger, next);
+            if (result === null) continue;
+            expect(ledgerViolations(JSON.parse(JSON.stringify(result))), next.kind).toEqual([]);
+            landed.add(next.kind);
+            ledger = result;
+          }
+        }),
+        { numRuns: 300 },
+      );
+      // Not vacuous: every kind of transition landed at least once.
+      expect([...landed].sort()).toEqual(["assign", "defer", "merge", "settle"]);
+    });
   });
 });

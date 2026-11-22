@@ -414,6 +414,8 @@ export function retireReopenedWaveReview(graph: TaskGraph, completed: RetiringRu
   return withRetiredRun(graph, completed, "completed-reopened");
 }
 
+declare const WAVE_GATE_ABANDONMENT: unique symbol;
+
 /**
  * The operator's terminal abandonment of one run, as `helper orchestration
  * abandon` recorded it in the Run Directory (`parseRunAbandonment`): an
@@ -426,7 +428,7 @@ export type WaveGateAbandonment = Readonly<{
   runId: OrchestrationRunId;
   reason: AbandonmentReason;
   supersededBy: OrchestrationRunId | null;
-}> & { readonly __brand: "WaveGateAbandonment" };
+}> & Readonly<{ [WAVE_GATE_ABANDONMENT]: true }>;
 
 /** Parse an abandonment to stamp: the reason is parsed as an `AbandonmentReason`
  *  and a run that names itself as its successor is refused. */

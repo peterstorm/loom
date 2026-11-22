@@ -49,6 +49,20 @@ describe("redirectsOf — every output redirect, typed", () => {
     expect(outputRedirectTargets("cat a >&file")).toBeNull();
   });
 
+  /** Text cut off mid-redirect: what the lexer, the guard and the evidence reader each read off it. */
+  it.each<[name: string, segment: string, kinds: readonly string[], guard: readonly string[] | null, minted: readonly string[]]>([
+    ["a target ending in a lone backslash", "echo x > out\\", ["file-write"], ["out\\"], ["out"]],
+    ["a lone backslash as the whole target", "echo x >\\", ["file-write"], ["\\"], []],
+    ["only whitespace after the operator", "echo x >\t", ["missing-target"], null, []],
+    ["an unterminated single quote", "echo x > 'unterminated", ["file-write"], ["'unterminated"], ["unterminated"]],
+    ["an unterminated double quote", `echo x > "a b`, ["file-write"], [`"a b`], ["a b"]],
+  ])("reads truncated input: %s", (_name, segment, expectedKinds, guard, minted) => {
+    expect(kinds(segment)).toEqual(expectedKinds);
+    expect(outputRedirectTargets(segment)).toEqual(guard);
+    expect(hasOutputRedirect(segment)).toBe(true);
+    expect(redirectTargetsOf(segment)).toEqual(minted);
+  });
+
   it("starts every redirect at an unquoted `>` (a discard at its `2`), in text order", () => {
     fc.assert(fc.property(shellText, (segment) => {
       const unquoted = new Set<number>();

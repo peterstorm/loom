@@ -66,7 +66,7 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     expect(views(".claude/stat${x}e")).toEqual([".claude/state"]); // braced
     expect(views(".claude/stat$xe")).toEqual([".claude/stat"]); // `$xe` is one name → deleted whole
     expect(views('".claude/stat${x}e"')).toEqual([".claude/state"]); // expands inside "…"
-    expect(views("${x:+y}z")).toEqual(["yz","z"]); // alternate form yields empty on unset
+    expect(views("${x:+y}z")).toEqual(["yz", "z"]); // alternate form: empty when unset, its word when set
     expect(views("${x:?msg}z")).toEqual(["z"]); // error form yields empty on unset
     expect(views("${#x}z")).toEqual(["z"]); // length
     expect(views("${x%.json}z")).toEqual(["z"]); // transform
@@ -84,9 +84,9 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     // forms that CONCEALS a guarded literal carried in the word (fail-open —
     // a live guard ALLOW while bash deleted real state). The word is revealed.
     expect(views("${x:-y}z")).toEqual(["yz"]);
-    expect(views("${x-y}z")).toEqual(["yz","z"]);
+    expect(views("${x-y}z")).toEqual(["yz", "z"]);
     expect(views("${x:=y}z")).toEqual(["yz"]);
-    expect(views("${x=y}z")).toEqual(["yz","z"]);
+    expect(views("${x=y}z")).toEqual(["yz", "z"]);
     expect(views('"${x:-y}z"')).toEqual(["yz"]); // reveals inside "…" too
     // The word is itself recursively normalized: quotes strip, nested
     // empty-form expansions delete, nested default words reveal.
@@ -111,11 +111,11 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     expect(views(".claude/stat${!x:-X}e")).toEqual([".claude/statXe"]);
     // A colonless indirect default's set-but-empty output (EMPTY) is a view,
     // as for its non-indirect twin.
-    expect(views(".claude/stat${!x-X}e")).toEqual([".claude/statXe",".claude/state"]);
+    expect(views(".claude/stat${!x-X}e")).toEqual([".claude/statXe", ".claude/state"]);
     // The alternate twin (`${!x:+w}`/`${!x+w}`) reveals `w` on SET — the
     // guard's set-state view of the indirect form.
-    expect(views("${!x:+.claude/state/active_task_graph.json}")).toEqual(["",".claude/state/active_task_graph.json"]);
-    expect(views(".claude/stat${!x+X}e")).toEqual([".claude/statXe",".claude/state"]);
+    expect(views("${!x:+.claude/state/active_task_graph.json}")).toEqual(["", ".claude/state/active_task_graph.json"]);
+    expect(views(".claude/stat${!x+X}e")).toEqual([".claude/statXe", ".claude/state"]);
     // Pure indirect, prefix-match and array-key forms carry NO word — still empty.
     expect(views("${!x}z")).toEqual(["z"]);
     expect(views("${!pre@}z")).toEqual(["z"]); // prefix-match: names starting `pre`
@@ -126,8 +126,8 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
   it("a colonless default `${x-w}`/`${x=w}` has an EMPTY view; colon forms only reveal their word (round-21)", () => {
     // Colonless forms have a set-but-empty output the default view can't see:
     // the word vanishes and the surrounding literals rejoin.
-    expect(views(".claude/stat${x-X}e")).toEqual([".claude/statXe",".claude/state"]);
-    expect(views(".claude/stat${x=X}e")).toEqual([".claude/statXe",".claude/state"]);
+    expect(views(".claude/stat${x-X}e")).toEqual([".claude/statXe", ".claude/state"]);
+    expect(views(".claude/stat${x=X}e")).toEqual([".claude/statXe", ".claude/state"]);
     // Colon forms substitute on unset AND null — `w` is their ONLY output, so
     // every view reveals the word (never expands to empty).
     expect(views(".claude/stat${x:-X}e")).toEqual([".claude/statXe"]);
@@ -142,10 +142,10 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     // the outer word must enumerate the nested form or its set-empty output is
     // concealed (the round-22 fail-open). Verified against real bash:
     // `unset x; y=; printf %s ".claude/stat${x:-${y-X}}e"` → `.claude/state`.
-    expect(views(".claude/stat${x:-${y-X}}e")).toEqual([".claude/statXe",".claude/state"]);
-    expect(views(".claude/stat${x:=${y=X}}e")).toEqual([".claude/statXe",".claude/state"]);
+    expect(views(".claude/stat${x:-${y-X}}e")).toEqual([".claude/statXe", ".claude/state"]);
+    expect(views(".claude/stat${x:=${y=X}}e")).toEqual([".claude/statXe", ".claude/state"]);
     // Arbitrary nesting depth: colonless buried two colon-reveals deep.
-    expect(views(".claude/stat${x:-${y:-${z-X}}}e")).toEqual([".claude/statXe",".claude/state"]);
+    expect(views(".claude/stat${x:-${y:-${z-X}}}e")).toEqual([".claude/statXe", ".claude/state"]);
     // A nested COLON form inside the revealed word stays revealed (only-output).
     expect(views(".claude/stat${x:-${y:-X}}e")).toEqual([".claude/statXe"]);
     // The unset view reveals the nested colonless word.
@@ -158,13 +158,13 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     // always-set var (PWD/HOME/$$) carries a guarded literal in `w`, so the guard
     // must reveal it or fail OPEN (the round-24 bypass). Verified against real
     // bash: `printf %s "${PWD:+.claude/state}"` → `.claude/state`.
-    expect(views("${x:+y}z")).toEqual(["yz","z"]);
-    expect(views("${x+y}z")).toEqual(["yz","z"]);
-    expect(views('"${x:+y}z"')).toEqual(["yz","z"]); // reveals inside "…" too
-    expect(views("${PWD:+.claude/state/active_task_graph.json}")).toEqual(["",".claude/state/active_task_graph.json"]);
-    expect(views(".claude/stat${x:+X}e")).toEqual([".claude/statXe",".claude/state"]);
+    expect(views("${x:+y}z")).toEqual(["yz", "z"]);
+    expect(views("${x+y}z")).toEqual(["yz", "z"]);
+    expect(views('"${x:+y}z"')).toEqual(["yz", "z"]); // reveals inside "…" too
+    expect(views("${PWD:+.claude/state/active_task_graph.json}")).toEqual(["", ".claude/state/active_task_graph.json"]);
+    expect(views(".claude/stat${x:+X}e")).toEqual([".claude/statXe", ".claude/state"]);
     // The alternate word is recursively normalized like a default word.
-    expect(views("${x:+gr${y:-a}ph}")).toEqual(["","graph"]);
+    expect(views("${x:+gr${y:-a}ph}")).toEqual(["", "graph"]);
     // Default/error forms are not optional: a colon default reveals its word in
     // every view (its only output), `:?` stays empty.
     expect(views("${x:-y}z")).toEqual(["yz"]);
@@ -177,12 +177,16 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     // A colon-default reveal wrapping an alternate form must enumerate it or the
     // inner set-state word is concealed. `x` unset → reveal `${PWD:+X}`; `PWD` set
     // → `X`, so bash yields `.claude/state`.
-    expect(views(".claude/stat${x:-${PWD:+X}}e")).toEqual([".claude/statXe",".claude/state"]);
+    expect(views(".claude/stat${x:-${PWD:+X}}e")).toEqual([".claude/statXe", ".claude/state"]);
     // Alternate nested inside alternate, two deep.
-    expect(views(".claude/stat${a:+${b:+X}}e")).toEqual([".claude/statXe",".claude/state"]);
+    expect(views(".claude/stat${a:+${b:+X}}e")).toEqual([".claude/statXe", ".claude/state"]);
+    // A sibling after a nested form keeps its own choice whether or not the
+    // nested form's enclosing word is emptied: each view addresses a form by
+    // where it is, not by how many forms the walk asked about before it.
+    expect(views("${a+${b+X}}${c+Y}")).toEqual(["", "X", "XY", "Y"]);
     // A colonless default emptied AND an alternate revealed in the same span —
     // the cross-product the guard tests.
-    expect(views(".claude/sta${x-Q}te${y:+/active_task_graph.json}")).toEqual([".claude/staQte",".claude/staQte/active_task_graph.json",".claude/state",".claude/state/active_task_graph.json"]);
+    expect(views(".claude/sta${x-Q}te${y:+/active_task_graph.json}")).toEqual([".claude/staQte", ".claude/staQte/active_task_graph.json", ".claude/state", ".claude/state/active_task_graph.json"]);
   });
 
   it("enumerates mixed per-expansion states instead of applying one global choice", () => {

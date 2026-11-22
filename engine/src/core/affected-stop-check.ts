@@ -44,6 +44,7 @@ import { classifyFailedTestcase, isFailedReportTestcase } from "./acceptance-con
 import { freeze, nonEmpty } from "./acceptance-contract/kernel";
 import type { NonEmpty } from "./orchestration-contract";
 import { attributeReportedFile } from "./report-file-attribution";
+import { blocksRemainingLine } from "./task-record";
 
 // --- Judging an affected run ---
 
@@ -186,10 +187,6 @@ const capNote = <K extends StopCheckName>(name: K, cap: StopCheckBlockCaps[K]): 
 
 const unreadableCounterNote = (name: StopCheckName, reason: string): string =>
   `${counterUnreadableNote(STOP_CHECKS[name].subject)}: ${reason}`;
-
-/** The last line of every runner and record check's part of a block message. */
-export const blocksRemainingLine = (blocksRemaining: number): string =>
-  `This check blocks at most ${blocksRemaining} more time(s); after that your stop proceeds and the Wave Gate judges.`;
 
 /** Whether one check may still block this agent, and the count its counter
  *  would then record, or why it fails open. */

@@ -215,18 +215,25 @@ export interface NormalizedSpan {
 type NormalizeMode = "matching-view" | "redirect-word";
 
 /**
- * Which output one optional word form contributes to a view: true reveals its
- * word `w`, false makes it EMPTY. Asked once per form, in text order, and only
- * for the forms with two outputs — a colonless default (`${x-w}`/`${x=w}`:
- * `w` on unset, EMPTY on set-but-empty) and an alternate form (`${x:+w}`/
- * `${x+w}`: EMPTY on unset, `w` on set). A colon default's `w` is its only
- * output and is always revealed.
+ * One optional word form: a form with two outputs — a colonless default
+ * (`${x-w}`/`${x=w}`: `w` on unset, EMPTY on set-but-empty) or an alternate
+ * form (`${x:+w}`/`${x+w}`: EMPTY on unset, `w` on set). `at` is its identity:
+ * the index its word `w` starts at in the text the walk began on, at any
+ * nesting depth. A colon default's `w` is its only output and is never a choice.
  */
-type RevealChoice = (form: "colonless-default" | "alternate") => boolean;
+type OptionalForm = Readonly<{ kind: "colonless-default" | "alternate"; at: number }>;
+
+/**
+ * Which output each optional form contributes to a view: true reveals its word
+ * `w`, false makes it EMPTY. A pure function of the form, so a view never
+ * depends on the order or the number of times the walk asks; a form nested in
+ * an emptied word is simply never asked.
+ */
+type RevealChoice = (form: OptionalForm) => boolean;
 
 /** Every variable unset: a colonless default yields its word, an alternate
  *  form nothing. The evidence reader's one view. */
-const UNSET_VIEW: RevealChoice = (form) => form === "colonless-default";
+const UNSET_VIEW: RevealChoice = ({ kind }) => kind === "colonless-default";
 
 /**
  * The value a `word`-form expansion contributes to the normalized view: its
@@ -239,18 +246,20 @@ const UNSET_VIEW: RevealChoice = (form) => form === "colonless-default";
  * guarded literal beyond one nesting level. The single source of truth for
  * the unquoted and double-quoted `$` call sites, so they cannot drift on the
  * reveal rules (the concealment/fail-open bypass this file has fought for
- * rounds).
+ * rounds). `base` is where `text` starts in the text the walk began on.
  */
 function wordContribution(
   text: string,
   pe: Extract<ParamExpansion, { kind: "word" }>,
   reveal: RevealChoice,
+  base: number,
 ): string {
+  const at = base + pe.wordStart;
   let shown = true;
-  if (pe.form === "alternate") shown = reveal("alternate");
-  else if (pe.colonless) shown = reveal("colonless-default");
+  if (pe.form === "alternate") shown = reveal({ kind: "alternate", at });
+  else if (pe.colonless) shown = reveal({ kind: "colonless-default", at });
   return shown
-    ? normalizeShellSpanInternal(text.slice(pe.wordStart, pe.end - 1), 0, "matching-view", reveal).value
+    ? normalizeShellSpanInternal(text.slice(pe.wordStart, pe.end - 1), 0, "matching-view", reveal, at).value
     : "";
 }
 
@@ -259,15 +268,22 @@ function wordContribution(
  * bash produces, applying every quote/escape/ANSI-C rule exactly once. The
  * decisions here are the shared contract; callers differ only by `mode` (see
  * NormalizeMode), which selects where a span ends and whether backticks quote,
- * and by `reveal`, which selects the variable state. Caveat: for double-quoted
- * `\c` where `c` is a non-special char, bash KEEPS the backslash (`"a\c"` →
- * `a\c`) but this normalizer DROPS it (→ `ac`); that over-normalizes —
- * reveal-monotonic for the guard (can only expose a guarded token, never hide
- * one) but over-mints for the evidence reader.
+ * and by `reveal`, which selects the variable state. `base` is where `text`
+ * starts in the text the walk began on (non-zero only inside a revealed word),
+ * so every optional form is named by one index at any depth. Caveat: for
+ * double-quoted `\c` where `c` is a non-special char, bash KEEPS the backslash
+ * (`"a\c"` → `a\c`) but this normalizer DROPS it (→ `ac`); that
+ * over-normalizes — reveal-monotonic for the guard (can only expose a guarded
+ * token, never hide one) but over-mints for the evidence reader.
  */
-function normalizeShellSpanInternal(text: string, start: number, mode: NormalizeMode, reveal: RevealChoice): NormalizedSpan {
-  const stopAtWordBoundary = mode === "redirect-word";
-  const backtickQuotes = mode === "redirect-word";
+function normalizeShellSpanInternal(
+  text: string,
+  start: number,
+  mode: NormalizeMode,
+  reveal: RevealChoice,
+  base: number,
+): NormalizedSpan {
+  const redirectWord = mode === "redirect-word";
   let value = "";
   let quote: '"' | "'" | "`" | null = null;
   let i = start;
@@ -288,7 +304,7 @@ function normalizeShellSpanInternal(text: string, start: number, mode: Normalize
       if (c === "$" && quote === '"') {
         const pe = paramExpansionEnd(text, i);
         if (pe.kind === "word") {
-          value += wordContribution(text, pe, reveal);
+          value += wordContribution(text, pe, reveal, base);
           i = pe.end - 1; continue;
         }
         if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -313,7 +329,7 @@ function normalizeShellSpanInternal(text: string, start: number, mode: Normalize
       // `$name`/`${…}`: delete to unset→empty; word forms contribute `w` per
       // family and `reveal` (see wordContribution).
       if (pe.kind === "word") {
-        value += wordContribution(text, pe, reveal);
+        value += wordContribution(text, pe, reveal, base);
         i = pe.end - 1; continue;
       }
       if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -325,11 +341,11 @@ function normalizeShellSpanInternal(text: string, start: number, mode: Normalize
       i++;
       continue;
     }
-    if (c === '"' || c === "'" || (backtickQuotes && c === "`")) {
+    if (c === '"' || c === "'" || (redirectWord && c === "`")) {
       quote = c;
       continue;
     }
-    if (stopAtWordBoundary && WORD_BOUNDARY.test(c)) break;
+    if (redirectWord && WORD_BOUNDARY.test(c)) break;
     value += c;
   }
   return { value, end: Math.min(i, text.length) };
@@ -342,14 +358,26 @@ function normalizeShellSpanInternal(text: string, start: number, mode: Normalize
  * backtick quotes.
  */
 export function normalizeShellSpan(text: string, start: number): NormalizedSpan {
-  return normalizeShellSpanInternal(text, start, "redirect-word", UNSET_VIEW);
+  return normalizeShellSpanInternal(text, start, "redirect-word", UNSET_VIEW, 0);
+}
+
+/** Every optional form the matching view of `text` from `start` can ask about:
+ *  the walk with every word revealed, so each nested form is reached. */
+function optionalForms(text: string, start: number): readonly number[] {
+  const forms = new Set<number>();
+  normalizeShellSpanInternal(text, start, "matching-view", ({ at }) => {
+    forms.add(at);
+    return true;
+  }, 0);
+  return [...forms];
 }
 
 /**
  * Every text bash may produce for `text` from `start` (matching-view): each
- * optional word form (see RevealChoice) is an independent reveal/empty
- * outcome, and the result holds every combination. Nested forms participate
- * only when their enclosing word is revealed. Treating syntax occurrences as
+ * optional word form (see OptionalForm) is an independent reveal/empty
+ * outcome, and the result holds every combination. View `k` reveals the forms
+ * whose bit is set in `k`, addressed by each form's identity, so a nested form
+ * inside an emptied word only repeats a view. Treating syntax occurrences as
  * independent deliberately over-approximates bash variables that repeat:
  * extra views can only arm a guard, never conceal a real output. `null` means
  * the requested bound cannot cover the cross-product and callers must fail
@@ -360,19 +388,14 @@ export function normalizeShellVariants(
   start: number,
   maxVariants: number,
 ): readonly string[] | null {
-  let forms = 0;
-  normalizeShellSpanInternal(text, start, "matching-view", () => {
-    forms += 1;
-    return true; // every enclosing word revealed: count every form that can be asked
-  });
-  const variantCount = 2 ** forms;
+  const forms = optionalForms(text, start);
+  const variantCount = 2 ** forms.length;
   if (!Number.isSafeInteger(variantCount) || variantCount > maxVariants) return null;
 
   const values = new Set<string>();
-  for (let mask = 0; mask < variantCount; mask += 1) {
-    let asked = 0;
-    const reveal: RevealChoice = () => (mask & (1 << asked++)) !== 0;
-    values.add(normalizeShellSpanInternal(text, start, "matching-view", reveal).value);
+  for (let view = 0; view < variantCount; view += 1) {
+    const revealed = new Set(forms.filter((_, bit) => Math.floor(view / 2 ** bit) % 2 === 1));
+    values.add(normalizeShellSpanInternal(text, start, "matching-view", ({ at }) => revealed.has(at), 0).value);
   }
   return Object.freeze([...values]);
 }

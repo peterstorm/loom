@@ -1,7 +1,9 @@
 # ADR-0025: The I6-era marker is the frozen test-file classification
 
 ## Status
-Accepted
+Accepted. Amended by [ADR-0098](ADR-0098-legacy-state-file-shapes-are-refused-at-load.md) (2026-11-20): the
+read-time fallbacks for a graph without a `verification_manifest` are deleted, so the pre-I6 default is no
+longer substituted on any read path.
 
 ## Context
 
@@ -78,10 +80,10 @@ Only TaskGraphs frozen before this feature lack `testFiles`: those with a pre-fe
 with no manifest at all.
 
 **Legacy default split.** `defaultVerificationManifest()` is now only the population freeze, and it carries
-`testFiles`. `preI6DefaultVerificationManifest()` keeps the old engine-default bytes and digest exactly. The
-two read-time fallbacks for a graph without a `verification_manifest` use it: the suite-receipt digest check
-in `engine/src/state-file-wire.ts` and `engine/src/core/wave-completion-suite-readiness.ts`.
-`parseFrozenVerificationManifest` accepts `testFiles` as an optional key and includes it in the digest
+`testFiles`. `preI6DefaultVerificationManifest()` keeps the old engine-default bytes and digest exactly. A
+pre-I6 graph carries that manifest frozen in its own State File. Since ADR-0098 no read path substitutes it
+for a missing one (the loader refuses an execute-phase graph without a `verification_manifest`), so its only
+callers are the fixtures that mint pre-I6 graphs. `parseFrozenVerificationManifest` accepts `testFiles` as an optional key and includes it in the digest
 re-check only when it is present. An old graph therefore keeps both its receipts and its `not-owed` era.
 
 **Era derivation (INV-6).** `engine/src/core/proof-obligations.ts` defines
@@ -128,8 +130,9 @@ decides, and `redThenGreenEra` is consulted only for a Task with no frozen Proof
   A possible follow-up is an explicit era sum type on the frozen manifest (pre-feature vs post-feature), which
   would make `redThenGreenEra` a total match and let post-feature freeze paths require `testFiles` by type.
 - The engine now has two engine-default manifests (`defaultVerificationManifest` and
-  `preI6DefaultVerificationManifest`). Using the wrong one at a read-time fallback would break old receipts
-  or obligation matching. Each fallback must be chosen on purpose.
+  `preI6DefaultVerificationManifest`). Population must freeze the first; only a fixture that mints a pre-I6
+  graph uses the second. Mixing them up would mint a graph whose era or digest is not the one it claims.
+  (Before ADR-0098 the second also served read-time fallbacks for manifest-less graphs; those are deleted.)
 - The era cannot be switched on per graph after population. A graph frozen before this feature never owes
   I6, even if it is resumed long after the feature shipped. To get I6 on that work, the graph has to be
   re-populated.

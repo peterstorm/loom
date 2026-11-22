@@ -18,6 +18,7 @@ import type { RedThenGreenObservation } from "../../core/red-then-green-types";
 import type { ContractConformance } from "../../core/skeleton/types";
 import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
 import type { FrozenVerificationManifest } from "../../core/verification-manifest";
+import { parseManifestedTaskGraph } from "../../core/manifested-task-graph";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import { artifactCovers } from "../../core/path-coverage";
 import { invalidateTaskReview } from "../../core/review-output";
@@ -248,7 +249,7 @@ function carriedRedThenGreen(task: Task): RedThenGreenObservation | undefined {
  * frozen red-then-green obligation is kept even when the manifest froze no
  * classification (reconcile reads no ledger and needs none).
  */
-function reconcileEra(task: Task, verificationManifest: FrozenVerificationManifest | undefined): RedThenGreenEra {
+function reconcileEra(task: Task, verificationManifest: FrozenVerificationManifest): RedThenGreenEra {
   const duty = redThenGreenDuty(task, verificationManifest);
   switch (duty.kind) {
     case "not-owed":
@@ -291,16 +292,15 @@ const settledOnlyByAttempt = (task: Task): boolean =>
  * not invent completion or test provenance: it keeps the prior completion
  * observation, stored test result, structured writes, prior satisfied I6
  * facts, and current byte delta. `verificationManifest` is the TaskGraph's
- * frozen manifest; whether I6 is owed is the Task's `redThenGreenDuty` under
- * it (see `reconcileEra`). Both are required, so every caller states its
- * graph's era. `contractConformance` is the observation's verdict over the
- * Task's current bytes (AD-5), required for the same reason: every caller
- * decides it. */
+ * frozen manifest, which every graph that holds Tasks carries; whether I6 is
+ * owed is the Task's `redThenGreenDuty` under it (see `reconcileEra`).
+ * `contractConformance` is the observation's verdict over the Task's current
+ * bytes (AD-5), required so every caller decides it. */
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
-  verificationManifest: FrozenVerificationManifest | undefined,
+  verificationManifest: FrozenVerificationManifest,
   contractConformance: ContractConformance,
 ): Task {
   if (task.status === "completed" || settledOnlyByAttempt(task)) return task;
@@ -421,6 +421,11 @@ const handler: HookHandler = async (_stdin, args) => {
       if (!state.tasks.some((task) => task.wave === wave)) {
         throw new Error(`Wave ${wave} has no tasks`);
       }
+      // Every Task is re-derived under the graph's frozen manifest; a graph
+      // without one is refused before any Task is read.
+      const manifested = parseManifestedTaskGraph(state);
+      if (!manifested.ok) throw new Error(`cannot reconcile: ${manifested.error}`);
+      const verificationManifest = manifested.value.verification_manifest;
       const recoveredPackets = recoveredBaselineSha !== null && packetBindings.length > 0
         ? recoverPacketEvidence(root, state, wave, recoveredBaselineSha, packetBindings)
         : { modifiedPathsByTask: new Map(), auditByTask: new Map() };
@@ -507,7 +512,7 @@ const handler: HookHandler = async (_stdin, args) => {
           sourceTask,
           proofArtifactsChanged,
           collectedNewTests.value,
-          state.verification_manifest,
+          verificationManifest,
           conformance.value,
         );
       });

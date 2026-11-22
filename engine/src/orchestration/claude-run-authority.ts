@@ -49,9 +49,6 @@ import {
   type SessionRunBinding,
 } from "./session-run-bindings";
 
-/** The run a hook was resolved to — the pair every run-directory primitive takes. */
-export type ClaudeRun = RunLocation;
-
 /**
  * `unbound`: the hook belongs to nobody's orchestration run (the ordinary
  * ad-hoc agent) and its caller must leave it alone. `bound`: the hook speaks
@@ -59,7 +56,7 @@ export type ClaudeRun = RunLocation;
  */
 export type ClaudeRunAuthority =
   | Readonly<{ kind: "unbound" }>
-  | Readonly<{ kind: "bound"; run: ClaudeRun }>;
+  | Readonly<{ kind: "bound"; run: RunLocation }>;
 
 /**
  * A SubagentStop additionally distinguishes a request-bound agent whose
@@ -72,7 +69,7 @@ export type ClaudeRunAuthority =
  */
 export type ClaudeStopAuthority =
   | ClaudeRunAuthority
-  | Readonly<{ kind: "uncorrelated"; run: ClaudeRun; identity: TaskIdentity }>;
+  | Readonly<{ kind: "uncorrelated"; run: RunLocation; identity: TaskIdentity }>;
 
 /** Everything run resolution reads, gathered at the hook boundary. */
 export type ClaudeRunContext = Readonly<{
@@ -107,15 +104,7 @@ export function claudeRunContext(
 }
 
 const UNBOUND: ClaudeRunAuthority = Object.freeze({ kind: "unbound" });
-const bound = (run: ClaudeRun): ClaudeRunAuthority => Object.freeze({ kind: "bound", run: Object.freeze({ ...run }) });
-
-/**
- * The run the explicit environment names, `null` when it names none. Half an
- * authority is a fault, never "unrelated".
- */
-export function explicitClaudeRun(context: ClaudeRunContext): BindingResult<ClaudeRun | null> {
-  return explicitRun(context, "claude-code");
-}
+const bound = (run: RunLocation): ClaudeRunAuthority => Object.freeze({ kind: "bound", run: Object.freeze({ ...run }) });
 
 function sessionBindings(context: ClaudeRunContext): BindingResult<readonly SessionRunBinding[]> {
   if (context.sessionId === undefined || context.sessionId === "") {
@@ -135,8 +124,8 @@ function sessionBindings(context: ClaudeRunContext): BindingResult<readonly Sess
 export function resolveClaudeSpawnRun(
   context: ClaudeRunContext,
   identity: TaskIdentity,
-): BindingResult<ClaudeRun> {
-  const explicit = explicitClaudeRun(context);
+): BindingResult<RunLocation> {
+  const explicit = explicitRun(context, "claude-code");
   if (!explicit.ok) return explicit;
   return resolveIssuingRun(
     explicit.value,
@@ -178,7 +167,7 @@ export function resolveClaudeStopRun(
   nativeId: string,
   spawnPrompt: () => BindingResult<string | null>,
 ): BindingResult<ClaudeStopAuthority> {
-  const explicit = explicitClaudeRun(context);
+  const explicit = explicitRun(context, "claude-code");
   if (!explicit.ok) return explicit;
   if (explicit.value !== null) return ok(bound(explicit.value));
   // A session with no published binding has no run for any of its agents, and
@@ -235,7 +224,7 @@ export function resolveClaudeStopRun(
  * conflicting one, so whichever boundary runs second either agrees or fails.
  */
 export async function recordClaudeSpawnCorrelator(
-  run: ClaudeRun,
+  run: RunLocation,
   spawn: Readonly<{ identity: TaskIdentity; role: string; nativeId: string }>,
 ): Promise<BindingResult<null>> {
   const { identity } = spawn;

@@ -4,6 +4,7 @@
  */
 
 import { claudeRecordKind } from "../core/claude-record-kind";
+import { isRecord } from "../core/plain-record";
 
 export interface TranscriptLine {
   message?: {
@@ -36,22 +37,43 @@ export interface ToolResultBlock extends ContentBlock {
   content: string | ContentBlock[];
 }
 
-/**
- * The conversation lines of a Claude Code JSONL transcript. Harness records
- * (`api-request-blob` copies of earlier turns, attachments, …) are skipped:
- * they are never the agent's activity (see core/claude-record-kind).
- */
-export function* parseJsonl(content: string): Generator<TranscriptLine> {
+/** Every JSON value of a JSONL transcript, one per non-blank line, each parsed once. A line that is not JSON is skipped. */
+export function jsonlRecords(content: string): readonly unknown[] {
+  const records: unknown[] = [];
   for (const line of content.split("\n")) {
     if (!line.trim()) continue;
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(line);
+      records.push(JSON.parse(line));
     } catch {
       continue; // Skip invalid JSON lines
     }
-    if (claudeRecordKind(parsed) === "conversation") yield parsed as TranscriptLine;
   }
+  return records;
+}
+
+/**
+ * The conversation lines among parsed transcript records. Harness records
+ * (`api-request-blob` copies of earlier turns, attachments, …) are skipped:
+ * they are never the agent's activity (see core/claude-record-kind).
+ */
+export function* conversationLines(records: readonly unknown[]): Generator<TranscriptLine> {
+  for (const record of records) {
+    if (claudeRecordKind(record) === "conversation") yield record as TranscriptLine;
+  }
+}
+
+/** The conversation lines of a Claude Code JSONL transcript (see `conversationLines`). */
+export function* parseJsonl(content: string): Generator<TranscriptLine> {
+  yield* conversationLines(jsonlRecords(content));
+}
+
+/**
+ * Whether a parsed transcript record is a Pi session header,
+ * `{"type":"session","version":…}`: the mark of a Pi session file, which no
+ * Claude reader here may read as Claude activity.
+ */
+export function isPiSessionHeader(record: unknown): boolean {
+  return isRecord(record) && record.type === "session" && record.version !== undefined;
 }
 
 /** Extract content blocks from a transcript line (Claude Code) */

@@ -192,6 +192,12 @@ describe("validate-agent-model — the grandfathering rescue", () => {
       "grandfathered model authority markers are unusable: task LOOM_CONTEXT_DIGEST marker is not canonical"],
     ["no authority markers at all", [],
       "grandfathered model authority requires exact request and context markers"],
+    ["a second context path marker that names another Run Directory",
+      ["LOOM_REQUEST_ID: request:grandfathered-retry", DIGEST, `LOOM_CONTEXT_PATH: /elsewhere/contexts/${"a".repeat(64)}.json`],
+      "grandfathered model authority markers are unusable: task LOOM_CONTEXT_PATH marker is contradictory"],
+    ["a context path to a packet other than the one its digest binds",
+      ["LOOM_REQUEST_ID: request:grandfathered-retry", `LOOM_CONTEXT_DIGEST: ${"b".repeat(64)}`],
+      `not the contexts/${"b".repeat(64)}.json its LOOM_CONTEXT_DIGEST binds`],
   ] as const)("BLOCKS on %s, naming why the rescue could not read them and keeping the policy block", async (_case, markers, diagnostic) => {
     const result = await validateAgentModel(markedSpawn(markers), []);
 

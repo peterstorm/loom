@@ -101,7 +101,7 @@ describe("parseSecurityAuditStart", () => {
     expectTypeOf(scope.headRef).toEqualTypeOf<CommitId>();
     // @ts-expect-error — a plain string is no commit id: only the parse brands one.
     const forged: CommitId = "main";
-    expect(forged).toBe("main");
+    void forged;
     const refused = parseSecurityAuditStart({ units: [], scope: { kind: "diff", baseRef: "A".repeat(40), headRef: "b".repeat(41) } });
     expect(refused.ok ? [] : refused.error.violations).toEqual([
       { path: "scope.baseRef", message: "expected a 40- or 64-hex commit id" },

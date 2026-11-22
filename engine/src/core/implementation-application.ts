@@ -55,7 +55,22 @@ import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const frozenArray = <T>(values: readonly T[]): readonly T[] => Object.freeze([...values]);
 
-export type TaskLocalByteObservation = Readonly<{
+declare const TASK_LOCAL_BYTE_OBSERVATION: unique symbol;
+
+/**
+ * One attempt's byte observation. Only `buildTaskLocalByteObservation` and
+ * `unavailableTaskLocalByteObservation` mint it, and the brand carries the
+ * relations between its fields that they hold by construction:
+ * - `unresolvedRepositoryPaths` are among the paths `byteScope` names as
+ *   written outside the scope, so an `accepted` scope carries none;
+ * - an `observation-unavailable` scope invalidates
+ *   (`taskBytesChangedOrUnobservable` and `invalidationBytesChanged` are true);
+ * - `invalidationBytesChanged` is `taskBytesChangedOrUnobservable` or any
+ *   unresolved repository path.
+ */
+export type TaskLocalByteObservation = TaskLocalByteObservationFields & Readonly<{ [TASK_LOCAL_BYTE_OBSERVATION]: true }>;
+
+type TaskLocalByteObservationFields = Readonly<{
   /** The attempt's bytes against its allowed scope, as the oracle settles them. */
   byteScope: TaskByteScopeOutcome;
   /** Parser-proven paths whose bytes changed during this exact attempt. */
@@ -278,7 +293,7 @@ export function buildTaskLocalByteObservation(
   const cumulative = frozenArray(
     [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proofChanged])].sort(compareStrings),
   );
-  return freeze({
+  return mintTaskLocalByteObservation({
     byteScope: observedByteScope([...rawOutside, ...unresolvedRepositoryPaths]),
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     attemptScopeChangedPaths: attempt.changed,
@@ -291,6 +306,10 @@ export function buildTaskLocalByteObservation(
   });
 }
 
+/** The brand's one minting point, reached only from the two constructors that hold its relations. */
+const mintTaskLocalByteObservation = (fields: TaskLocalByteObservationFields): TaskLocalByteObservation =>
+  freeze(fields) as TaskLocalByteObservation;
+
 /** The comparison of a Task with no tests-only scope: nothing changed since a reopening it never had. */
 const NO_REOPEN_SCOPE: Readonly<{ ok: true; changed: readonly ReviewPath[] }> = freeze({ ok: true, changed: frozenArray([]) });
 
@@ -298,7 +317,7 @@ export function unavailableTaskLocalByteObservation(
   reason: string,
   cumulativeModifiedPaths: readonly ReviewPath[] = frozenArray([]),
 ): TaskLocalByteObservation {
-  return freeze({
+  return mintTaskLocalByteObservation({
     byteScope: unavailableByteScope(reason),
     attributedAttemptChangedPaths: frozenArray([]),
     attemptScopeChangedPaths: frozenArray([]),
@@ -393,7 +412,9 @@ export type NormalizedImplementationEvidence = Readonly<{
 }>;
 
 /** A trusted stored verdict survives an incoming result that is untrusted or
- *  absent (no test result observed): neither may replace it. */
+ *  absent (no test result observed): neither may replace it. It survives only
+ *  while `revalidation_required` is not set, and a trusted-pass only while the
+ *  Task's bytes are unchanged and observable; a trusted-fail survives either way. */
 function shouldPreserveTrustedEvidence(
   task: Task,
   incoming: TaskTestResult | undefined,
@@ -406,9 +427,11 @@ function shouldPreserveTrustedEvidence(
 }
 
 /** One preservation rule shared by Claude and Pi, without provenance relabeling.
- *  The result is the Task's test evidence after this attempt: an absent field
- *  means the attempt left none, and the settled Task records none (an earlier
- *  attempt's result is never carried past an attempt that observed none). */
+ *  The result is the Task's test evidence after this attempt. An untrusted or
+ *  absent incoming result leaves a trusted stored verdict in place
+ *  (`shouldPreserveTrustedEvidence`); otherwise the incoming fields stand, and
+ *  an absent one means the settled Task records none, so an earlier untrusted
+ *  result is never carried past an attempt that observed none. */
 export function normalizeImplementationEvidence(
   task: Task,
   incoming: IncomingImplementationEvidence,

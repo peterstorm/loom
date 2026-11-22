@@ -10,7 +10,7 @@
  *
  * Pure module: no I/O, no clock, no randomness.
  */
-import { PANEL_LENSES, architectureCriterion, type PanelLens } from "./panel-contract";
+import { PANEL_LENSES, architectureCriterion, type ArchitectureCriterion, type PanelLens } from "./panel-contract";
 import type { LlmProfileId } from "./model-profiles";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { parseErr, parseOk, type LineParseResult } from "./parse-result";
@@ -140,16 +140,17 @@ export type ProgramResult<T> =
 const success = <T>(value: T): ProgramResult<T> => ({ ok: true, value });
 const reject = <T>(error: PanelProgramError): ProgramResult<T> => ({ ok: false, error });
 
+/** The dispatch input: lenses and criteria already parsed into their closed vocabularies. */
 export interface ArchitectureProgramInput {
   readonly candidateLenses: readonly PanelLens[];
-  readonly judgeCriteria: readonly string[];
+  readonly judgeCriteria: readonly ArchitectureCriterion[];
 }
 
 interface ArchitectureStateBase {
   readonly panel: "architecture";
   readonly input: Readonly<{
     candidateLenses: NonEmpty<PanelLens>;
-    judgeCriteria: NonEmpty<string>;
+    judgeCriteria: NonEmpty<ArchitectureCriterion>;
   }>;
   readonly completedRequestIds: readonly string[];
   readonly completedOperationIds: readonly ArchitectureEngineOperation[];
@@ -221,7 +222,7 @@ const candidateRequests = (lenses: NonEmpty<PanelLens>, attempt: 1 | 2 = 1): Non
     `non-empty architecture candidate for design lens ${lens}`,
   ));
 
-const judgeRequests = (criteria: NonEmpty<string>, attempt: 1 | 2 = 1): NonEmpty<HeadlessSpawnRequest> =>
+const judgeRequests = (criteria: NonEmpty<ArchitectureCriterion>, attempt: 1 | 2 = 1): NonEmpty<HeadlessSpawnRequest> =>
   mapNonEmpty(criteria, (criterion, index) => headlessRequest(
     `architecture:judge:${index + 1}`,
     "arch-judge-agent",
@@ -263,36 +264,24 @@ function distinctNonEmpty<T extends string>(
   const errors: string[] = [];
   if (values.length === 0) errors.push(`${label} must be non-empty`);
   if (new Set(values).size !== values.length) errors.push(`${label} must be distinct`);
-  if (values.some((value) => value.trim().length === 0)) errors.push(`${label} must not contain empty values`);
   if (errors.length > 0) return fail(errors);
   const copy = [...values];
   const first = copy[0];
   return first === undefined ? fail([`${label} failed its internal non-empty check`]) : ok([first, ...copy.slice(1)]);
 }
 
-/** Parse the dispatch configuration: distinct, non-empty, closed-vocabulary lenses and criteria. */
+/**
+ * Parse the dispatch configuration: distinct and non-empty lenses and criteria.
+ * Vocabulary membership is already in the input's types: the journal parser
+ * (`parseArchitecturePanelJournal`) is where untrusted lenses and criteria
+ * become a `PanelLens` and an `ArchitectureCriterion`.
+ */
 function parseArchitectureProgramInput(input: ArchitectureProgramInput): ParseResult<ArchitectureStateBase["input"]> {
   const lenses = distinctNonEmpty(input.candidateLenses, "candidate lenses");
   const criteria = distinctNonEmpty(input.judgeCriteria, "judge criteria");
-  const unknownLenses = lenses.ok
-    ? lenses.value.filter((lens) => !(PANEL_LENSES as readonly string[]).includes(lens))
-    : [];
-  // Criteria are checked against the CLOSED vocabulary, exactly as lenses are
-  // against `PANEL_LENSES`: `startArchitectureDispatchProgram` parses them while
-  // rehydrating a persisted journal, which is untrusted input by the same
-  // argument `architectureCriterion`'s own doc gives for checkpoints.
-  const unknownCriteria = criteria.ok
-    ? criteria.value.filter((criterion) => architectureCriterion(criterion) === null)
-    : [];
-  if (!lenses.ok || !criteria.ok || unknownLenses.length > 0 || unknownCriteria.length > 0) {
-    return fail([
-      ...(lenses.ok ? [] : lenses.errors),
-      ...(criteria.ok ? [] : criteria.errors),
-      ...unknownLenses.map((lens) => `unknown architecture design lens: ${lens}`),
-      ...unknownCriteria.map((criterion) => `unknown architecture judge criterion: ${criterion}`),
-    ]);
+  if (!lenses.ok || !criteria.ok) {
+    return fail([...(lenses.ok ? [] : lenses.errors), ...(criteria.ok ? [] : criteria.errors)]);
   }
-
   return ok({ candidateLenses: lenses.value, judgeCriteria: criteria.value });
 }
 
@@ -401,16 +390,48 @@ function operationOutcome(
     : success({ failed: event.error?.trim() || `${expected} failed` });
 }
 
-const unexpected = <T>(
-  panel: "architecture",
-  stage: string,
-): ProgramResult<T> => reject({ kind: "unexpected-event", panel, stage });
+const unexpected = <T>(stage: string): ProgramResult<T> =>
+  reject({ kind: "unexpected-event", panel: "architecture", stage });
 
-const blocked = (
-  panel: "architecture",
-  stage: string,
-  reason: string,
-): BlockedAction => ({ type: "blocked", panel, stage, reason });
+const blocked = (stage: string, reason: string): BlockedAction =>
+  ({ type: "blocked", panel: "architecture", stage, reason });
+
+/** The two headless fan-out stages: their slots only ever hold headless requests. */
+type FanOutState = Extract<ArchitectureProgramState, { stage: "candidates" | "judges" }>;
+
+/**
+ * One spawn outcome over a headless fan-out stage: a retry re-batches the one
+ * failed request, a second failure blocks the stage, a partial batch waits,
+ * and the last success hands every slot's request id to `advance`, which
+ * names the stage that follows.
+ */
+function settleFanOut(
+  state: FanOutState,
+  event: ArchitectureProgramEvent,
+  advance: (completedRequestIds: readonly string[]) => ProgramStep<ArchitectureProgramState>,
+): ProgramResult<ProgramStep<ArchitectureProgramState>> {
+  if (event.type !== "spawn-outcome") return unexpected(state.stage);
+  const settled = settleSlots(state.slots, state.completedRequestIds, event);
+  if (!settled.ok) return settled;
+  const result = settled.value;
+  switch (result.outcome) {
+    case "retry":
+      return success({ state: { ...state, slots: result.slots }, action: batch([result.retry]) });
+    case "blocked":
+      return success({
+        state: { ...state, stage: "blocked", reason: result.reason },
+        action: blocked(state.stage, result.reason),
+      });
+    case "waiting":
+      return success({ state: { ...state, slots: result.slots }, action: null });
+    case "complete":
+      return success(advance([...state.completedRequestIds, ...state.slots.map((slot) => slot.request.id)]));
+    default: {
+      const unreachable: never = result;
+      return unreachable;
+    }
+  }
+}
 
 /** The architecture panel reducer. It does not delegate to a generic panel machine. */
 export function reduceArchitectureProgram(
@@ -425,42 +446,26 @@ export function reduceArchitectureProgram(
   }
 
   switch (state.stage) {
-    case "candidates": {
-      if (event.type !== "spawn-outcome") return unexpected("architecture", state.stage);
-      const settled = settleSlots(state.slots, state.completedRequestIds, event);
-      if (!settled.ok) return settled;
-      const result = settled.value;
-      if (result.outcome === "retry") {
-        const retry = result.retry;
-        if (retry.interaction !== "headless") return unexpected("architecture", state.stage);
-        return success({ state: { ...state, slots: result.slots }, action: batch([retry]) });
-      }
-      if (result.outcome === "blocked") {
-        const reason = result.reason;
-        return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", "candidates", reason) });
-      }
-      if (result.outcome === "waiting") return success({ state: { ...state, slots: result.slots }, action: null });
-      const next: ArchitectureProgramState = {
-        panel: state.panel,
-        input: state.input,
-        stage: "prepare-judges",
-        operation: "architecture-prepare-judges",
-        completedRequestIds: [...state.completedRequestIds, ...state.slots.map((slot) => slot.request.id)],
-        completedOperationIds: state.completedOperationIds,
-      };
-      return success({
-        state: next,
+    case "candidates":
+      return settleFanOut(state, event, (completedRequestIds) => ({
+        state: {
+          panel: state.panel,
+          input: state.input,
+          stage: "prepare-judges",
+          operation: "architecture-prepare-judges",
+          completedRequestIds,
+          completedOperationIds: state.completedOperationIds,
+        },
         action: operation("architecture-prepare-judges", "validated candidate set and exact ordered judge criteria"),
-      });
-    }
+      }));
 
     case "prepare-judges": {
-      if (event.type !== "engine-outcome") return unexpected("architecture", state.stage);
+      if (event.type !== "engine-outcome") return unexpected(state.stage);
       const outcome = operationOutcome(state.operation, state.completedOperationIds, event);
       if (!outcome.ok) return outcome;
       if (outcome.value !== "succeeded") {
         const reason = outcome.value.failed;
-        return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", state.stage, reason) });
+        return success({ state: { ...state, stage: "blocked", reason }, action: blocked(state.stage, reason) });
       }
       const requests = judgeRequests(state.input.judgeCriteria);
       const next: ArchitectureProgramState = {
@@ -474,42 +479,26 @@ export function reduceArchitectureProgram(
       return success({ state: next, action: batch(requests) });
     }
 
-    case "judges": {
-      if (event.type !== "spawn-outcome") return unexpected("architecture", state.stage);
-      const settled = settleSlots(state.slots, state.completedRequestIds, event);
-      if (!settled.ok) return settled;
-      const result = settled.value;
-      if (result.outcome === "retry") {
-        const retry = result.retry;
-        if (retry.interaction !== "headless") return unexpected("architecture", state.stage);
-        return success({ state: { ...state, slots: result.slots }, action: batch([retry]) });
-      }
-      if (result.outcome === "blocked") {
-        const reason = result.reason;
-        return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", "judges", reason) });
-      }
-      if (result.outcome === "waiting") return success({ state: { ...state, slots: result.slots }, action: null });
-      const next: ArchitectureProgramState = {
-        panel: state.panel,
-        input: state.input,
-        stage: "aggregate",
-        operation: "architecture-aggregate",
-        completedRequestIds: [...state.completedRequestIds, ...state.slots.map((slot) => slot.request.id)],
-        completedOperationIds: state.completedOperationIds,
-      };
-      return success({
-        state: next,
+    case "judges":
+      return settleFanOut(state, event, (completedRequestIds) => ({
+        state: {
+          panel: state.panel,
+          input: state.input,
+          stage: "aggregate",
+          operation: "architecture-aggregate",
+          completedRequestIds,
+          completedOperationIds: state.completedOperationIds,
+        },
         action: operation("architecture-aggregate", "deterministic total ranking over every candidate and criterion"),
-      });
-    }
+      }));
 
     case "aggregate": {
-      if (event.type !== "engine-outcome") return unexpected("architecture", state.stage);
+      if (event.type !== "engine-outcome") return unexpected(state.stage);
       const outcome = operationOutcome(state.operation, state.completedOperationIds, event);
       if (!outcome.ok) return outcome;
       if (outcome.value !== "succeeded") {
         const reason = outcome.value.failed;
-        return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", state.stage, reason) });
+        return success({ state: { ...state, stage: "blocked", reason }, action: blocked(state.stage, reason) });
       }
       const request = finalizerRequest(1);
       const next: ArchitectureProgramState = {
@@ -524,18 +513,16 @@ export function reduceArchitectureProgram(
     }
 
     case "finalize": {
-      if (event.type !== "spawn-outcome") return unexpected("architecture", state.stage);
+      if (event.type !== "spawn-outcome") return unexpected(state.stage);
       const settled = settleSlots([state.slot], state.completedRequestIds, event);
       if (!settled.ok) return settled;
       const result = settled.value;
       if (result.outcome === "retry") {
-        const retry = result.retry;
-        if (retry.interaction !== "interactive") return unexpected("architecture", state.stage);
-        return success({ state: { ...state, slot: result.slots[0] as InteractiveSlot }, action: awaitUser(retry) });
+        return success({ state: { ...state, slot: result.slots[0] }, action: awaitUser(result.retry) });
       }
       if (result.outcome === "blocked") {
         const reason = result.reason;
-        return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", "finalize", reason) });
+        return success({ state: { ...state, stage: "blocked", reason }, action: blocked("finalize", reason) });
       }
       if (result.outcome === "waiting") return success({ state, action: null });
       return success({
@@ -552,7 +539,7 @@ export function reduceArchitectureProgram(
 
     case "complete":
     case "blocked":
-      return unexpected("architecture", state.stage);
+      return unexpected(state.stage);
   }
 }
 
@@ -577,14 +564,25 @@ const isStrings = (value: unknown): value is string[] =>
 
 const JOURNAL_INPUT_SHAPE = "architecture input requires exact PanelLens candidateLenses[] and judgeCriteria[]";
 
-/** The journal's candidate lenses: strings, each a `PanelLens`; the first that is not one is named. */
-function parseJournalLenses(value: unknown): LineParseResult<readonly PanelLens[]> {
+const panelLens = (entry: string): PanelLens | null =>
+  PANEL_LENSES.find((candidate) => candidate === entry) ?? null;
+
+/**
+ * One journal input list: strings, each a member of its closed vocabulary
+ * (`member` returns null for a non-member); the first that is not one is named
+ * as an unknown `term`.
+ */
+function parseJournalTerms<Term>(
+  value: unknown,
+  member: (entry: string) => Term | null,
+  term: "design lens" | "judge criterion",
+): LineParseResult<readonly Term[]> {
   if (!isStrings(value)) return parseErr(JOURNAL_INPUT_SHAPE);
-  const parsed: PanelLens[] = [];
+  const parsed: Term[] = [];
   for (const entry of value) {
-    const lens = PANEL_LENSES.find((candidate) => candidate === entry);
-    if (lens === undefined) return parseErr(`unknown architecture design lens: ${entry}`);
-    parsed.push(lens);
+    const known = member(entry);
+    if (known === null) return parseErr(`unknown architecture ${term}: ${entry}`);
+    parsed.push(known);
   }
   return parseOk(Object.freeze(parsed));
 }
@@ -636,10 +634,10 @@ export function parseArchitecturePanelJournal(raw: unknown): LineParseResult<Arc
     if (raw.panel !== undefined && raw.panel !== "architecture") {
       return parseErr(`Panel journal declares '${String(raw.panel)}' but was opened as 'architecture'`);
     }
-    const candidateLenses = parseJournalLenses(raw.input.candidateLenses);
+    const candidateLenses = parseJournalTerms(raw.input.candidateLenses, panelLens, "design lens");
     if (!candidateLenses.ok) return candidateLenses;
-    const judgeCriteria = raw.input.judgeCriteria;
-    if (!isStrings(judgeCriteria)) return parseErr(JOURNAL_INPUT_SHAPE);
+    const judgeCriteria = parseJournalTerms(raw.input.judgeCriteria, architectureCriterion, "judge criterion");
+    if (!judgeCriteria.ok) return judgeCriteria;
     const events: ArchitectureProgramEvent[] = [];
     for (const [index, rawEvent] of raw.events.entries()) {
       const parsed = parseJournalEvent(rawEvent, index);
@@ -647,12 +645,56 @@ export function parseArchitecturePanelJournal(raw: unknown): LineParseResult<Arc
       events.push(parsed.value);
     }
     return parseOk(Object.freeze({
-      input: Object.freeze({ candidateLenses: candidateLenses.value, judgeCriteria: Object.freeze([...judgeCriteria]) }),
+      input: Object.freeze({ candidateLenses: candidateLenses.value, judgeCriteria: judgeCriteria.value }),
       events: Object.freeze(events),
     }));
   } catch (error) {
     // Bind the thrown cause: a shape TypeError is a real journal defect the
     // operator must be able to tell apart from a parser drift.
     return parseErr(`Panel program journal could not be safely inspected: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Replay — the journal folded through the program (ADR-0096)
+// ---------------------------------------------------------------------------
+
+/** Why a parsed journal does not replay: the start refused its input, or the reducer refused an event. */
+export type ArchitectureReplayError =
+  | Readonly<{ kind: "start-refused"; errors: readonly string[] }>
+  | Readonly<{ kind: "event-refused"; error: PanelProgramError }>;
+
+export type ArchitectureReplayResult =
+  | Readonly<{ ok: true; value: ProgramStep<ArchitectureProgramState> }>
+  | Readonly<{ ok: false; error: ArchitectureReplayError }>;
+
+/**
+ * Start the program from the journal's input and fold its events through the
+ * reducer, in order: the step the last event leaves, or the first refusal.
+ * `helper panel-program architecture` prints the step.
+ */
+export function replayArchitecturePanelJournal(journal: ArchitecturePanelJournal): ArchitectureReplayResult {
+  const started = startArchitectureDispatchProgram(journal.input);
+  if (!started.ok) return { ok: false, error: { kind: "start-refused", errors: started.errors } };
+  let step = started.value;
+  for (const event of journal.events) {
+    const reduced = reduceArchitectureProgram(step.state, event);
+    if (!reduced.ok) return { ok: false, error: { kind: "event-refused", error: reduced.error } };
+    step = reduced.value;
+  }
+  return { ok: true, value: step };
+}
+
+/** The operator text for a replay refusal. */
+export function describeArchitectureReplayError(error: ArchitectureReplayError): string {
+  switch (error.kind) {
+    case "start-refused":
+      return error.errors.join("\n");
+    case "event-refused":
+      return `Panel program rejected event: ${JSON.stringify(error.error)}`;
+    default: {
+      const unreachable: never = error;
+      return unreachable;
+    }
   }
 }

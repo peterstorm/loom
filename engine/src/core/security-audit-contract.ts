@@ -101,12 +101,16 @@ export const parseWire = <Schema extends z.ZodType>(
 
 /** A schema whose value is whatever `parse` proves — the bridge from an
  *  existing smart constructor (branded ids, canonical refs) into a zod shape, so
- *  the constructor stays the one owner of its rule. */
-export const parsedBy = <T>(parse: (raw: unknown) => DomainResult<T, string>) =>
+ *  the constructor stays the one owner of its rule. A refusal reports
+ *  `message` when given, else the constructor's own error message. */
+export const parsedBy = <T>(
+  parse: (raw: unknown) => DomainResult<T, Readonly<{ message: string }>>,
+  message?: string,
+) =>
   z.unknown().transform((raw, ctx): T => {
     const parsed = parse(raw);
     if (parsed.ok) return parsed.value;
-    ctx.addIssue({ code: "custom", message: raw === undefined ? "required" : parsed.error });
+    ctx.addIssue({ code: "custom", message: raw === undefined ? "required" : message ?? parsed.error.message });
     return z.NEVER;
   });
 
@@ -408,10 +412,7 @@ export const parseCoverageRefs = (raw: unknown): DomainResult<CoverageRefs, Cove
 
 /** A canonical refs tuple as a field schema: `parseCoverageRefs` stays the one
  *  proof of the brand. */
-export const coverageRefsSchema = parsedBy((raw) => {
-  const refs = parseCoverageRefs(raw);
-  return refs.ok ? refs : failure(refs.error.message);
-});
+export const coverageRefsSchema = parsedBy(parseCoverageRefs);
 
 /** The tuple that must be unique across a ledger: two units with different IDs
  *  but the same semantics are one unit, and a run that assigns both double-counts

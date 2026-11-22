@@ -208,8 +208,8 @@ export function observeCurrentWaveCompletionResult(
   workspace: WaveWorkspaceObservation,
 ): WaveCompletionResultObservation {
   const active = graph.active_wave_gate;
-  const manifest = graph.verification_manifest;
-  if (active === undefined || active.terminalOutcome !== null || manifest === undefined) {
+  const manifested = parseManifestedTaskGraph(graph);
+  if (active === undefined || active.terminalOutcome !== null || !manifested.ok) {
     return freeze({
       kind: "unavailable",
       reason: "current persisted completion result requires modern nonterminal active Wave authority",
@@ -227,7 +227,7 @@ export function observeCurrentWaveCompletionResult(
       reason: `current workspace authority is unavailable: ${workspace.reason}`,
     });
   }
-  const authorized = authorizeGraphCompletionSuite(graph, workspace.workspaceDigest);
+  const authorized = authorizeGraphCompletionSuite(manifested.value, workspace.workspaceDigest);
   if (!authorized.ok) {
     return freeze({ kind: "unavailable", reason: authorized.error.errors.join("; ") });
   }

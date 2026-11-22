@@ -10,6 +10,7 @@ import {
   findingsUnionError,
   mergeFindings,
   recoverViewOnlyClaims,
+  parseStoredFindingsField,
   parseStoredRefutationsField,
   parseStoredResolutionsField,
   reviewRunError,
@@ -604,6 +605,25 @@ describe("the load boundary proves what the Task type asserts", () => {
     expect(parseStoredResolutionsField([resolved, resolved], "resolved")).toEqual({
       ok: false,
       error: "resolved[1] repeats resolved finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
+    });
+  });
+
+  it("parses stored findings into the frozen, parsed list the State File load consumes", () => {
+    const other = { ...wellFormed, id: "silent-failure-hunter-1", agent: "silent-failure-hunter", severity: "advisory" };
+    const parsed = parseStoredFindingsField([wellFormed, other], "findings");
+
+    expect(parsed).toEqual({ ok: true, value: parseStoredFindings([wellFormed, other]) });
+    expect(parsed.ok && parsed.value).toHaveLength(2);
+    expect(parsed.ok && Object.isFrozen(parsed.value)).toBe(true);
+    expect(parseStoredFindingsField(undefined, "findings")).toEqual({ ok: true, value: undefined });
+    expect(parseStoredFindingsField({}, "findings")).toEqual({ ok: false, error: "findings must be an array when present" });
+    expect(parseStoredFindingsField([wellFormed, {}], "findings")).toEqual({
+      ok: false,
+      error: "findings[1] is not a well-formed finding (repair and install atomically with: helper repair-task-graph)",
+    });
+    expect(parseStoredFindingsField([wellFormed, { ...wellFormed, claim: "y" }], "findings")).toEqual({
+      ok: false,
+      error: "findings[1] repeats finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
     });
   });
 

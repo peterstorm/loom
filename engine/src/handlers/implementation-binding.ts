@@ -80,7 +80,7 @@ function observeFirstPrompt(sessionId: SessionId, agentId: AgentId, suppliedTran
   if (content.trim() === "") return unwritten;
   const prompt = parseFirstUserPrompt(content);
   return prompt.ok
-    ? Object.freeze({ kind: "prompt", text: prompt.prompt })
+    ? Object.freeze({ kind: "prompt", text: prompt.value })
     : Object.freeze({ kind: "untrusted", reason: prompt.error });
 }
 

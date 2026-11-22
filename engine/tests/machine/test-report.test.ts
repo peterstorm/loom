@@ -1,11 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, expectTypeOf } from "vitest";
 import {
   executedTestCount,
+  junitReportRead,
   mergeSummaries,
   parseReportCounts,
   parseReportSummary,
   readTestReport,
+  readTestReportText,
   reportCounts,
+  reportTestcases,
+  testRunSummary,
+  type TestReport,
 } from "../../src/core/structured-test-report";
 import { judgeTestRun } from "../../src/machine/test-report";
 import { countedReport, reportSummary, summarizedReport } from "./report-summary";
@@ -115,14 +120,17 @@ describe("reportCounts — the executed-count rule", () => {
     expect(countedReport("plain output")).toMatchObject({
       ok: false, error: { reason: "unrecognized-format" },
     });
-    expect(countedReport(JSON.stringify({
+    const ambiguous = JSON.stringify({
       numTotalTests: 1,
       numPassedTests: 1,
       numFailedTests: 0,
       numPendingTests: 0,
       numTodoTests: 0,
       attachment: '<testsuite tests="1" failures="0"/>',
-    }))).toMatchObject({ ok: false, error: { reason: "ambiguous-format" } });
+    });
+    expect(countedReport(ambiguous)).toMatchObject({ ok: false, error: { reason: "ambiguous-format" } });
+    // Only the executed-count rule refuses the ambiguity: the TestRun summary reads the Vitest JSON it parsed as.
+    expect(summarizedReport(ambiguous, "vitest-json")).toEqual({ total: 1, failed: 0, source: "vitest-json" });
     expect(countedReport(JSON.stringify({
       numTotalTests: 1,
       numPassedTests: 2,
@@ -225,6 +233,26 @@ describe("judgeTestRun — the R2 trust rule", () => {
 
     it.each([0, null])("judgeTestRun reads an all-skipped JUnit report as trusted-fail (exit %s)", (exit) => {
       expect(judgeTestRun(exit, summarizedReport(allSkippedJunit, "junit-xml"))).toEqual({ verdict: "trusted-fail" });
+    });
+
+    it("TestReport carries no declared summary a caller could take without the executed-count check", () => {
+      expectTypeOf<TestReport>().not.toHaveProperty("declared");
+      expectTypeOf<TestReport>().toHaveProperty("executed");
+      const read = readTestReportText(allSkippedJunit);
+      expect(read.kind === "report" ? Object.keys(read.report) : null).not.toContain("declared");
+    });
+
+    it("every exported projection reads one all-skipped JUnit report consistently", () => {
+      const read = readTestReportText(allSkippedJunit);
+      const summary = testRunSummary(read, "junit-xml");
+      expect(summary).toMatchObject({ total: 2, failed: 0, source: "junit-xml" });
+      expect(executedTestCount(summary!)).toBe(0);
+      expect(reportCounts(read)).toEqual({ ok: true, value: { total: 0, failed: 0, source: "junit-xml" } });
+      expect(junitReportRead(read)).toEqual({ kind: "parsed", summary });
+      expect(reportTestcases(read)).toMatchObject({
+        ok: true,
+        value: [{ name: "one", outcome: "skipped" }, { name: "two", outcome: "skipped" }],
+      });
     });
 
     it("a summary-only all-skipped JUnit report mints the executed-count rule's zero and is trusted-fail", () => {

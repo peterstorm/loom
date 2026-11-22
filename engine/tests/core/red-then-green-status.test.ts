@@ -99,7 +99,6 @@ const withT1WritingContract = (graph: TaskGraph): TaskGraph => ({
   }],
 });
 
-
 /** A file that failed to load (a missing module's import error): JUnit's one failing synthetic testcase. */
 const collectionError = (file: string): TestFileResult => ({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
 
@@ -245,7 +244,6 @@ describe("redThenGreenStatusView: duty", () => {
       duty: { kind: "undeterminable", reason: duty.reason },
     });
   });
-
 });
 
 describe("redThenGreenStatusView: live attempt", () => {

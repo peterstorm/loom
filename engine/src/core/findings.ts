@@ -729,22 +729,46 @@ export function findingsUnionError(raw: unknown, label: string): string | null {
  * the first diagnostic refusing them (`findingsUnionError` is its verdict).
  */
 export function parseStoredFindingsField(raw: unknown, label: string): DomainResult<readonly Finding[] | undefined, string> {
-  if (raw === undefined) return { ok: true, value: undefined };
-  if (!Array.isArray(raw)) return { ok: false, error: `${label} must be an array when present` };
-  const parsed = raw.map(parseStoredFinding);
-  const index = parsed.findIndex((entry) => entry === null);
-  if (index >= 0) return { ok: false, error: `${label}[${index}] is not a well-formed finding (${REPAIR_HINT})` };
-  const findings = parsed.filter((entry): entry is Finding => entry !== null);
-
   // Ids must be distinct, and this is the only place that can prove it. Two
   // findings sharing an id make `applyFindingOutcomes`' id filter delete BOTH
   // where one was adjudicated, and attach the panel's reasoning to the wrong
   // claim — the exact failure `nextOrdinal` is built to foreclose on the
   // minting side. Minting is guarded; a hand-edited or drifted file is not.
-  const repeated = firstRepeated(findings.map(({ id }) => id));
+  return parseStoredFindingContainer(raw, label, parseStoredFinding, ({ id }) => id, {
+    entry: "finding",
+    repeatedId: "finding id",
+  });
+}
+
+/** How a stored finding container's diagnostics name one entry and its id. */
+type StoredContainerNouns = Readonly<{ entry: string; repeatedId: string }>;
+
+/**
+ * The one load-boundary rule for a stored container of findings or of retired
+ * finding records: absent, or an array whose every entry parses and whose ids
+ * are distinct — the parsed entries frozen, or the first diagnostic refusing
+ * them, naming the entry's index.
+ */
+function parseStoredFindingContainer<T>(
+  raw: unknown,
+  label: string,
+  parse: (entry: unknown) => T | null,
+  idOf: (entry: T) => string,
+  nouns: StoredContainerNouns,
+): DomainResult<readonly T[] | undefined, string> {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(raw)) return { ok: false, error: `${label} must be an array when present` };
+  const items: readonly unknown[] = raw;
+  const entries: T[] = [];
+  for (const [index, item] of items.entries()) {
+    const entry = parse(item);
+    if (entry === null) return { ok: false, error: `${label}[${index}] is not a well-formed ${nouns.entry} (${REPAIR_HINT})` };
+    entries.push(entry);
+  }
+  const repeated = firstRepeated(entries.map(idOf));
   return repeated === null
-    ? { ok: true, value: Object.freeze(findings) }
-    : { ok: false, error: `${label}[${repeated.index}] repeats finding id '${repeated.value}' (${REPAIR_HINT})` };
+    ? { ok: true, value: Object.freeze(entries) }
+    : { ok: false, error: `${label}[${repeated.index}] repeats ${nouns.repeatedId} '${repeated.value}' (${REPAIR_HINT})` };
 }
 
 /**
@@ -813,35 +837,25 @@ export function findingsLockstepError(
   return null;
 }
 
-function parseRetiredFindingsField<T extends Readonly<{ finding: Finding }>>(
-  raw: unknown,
-  label: string,
-  parse: (entry: unknown) => T | null,
-  recordKind: "refutation" | "resolution",
-  findingKind: "refuted" | "resolved",
-): DomainResult<readonly T[] | undefined, string> {
-  if (raw === undefined) return { ok: true, value: undefined };
-  if (!Array.isArray(raw)) return { ok: false, error: `${label} must be an array when present` };
-  const parsed = raw.map(parse);
-  const index = parsed.findIndex((entry) => entry === null);
-  if (index >= 0) return { ok: false, error: `${label}[${index}] is not a well-formed ${recordKind} record (${REPAIR_HINT})` };
-  const records = parsed.filter((entry): entry is T => entry !== null);
-  const repeated = firstRepeated(records.map((entry) => entry.finding.id));
-  return repeated === null
-    ? { ok: true, value: Object.freeze(records) }
-    : { ok: false, error: `${label}[${repeated.index}] repeats ${findingKind} finding id '${repeated.value}' (${REPAIR_HINT})` };
-}
+/** A retired record's id: the id of the finding it retired. */
+const retiredFindingId = ({ finding }: Readonly<{ finding: Finding }>): string => finding.id;
 
 /** The load boundary's parse of `Task.refuted_findings`: absent, or well-formed records under distinct finding ids. */
 export function parseStoredRefutationsField(raw: unknown, label: string): DomainResult<readonly RefutedFinding[] | undefined, string> {
   // Two records under one id attach different verdicts to the same claim, so
   // the audit trail can no longer say which verdict was applied.
-  return parseRetiredFindingsField(raw, label, parseStoredRefutation, "refutation", "refuted");
+  return parseStoredFindingContainer(raw, label, parseStoredRefutation, retiredFindingId, {
+    entry: "refutation record",
+    repeatedId: "refuted finding id",
+  });
 }
 
 /** The load boundary's parse of `Task.resolved_findings`: findings retired because a later implementation fixed them. */
 export function parseStoredResolutionsField(raw: unknown, label: string): DomainResult<readonly ResolvedFinding[] | undefined, string> {
-  return parseRetiredFindingsField(raw, label, parseStoredResolution, "resolution", "resolved");
+  return parseStoredFindingContainer(raw, label, parseStoredResolution, retiredFindingId, {
+    entry: "resolution record",
+    repeatedId: "resolved finding id",
+  });
 }
 
 function hasReservedFindingFields(record: Record<string, unknown>): boolean {

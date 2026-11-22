@@ -242,6 +242,28 @@ describe("Task-local byte-scope application core", () => {
     expect(bytes.invalidationBytesChanged).toBe(true);
   });
 
+  it("refuses a hand-built observation at compile time: only the two constructors mint one", () => {
+    const accepted = observedBytes({ parserModifiedPaths: [] });
+    const foreign = observedBytes({ repositoryChangedPaths: ["src/foreign.ts"] });
+    // @ts-expect-error a literal pairing an accepted scope with unresolved repository paths is not minted
+    const forged: TaskLocalByteObservation = {
+      byteScope: accepted.byteScope,
+      attributedAttemptChangedPaths: [],
+      attemptScopeChangedPaths: [],
+      cumulativeModifiedPaths: [],
+      cumulativeProofArtifactChanges: [],
+      reopenScopeChangedPaths: [],
+      taskBytesChangedOrUnobservable: false,
+      unresolvedRepositoryPaths: foreign.unresolvedRepositoryPaths,
+      invalidationBytesChanged: false,
+    };
+    void forged;
+    expect(accepted.byteScope).toEqual({ kind: "accepted" });
+    expect(foreign.unresolvedRepositoryPaths).toEqual(["src/foreign.ts"]);
+    // What a minted observation holds instead: unresolved paths are written outside the scope.
+    expect(foreign.byteScope.kind).toBe("out-of-scope-writes");
+  });
+
   it("never turns sibling repository movement into Task attribution, proof, or invalidation", () => {
     const bytes = observedBytes({
       currentAttemptScope: baseline("src/a.ts", digest("a")),

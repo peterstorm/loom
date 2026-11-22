@@ -13,6 +13,7 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
+import { match, P } from "ts-pattern";
 import { normalizeShellSpan, type NormalizedSpan } from "./shell-normalize";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
 
@@ -229,37 +230,24 @@ export function redirectTargetsOf(segment: string): readonly string[] {
  * elsewhere: the guard judged that word, so the evidence names it too.
  */
 function writtenWords(segment: string, redirect: OutputRedirect): readonly NormalizedSpan[] {
-  const fromOperand = (): NormalizedSpan => normalizeShellSpan(segment, pastWhitespace(segment, redirect.operandAt));
-  switch (redirect.kind) {
-    case "file-write": {
-      const scanned = redirect.end - redirect.word.length;
-      const operand = pastWhitespace(segment, redirect.operandAt);
+  const operand = pastWhitespace(segment, redirect.operandAt);
+  return match<OutputRedirect, readonly NormalizedSpan[]>(redirect)
+    .with({ kind: "file-write" }, ({ end, word }) => {
+      const scanned = end - word.length;
       return operand === scanned
         ? [normalizeShellSpan(segment, scanned)]
         : [normalizeShellSpan(segment, operand), normalizeShellSpan(segment, scanned)];
-    }
-    case "file-dup":
-      return [normalizeShellSpan(segment, redirect.operandAt + 1)];
-    case "read-write":
-    case "stderr-discard":
-    case "missing-target":
-      return [fromOperand()];
-    case "fd-dup":
-    case "process-substitution":
-      return [];
-    default:
-      return assertNever(redirect);
-  }
+    })
+    .with({ kind: "file-dup" }, ({ operandAt }) => [normalizeShellSpan(segment, operandAt + 1)])
+    .with({ kind: P.union("read-write", "stderr-discard", "missing-target") }, () => [normalizeShellSpan(segment, operand)])
+    .with({ kind: P.union("fd-dup", "process-substitution") }, () => [])
+    .exhaustive();
 }
 
 const pastWhitespace = (text: string, start: number): number => {
   let cursor = start;
   while (cursor < text.length && /\s/.test(text[cursor] as string)) cursor += 1;
   return cursor;
-};
-
-const assertNever = (value: never): never => {
-  throw new Error(`unreachable redirect: ${JSON.stringify(value)}`);
 };
 
 /**

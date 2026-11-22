@@ -1,9 +1,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import fc from "fast-check";
-import { mkdirSync, realpathSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
 import { parseSpecCheckOutput } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import handler, { runStoreSpecCheckFindings } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import { projectSlug } from "../../src/utils/agent-transcript-path";
@@ -289,12 +288,7 @@ describe("handler reads file content (not path)", () => {
   });
 
   it("reads transcript from file path and parses JSONL content", async () => {
-    tmpDir = join(tmpdir(), `spec-check-test-${Date.now()}`);
-    mkdirSync(tmpDir, { recursive: true });
-    // macOS tmpdir() sits behind the system /var → /private/var symlink; the
-    // anchored primitives resolve the base once, so the fixture root must be
-    // canonical too.
-    tmpDir = realpathSync.native(tmpDir);
+    tmpDir = canonicalTempDir("spec-check-test-");
 
     const transcriptPath = join(tmpDir, "transcript.jsonl");
     const transcriptLine = JSON.stringify({
@@ -345,77 +339,25 @@ describe("handler reads file content (not path)", () => {
 });
 
 describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
-  async function withTaskGraphPointer<T>(
-    session: string,
-    statePath: string,
-    run: () => Promise<T>,
-  ): Promise<T> {
-    const { SUBAGENT_DIR } = await import("../../src/config");
-    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
-    writeFileSync(pointer, statePath);
-    try {
-      return await run();
-    } finally {
-      rmSync(pointer, { force: true });
-    }
-  }
   it.each(["missing", "unreadable"] as const)(
     "records exact modern Wave %s transcript capture as EVIDENCE_CAPTURE_FAILED",
     async (failureKind) => {
-      const tmpRoot = join(tmpdir(), `spec-check-${failureKind}-modern-${Date.now()}`);
-      mkdirSync(tmpRoot, { recursive: true });
-      const tmpDir = realpathSync.native(tmpRoot);
-      const statePath = join(tmpDir, "active_task_graph.json");
-      const transcriptPath = join(tmpDir, "transcript.jsonl");
-      if (failureKind === "unreadable") mkdirSync(transcriptPath);
-      const runId = parseOrchestrationRunId(`run.spec-${failureKind}-transcript`);
-      const slotId = parseSlotId(`wave-slot:spec-${failureKind}-transcript`);
-      if (!runId.ok || !slotId.ok) throw new Error("invalid transcript failure authority fixture");
-      writeFileSync(statePath, JSON.stringify({
-        spec_trace_version: 2,
-        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
-        spec_file: null, plan_file: null, current_wave: 5, tasks: [], wave_gates: {},
-        active_wave_gate: {
-          schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 5,
-          authorityDigest: "a".repeat(64), revision: 1, terminalOutcome: null,
-        },
-        wave_review_epoch: {
-          runId: runId.value, wave: 5, batchEpoch: "b".repeat(64),
-          specCheckDocuments: {
-            spec: { path: null, contentDigest: null },
-            plan: { path: null, contentDigest: null },
-          },
-          specCheckSlotAuthority: { slot_id: slotId.value, attempted: 1 },
-        },
-      }));
-      const session = `spec-check-${failureKind}-modern-${process.pid}-${Date.now()}`;
-      try {
-        await withTaskGraphPointer(session, statePath, async () => {
-          const result = await runStoreSpecCheckFindings(JSON.stringify({
-            session_id: session,
-            agent_type: "spec-check-invoker",
-            agent_transcript_path: transcriptPath,
-          }), [], {
-            runId: runId.value,
-            slotId: slotId.value,
-            attempt: 1,
-            role: "spec-check-invoker",
-          });
+      const { result, state } = await captureRegisteredSpecCheck({
+        label: `spec-${failureKind}-transcript`,
+        wave: 5,
+        extra: { spec_trace_version: 2 },
+        transcript: failureKind === "missing" ? null : "directory",
+      });
 
-          expect(result).toMatchObject({
-            kind: "passthrough",
-            systemMessage: expect.stringContaining("marking evidence_capture_failed"),
-          });
-          expect(JSON.parse(readFileSync(statePath, "utf8")).spec_check).toMatchObject({
-            wave: 5,
-            verdict: "EVIDENCE_CAPTURE_FAILED",
-            error: expect.stringMatching(/spec-check transcript is unreadable.*re-run \/wave-gate/),
-          });
-        });
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
+      expect(result).toMatchObject({
+        kind: "passthrough",
+        systemMessage: expect.stringContaining("marking evidence_capture_failed"),
+      });
+      expect(state.spec_check).toMatchObject({
+        wave: 5,
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: expect.stringMatching(/spec-check transcript is unreadable.*re-run \/wave-gate/),
+      });
     },
   );
 
@@ -455,11 +397,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
   });
 
   it("rejects absent and stale request authority on a modern Wave without changing spec evidence", async () => {
-    const tmpRoot = join(tmpdir(), `spec-check-authority-${Date.now()}`);
-    mkdirSync(tmpRoot, { recursive: true });
-    // macOS tmpdir() sits behind /var → /private/var; canonicalize the fixture
-    // root so the anchored primitives' base-resolution matches production.
-    const tmpDir = realpathSync.native(tmpRoot);
+    const tmpDir = canonicalTempDir("spec-check-authority-");
     const statePath = join(tmpDir, "active_task_graph.json");
     const runId = parseOrchestrationRunId("run.spec-authority");
     const slotId = parseSlotId("wave-slot:spec-check");
@@ -514,9 +452,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
   });
 
   it("rejects exact request evidence after the bound specification bytes change", async () => {
-    const tmpRoot = join(tmpdir(), `spec-check-byte-drift-${Date.now()}`);
-    mkdirSync(tmpRoot, { recursive: true });
-    const tmpDir = realpathSync.native(tmpRoot);
+    const tmpDir = canonicalTempDir("spec-check-byte-drift-");
     const statePath = join(tmpDir, "active_task_graph.json");
     const specPath = join(tmpDir, "spec.md");
     const planPath = join(tmpDir, "plan.md");
@@ -578,12 +514,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
   });
 
   it("rejects authority-free spec-check evidence after modern Wave authority is retired", async () => {
-    const { SUBAGENT_DIR } = await import("../../src/config");
-    const tmpRoot = join(tmpdir(), `spec-check-retired-modern-${Date.now()}`);
-    mkdirSync(tmpRoot, { recursive: true });
-    // macOS tmpdir() sits behind /var → /private/var; canonicalize the fixture
-    // root so the anchored primitives' base-resolution matches production.
-    const tmpDir = realpathSync.native(tmpRoot);
+    const tmpDir = canonicalTempDir("spec-check-retired-modern-");
     const statePath = join(tmpDir, "active_task_graph.json");
     const initial = {
       spec_trace_version: 2,
@@ -611,77 +542,24 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       }] },
     }));
     const session = `spec-check-retired-modern-${process.pid}-${Date.now()}`;
-    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
-    writeFileSync(pointer, statePath);
     try {
-      const result = await handler(JSON.stringify({
-        session_id: session,
-        agent_type: "spec-check-invoker",
-        agent_transcript_path: transcriptPath,
-      }), []);
+      await withTaskGraphPointer(session, statePath, async () => {
+        const result = await handler(JSON.stringify({
+          session_id: session,
+          agent_type: "spec-check-invoker",
+          agent_transcript_path: transcriptPath,
+        }), []);
 
-      expect(result).toMatchObject({
-        kind: "error",
-        message: expect.stringContaining("modern Wave spec-check has no current capture-correlated request authority"),
+        expect(result).toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("modern Wave spec-check has no current capture-correlated request authority"),
+        });
+        expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual(initial);
       });
-      expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual(initial);
     } finally {
-      rmSync(pointer, { force: true });
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
-
-  /**
-   * Captures a spec-check stop for `gate`'s slot over a State File holding
-   * Wave `wave` plus `extra`, from `transcript` (written when it is a string,
-   * left absent when null, a directory when "directory"). Returns the hook
-   * result, everything written to stderr, and the persisted State File.
-   */
-  async function captureRegisteredSpecCheck(input: Readonly<{
-    label: string;
-    wave: number;
-    extra?: Record<string, unknown>;
-    transcript: string | null | "directory";
-    stopFields?: Record<string, unknown>;
-    session?: string;
-  }>) {
-    const tmpDir = canonicalTempDir(`loom-${input.label}-`);
-    const statePath = join(tmpDir, "active_task_graph.json");
-    const transcriptPath = join(tmpDir, input.transcript === null ? "does-not-exist.jsonl" : "transcript.jsonl");
-    if (input.transcript === "directory") mkdirSync(transcriptPath);
-    else if (input.transcript !== null) writeFileSync(transcriptPath, input.transcript);
-    const gate = registeredSpecCheckWave(input.wave, input.label);
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: input.wave, tasks: [], wave_gates: {},
-      ...gate.fields, ...input.extra,
-    }));
-    const session = input.session ?? `${input.label}-${process.pid}-${Date.now()}`;
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      return await withTaskGraphPointer(session, statePath, async () => {
-        const result = await runStoreSpecCheckFindings(JSON.stringify({
-          session_id: session,
-          agent_type: "spec-check-invoker",
-          ...(input.stopFields ?? { agent_transcript_path: transcriptPath }),
-        }), [], gate.authority);
-        return {
-          result,
-          stderr: stderrSpy.mock.calls.map((c) => String(c[0])).join(""),
-          state: JSON.parse(readFileSync(statePath, "utf-8")),
-          session,
-        };
-      });
-    } finally {
-      stderrSpy.mockRestore();
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  }
-
-  /** One assistant transcript line carrying `text`. */
-  const textTranscript = (text: string): string =>
-    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } });
 
   it("count/findings mismatch → EVIDENCE_CAPTURE_FAILED (fail closed, mirrors the manual store-spec-check helper)", async () => {
     const { result, stderr, state } = await captureRegisteredSpecCheck({
@@ -840,9 +718,7 @@ describe("the Requirement Coverage Projection is enforced, not merely rendered",
     // default and test the opposite of what it claims.
     floor: Readonly<Record<string, unknown>> | null = { kind: "settled", count: 3 },
   ): Promise<Record<string, unknown>> {
-    const tmpRoot = join(tmpdir(), `spec-check-floor-${reported}-${Date.now()}`);
-    mkdirSync(tmpRoot, { recursive: true });
-    const tmpDir = realpathSync.native(tmpRoot);
+    const tmpDir = canonicalTempDir(`spec-check-floor-${reported}-`);
     const statePath = join(tmpDir, "active_task_graph.json");
     const specPath = join(tmpDir, "spec.md");
     writeFileSync(specPath, spec);
@@ -948,69 +824,95 @@ describe("round-6: the reported party selects no Wave", () => {
     // floor is derived from and, through reconcileWaveBlock's cause
     // attribution, the veto's target. One Wave variable feeds the stored
     // record and the block, and it is the registered epoch's.
-    const tmpRoot = join(tmpdir(), `spec-check-block-wave-${Date.now()}`);
-    mkdirSync(tmpRoot, { recursive: true });
-    const tmpDir = realpathSync.native(tmpRoot);
-    const statePath = join(tmpDir, "active_task_graph.json");
-    const gate = registeredSpecCheckWave(3, "spec-wrong-wave");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute",
-      verification_manifest: preI6DefaultVerificationManifest(),
-      phase_artifacts: {},
-      skipped_phases: [],
-      spec_file: null,
-      plan_file: null,
-      current_wave: 3, ...gate.fields,
-      tasks: [],
-      spec_check: {
-        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
+    const { result, state } = await captureRegisteredSpecCheck({
+      label: "spec-wrong-wave",
+      wave: 3,
+      extra: {
+        spec_check: {
+          wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
+          critical_findings: [], high_findings: [], medium_findings: [],
+        },
+        wave_gates: {
+          "3": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
+          "5": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
+        },
       },
-      wave_gates: {
-        "3": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
-        "5": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
-      },
-    }));
-    const transcriptPath = join(tmpDir, "transcript.jsonl");
-    writeFileSync(transcriptPath, JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: [
+      transcript: textTranscript([
         "SPEC_CHECK_WAVE: 5",
         "CRITICAL: the Agent's claimed wave must not choose the veto's target",
         "SPEC_CHECK_CRITICAL_COUNT: 1",
         "SPEC_CHECK_HIGH_COUNT: 0",
         "SPEC_CHECK_VERDICT: BLOCKED",
-      ].join("\n") }] },
-    }));
-    const session = `spec-check-block-wave-${process.pid}-${Date.now()}`;
-    try {
-      await withTaskGraphPointer(session, statePath, async () => {
-        const result = await runStoreSpecCheckFindings(JSON.stringify({
-          session_id: session,
-          agent_type: "spec-check-invoker",
-          agent_transcript_path: transcriptPath,
-        }), [], gate.authority);
-        expect(result.kind).toBe("passthrough");
+      ].join("\n")),
+    });
 
-        const state = JSON.parse(readFileSync(statePath, "utf-8"));
-        // The record files under the engine's wave (state.current_wave), not
-        // the Agent's claimed wave 5.
-        expect(state.spec_check.wave).toBe(3);
-        expect(state.spec_check).toMatchObject({
-          verdict: "EVIDENCE_CAPTURE_FAILED",
-          cause: "transcript",
-          error: expect.stringContaining("does not match protected Wave 3"),
-        });
-        // Evidence failure carries no accepted critical count, so neither Wave
-        // receives a content block; the engine-selected filing Wave remains 3.
-        expect(state.wave_gates["3"].blocked).toBe(false);
-        expect(state.wave_gates["5"].blocked).toBe(false);
-      });
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
+    expect(result.kind).toBe("passthrough");
+    // The record files under the engine's wave (state.current_wave), not
+    // the Agent's claimed wave 5.
+    expect(state.spec_check.wave).toBe(3);
+    expect(state.spec_check).toMatchObject({
+      verdict: "EVIDENCE_CAPTURE_FAILED",
+      cause: "transcript",
+      error: expect.stringContaining("does not match protected Wave 3"),
+    });
+    // Evidence failure carries no accepted critical count, so neither Wave
+    // receives a content block; the engine-selected filing Wave remains 3.
+    expect(state.wave_gates["3"].blocked).toBe(false);
+    expect(state.wave_gates["5"].blocked).toBe(false);
   });
 });
+
+/**
+ * Captures a spec-check stop for a registered Wave Gate slot over a State File
+ * holding Wave `wave` plus `extra`, from `transcript` (written when it is a
+ * string, left absent when null, a directory when "directory"). Returns the
+ * hook result, everything written to stderr, and the persisted State File.
+ */
+async function captureRegisteredSpecCheck(input: Readonly<{
+  label: string;
+  wave: number;
+  extra?: Record<string, unknown>;
+  transcript: string | null | "directory";
+  stopFields?: Record<string, unknown>;
+  session?: string;
+}>) {
+  const tmpDir = canonicalTempDir(`loom-${input.label}-`);
+  const statePath = join(tmpDir, "active_task_graph.json");
+  const transcriptPath = join(tmpDir, input.transcript === null ? "does-not-exist.jsonl" : "transcript.jsonl");
+  if (input.transcript === "directory") mkdirSync(transcriptPath);
+  else if (input.transcript !== null) writeFileSync(transcriptPath, input.transcript);
+  const gate = registeredSpecCheckWave(input.wave, input.label);
+  writeFileSync(statePath, JSON.stringify({
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+    spec_file: null, plan_file: null, current_wave: input.wave, tasks: [], wave_gates: {},
+    ...gate.fields, ...input.extra,
+  }));
+  const session = input.session ?? `${input.label}-${process.pid}-${Date.now()}`;
+  const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    return await withTaskGraphPointer(session, statePath, async () => {
+      const result = await runStoreSpecCheckFindings(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        ...(input.stopFields ?? { agent_transcript_path: transcriptPath }),
+      }), [], gate.authority);
+      return {
+        result,
+        stderr: stderrSpy.mock.calls.map((c) => String(c[0])).join(""),
+        state: JSON.parse(readFileSync(statePath, "utf-8")),
+        session,
+      };
+    });
+  } finally {
+    stderrSpy.mockRestore();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/** One assistant transcript line carrying `text`. */
+function textTranscript(text: string): string {
+  return JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } });
+}
 
 /**
  * Wave `wave` under a registered Wave Gate that issued spec-check slot

@@ -396,10 +396,13 @@ type MintedByteScope = Readonly<{ [TASK_BYTE_SCOPE_OUTCOME]: true }>;
  * `MAX_REASON_LENGTH` characters, so the receipt and the failure message
  * cannot differ by call site.
  */
-export type TaskByteScopeOutcome =
-  | (Readonly<{ kind: "accepted" }> & MintedByteScope)
-  | (Readonly<{ kind: "out-of-scope-writes"; paths: readonly [ReviewPath, ...ReviewPath[]] }> & MintedByteScope)
-  | UnavailableByteScope;
+export type TaskByteScopeOutcome = AcceptedByteScope | OutOfScopeByteScope | UnavailableByteScope;
+
+/** The byte-scope outcome of an attempt that wrote nothing outside its scope. */
+type AcceptedByteScope = Readonly<{ kind: "accepted" }> & MintedByteScope;
+
+/** The byte-scope outcome of an attempt that wrote outside its scope: those paths, sorted, each once. */
+type OutOfScopeByteScope = Readonly<{ kind: "out-of-scope-writes"; paths: readonly [ReviewPath, ...ReviewPath[]] }> & MintedByteScope;
 
 /** The byte-scope outcome of an attempt whose bytes could not be observed. */
 export type UnavailableByteScope = Readonly<{ kind: "observation-unavailable"; reason: string }> & MintedByteScope;
@@ -413,11 +416,11 @@ const DEFAULT_UNAVAILABLE_REASON = "Task-local byte observation is unavailable";
  */
 export function observedByteScope(outside: readonly ReviewPath[]): TaskByteScopeOutcome {
   const [first, ...rest] = [...new Set(outside)].sort(compareStrings);
-  const paths: readonly [ReviewPath, ...ReviewPath[]] | null = first === undefined ? null : Object.freeze([first, ...rest]);
-  const outcome: Readonly<{ kind: "accepted" }> | Readonly<{ kind: "out-of-scope-writes"; paths: readonly [ReviewPath, ...ReviewPath[]] }> =
-    paths === null ? freeze({ kind: "accepted" }) : freeze({ kind: "out-of-scope-writes", paths });
   // The brand's minting point: the paths are canonical by construction.
-  return outcome as TaskByteScopeOutcome;
+  return (first === undefined
+    ? freeze({ kind: "accepted" })
+    : freeze({ kind: "out-of-scope-writes", paths: Object.freeze<[ReviewPath, ...ReviewPath[]]>([first, ...rest]) })
+  ) as AcceptedByteScope | OutOfScopeByteScope;
 }
 
 /**

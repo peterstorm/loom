@@ -347,13 +347,31 @@ export function observeImplementationTranscript(
   if (!evidence.ok) {
     return { kind: "malformed", failureReason: `Pi transcript evidence capture failed: ${evidence.errors.join("; ")}` };
   }
-  const { writeTargets, testResult, testDiagnostics } = evidence.value;
+  const { writeTargets, unprovableWriteCalls, testResult, testDiagnostics } = evidence.value;
   return {
     kind: "accepted",
     writeTargets,
     test: testResult === null ? { kind: "missing" } : { kind: "structured", evidence: testResult },
-    log: testResult === null ? [missingStructuredEvidenceLog(taskId, testDiagnostics)] : [],
+    log: [
+      ...(testResult === null ? [missingStructuredEvidenceLog(taskId, testDiagnostics)] : []),
+      ...unprovableWriteCallLog(taskId, unprovableWriteCalls, "files_modified"),
+    ],
   };
+}
+
+/**
+ * One log line per transcript write call that names no provable target
+ * (`piUnprovableWriteCalls`): the path such a call may have written is absent
+ * from what `subject`'s settlement attributes (`attributedTo`), so the gap is
+ * named rather than silent.
+ */
+export function unprovableWriteCallLog(
+  subject: string,
+  unprovableWriteCalls: readonly string[],
+  attributedTo: string,
+): readonly string[] {
+  return unprovableWriteCalls.map((refusal) =>
+    `loom(pi): ${subject} transcript write call names no provable target (${refusal}) — not attributed to ${attributedTo}`);
 }
 
 /** The untrusted, provenance-labelled test result an implementation

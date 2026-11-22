@@ -8,6 +8,7 @@ import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completio
 import { extractTestEvidence, type TestEvidence } from "../../src/core/test-evidence";
 import type { HookResult, TaskGraph } from "../../src/types";
 import { parseTaskGraph } from "../../src/state-file-wire";
+import { StateManager } from "../../src/state-manager";
 import type { ImplementationAuthorityObservation } from "../../src/implementation-attempt-sidecar";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { ARMED_ARTIFACT, armedClaudeImplementation, writesTranscript } from "../fixtures/claude-implementation-attempt";
@@ -716,6 +717,59 @@ describe("update-task-status — transcript path resolution", () => {
     const graph = attempt.read();
     expect(graph.executing_tasks).toEqual([]);
     expect(graph.tasks[0]).toMatchObject({ status: "pending", revalidation_required: true });
+  }, 30_000);
+
+  it.each(["missing-sidecar", "malformed-sidecar", "unreadable-sidecar", "invalid-sidecar-identity"] as const)(
+    "refuses a lost %s while a Task executes and preserves the attempt",
+    async (kind) => {
+      const attempt = await armed(`lost-${kind}`);
+      const before = readFileSync(attempt.statePath);
+      const observation: ImplementationAuthorityObservation = {
+        kind: "authority-unavailable",
+        failure: { kind, message: `the sidecar is ${kind}` },
+      };
+
+      const result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: [] }, observation);
+
+      expect(result).toEqual({
+        kind: "error",
+        message: `update-task-status: ${kind}: the sidecar is ${kind}; implementation authority was preserved`,
+      });
+      // T1 still executes under its attempt: nothing was released or settled.
+      expect(readFileSync(attempt.statePath).equals(before)).toBe(true);
+      expect(attempt.read().executing_tasks).toEqual(["T1"]);
+    },
+    30_000,
+  );
+
+  it("errors without writing when the attempt's Task leaves the graph during the transcript read", async () => {
+    const attempt = await armed("task-vanished");
+    writeFileSync(attempt.transcript, writesTranscript("Implemented the thing.", [ARMED_ARTIFACT]));
+    writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
+    const before = readFileSync(attempt.statePath);
+    // The pre-transcript load sees T1 (the stale-authority check requires it);
+    // a concurrent rewrite then drops it before the second, unlocked load.
+    const load = StateManager.prototype.load;
+    let loads = 0;
+    const spy = vi.spyOn(StateManager.prototype, "load").mockImplementation(function (this: StateManager) {
+      const graph = load.call(this);
+      loads += 1;
+      return loads === 1 ? graph : { ...graph, tasks: graph.tasks.filter((task) => task.id !== "T1") };
+    });
+    let result: HookResult;
+    try {
+      result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: [] }, attempt.observation);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind === "error") {
+      expect(result.message).toContain("attempt authority names unknown task T1");
+      expect(result.message).toContain("known tasks: <none>");
+      expect(result.message).toContain("Implementation evidence was NOT stored");
+    }
+    expect(readFileSync(attempt.statePath).equals(before)).toBe(true);
   }, 30_000);
 
   /** A session whose TaskGraph holds T1 with nothing executing, and the graph's bytes before the stop. */

@@ -151,7 +151,7 @@ function asSpawnBatch(value: unknown, label: string): SpawnBatch {
     check(typeof authority.role === "string", `${label} role is missing`);
     check(typeof authority.contextDigest === "string", `${label} contextDigest is missing`);
     check(typeof request.task === "string", `${label} request task is missing`);
-    const identity = parseIssuedTaskIdentity(String(request.task));
+    const identity = parseIssuedTaskIdentity(request.task);
     check(identity.kind === "bound" && identity.requestId === authority.requestId &&
       identity.contextDigest === authority.contextDigest,
       `${label} request task's authority markers do not name its request and context: ${JSON.stringify(identity)}`);

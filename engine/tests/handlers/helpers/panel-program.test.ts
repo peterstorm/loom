@@ -1,11 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import { criterionOf, type ArchitectureCriterion } from "../../../src/core/panel-contract";
 import {
   parseArchitecturePanelJournal,
   type ArchitectureEngineOperation,
   type ArchitecturePanelJournal,
+  type ArchitectureProgramInput,
 } from "../../../src/core/panel-program";
 
 const ENGINE = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -24,6 +26,12 @@ const architectureInput = {
   candidateLenses: ["simplicity-first", "type-driven-fp"],
   judgeCriteria: ["simplicity", "pure functional core"],
 } as const;
+
+/** `architectureInput` as the journal parser returns it: each criterion an `ArchitectureCriterion`. */
+const parsedArchitectureInput: ArchitectureProgramInput = {
+  candidateLenses: architectureInput.candidateLenses,
+  judgeCriteria: [criterionOf("simplicity"), criterionOf("pure functional core")],
+};
 
 describe("the architecture panel journal", () => {
   it("reads the unversioned spelling and the explicitly tagged one alike, without rewriting either", () => {
@@ -82,6 +90,20 @@ describe("the architecture panel journal", () => {
       ok: false,
       error: "unknown architecture design lens: not-a-panel-lens",
     });
+  });
+
+  it("parses criteria through the closed judge-criterion vocabulary", () => {
+    expect(parseArchitecturePanelJournal({
+      input: { ...architectureInput, judgeCriteria: ["simplicity", "not-a-criterion", "also-not-one"] },
+      events: [],
+    })).toEqual({
+      ok: false,
+      error: "unknown architecture judge criterion: not-a-criterion",
+    });
+
+    const parsed = parseArchitecturePanelJournal({ input: architectureInput, events: [] });
+    expect(parsed).toEqual({ ok: true, value: { input: parsedArchitectureInput, events: [] } });
+    if (parsed.ok) expectTypeOf(parsed.value.input.judgeCriteria).toEqualTypeOf<readonly ArchitectureCriterion[]>();
   });
 
   it("names an unknown lens before a malformed judgeCriteria, and the input shape otherwise", () => {
@@ -224,7 +246,7 @@ describe("the architecture panel journal", () => {
 
   it("makes a foreign operation unrepresentable in types and rejects it while parsing", () => {
     const architectureJournal: ArchitecturePanelJournal = {
-      input: architectureInput,
+      input: parsedArchitectureInput,
       events: [{
         type: "engine-outcome",
         // @ts-expect-error refutation operations cannot inhabit an architecture journal

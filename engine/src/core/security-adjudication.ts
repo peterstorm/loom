@@ -107,14 +107,6 @@ export const verifierVoteShape = {
 };
 export type VerifierVote = Readonly<z.output<z.ZodObject<typeof verifierVoteShape>>>;
 
-/** One identity field of a binding, read by the identity grammar's own parser:
- *  its refusal is named by `message`, or by the parser's own message. */
-const boundBy = <T>(parse: (raw: unknown) => DomainResult<T, Readonly<{ message: string }>>, message?: string) =>
-  parsedBy((raw) => {
-    const parsed = parse(raw);
-    return parsed.ok ? parsed : failure(message ?? parsed.error.message);
-  });
-
 /**
  * Where a ballot came from, taken from AUTHORITY only (ADR-0067 D3): the
  * minted request the verifier spawn answered and the digest of its captured
@@ -133,20 +125,21 @@ const ballotBindingSchema = z
       /** The program that issues every verifier spawn a ballot may come from
        *  (owned by the orchestration contract's program vocabulary). */
       program: z.literal(SECURITY_VERIFICATION_PROGRAM, expecting(`expected ${SECURITY_VERIFICATION_PROGRAM}`)),
-      /** The verification run that issued the request. */
-      runId: boundBy(parseOrchestrationRunId),
-      requestId: boundBy(parseRequestId),
-      slotId: boundBy(parseSlotId),
+      /** The verification run that issued the request. Each identity field is
+       *  read by the identity grammar's own parser (`parsedBy`). */
+      runId: parsedBy(parseOrchestrationRunId),
+      requestId: parsedBy(parseRequestId),
+      slotId: parsedBy(parseSlotId),
       attempt: z.literal([1, 2], expecting("expected 1 or 2")),
       role: z.literal(SECURITY_VERIFIER_ROLE, expecting(`expected ${SECURITY_VERIFIER_ROLE}`)),
       /** The catalog profile the request was MINTED under. */
-      profile: boundBy(parseLlmProfileId, "expected a catalog profile").superRefine((profile, ctx) => {
+      profile: parsedBy(parseLlmProfileId, "expected a catalog profile").superRefine((profile, ctx) => {
         const problem = catalogVerifierProfileProblem(profile);
         if (problem !== null) ctx.addIssue({ code: "custom", message: problem });
       }),
       /** SHA-256 of the captured transcript bytes the verdict was admitted from
        *  (the capture receipt's digest). */
-      captureDigest: boundBy(parseArtifactDigest, "expected a sha256 capture digest"),
+      captureDigest: parsedBy(parseArtifactDigest, "expected a sha256 capture digest"),
     },
     { error: (issue) => (issue.code === "invalid_type" ? "expected the binding a verification run published" : undefined) },
   )

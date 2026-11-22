@@ -376,10 +376,10 @@ function checkExclusions(unit: Readonly<Pick<CoverageUnit, "excluded_blocks" | "
 type AttemptHistory = Readonly<{ owners: Set<string>; artifacts: Set<string> }>;
 
 /**
- * Every archived attempt is earlier than the one before it is not, runs under a
- * fresh owner, and reuses nothing an earlier attempt spent; the live attempt
- * then starts fresh: its owner and its checks belong to no archived attempt,
- * and it cites no archived artifact.
+ * Archived waves strictly increase and precede the current wave; each archived
+ * attempt runs under a fresh owner and reuses no artifact an earlier attempt
+ * spent. The live attempt then starts fresh: its owner and its checks belong to
+ * no archived attempt, and it cites no archived artifact.
  */
 function checkAttemptHistory(
   unit: Readonly<Pick<CoverageUnit, "attempts" | "wave" | "agent_id" | "local_checks">>,
@@ -455,14 +455,15 @@ function checkPlacement(units: readonly CoverageUnit[], ctx: Ctx): void {
   });
 }
 
+/** The ceiling's one refusal message: the seed, ledger and merge paths all name it. */
+const UNIT_CEILING = `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`;
+
 /**
  * A stored ledger: a top-level array of at least one unit (an empty ledger
  * would make `every(...)` claim complete coverage of nothing — the seed path
  * refuses it, so the read path must too), each unit valid in its own right and
  * placed once, in canonical order.
  */
-const UNIT_CEILING = `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`;
-
 const coverageLedgerSchema = z
   .array(coverageUnitSchema, expecting("expected a top-level array"))
   .min(1, "a run always seeds at least one unit")
@@ -499,9 +500,15 @@ export function parseLedger(raw: unknown): DomainResult<CoverageLedger, Coverage
 
 /** A unit a transition rebuilt, parsed as the unit it claims to be and named
  *  at its place in `ledger`. Only the rules the unit's type does not carry can
- *  refuse it — the wave order its history implies, the paths its checks own. */
+ *  refuse it — the wave order its history implies, the paths its checks own.
+ *  The unit's place is looked up only for a refusal: the parse is pure, so the
+ *  re-parse that paths its violations names exactly what the first one found,
+ *  and a transition over many units (deferral) scans the ledger for none. */
 function rebuiltUnit(ledger: CoverageLedger, candidate: unknown, coverageId: string): DomainResult<CoverageUnit, readonly CoverageViolation[]> {
-  return parseWire(coverageUnitSchema, candidate, `$[${ledger.findIndex((unit) => unit.coverage_id === coverageId)}]`);
+  const parsed = parseWire(coverageUnitSchema, candidate);
+  return parsed.ok
+    ? parsed
+    : parseWire(coverageUnitSchema, candidate, `$[${ledger.findIndex((unit) => unit.coverage_id === coverageId)}]`);
 }
 
 /** Canonical order: lexicographic by canonical id. Every returned ledger is
@@ -531,7 +538,7 @@ const coverageSeedSchema = z.strictObject({
   wave: z.number(expecting("expected a number")).optional(),
   status: z.enum(COVERAGE_STATUSES, expecting(`expected one of ${COVERAGE_STATUSES.join(", ")}`)).optional(),
   unresolved: stringListSchema.optional(),
-});
+}).readonly();
 export type CoverageSeed = z.output<typeof coverageSeedSchema>;
 
 const coverageSeedsSchema = z
@@ -559,10 +566,10 @@ function seedUnitAt(seed: CoverageSeed, root: string): DomainResult<CoverageUnit
   if (!isOneOf(SEEDABLE_STATUSES, status)) {
     return failure(invalid([wireViolation(wirePath(root, ["status"]), `a seeded unit may only start ${SEEDABLE_STATUSES.join(", ")}`)]));
   }
-  const refs = seed.refs;
+  const { refs } = seed;
   // A seed that names a lifecycle its refs do not carry (or carry differently)
   // would seed the lifecycle-less cell — a different cell than it named.
-  const lifecycle = seed.lifecycle !== undefined && refs.lifecycle !== seed.lifecycle
+  const lifecycleViolations = seed.lifecycle !== undefined && refs.lifecycle !== seed.lifecycle
     ? [wireViolation(wirePath(root, ["lifecycle"]), "lifecycle and canonical_refs.lifecycle disagree")]
     : [];
   const unit = parseWire(coverageUnitSchema, {
@@ -587,7 +594,7 @@ function seedUnitAt(seed: CoverageSeed, root: string): DomainResult<CoverageUnit
     result_fingerprints: [],
     unresolved: seed.unresolved ?? [],
   }, root);
-  const violations = [...lifecycle, ...(unit.ok ? [] : unit.error)];
+  const violations = [...lifecycleViolations, ...(unit.ok ? [] : unit.error)];
   return unit.ok && violations.length === 0 ? unit : failure(invalid(violations));
 }
 
@@ -747,7 +754,7 @@ export function assignUnits(
  *  required fields happen to be present, and the run would record a status the
  *  hunter never wrote. The entries of each list are judged when the unit is
  *  settled, by the ledger's own unit schema. */
-const unitResultSchema = z.strictObject({
+const unitResultShape = z.strictObject({
   coverageId: z.custom<string>((value) => isVisibleText(value), expecting("expected the canonical coverage ID")),
   agentId: z.custom<SecurityAgentId>(isSecurityAgentId, expecting("expected a catalog agent id")),
   wave: positiveIntegerSchema,
@@ -757,11 +764,12 @@ const unitResultSchema = z.strictObject({
   fingerprints: stringListSchema.optional(),
   unresolved: stringListSchema.optional(),
 });
+const unitResultSchema = unitResultShape.readonly();
 export type UnitResult = z.output<typeof unitResultSchema>;
 
 /** Exported so the docs test pins the docs to THIS list rather than to a
  *  hand-copied one. Derived from the schema. */
-export const UNIT_RESULT_KEYS: readonly string[] = unitResultSchema.keyof().options;
+export const UNIT_RESULT_KEYS: readonly string[] = unitResultShape.keyof().options;
 
 /**
  * Parse the settlement payload a hunter's parent submits.
@@ -830,19 +838,20 @@ export function recordUnitResult(
 
 /** One cell the critic says the ledger is missing, with the evidence a hunter
  *  needs to hunt it. Its paths and blocks are judged when it is seeded. */
-const coverageProposalSchema = z.strictObject({
+const coverageProposalShape = z.strictObject({
   refs: coverageRefsSchema,
   startingPaths: stringListSchema.default([]),
   ordinaryAttackClassBlock: visibleTextSchema.nullable().default(null),
   selectedCompanionBlocks: stringListSchema.default([]),
   excludedBlocks: z.array(excludedBlockSchema).readonly().default([]),
 });
+const coverageProposalSchema = coverageProposalShape.readonly();
 export type CoverageProposal = z.output<typeof coverageProposalSchema>;
 
 /** The keys one proposed unit may carry. Exported for the same reason as
  *  `UNIT_RESULT_KEYS`: a doc that names a key this list omits is an agent whose
  *  output the engine refuses. */
-export const CRITIC_PROPOSAL_KEYS: readonly string[] = coverageProposalSchema.keyof().options;
+export const CRITIC_PROPOSAL_KEYS: readonly string[] = coverageProposalShape.keyof().options;
 
 /** A coverage critic's document. Fail-closed: every key is allowlisted, the
  *  identity is required (a document the run cannot prove came from the critic
@@ -891,7 +900,7 @@ const criticMergeMapsSchema = z.object({
   reassignmentReasons: stringMapSchema,
   /** lead fingerprint → the coverage id of the unit that carries it. */
   priorLeadOwners: stringMapSchema,
-});
+}).readonly();
 export type CriticMergeMaps = z.output<typeof criticMergeMapsSchema>;
 
 /** Parse the merge maps that travel beside a critic document. */
@@ -931,10 +940,14 @@ export type CriticError =
  *   construction;
  * - `resolveLeads`: a resolved prior lead is recorded on the unit that owns it.
  *
- * Every unit a phase builds is parsed by the unit schema, each phase keeps the
- * ledger sorted with every cell once, and `acceptProposals` holds the unit
- * ceiling, so the merged ledger is one `parseLedger` accepts with no second
- * pass.
+ * Every unit a phase builds is parsed by the unit schema. The ledger-wide
+ * invariants have no single enforcement point; each phase upholds them for
+ * what it changes: `acceptProposals` sorts what it adds and holds the unit
+ * ceiling, and `replaceUnit` keeps every id and position. So the merged ledger
+ * is one `parseLedger` accepts with no second pass. Their guard is the
+ * generative test "every ledger a run of transitions produces is one
+ * parseLedger accepts" (tests/security/security-coverage.test.ts): a phase that
+ * reorders, renames or outgrows the ledger fails it.
  */
 export function mergeCritic(
   ledger: CoverageLedger,

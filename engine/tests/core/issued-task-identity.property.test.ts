@@ -4,6 +4,7 @@
  * SubagentStop, Pi's spawn admission, correlator and result paths, the issued
  * emission capability and the grandfathered-model rescue all read the markers
  * through it, so these properties are the marker contract for both harnesses.
+ * The rescue also reads the packet path through `parseIssuedContextPath`.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -11,9 +12,11 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseContextDigest, parseRequestId } from "../../src/core/orchestration-contract/identity";
 import {
+  parseIssuedContextPath,
   parseIssuedTaskIdentity,
   renderSpawnTaskText,
   type SpawnTaskFacts,
+  type TaskIdentity,
 } from "../../src/core/spawn-task-text";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 
@@ -24,7 +27,7 @@ const contextDigests = fc.stringMatching(/^[0-9a-f]{64}$/);
 /** Instruction text that makes no authority claim of its own. */
 const claimFreeLine = fc.string({ maxLength: 60 })
   .map((line) => line.replaceAll("\n", " "))
-  .filter((line) => !line.startsWith("LOOM_REQUEST_ID:") && !line.startsWith("LOOM_CONTEXT_DIGEST:"));
+  .filter((line) => !["LOOM_REQUEST_ID:", "LOOM_CONTEXT_DIGEST:", "LOOM_CONTEXT_PATH:"].some((marker) => line.startsWith(marker)));
 const instructions = fc.array(claimFreeLine, { maxLength: 4 }).map((lines) => lines.join("\n"));
 
 const factsFor = (requestId: string, contextDigest: string, instruction: string, standalone: boolean): SpawnTaskFacts => ({
@@ -142,6 +145,50 @@ describe("parseIssuedTaskIdentity", () => {
   it("ignores a marker name that is not at the start of a line, or that only shares its prefix", () => {
     expect(parseIssuedTaskIdentity("see LOOM_REQUEST_ID: req-1\nLOOM_REQUEST_IDS: x\n  LOOM_CONTEXT_DIGEST: y"))
       .toEqual({ kind: "unbound" });
+  });
+});
+
+describe("parseIssuedContextPath", () => {
+  /** A task's bound identity, through the production parser. */
+  const identityOf = (text: string): TaskIdentity => {
+    const identity = parseIssuedTaskIdentity(text);
+    if (identity.kind !== "bound") throw new Error(`task must be bound: ${JSON.stringify(identity)}`);
+    return { requestId: identity.requestId, contextDigest: identity.contextDigest };
+  };
+
+  it("round-trips the packet path renderSpawnTaskText writes for the bound identity", () => {
+    fc.assert(fc.property(renderedTask, ({ contextDigest, text }) => {
+      expect(parseIssuedContextPath(text, identityOf(text)))
+        .toEqual({ ok: true, value: `/run/dir/contexts/${contextDigest}.json` });
+    }));
+  });
+
+  it("refuses a second, different context path rather than picking either", () => {
+    fc.assert(fc.property(renderedTask, fc.stringMatching(/^\/[a-z]{1,12}$/), ({ contextDigest, text }, otherRoot) => {
+      const other = `LOOM_CONTEXT_PATH: ${otherRoot}/contexts/${contextDigest}.json`;
+      for (const task of [`${text}\n${other}`, `${other}\n${text}`]) {
+        expect(parseIssuedContextPath(task, identityOf(text)))
+          .toEqual({ ok: false, error: "task LOOM_CONTEXT_PATH marker is contradictory" });
+      }
+    }));
+  });
+
+  it("refuses a path to any packet other than the one the bound digest names", () => {
+    fc.assert(fc.property(renderedTask, contextDigests, ({ contextDigest, text }, other) => {
+      fc.pre(other !== contextDigest);
+      const rebound = identityOf(text.replace(`LOOM_CONTEXT_DIGEST: ${contextDigest}`, `LOOM_CONTEXT_DIGEST: ${other}`));
+      const parsed = parseIssuedContextPath(text, rebound);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain(`not the contexts/${other}.json its LOOM_CONTEXT_DIGEST binds`);
+    }));
+  });
+
+  it("refuses a bound task that names no context path", () => {
+    fc.assert(fc.property(renderedTask, ({ text }) => {
+      const withoutPath = text.split("\n").filter((line) => !line.startsWith("LOOM_CONTEXT_PATH:")).join("\n");
+      expect(parseIssuedContextPath(withoutPath, identityOf(text)))
+        .toEqual({ ok: false, error: "task LOOM_CONTEXT_PATH marker is absent" });
+    }));
   });
 });
 

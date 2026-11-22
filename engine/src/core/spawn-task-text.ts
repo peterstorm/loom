@@ -13,7 +13,7 @@
  */
 import { join } from "node:path";
 import { match } from "ts-pattern";
-import type { AgentRequestAuthority } from "./orchestration-contract";
+import type { AgentRequestAuthority, DomainResult } from "./orchestration-contract";
 import {
   canonicalRecord,
   parseContextDigest,
@@ -101,14 +101,16 @@ export function canonicalSpawnTaskText(rendered: string, issuedTask: string): Ca
 }
 
 /**
- * The two authority markers that bind a spawned task to its issued request
- * (ADR-0017): the request id and its Context Packet digest. They are written
- * by `renderSpawnTaskText` and read back by `parseIssuedTaskIdentity`, both in
- * this module, so the grammar has one writer and one reader.
+ * The authority markers that bind a spawned task to its issued request
+ * (ADR-0017): the request id, its Context Packet digest, and the packet's path
+ * in the run directory. They are written by `renderSpawnTaskText` and read back
+ * by `parseIssuedTaskIdentity` and `parseIssuedContextPath`, all in this
+ * module, so the grammar has one writer and one reader.
  */
 const REQUEST_ID_MARKER = "LOOM_REQUEST_ID";
 const CONTEXT_DIGEST_MARKER = "LOOM_CONTEXT_DIGEST";
-type AuthorityMarker = typeof REQUEST_ID_MARKER | typeof CONTEXT_DIGEST_MARKER;
+const CONTEXT_PATH_MARKER = "LOOM_CONTEXT_PATH";
+type AuthorityMarker = typeof REQUEST_ID_MARKER | typeof CONTEXT_DIGEST_MARKER | typeof CONTEXT_PATH_MARKER;
 
 /** The one marker-line grammar: `MARKER: value` on its own line. */
 const authorityMarkerLine = (marker: AuthorityMarker, value: string): string => `${marker}: ${value}\n`;
@@ -116,8 +118,11 @@ const authorityMarkerLine = (marker: AuthorityMarker, value: string): string => 
 /** One POSIX-shell single-quoted word. */
 const shellQuote = (text: string): string => "'" + text.replaceAll("'", "'\\''") + "'";
 
+/** Where a run directory keeps the Context Packet of `digest`, relative to it. */
+const contextPacketLeaf = (digest: string): string => join("contexts", `${digest}.json`);
+
 const contextPath = (facts: SpawnTaskFacts): string =>
-  join(facts.runDirectory, "contexts", `${facts.authority.contextDigest}.json`);
+  join(facts.runDirectory, contextPacketLeaf(facts.authority.contextDigest));
 
 /** The Context Packet reader every reviewer delivery runs; the shell verifies it exists. */
 export const contextPacketReaderPath = (packageRoot: string): string =>
@@ -239,7 +244,7 @@ export function renderSpawnTaskText(facts: SpawnTaskFacts): string {
   return (facts.standalone ? "LOOM_REVIEW_CONTEXT: standalone\n" : "") +
     authorityMarkerLine(REQUEST_ID_MARKER, authority.requestId) +
     authorityMarkerLine(CONTEXT_DIGEST_MARKER, authority.contextDigest) +
-    `LOOM_CONTEXT_PATH: ${contextPath(facts)}\n` +
+    authorityMarkerLine(CONTEXT_PATH_MARKER, contextPath(facts)) +
     requiredSkillMarker(authority.requiredSkill) +
     contextSectionDelivery(facts) +
     facts.descriptor +
@@ -320,5 +325,21 @@ export function parseIssuedTaskIdentity(taskText: string): IssuedTaskIdentity {
 }
 
 const malformedIdentity = (reason: string): IssuedTaskIdentity => canonicalRecord({ kind: "malformed" as const, reason });
+
+/**
+ * The Context Packet path a task names for its bound `identity`: exactly one
+ * `LOOM_CONTEXT_PATH` value, and one that ends in the `contexts/<digest>.json`
+ * leaf `renderSpawnTaskText` writes for that identity's digest. An absent or
+ * contradictory marker, or a path to any other packet, is refused. The path
+ * only locates the run directory; the caller still anchors it before reading.
+ */
+export function parseIssuedContextPath(taskText: string, identity: TaskIdentity): DomainResult<string, string> {
+  const marker = taskMarker(taskText.split("\n"), CONTEXT_PATH_MARKER);
+  if (marker.kind !== "bound") return { ok: false, error: `task ${CONTEXT_PATH_MARKER} marker ${markerReason(marker)}` };
+  const leaf = contextPacketLeaf(identity.contextDigest);
+  return marker.value.endsWith(`/${leaf}`)
+    ? { ok: true, value: marker.value }
+    : { ok: false, error: `task ${CONTEXT_PATH_MARKER} marker names ${marker.value}, not the ${leaf} its ${CONTEXT_DIGEST_MARKER} binds` };
+}
 
 const notCanonical = (marker: AuthorityMarker, message: string): string => `task ${marker} marker is not canonical: ${message}`;

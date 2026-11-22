@@ -9,6 +9,7 @@
 import { parseJsonl, getContentBlocks, type ContentBlock } from "./types";
 import { claudeRecordKind } from "../core/claude-record-kind";
 import { isRecord } from "../core/plain-record";
+import { parseErr, parseOk, type LineParseResult } from "../core/parse-result";
 
 function textContent(content: unknown): string[] {
   if (typeof content === "string") return [content];
@@ -46,12 +47,6 @@ export function parseTranscript(content: string): string {
   return texts.join("\n");
 }
 
-export type FirstUserPromptParse =
-  | Readonly<{ ok: true; prompt: string }>
-  | Readonly<{ ok: false; error: string }>;
-
-const promptFailure = (error: string): FirstUserPromptParse => ({ ok: false, error });
-
 function authoredPromptText(body: unknown): string | null {
   return typeof body === "string" || Array.isArray(body)
     ? textContent(body).join("\n")
@@ -61,19 +56,19 @@ function authoredPromptText(body: unknown): string | null {
 /** The first user-authored prompt only. Unlike general transcript extraction,
  * this is an attribution boundary: malformed JSON before the prompt and
  * user-role tool-result envelopes fail closed instead of being skipped. */
-export function parseFirstUserPrompt(content: string): FirstUserPromptParse {
+export function parseFirstUserPrompt(content: string): LineParseResult<string> {
   for (const [index, rawLine] of content.split("\n").entries()) {
     if (rawLine.trim() === "") continue;
     let parsed: unknown;
     try {
       parsed = JSON.parse(rawLine);
     } catch (error) {
-      return promptFailure(
+      return parseErr(
         `malformed transcript JSON before the first user prompt at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     if (!isRecord(parsed)) {
-      return promptFailure(`malformed transcript entry before the first user prompt at line ${index + 1}: expected a JSON object`);
+      return parseErr(`malformed transcript entry before the first user prompt at line ${index + 1}: expected a JSON object`);
     }
     // Only a message that is an object can carry a role; any other is no user prompt.
     const message = isRecord(parsed.message) ? parsed.message : null;
@@ -85,15 +80,15 @@ export function parseFirstUserPrompt(content: string): FirstUserPromptParse {
       typeof block === "object" && block !== null &&
       "type" in block && block.type === "tool_result"
     )) {
-      return promptFailure(`first user-role entry is a tool result, not an authored prompt, at line ${index + 1}`);
+      return parseErr(`first user-role entry is a tool result, not an authored prompt, at line ${index + 1}`);
     }
     const prompt = authoredPromptText(body);
     if (prompt === null) {
-      return promptFailure(`first Claude user prompt has unsupported content at line ${index + 1}`);
+      return parseErr(`first Claude user prompt has unsupported content at line ${index + 1}`);
     }
     return prompt.trim() === ""
-      ? promptFailure(`first user prompt is empty at line ${index + 1}`)
-      : { ok: true, prompt };
+      ? parseErr(`first user prompt is empty at line ${index + 1}`)
+      : parseOk(prompt);
   }
-  return promptFailure("transcript contains no user-authored prompt");
+  return parseErr("transcript contains no user-authored prompt");
 }

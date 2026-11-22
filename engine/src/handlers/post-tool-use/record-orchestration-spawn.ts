@@ -19,10 +19,10 @@
 import type { HookHandler, HookResult } from "../../types";
 import {
   claudeRunContext,
-  explicitClaudeRun,
   recordClaudeSpawnCorrelator,
   resolveClaudeSpawnRun,
 } from "../../orchestration/claude-run-authority";
+import { explicitRun } from "../../orchestration/session-run-bindings";
 import { parseIssuedTaskIdentity } from "../../core/spawn-task-text";
 import { subagentDir } from "../../config";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -68,7 +68,7 @@ export async function recordClaudeSpawnCorrelation(
   // work and must not be claimed by any run — but half an explicit authority
   // is still a fault, whatever the prompt carries.
   if (identity.kind === "unbound") {
-    const explicit = explicitClaudeRun(context);
+    const explicit = explicitRun(context, "claude-code");
     return explicit.ok ? { kind: "passthrough" } : { kind: "error", message: explicit.message };
   }
   if (identity.kind === "malformed") return { kind: "error", message: `Claude orchestration prompt ${identity.reason}` };

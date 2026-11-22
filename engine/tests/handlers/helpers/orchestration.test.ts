@@ -33,6 +33,8 @@ import { CURRENT_PI_CATALOG, DESKTOP_VLLM_ROUTE, type PiCatalog } from "../../..
 import { RETIRED_CLOUD_PI_BINDING, RETIRED_REFUTATION_PI_BINDING, retiredPiCatalog } from "../../fixtures/local-pi-binding";
 import { deadLoopbackPort } from "../../fixtures/dead-loopback-port";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
+import { parseOrchestrationOperation } from "../../../src/handlers/helpers/orchestration-operations";
+import { ignoredRunsRoot } from "../../fixtures/git-repository";
 import {
   replayStandaloneResultFromEvidence,
   startStandaloneFacade,
@@ -179,8 +181,10 @@ function blockedReviewTarget(
   });
 }
 
-/** The in-repository runs root `<root>/runs`, created. `repository()` gitignores
- *  `runs/`, so a Run Directory there is engine output and never Wave workspace. */
+/** The in-repository runs root `<root>/runs`, created. A `repository()` root
+ *  already ignores it through `ignoredRunsRoot`, so a Run Directory there is
+ *  engine output, never Wave workspace; any other root is not a Git
+ *  repository, so no workspace digest sees it. */
 function runsRootIn(root: string): string {
   const runsRoot = join(root, "runs");
   mkdirSync(runsRoot, { recursive: true });
@@ -213,6 +217,21 @@ function executeGraph(overrides: Record<string, unknown> = {}): Record<string, u
       { id: "T2", description: "d", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [] },
     ],
     ...overrides,
+  };
+}
+
+/** A Wave 1 execute-phase State File with no spec, plan or Wave Gate yet; `fields` adds the Tasks and overrides any default. */
+function waveGraph(fields: Record<string, unknown>): Record<string, unknown> {
+  return {
+    current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
+    current_wave: 1,
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    wave_gates: {},
+    ...fields,
   };
 }
 
@@ -738,8 +757,7 @@ describe("orchestration CLI", () => {
     git(root, ["config", "user.email", "loom@example.test"]);
     git(root, ["config", "user.name", "Loom Test"]);
     writeFileSync(join(root, "README.md"), "fixture\n");
-    // The in-repository runs root the CLI tests pass is engine output, never Wave workspace.
-    writeFileSync(join(root, ".gitignore"), "runs/\n");
+    ignoredRunsRoot(root);
     git(root, ["add", "README.md", ".gitignore"]);
     git(root, ["commit", "-qm", "initial"]);
     return root;
@@ -1765,10 +1783,9 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       tasks: [reviewedTarget("T1", proof)],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-fresh-generation");
     mkdirSync(runDir);
@@ -1817,10 +1834,9 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const task = (id: string) => reviewedTarget(id, proof, { description: `review ${id}` });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [task("T1"), task("T2")],
-    }));
+    writeFileSync(statePath, JSON.stringify(waveGraph({
+      tasks: [task("T1"), task("T2")],
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-sibling-stability");
     mkdirSync(runDir);
@@ -1864,12 +1880,11 @@ describe("orchestration CLI", () => {
       id: findingId("silent-failure-hunter-15"), agent: "silent-failure-hunter", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "current packet must finish before this finding is adjudicated",
     };
-    const graph = {
+    const graph = waveGraph({
       spec_trace_version: 2,
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: canonicalSpec(root), plan_file: null, wave_gates: {},
+      spec_file: canonicalSpec(root),
       tasks: [blockedReviewTarget("T10", proof, finding, { spec_anchors: ["FR-001", "AS-001"], spec_contributions: [] })],
-    };
+    });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
     const runsRoot = runsRootIn(root);
@@ -2038,14 +2053,13 @@ describe("orchestration CLI", () => {
       file: "src/x.ts", line: 1, claim: "a critical spec gap claim",
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       spec_trace_version: 2,
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {}, tasks: [reviewedTarget("T1", proof, {
+      spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), tasks: [reviewedTarget("T1", proof, {
         spec_anchors: ["FR-001", "AS-001"], spec_contributions: [],
         review_status: "pending", findings: [finding], critical_findings: [finding.claim],
       })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-spec-retry-epoch");
     mkdirSync(runDir);
@@ -2203,12 +2217,11 @@ describe("orchestration CLI", () => {
       file: "src/x.ts", line: 1, claim: "a critical spec gap claim",
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [reviewedTarget("T1", proof, {
+    writeFileSync(statePath, JSON.stringify(waveGraph({
+      tasks: [reviewedTarget("T1", proof, {
         review_status: "pending", findings: [finding], critical_findings: [finding.claim],
       })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-spec-retry-lost-context");
     mkdirSync(runDir);
@@ -2276,13 +2289,12 @@ describe("orchestration CLI", () => {
       "",
     ].join("\n"));
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       spec_trace_version: 2,
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: specPath, plan_file: null, wave_gates: {}, tasks: [reviewedTarget("T1", proof, {
+      spec_file: specPath, tasks: [reviewedTarget("T1", proof, {
         description: "claims an undefined Requirement", spec_anchors: ["FR-404"], spec_contributions: [],
       })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-facade-floor");
     mkdirSync(runDir);
@@ -2338,11 +2350,9 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       tasks: [reviewedTarget("T1", proof, { description: "attempt-one rejection" })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-attempt-one-rejection");
     mkdirSync(runDir);
@@ -2402,11 +2412,9 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       tasks: [reviewedTarget("T1", proof, { description: "mixed retry target" })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-mixed-retry");
     mkdirSync(runDir);
@@ -2477,9 +2485,8 @@ describe("orchestration CLI", () => {
       file: "src/x.ts", line: 3, claim: "preserve resolved finding",
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [blockedReviewTarget("T1", proof, activeFinding, {
+    writeFileSync(statePath, JSON.stringify(waveGraph({
+      tasks: [blockedReviewTarget("T1", proof, activeFinding, {
         description: "orphan recovery target", review_generation: 7,
         refuted_findings: [{
           finding: refutedFinding,
@@ -2497,7 +2504,7 @@ describe("orchestration CLI", () => {
           },
         }],
       })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const oldRun = join(runsRoot, "run.wave-orphaned");
     mkdirSync(oldRun);
@@ -2686,11 +2693,9 @@ describe("orchestration CLI", () => {
     expect(proof.state).toBe("satisfied");
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       tasks: [reviewedTarget("T1", proof, { description: "restart target" })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const previousRun = join(runsRoot, "run.wave-exhausted");
     mkdirSync(previousRun);
@@ -2940,11 +2945,9 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       tasks: [reviewedTarget("T1", proof, { description: "partial restart" })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const previousRun = join(runsRoot, "run.wave-partial-exhausted");
     mkdirSync(previousRun);
@@ -3021,11 +3024,9 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       tasks: [reviewedTarget("T1", proof, { description: "valid retry" })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const previousRun = join(runsRoot, "run.wave-valid-retry");
     mkdirSync(previousRun);
@@ -3064,11 +3065,9 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+    writeFileSync(statePath, JSON.stringify(waveGraph({
       tasks: [reviewedTarget("T1", proof, { description: "completion crash window" })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-crash-window");
     mkdirSync(runDir);
@@ -3087,9 +3086,7 @@ describe("orchestration CLI", () => {
     // Simulate the exact completion crash window: commitActiveWaveGateCompletion
     // durably wrote the retired graph with completion history, but the terminal
     // checkpoint write never happened. The run directory has NO checkpoint.
-    const crashGraph = {
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null,
+    const crashGraph = waveGraph({
       wave_gates: {
         "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
       },
@@ -3110,7 +3107,7 @@ describe("orchestration CLI", () => {
         },
         completionSuite: registered.active_wave_completion_suite,
       }],
-    };
+    });
     chmodSync(statePath, 0o644);
     writeFileSync(statePath, JSON.stringify(crashGraph, null, 2));
 
@@ -3145,12 +3142,10 @@ describe("orchestration CLI", () => {
       id: findingId("code-reviewer-7"), agent: "code-reviewer", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
-    const graph = {
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+    const graph = waveGraph({
       ...passedSpecCheckEpoch("run.wave-upheld-tally", "a".repeat(64), null),
       tasks: [blockedReviewTarget("T1", proof, finding)],
-    };
+    });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
     const runsRoot = runsRootIn(root);
@@ -3213,12 +3208,11 @@ describe("orchestration CLI", () => {
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
     const planFile = modelFreePlan(root);
-    const graph = {
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: planFile, wave_gates: {},
+    const graph = waveGraph({
+      plan_file: planFile,
       ...passedSpecCheckEpoch("run.wave-refuted-tally", "b".repeat(64), planFile),
       tasks: [blockedReviewTarget("T1", proof, finding)],
-    };
+    });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
     const runsRoot = runsRootIn(root);
@@ -3264,12 +3258,11 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "src", "x.ts"), "console.log('full-tier violation');\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     const planFile = modelFreePlan(root);
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: planFile, wave_gates: {},
+    writeFileSync(statePath, JSON.stringify(waveGraph({
+      plan_file: planFile,
       ...passedSpecCheckEpoch("run.wave-lint-block", "b".repeat(64), planFile),
       tasks: [reviewedTarget("T1", proof, { description: "lint target" })],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-lint-block");
     mkdirSync(runDir);
@@ -3663,12 +3656,11 @@ describe("orchestration CLI", () => {
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
     const planFile = modelFreePlan(root);
-    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: planFile, wave_gates: {},
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(waveGraph({
+      plan_file: planFile,
       ...passedSpecCheckEpoch("run.wave-retired-refutation", "c".repeat(64), planFile),
       tasks: [blockedReviewTarget("T1", proof, finding)],
-    }));
+    })));
     const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-retired-refutation");
     mkdirSync(runDir);
@@ -4264,11 +4256,10 @@ describe("orchestration CLI", () => {
       mkdirSync(join(root, "src"));
       writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
-      writeFileSync(statePath, JSON.stringify({
-        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-        spec_trace_version: 2, spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {},
+      writeFileSync(statePath, JSON.stringify(waveGraph({
+        spec_trace_version: 2, spec_file: canonicalSpec(root), plan_file: modelFreePlan(root),
         tasks: [reviewedTarget("T1", proof, { spec_anchors: ["FR-001", "AS-001"], spec_contributions: [] })],
-      }));
+      })));
       const runsRoot = runsRootIn(root);
       const runDir = join(runsRoot, `run.${label}`);
       mkdirSync(runDir);
@@ -4721,13 +4712,10 @@ describe("orchestration CLI", () => {
       const proof = passingWaveTaskProof();
       writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
-      writeFileSync(statePath, JSON.stringify({
-        current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-        spec_file: null, plan_file: null, wave_gates: {},
+      writeFileSync(statePath, JSON.stringify(waveGraph({
         tasks: [reviewedTarget("T1", proof, { description: "abandon stamp target" })],
-      }));
-      const runsRoot = canonicalTempDir("loom-wave-abandon-stamp-runs-");
-      cleanup.push(runsRoot);
+      })));
+      const runsRoot = runsRootIn(root);
       const runDir = join(runsRoot, "run.wave-abandon-stamp");
       mkdirSync(runDir);
       const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -4768,5 +4756,108 @@ describe("orchestration CLI", () => {
       expect(usage.stderr).toContain("inspect --runs-root <root> --run <run-directory> [--json]");
       expect(usage.stderr).toContain("abandon --runs-root <root> --run <run-directory> --reason <text>");
     });
+  });
+
+  /**
+   * ADR-0096 retired the registered panel driver: its `start architecture`,
+   * `start refutation` and `complete` entries are gone, and a Run Directory it
+   * wrote is refused by name, never driven and never reported as corrupt.
+   */
+  describe("the retired registered panel driver (ADR-0096)", () => {
+    it("refuses the retired complete operation with the usage text", async () => {
+      expect(parseOrchestrationOperation("complete")).toBeNull();
+      const root = project();
+      const refused = await runCli(
+        ["complete", "--runs-root", runsRootIn(root), "--run", "run.retired-complete", "--operation", "x"], "", root);
+
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toContain("abandon --runs-root <root> --run <run-directory> --reason <text>");
+      expect(refused.stderr).not.toMatch(/^\s+complete\b/m);
+    });
+
+    it.each(["architecture", "refutation"])("refuses the retired start %s before claiming a Run Directory", async (program) => {
+      const root = project();
+      const runsRoot = runsRootIn(root);
+      const runDir = join(runsRoot, `run.retired-${program}`);
+      const refused = await runCli(["start", program, "--runs-root", runsRoot, "--run", runDir], JSON.stringify({}), root);
+
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toMatch(/start requires .*wave-gate/);
+      expect(refused.stderr).not.toContain(program);
+      expect(existsSync(runDir)).toBe(false);
+    });
+
+    /** A Run Directory holding one reserved reviewer request and the given stored registration. */
+    async function registeredRun(runId: string, registration: unknown) {
+      const root = project();
+      const runsRoot = runsRootIn(root);
+      const runDir = join(runsRoot, runId);
+      const created = createRunDirectory(runsRoot, runDir);
+      if (!created.ok) throw new Error(created.error.message);
+      const request = {
+        runId,
+        requestId: "request:reviewer:1",
+        slotId: "slot-1",
+        program: "wave-gate",
+        role: "code-reviewer",
+        attempt: 1,
+        modelProfile: "general-review",
+        harnessBinding: { pi: RETIRED_CLOUD_PI_BINDING, claude: { harness: "claude-code", model: "sonnet" } },
+        requiredSkill: null,
+        contextDigest: "a".repeat(64),
+        outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
+      } as AgentRequestAuthority;
+      expect((await created.value.reserveRequest(request)).ok).toBe(true);
+      expect((await created.value.registerProgram(registration)).ok).toBe(true);
+      const snapshot = async () => ({
+        events: await created.value.readEvents(),
+        issued: created.value.readIssuedRequests(),
+        captured: created.value.readCapturedAttempts(),
+      });
+      return { root, runsRoot, runDir, request, before: await snapshot(), snapshot };
+    }
+
+    /** `resume` and then `submit` of the reserved request against the run, each answered. */
+    async function resumeAndSubmit(run: Awaited<ReturnType<typeof registeredRun>>) {
+      return [
+        await runCli(["resume", "--runs-root", run.runsRoot, "--run", run.runDir], "", run.root),
+        await runCli([
+          "submit", "--runs-root", run.runsRoot, "--run", run.runDir,
+          "--request", run.request.requestId, "--slot", "slot-1", "--attempt", "1",
+        ], "reviewer bytes", run.root),
+      ];
+    }
+
+    it.each(["architecture", "refutation"])(
+      "names a stored %s registration as retired on resume and submit, leaving the run untouched",
+      async (program) => {
+        const run = await registeredRun(`run.legacy-${program}`, { schemaVersion: 1, kind: program, journal: {} });
+
+        for (const refused of await resumeAndSubmit(run)) {
+          expect(refused.status).not.toBe(0);
+          expect(refused.stderr).toContain(
+            `registered orchestration program "${program}" is a legacy panel program this engine no longer drives (ADR-0096)`);
+          expect(refused.stderr).toContain("helper orchestration abandon");
+          expect(refused.stderr).not.toContain("malformed");
+        }
+        expect(await run.snapshot()).toEqual(run.before);
+      },
+      30_000,
+    );
+
+    it.each([
+      ["an unclaimed record that names no retired program", "run.foreign-registration",
+        { schemaVersion: 1, kind: "not-a-program" }, "registered orchestration program is malformed"],
+      ["a record that claims a facade program but fails its parse", "run.invalid-wave-registration",
+        { schemaVersion: 1, kind: "wave-gate", input: { wave: 0 } }, "registered orchestration program is invalid: "],
+    ] as const)("refuses %s on resume and submit, leaving the run untouched", async (_name, runId, registration, message) => {
+      const run = await registeredRun(runId, registration);
+
+      for (const refused of await resumeAndSubmit(run)) {
+        expect(refused.status).not.toBe(0);
+        expect(refused.stderr).toContain(message);
+      }
+      expect(await run.snapshot()).toEqual(run.before);
+    }, 30_000);
   });
 });

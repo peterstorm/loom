@@ -31,6 +31,7 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult as applySpecCheckPiResultWithBoundary,
+  unauthorizedImplementationOutcome,
   type TaskGraphStore,
 } from "../../../pi/subagent-result";
 import { parsePiSubagentResults, type PiSubagentResult } from "../../../pi/subagent-result-batch";
@@ -435,6 +436,30 @@ describe("applyPhaseAgentPiResult", () => {
     ]);
     expect(applied.log).toEqual([expect.stringContaining("exact Phase authority required")]);
     expect(store.current().current_phase).toBe("specify");
+  });
+
+  it("names each write call with no provable target ahead of the settlement's own log", async () => {
+    const store = fakeStore(graph({ current_phase: "architecture" }));
+
+    const applied = await applyPhaseAgentPiResult({
+      store,
+      agentType: "specify-agent",
+      completedPhase: "specify",
+      result: result({
+        agent: "specify-agent",
+        messages: [{ role: "assistant", content: [{ type: "toolCall", id: "w-unprovable", name: "write", arguments: {} }] }],
+      }),
+      now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
+    });
+
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log).toEqual([
+      "loom(pi): specify-agent transcript write call names no provable target (Write call #1: write input must " +
+        "contain a target or a non-empty edits array) — not attributed to the phase artifacts",
+      expect.stringContaining("already past"),
+    ]);
+    expect(store.current().current_phase).toBe("architecture");
   });
 });
 
@@ -1400,6 +1425,24 @@ describe("applySpecCheckPiResult", () => {
   });
 });
 
+describe("unauthorizedImplementationOutcome — pure over the executing Tasks", () => {
+  const preserved = (count: number) =>
+    `loom(pi): the child ended without exact implementation attempt authority — ${count} executing attempt(s) preserved`;
+  const nothingSettled =
+    "loom(pi): the child ended without implementation attempt authority and no Task is executing — nothing settled";
+  const unrecorded = `${nothingSettled}; its Task status was NOT recorded`;
+
+  it.each([
+    ["failed", ["T1"], { processingErrors: [preserved(1)], log: [preserved(1)] }],
+    ["completed", ["T1"], { processingErrors: [preserved(1)], log: [preserved(1)] }],
+    ["completed", ["T1", "T2"], { processingErrors: [preserved(2)], log: [preserved(2)] }],
+    ["failed", [], { processingErrors: [], log: [nothingSettled] }],
+    ["completed", [], { processingErrors: [unrecorded], log: [unrecorded] }],
+  ] as const)("a %s result with executing %j", (end, executing, expected) => {
+    expect(unauthorizedImplementationOutcome(end, "the child ended", executing)).toEqual(expected);
+  });
+});
+
 describe("applyImplementationPiResult", () => {
   /** A repository probe pointed at a root, with `isRepo` under test control. */
   const repositoryAt = (root: string, isRepo = true) => ({ root: () => root, isRepo: () => isRepo });
@@ -1820,16 +1863,16 @@ describe("applyImplementationPiResult", () => {
   });
 
   it.each([
-    ["wrong", "Task ID: T2"],
-    ["missing", "implementation completed"],
-  ] as const)("infrastructure-settles an exact reserved slot when returned Task identity is %s", async (_label, returnedTask) => {
+    ["wrong", "Task ID: T2", "T2"],
+    ["missing", "implementation completed", "missing"],
+  ] as const)("infrastructure-settles an exact reserved slot when returned Task identity is %s", async (label, returnedTask, returnedId) => {
     const modern = modernize(implementationGraph({
       file_list: [],
       verification_policy: {
         regression: { kind: "waived", reason: "documentation-only" },
         new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
       },
-    }), process.cwd(), `pi-result-task-${_label}`);
+    }), process.cwd(), `pi-result-task-${label}`);
     const store = fakeStore(modern.graph);
 
     const applied = await applyImplementationPiResult({
@@ -1845,8 +1888,48 @@ describe("applyImplementationPiResult", () => {
     });
 
     expect(applied.processingErrors).toEqual([
-      `Pi result Task identity mismatch: returned=${_label === "wrong" ? "T2" : "missing"}, reserved=T1`,
+      `Pi result Task identity mismatch: returned=${returnedId}, reserved=T1`,
     ]);
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      implementation_attempt_history: [{
+        authorityDigest: implementationAuthorityOf(modern.reservedSlot)?.authorityDigest,
+        transition: "infrastructure-blocked",
+      }],
+    });
+    expect(store.current().tasks[0]?.test_result).toBeUndefined();
+  });
+
+  // Both evidence exits under exact authority release the attempt as
+  // infrastructure-blocked and reach Pi as a processing error: a transcript
+  // that is not a Pi message array, and a write target outside the repository.
+  it.each([
+    ["malformed transcript", "not a message array", /^Pi transcript evidence capture failed: \S/],
+    ["unsafe modified path", [writeCall("../outside.ts")], /^unsafe modified-file evidence for T1: /],
+  ] as const)("infrastructure-settles an exact reserved slot on unusable evidence: %s", async (label, messages, pattern) => {
+    const modern = modernize(implementationGraph({
+      file_list: [],
+      verification_policy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    }), process.cwd(), `pi-infra-${label.replaceAll(" ", "-")}`);
+    const store = fakeStore(modern.graph);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages }),
+      reservedSlot: modern.reservedSlot,
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringMatching(pattern)]);
+    expect(applied.log).toContain(`loom(pi): ${applied.processingErrors[0]}`);
+    // The renderer adds the log prefix once; the reason carries none of its own.
+    expect(applied.log.filter((line) => line.includes("loom(pi): loom(pi)"))).toEqual([]);
     expect(store.current().executing_tasks).toEqual([]);
     expect(store.current().tasks[0]).toMatchObject({
       status: "pending",

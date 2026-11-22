@@ -326,7 +326,8 @@ describe("retireWaveReviewAuthority", () => {
 
 describe("abandonWaveGateRegistration", () => {
   const live = active(base, "run.live");
-  const input = { runsRoot: "/runs", runId: live.runId, reason: "reviewed bytes changed", supersededBy: null };
+  const input: Parameters<typeof waveGateAbandonmentFixture>[0] =
+    { runsRoot: "/runs", runId: live.runId, reason: "reviewed bytes changed", supersededBy: null };
   const abandonment = waveGateAbandonmentFixture(input);
   const withSuite = { ...withActive(live), active_wave_completion_suite: acceptedWaveCompletionSuite(live) };
 
@@ -344,11 +345,21 @@ describe("abandonWaveGateRegistration", () => {
     expect(replay.value).toEqual({ kind: "replayed", registration: stamped.active_wave_gate });
   });
 
+  it("replays a stamp that names the same successor", () => {
+    const successor = active(base, "run.next").runId;
+    const graph = withActive(active(base, "run.live", abandoned(successor)));
+    const replay = abandonWaveGateRegistration(graph, waveGateAbandonmentFixture({ ...input, supersededBy: successor }));
+    expect(replay.state).toBe(graph);
+    expect(replay.value).toEqual({ kind: "replayed", registration: graph.active_wave_gate });
+  });
+
   it.each<readonly [string, TaskGraph, Partial<typeof input>, string]>([
     ["no registration", base, {}, "registration-absent"],
     ["another runs-root", withActive(live), { runsRoot: "/other" }, "authority-mismatch"],
     ["another run", withActive(live), { runId: active(base, "run.other").runId }, "authority-mismatch"],
     ["a different abandonment", withActive(active(base, "run.live", abandoned(null))), { reason: "another story" }, "terminal-conflict"],
+    ["the same reason with another successor", withActive(active(base, "run.live", abandoned(null))),
+      { supersededBy: active(base, "run.next").runId }, "terminal-conflict"],
     ["another terminal outcome", withActive(active(base, "run.live", done("run.live"))), {}, "terminal-conflict"],
   ])("targets nothing on %s, leaving the graph itself", (_, graph, overrides, reason) => {
     const decision = abandonWaveGateRegistration(graph, waveGateAbandonmentFixture({ ...input, ...overrides }));

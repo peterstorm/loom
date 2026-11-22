@@ -69,6 +69,24 @@ function graph(attempt: ImplementationAttemptAuthority, newTestsRequired = false
   };
 }
 
+/** `graph`, with a Task whose frozen Proof owes the regression suite (new tests waived). */
+function regressionGraph(attempt: ImplementationAttemptAuthority): TaskGraph {
+  const verificationPolicy = {
+    regression: { kind: "required" as const },
+    newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+  };
+  const initial = graph(attempt);
+  return {
+    ...initial,
+    tasks: initial.tasks.map((task) => taskFixture({
+      ...task,
+      new_tests_required: undefined,
+      verification_policy: { regression: verificationPolicy.regression, new_tests: verificationPolicy.newTests },
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] }),
+    })),
+  };
+}
+
 function facts(
   transport: "Claude" | "Pi",
   attempt: ImplementationAttemptAuthority,
@@ -164,6 +182,33 @@ describe("shared exact implementation settlement shell", () => {
     const attempt = authority(`accepted-${transport}`);
     const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), ports());
     expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
+  });
+
+  it.each(TRANSPORTS)("settles %s facts that observed no test result as retry-required with test-result-missing", (transport) => {
+    const attempt = authority(`no-test-result-${transport}`);
+    const settled = settleExactImplementation(regressionGraph(attempt), { ...facts(transport, attempt), test: null }, ports());
+    expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "retry-required" } });
+    if (settled.application.kind !== "applied") return;
+    const task = settled.application.state.tasks[0];
+    expect(task?.proof).toMatchObject({ state: "failed", failures: expect.arrayContaining([{ kind: "test-result-missing" }]) });
+    expect(task?.test_result).toBeUndefined();
+    expect(settled).not.toHaveProperty("infrastructureReason");
+  });
+
+  it.each(TRANSPORTS)("keeps a stored trusted verdict when %s observed no test result", (transport) => {
+    const attempt = authority(`trusted-kept-${transport}`);
+    const initial = regressionGraph(attempt);
+    const trustedGraph: TaskGraph = {
+      ...initial,
+      tasks: initial.tasks.map((task) => taskFixture({
+        ...task, test_result: { verdict: "trusted-pass" }, test_evidence: "earlier trusted run",
+      })),
+    };
+    const settled = settleExactImplementation(trustedGraph, { ...facts(transport, attempt), test: null }, ports());
+    expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
+    if (settled.application.kind !== "applied") return;
+    expect(settled.application.state.tasks[0]?.test_result).toEqual({ verdict: "trusted-pass" });
+    expect(settled.application.state.tasks[0]?.test_evidence).toBe("earlier trusted run");
   });
 
   it.each(TRANSPORTS)("settles semantic %s failures without infrastructure relabeling", (transport) => {
@@ -277,24 +322,7 @@ describe("shared exact implementation settlement shell", () => {
       label: "pi-structured",
       provenance: "pi-structured",
     };
-    const verificationPolicy = {
-      regression: { kind: "required" as const },
-      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
-    };
-    const initial = graph(attempt);
-    const provenanceGraph: TaskGraph = {
-      ...initial,
-      tasks: initial.tasks.map((task) => taskFixture({
-        ...task,
-        new_tests_required: undefined,
-        verification_policy: {
-          regression: verificationPolicy.regression,
-          new_tests: verificationPolicy.newTests,
-        },
-        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] }),
-      })),
-    };
-    const settled = settleExactImplementation(provenanceGraph, facts("Pi", attempt, untrusted), ports());
+    const settled = settleExactImplementation(regressionGraph(attempt), facts("Pi", attempt, untrusted), ports());
     expect(settled.application.kind).toBe("applied");
     if (settled.application.kind !== "applied") return;
     expect(settled.application.state.tasks[0]?.proof).toMatchObject({

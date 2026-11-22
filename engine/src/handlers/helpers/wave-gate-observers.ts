@@ -8,6 +8,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { parsePlanModels } from "../../core/parse-plan-models";
 import type { FilePresence, PlanModelsSource } from "../../core/wave-gate-checks";
+import { describeCause } from "../../utils/describe-cause";
 
 /** Resolve the plan's executable models from state — effectful shell helper */
 export function loadPlanModelsSource(planFile: string | null | undefined): PlanModelsSource {
@@ -17,7 +18,7 @@ export function loadPlanModelsSource(planFile: string | null | undefined): PlanM
   } catch (e) {
     // Carry the cause: ENOENT (typo'd path) and EACCES (permissions) demand
     // different operator responses — a bare "unreadable" hides which.
-    return { kind: "unreadable", path: planFile, error: e instanceof Error ? e.message : String(e) };
+    return { kind: "unreadable", path: planFile, error: describeCause(e) };
   }
 }
 
@@ -31,6 +32,6 @@ export function inspectFilePresence(path: string): FilePresence {
     const code = error instanceof Error && "code" in error ? error.code : undefined;
     return code === "ENOENT"
       ? { ok: true, exists: false }
-      : { ok: false, error: error instanceof Error ? error.message : String(error) };
+      : { ok: false, error: describeCause(error) };
   }
 }

@@ -212,15 +212,16 @@ function newTestExemption(policy: VerificationPolicy): RedThenGreenExemption | n
 /**
  * The one red-then-green duty rule (INV-6), over a Task's era half already
  * decided (`taskRedThenGreenEra`; the graph's era alone at revalidation): a
- * Task owes I6 exactly when that era owes it and it must write new tests.
- * Population freezes the answer into the Task's Proof
+ * Task owes I6 exactly when that era owes it and its policy grants no
+ * new-test exemption (`newTestExemption`, the one reading of the new-test
+ * half). Population freezes the answer into the Task's Proof
  * (`deriveProofObligations`); `redThenGreenOwing` is the same rule asked of
  * the graph's scope, with the exemption that explains a not-owed answer. A
  * loaded Task's frozen Proof is then authoritative (`redThenGreenDuty`), and
  * the State File load refuses a Proof that disagrees with this rule.
  */
 export function redThenGreenRule(era: RedThenGreenEra, policy: VerificationPolicy): boolean {
-  return era === "owed-if-new-tests" && requiresNewTests(policy);
+  return era === "owed-if-new-tests" && newTestExemption(policy) === null;
 }
 
 /**
@@ -228,8 +229,8 @@ export function redThenGreenRule(era: RedThenGreenEra, policy: VerificationPolic
  * with the first exemption, era half first, when the Task owes nothing: the
  * scope rules refuse a roster by it, and the Red-Then-Green Status explains a
  * not-owed duty by its exemption. Its answer is `redThenGreenRule` over
- * `taskRedThenGreenEra`: the era half is `eraExemption` in both, and the
- * new-test half is null exactly when `requiresNewTests` holds.
+ * `taskRedThenGreenEra` by construction: both read the era half through
+ * `eraExemption` and the new-test half through `newTestExemption`.
  */
 export function redThenGreenOwing(scope: RedThenGreenScope, taskId: string, policy: VerificationPolicy): RedThenGreenOwing {
   const exemption = eraExemption(scope, taskId) ?? newTestExemption(policy);

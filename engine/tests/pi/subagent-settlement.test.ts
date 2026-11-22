@@ -239,7 +239,6 @@ describe("observeImplementationTranscript", () => {
           "no test result recorded (test-result-missing); the wave gate will reject it",
       ],
     });
-    if (observed.kind === "accepted") expect(observed.log).toHaveLength(1);
   });
 
   it("names the classified commands and verdict when a test run minted no structured evidence", () => {
@@ -259,6 +258,25 @@ describe("observeImplementationTranscript", () => {
       { role: "toolResult", toolCallId: "e", toolName: "edit", isError: true, content: [{ type: "text", text: "no match" }] },
     ], "T1", "/repo");
     expect(observed).toMatchObject({ kind: "accepted", writeTargets: ["src/a.ts", "src/b.ts", "src/c.ts"] });
+  });
+
+  it("logs each write call that names no provable target, which attributes no path", () => {
+    const observed = observeImplementationTranscript([
+      ...bashCall("bun test engine/tests/pi/subagent-settlement.test.ts", BUN_PASS),
+      { role: "assistant", content: [
+        { type: "toolCall", id: "e", name: "edit", arguments: { path: "src/a.ts" } },
+        { type: "toolCall", id: "m", name: "multi_edit", arguments: { edits: [{ path: "src/b.ts" }, {}] } },
+      ] },
+    ], "T1", "/repo");
+    expect(observed).toEqual({
+      kind: "accepted",
+      writeTargets: ["src/a.ts"],
+      test: { kind: "structured", evidence: { passed: true, evidence: expect.stringContaining("1 pass") } },
+      log: [
+        "loom(pi): T1 transcript write call names no provable target (MultiEdit call #3: write input.edits[1] " +
+          "must name one non-empty path, file_path, or filePath target) — not attributed to files_modified",
+      ],
+    });
   });
 });
 

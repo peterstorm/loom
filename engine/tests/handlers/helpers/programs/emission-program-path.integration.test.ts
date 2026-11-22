@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { git } from "../../../fixtures/git-repository";
+import { git, ignoredRunsRoot } from "../../../fixtures/git-repository";
 import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
 import { graphFixture, taskFixture, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 import { OTHER_CONTEXT_DIGEST, REVIEWER_V2 } from "../../../fixtures/issued-emission";
@@ -120,14 +120,11 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
   const root = canonicalTempDir("loom-t6-wave-wiring-");
   waveCliRoots.push(root);
   mkdirSync(join(root, "src"));
-  mkdirSync(join(root, "runs"));
+  const runsRoot = ignoredRunsRoot(root);
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
   writeFileSync(join(root, "spec.md"), waveSpecText);
   writeFileSync(join(root, "plan.md"), "# Model-free plan\n");
-  // The Run Directory lives in the repository: the completion suite's
-  // workspace digest must not see it change.
-  writeFileSync(join(root, ".gitignore"), "runs/\n");
   git(root, ["init", "-q"]);
   git(root, ["add", ".gitignore", "src/x.ts", "spec.md", "plan.md"]);
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
@@ -150,7 +147,7 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
   const parsedGraph = parseTaskGraph(graph);
   if (!parsedGraph.ok) throw new Error(`fixture task graph refused: ${parsedGraph.error}`);
   writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(parsedGraph.value));
-  return { root, runsRoot: join(root, "runs") };
+  return { root, runsRoot };
 }
 
 function standaloneEmissionProject(): { root: string; runsRoot: string } {

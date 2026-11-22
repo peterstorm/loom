@@ -471,8 +471,9 @@ export function createTaskExecutionAuthorityBatch(
 }
 
 /** A stale reservation proven by the exact attempt authority it holds now:
- *  every executing Task carries one (the State File refuses any other). */
-export type ProvenStaleReservation = Readonly<{ taskId: string; authority: ImplementationAttemptAuthority }>;
+ *  every executing Task carries one (the State File refuses any other). The
+ *  authority names its Task, so a proof cannot name two. */
+export type ProvenStaleReservation = Readonly<{ authority: ImplementationAttemptAuthority }>;
 
 /** Lift Task-id staleness into the exact reservation identities held now. */
 export function proveStaleReservations(
@@ -481,7 +482,7 @@ export function proveStaleReservations(
 ): readonly ProvenStaleReservation[] {
   return Object.freeze([...staleTaskIds].flatMap((taskId): readonly ProvenStaleReservation[] => {
     const authority = state.tasks.find((candidate) => candidate.id === taskId)?.active_implementation_attempt;
-    return authority === undefined ? [] : [Object.freeze({ taskId, authority })];
+    return authority === undefined ? [] : [Object.freeze({ authority })];
   }));
 }
 
@@ -489,10 +490,10 @@ function exactStaleTaskIds(
   state: TaskGraph,
   stale: readonly ProvenStaleReservation[],
 ): ReadonlySet<string> {
-  return new Set(stale.flatMap((proof) => {
-    const task = state.tasks.find((candidate) => candidate.id === proof.taskId);
-    return task?.active_implementation_attempt?.authorityDigest === proof.authority.authorityDigest
-      ? [proof.taskId]
+  return new Set(stale.flatMap(({ authority }) => {
+    const task = state.tasks.find((candidate) => candidate.id === authority.taskId);
+    return task?.active_implementation_attempt?.authorityDigest === authority.authorityDigest
+      ? [authority.taskId]
       : [];
   }));
 }
@@ -536,11 +537,19 @@ function reclaimTaskAttempt(
   reclaimedAt: IsoInstant,
   invalidateEvidence = false,
 ): Task {
-  const proof = stale.find((candidate) => candidate.taskId === task.id);
+  const proof = stale.find((candidate) => candidate.authority.taskId === task.id);
   if (proof === undefined) return task;
   if (task.active_implementation_attempt?.authorityDigest !== proof.authority.authorityDigest) return task;
   const receipt = createReclaimedImplementationAttemptReceipt(proof.authority, reclaimedAt);
-  if (!receipt.ok) return task;
+  // The authority came from loaded State, so it re-parses unless that State is
+  // corrupt. Returning the Task unchanged would then write it still reserved
+  // yet dropped from executing_tasks, so the whole update is refused instead.
+  if (!receipt.ok) {
+    throw new Error(
+      `Cannot reclaim the implementation attempt of ${task.id}: its held authority does not parse ` +
+      `(${receipt.error.errors.join("; ")})`,
+    );
+  }
   const history = task.implementation_attempt_history ?? [];
   const archived = history.some((candidate) => candidate.authorityDigest === proof.authority.authorityDigest)
     ? history
@@ -570,11 +579,12 @@ export function applyTaskExecutionAuthorityBatch(
   const planByTask = new Map<string, TaskExecutionAuthorityPlan>(
     plans.map((plan) => [plan.authority.taskId, plan]),
   );
-  const invalidatedTaskIds = new Set(stale.flatMap((proof) => {
-    if (!staleTaskIds.has(proof.taskId)) return [];
-    const task = state.tasks.find((candidate) => candidate.id === proof.taskId);
-    if (task === undefined || canPreserveReclaimedEvidence(task, proof, planByTask.get(proof.taskId))) return [];
-    return [proof.taskId];
+  const invalidatedTaskIds = new Set<string>(stale.flatMap((proof) => {
+    const { taskId } = proof.authority;
+    if (!staleTaskIds.has(taskId)) return [];
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (task === undefined || canPreserveReclaimedEvidence(task, proof, planByTask.get(taskId))) return [];
+    return [taskId];
   }));
   const tasks = state.tasks.map((original): Task => {
     const task = reclaimTaskAttempt(original, stale, reclaimedAt, invalidatedTaskIds.has(original.id));
@@ -638,10 +648,7 @@ export function rollbackTaskExecutionAuthorityBatch(
   authorities: readonly ImplementationAttemptAuthority[],
   rolledBackAt: IsoInstant,
 ): TaskGraph {
-  const stale = authorities.map((authority) => Object.freeze({
-    taskId: authority.taskId,
-    authority,
-  }));
+  const stale = authorities.map((authority): ProvenStaleReservation => Object.freeze({ authority }));
   const exact = exactStaleTaskIds(state, stale);
   if (exact.size === 0) return state;
   return {

@@ -16,14 +16,14 @@
  *   Task or of other bytes is stale.
  * - `TaskRecordObservation` and `TaskRecordStopVerdict`: what a stop shell
  *   observed for a record-reading arm, and what the arm decides from it.
- * - `TASK_RECORD_CHECK_DEADLINE_MS`, `TASK_RECORD_CHECK_BASH_TIMEOUT_MS` and
- *   `taskRecordAnswerLines`: the budget both helpers run under, and how both
- *   arms end their part of a block message.
+ * - `TASK_RECORD_CHECK_DEADLINE_MS`, `TASK_RECORD_CHECK_BASH_TIMEOUT_MS`,
+ *   `taskRecordAnswerLines` and `blocksRemainingLine`: the budget both helpers
+ *   run under, and how both arms end their part of a block message. The
+ *   affected check ends its part with the same `blocksRemainingLine`.
  *
  * Pure and total: no I/O, no clock, no throw.
  */
 
-import { blocksRemainingLine } from "./affected-stop-check";
 import { sha256Bytes, sha256Hex } from "./digest";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import { compareStrings } from "./ordering";
@@ -156,6 +156,10 @@ export const TASK_RECORD_CHECK_DEADLINE_MS = 480_000;
 
 /** The tool-call timeout an implementer gives that helper: the deadline, plus room to open and remove its worktrees. */
 export const TASK_RECORD_CHECK_BASH_TIMEOUT_MS = 600_000;
+
+/** The last line of every runner and record check's part of a block message. */
+export const blocksRemainingLine = (blocksRemaining: number): string =>
+  `This check blocks at most ${blocksRemaining} more time(s); after that your stop proceeds and the Wave Gate judges.`;
 
 /** How a record arm's part of a block message ends: the one command that answers it, and how many more blocks it may issue. */
 export const taskRecordAnswerLines = (command: string, blocksRemaining: number): readonly string[] => [

@@ -91,6 +91,19 @@ function observation(overrides: Record<string, unknown> = {}): Record<string, un
   };
 }
 
+/** The authored Proof, satisfied by the default observation's evidence. */
+function satisfiedProof() {
+  const parsedObservation = value(parseImplementationObservation(observation()));
+  const satisfied = evaluateProofObligations(
+    authoredProof().obligations,
+    parsedObservation.kind === "implementation-observed"
+      ? parsedObservation.evidence
+      : observedEvidence({ taskCompleted: false, filesModified: [] }),
+  );
+  if (satisfied.state !== "satisfied") throw new Error("fixture must satisfy proof");
+  return satisfied;
+}
+
 function task(
   attempt: ImplementationAttemptAuthority,
   overrides: Record<string, unknown> = {},
@@ -536,18 +549,10 @@ describe("Implementation Completion Oracle", () => {
       ACCEPTED_BYTE_SCOPE,
     ))).toEqual({ kind: "ignored", reason: "duplicate" });
 
-    const parsedObservation = value(parseImplementationObservation(observation()));
-    const satisfied = evaluateProofObligations(
-      authoredProof().obligations,
-      parsedObservation.kind === "implementation-observed"
-        ? parsedObservation.evidence
-        : observedEvidence({ taskCompleted: false, filesModified: [] }),
-    );
-    if (satisfied.state !== "satisfied") throw new Error("fixture must satisfy proof");
     expect(settledValue(settleImplementationAttempt(
       task(current, {
         status: "completed",
-        proof: satisfied,
+        proof: satisfiedProof(),
         active_implementation_attempt: undefined,
       }),
       current,
@@ -584,6 +589,53 @@ describe("Implementation Completion Oracle", () => {
     const second = settleImplementationAttempt(inputTask, attempt, attempt, inputObservation, OUT_OF_SCOPE_WRITES);
     expect(second).toEqual(first);
     expect(JSON.stringify([inputTask, attempt, inputObservation, OUT_OF_SCOPE_WRITES])).toBe(before);
+  });
+
+  it("settles several unsorted duplicate outside paths into one violation naming each path once, sorted", () => {
+    const attempt = authority();
+    const outside = ["z.ts", "a.ts", "z.ts"].map((path) => value(parseReviewPath(path)));
+    const transition = settledValue(settleImplementationAttempt(
+      task(attempt), attempt, attempt, observation(), observedByteScope(outside),
+    ));
+    expect(transition.kind).toBe("retry-required");
+    if (transition.kind === "retry-required") {
+      expect(transition.failures).toEqual([{ kind: "task-byte-scope-violation", paths: ["a.ts", "z.ts"] }]);
+    }
+  });
+
+  it("settles a blank unavailable reason as the default reason, exactly as minted", () => {
+    const attempt = authority();
+    const transition = settledValue(settleImplementationAttempt(
+      task(attempt), attempt, attempt, observation(), unavailableByteScope(""),
+    ));
+    expect(transition.kind).toBe("infrastructure-blocked");
+    if (transition.kind === "infrastructure-blocked") {
+      expect(transition.failures).toEqual([
+        { kind: "task-byte-scope-unavailable", reason: "Task-local byte observation is unavailable" },
+      ]);
+    }
+  });
+
+  it("refuses a Task whose status and Proof disagree, or whose Proof does not parse, as invalid-task", () => {
+    const attempt = authority();
+    const satisfied = satisfiedProof();
+    const settle = (overrides: Record<string, unknown>) =>
+      settleImplementationAttempt(task(attempt, overrides), attempt, attempt, observation(), ACCEPTED_BYTE_SCOPE);
+
+    for (const status of ["implemented", "completed"] as const) {
+      expect(settle({ status })).toEqual({
+        ok: false,
+        error: { kind: "invalid-task", errors: ["implementation-bearing modern Task must carry satisfied Proof"] },
+      });
+    }
+    expect(settle({ status: "failed", proof: satisfied })).toEqual({
+      ok: false,
+      error: { kind: "invalid-task", errors: ["failed Task must carry failed Proof"] },
+    });
+    expect(settle({ proof: { ...authoredProof(), state: "bogus" } })).toEqual({
+      ok: false,
+      error: { kind: "invalid-task", errors: ["proof.state must be pending, failed, or satisfied"] },
+    });
   });
 });
 

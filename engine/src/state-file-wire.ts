@@ -259,12 +259,8 @@ const WAVE_GATE_FLAGS = ["impl_complete", "reviews_complete", "blocked"] as cons
  * of that reference able to write `critical_count` back out of the
  * count/findings-length equality proven here.
  */
-function parseSpecCheckField(v: unknown):
-  | Readonly<{ ok: true; value: SpecCheck | undefined }>
-  | Readonly<{ ok: false; error: string }> {
-  if (v === undefined) return { ok: true, value: undefined };
-  const parsed = parseStoredSpecCheck(v);
-  return toParseResult(parsed);
+function parseSpecCheckField(v: unknown): ParseResult<SpecCheck | undefined> {
+  return v === undefined ? parseOk(undefined) : toParseResult(parseStoredSpecCheck(v));
 }
 
 /**
@@ -1693,14 +1689,16 @@ const taskLabel = (index: number, id: string): string => `tasks[${index}] ("${id
 /** `{ [field]: value }` for a present value, `{}` for an absent one: an absent field stays absent. */
 function present<K extends string, V>(field: K, value: V | undefined): Partial<Readonly<Record<K, V>>> {
   const absent: Partial<Readonly<Record<K, V>>> = {};
+  // Spreading the typed `absent` keeps the computed key typed as K; a bare
+  // `{ [field]: value }` widens to a string index and would need a cast.
   return value === undefined ? absent : { ...absent, [field]: value };
 }
 
+/** A stored Task's record, its id, and the diagnostic label its position and id make. */
+type StoredTaskIdentity = Readonly<{ record: Readonly<Record<string, unknown>>; id: TaskId; label: string }>;
+
 /** A stored Task's id and its position, or why the entry is no Task. */
-function parseStoredTaskIdentity(
-  raw: unknown,
-  index: number,
-): ParseResult<Readonly<{ record: Readonly<Record<string, unknown>>; id: TaskId; label: string }>> {
+function parseStoredTaskIdentity(raw: unknown, index: number): ParseResult<StoredTaskIdentity> {
   if (!isRecord(raw)) return parseErr(`tasks[${index}] must be an object`);
   const id = parseTaskIdAt(raw.id, `tasks[${index}]`);
   return id.ok ? parseOk({ record: raw, id: id.value, label: taskLabel(index, id.value) }) : id;
@@ -1722,23 +1720,37 @@ function parseStoredTaskIdentity(
  * caller can prove a Task against "either era".
  */
 export function parseStoredTask(raw: unknown, index: number, scope: RedThenGreenScope): ParseResult<ParsedTask> {
-  return parseJudgedStoredTask(raw, index, scope, readStoredTaskFindings);
+  return readStoredTask(raw, index, scope).parsed;
 }
 
 /**
- * `parseStoredTask` with the findings aggregate judged by `judgeFindings`:
- * the operator validator hands in the judgement it already made, so each
- * findings rule is evaluated once per Task.
+ * One stored Task read once: its parse, and every findings-aggregate rule's
+ * refusal. The aggregate is judged once and the parse reads that same
+ * judgement at its place in the field order.
  */
-function parseJudgedStoredTask(
-  raw: unknown,
+type StoredTaskReading = Readonly<{ parsed: ParseResult<ParsedTask>; findingsErrors: readonly string[] }>;
+
+const findingsRefusals = (findings: StoredTaskFindings): readonly string[] => findings.ok ? [] : findings.errors;
+
+function readStoredTask(raw: unknown, index: number, scope: RedThenGreenScope): StoredTaskReading {
+  const identity = parseStoredTaskIdentity(raw, index);
+  if (!identity.ok) {
+    // A non-canonical id is its own refusal; the review fields are still judged under it.
+    const findings = isRecord(raw) && typeof raw.id === "string" ? readStoredTaskFindings(raw, taskLabel(index, raw.id)) : null;
+    return { parsed: identity, findingsErrors: findings === null ? [] : findingsRefusals(findings) };
+  }
+  const findings = readStoredTaskFindings(identity.value.record, identity.value.label);
+  return { parsed: parseIdentifiedStoredTask(identity.value, index, scope, findings), findingsErrors: findingsRefusals(findings) };
+}
+
+/** `parseStoredTask` past the Task's identity, reading the findings aggregate as already judged. */
+function parseIdentifiedStoredTask(
+  identity: StoredTaskIdentity,
   index: number,
   scope: RedThenGreenScope,
-  judgeFindings: (record: Readonly<Record<string, unknown>>, label: string) => StoredTaskFindings,
+  findings: StoredTaskFindings,
 ): ParseResult<ParsedTask> {
-  const identity = parseStoredTaskIdentity(raw, index);
-  if (!identity.ok) return identity;
-  const { record: t, id, label } = identity.value;
+  const { record: t, id, label } = identity;
   const shape = parseStoredTaskShape(t, label);
   if (!shape.ok) return shape;
   const baselines = parseStoredTaskBaselines(t, label, shape.value);
@@ -1753,7 +1765,6 @@ function parseJudgedStoredTask(
   if (!lifecycle.ok) return lifecycle;
   const evidence = parseStoredTaskEvidence(t, label);
   if (!evidence.ok) return evidence;
-  const findings = judgeFindings(t, label);
   if (!findings.ok) return parseErr(findings.errors[0]);
   const hashes = parseSpecAnchorHashes(t.spec_anchor_hashes, index);
   if (!hashes.ok) return hashes;
@@ -1792,14 +1803,11 @@ function parseJudgedStoredTask(
  * validator: the one `parseStoredTask` stops at, and every findings-aggregate
  * rule's. Those rules read only the review fields, so each is reported though
  * an earlier one refused; the rest of the parse depends on what precedes it.
- * The aggregate is judged once and the parse reads that same judgement, so a
- * parse that stops at it reports its first refusal, which is listed once.
+ * A parse that stops at the aggregate reports its first refusal, which is
+ * listed once.
  */
 export function storedTaskErrors(raw: unknown, index: number, scope: RedThenGreenScope): readonly string[] {
-  // A non-canonical id is its own refusal; the review fields are still judged under it.
-  const findings = isRecord(raw) && typeof raw.id === "string" ? readStoredTaskFindings(raw, taskLabel(index, raw.id)) : null;
-  const parsed = parseJudgedStoredTask(raw, index, scope, (record, label) => findings ?? readStoredTaskFindings(record, label));
-  const findingsErrors = findings === null || findings.ok ? [] : findings.errors;
+  const { parsed, findingsErrors } = readStoredTask(raw, index, scope);
   return [...new Set([...findingsErrors, ...(parsed.ok ? [] : [parsed.error])])];
 }
 

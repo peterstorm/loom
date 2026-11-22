@@ -45,7 +45,7 @@ import {
 } from "../engine/src/handlers/helpers/exact-implementation-settlement";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
-import { parsePiMessages, piTranscriptToolCalls, piWriteTargets } from "./transcript-adapter";
+import { parsePiMessages, piTranscriptToolCalls, piUnprovableWriteCalls, piWriteTargets } from "./transcript-adapter";
 import { piSubagentFailureSignals, type PiSubagentResult } from "./subagent-result-batch";
 import { describeCause } from "./cleanup-actions";
 import {
@@ -70,6 +70,7 @@ import {
   renderReviewEvidence,
   retireCompletedImplementation,
   transcriptTextOf,
+  unprovableWriteCallLog,
   type ImplementationTranscriptObservation,
   type LockedPiSettlement,
   type LockedReviewEvidenceApplication,
@@ -127,13 +128,13 @@ type UnauthorizedImplementationEnd = "failed" | "completed";
  * stays log-only; a COMPLETED one is finished work (a duplicate or late
  * result, say, after its slot was retired) that no Task status records, so
  * it is reported to Pi as a processing error rather than passing as clean.
+ * Pure over the graph's executing Tasks, which the shell reads and passes in.
  */
-function unauthorizedImplementationOutcome(
-  store: TaskGraphStore,
+export function unauthorizedImplementationOutcome(
   end: UnauthorizedImplementationEnd,
   subject: string,
+  executing: readonly string[],
 ): PiResultOutcome {
-  const executing = store.load().executing_tasks ?? [];
   if (executing.length > 0) {
     return processingFailure(
       `loom(pi): ${subject} without exact implementation attempt authority — ` +
@@ -182,7 +183,9 @@ async function settleFailedExactImplementation(
 
 async function applyFailedImplementationResult(args: FailedImplementationArgs): Promise<PiResultOutcome> {
   const authority = implementationAuthorityOf(args.slot);
-  if (authority === null) return unauthorizedImplementationOutcome(args.store, "failed", args.failure);
+  if (authority === null) {
+    return unauthorizedImplementationOutcome("failed", args.failure, args.store.load().executing_tasks ?? []);
+  }
   if (await settleCompletedImplementation(args.store, authority)) {
     return outcome([`loom(pi): ${authority.taskId} failed after completion; retired exact completed/missing reservation`]);
   }
@@ -294,8 +297,9 @@ export async function applyFailedPiResult(args: FailedPiResultArgs): Promise<PiR
   }
 
   // The dispatcher normally settled a reserved failure through
-  // finalizeReservedImplementations first. This idempotent release keeps the
-  // applier correct in isolation without overwriting that richer proof.
+  // finalizeReservedImplementations first. Settling here is idempotent: an
+  // already-settled attempt is ignored, so the applier stays correct in
+  // isolation without overwriting that richer proof.
   if (IMPL_AGENTS.has(agentType)) {
     return applyFailedImplementationResult({ store, slot, failure, now: args.now });
   }
@@ -319,8 +323,23 @@ export async function applyFailedPiResult(args: FailedPiResultArgs): Promise<PiR
  * `filePath.includes(specDir) && endsWith("/spec.md")` here — a substring test
  * that admits `.claude/specs/../../../tmp/evil/spec.md`, which then became the
  * run's authoritative spec artifact.
+ *
+ * A transcript write call that names no provable target routes no artifact;
+ * each one is named in the outcome's log ahead of the settlement's own lines.
  */
-export async function applyPhaseAgentPiResult(args: Readonly<{
+export async function applyPhaseAgentPiResult(args: PhaseAgentPiResultArgs): Promise<PiResultOutcome> {
+  const parsed = parsePiMessages(args.result.messages);
+  if (!parsed.ok) {
+    const diagnostic = `${args.agentType} phase artifact extraction failed: ${parsed.errors.join("; ")}`;
+    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
+  }
+  const calls = piTranscriptToolCalls(parsed.value, args.phaseArtifactBaseDir);
+  const unprovable = unprovableWriteCallLog(args.agentType, piUnprovableWriteCalls(calls), "the phase artifacts");
+  const settled = await settlePiPhaseResult(args, piWriteTargets(calls));
+  return outcome([...unprovable, ...settled.log], settled.processingErrors);
+}
+
+type PhaseAgentPiResultArgs = Readonly<{
   store: TaskGraphStore;
   agentType: string;
   completedPhase: Phase;
@@ -334,13 +353,13 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
    *  `observeTaskGraphProjectBoundary(...).root`; requiring the argument makes
    *  the omission a compile error instead of a silent cross-checkout drift. */
   phaseArtifactBaseDir: string;
-}>): Promise<PiResultOutcome> {
-  const parsed = parsePiMessages(args.result.messages);
-  if (!parsed.ok) {
-    const diagnostic = `${args.agentType} phase artifact extraction failed: ${parsed.errors.join("; ")}`;
-    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
-  }
-  const writtenPaths = piWriteTargets(piTranscriptToolCalls(parsed.value, args.phaseArtifactBaseDir));
+}>;
+
+/** Route the written phase artifacts and advance the phase under the lock. */
+async function settlePiPhaseResult(
+  args: PhaseAgentPiResultArgs,
+  writtenPaths: readonly string[],
+): Promise<PiResultOutcome> {
   try {
     const observedState = args.store.load();
     const prepared = preparePiPhaseResult(
@@ -380,6 +399,7 @@ type ImplementationPiResultArgs = Readonly<{
   ledger: LedgerObservation;
 }>;
 
+/** A refused read's `message` is an infrastructure reason: the renderer adds the log prefix. */
 type ModifiedPathRead =
   | Readonly<{ ok: true; filesModified: readonly string[] }>
   | Readonly<{ ok: false; message: string }>;
@@ -399,7 +419,7 @@ function readImplementationModifiedPaths(
   } catch (error) {
     return {
       ok: false,
-      message: `loom(pi): unsafe modified-file evidence for ${taskId}: ` +
+      message: `unsafe modified-file evidence for ${taskId}: ` +
         `${describeCause(error)} — task left pending`,
     };
   }
@@ -489,7 +509,10 @@ async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Pr
 export async function applyImplementationPiResult(args: ImplementationPiResultArgs): Promise<PiResultOutcome> {
   const { reservedSlot, ...unslotted } = args;
   const authority = implementationAuthorityOf(reservedSlot);
-  if (authority === null) return unauthorizedImplementationOutcome(args.store, "completed", `${args.agentType} completed`);
+  if (authority === null) {
+    return unauthorizedImplementationOutcome(
+      "completed", `${args.agentType} completed`, args.store.load().executing_tasks ?? []);
+  }
   if (await settleCompletedImplementation(args.store, authority)) {
     return outcome([`loom(pi): ${authority.taskId} stopped; retired exact completed/missing reservation`]);
   }

@@ -17,7 +17,12 @@ import { boundedThrownCause, describeUnknown } from "../engine/src/core/orchestr
 import { emissionToolFamily, type IssuedEmissionBinding } from "../engine/src/core/emission-tool";
 import type { EmissionCallFrame } from "../engine/src/core/emission-observation";
 import { isRecord } from "../engine/src/core/plain-record";
-import { piTranscriptTool, piTranscriptToolCall, piWriteTargetPaths } from "../engine/src/core/harness-tool-call";
+import {
+  piTranscriptTool,
+  piTranscriptToolCall,
+  piWriteTargetPaths,
+  type PiWriteTargetPathsResult,
+} from "../engine/src/core/harness-tool-call";
 import type { BashToolOutcome, HarnessTool, HarnessToolCall } from "../engine/src/machine/harness-tool-call-types";
 
 export type PiContentBlock =
@@ -305,20 +310,41 @@ const requestOf = (entry: PiTranscriptToolCall): Readonly<{ tool: HarnessTool; i
   entry.kind === "finished" ? entry.call : entry;
 
 /**
- * Every path the transcript's Write, Edit and MultiEdit calls targeted, in
- * call order: each call's targets as the write guard reads them
- * (`piWriteTargetPaths`, so an `edits[]`-only multi-edit names each edit's
- * path). A call counts whether it finished, failed or never got a result —
- * the transcript is read for every file the child may have written; a call
- * whose input names no provable target names nothing.
+ * One Write, Edit or MultiEdit call of the projection, read as the write guard
+ * reads it (`piWriteTargetPaths`, so an `edits[]`-only multi-edit names each
+ * edit's path): its tool, its 1-based position among the transcript's tool
+ * calls, and its targets or the refusal naming why none is provable. A call
+ * counts whether it finished, failed or never got a result — the transcript is
+ * read for every file the child may have written.
  */
-export function piWriteTargets(calls: readonly PiTranscriptToolCall[]): readonly string[] {
-  return Object.freeze(calls.flatMap((entry) => {
+type WriteCallReading = Readonly<{ tool: HarnessTool; position: number; targets: PiWriteTargetPathsResult }>;
+
+function writeCallReadings(calls: readonly PiTranscriptToolCall[]): readonly WriteCallReading[] {
+  return calls.flatMap((entry, index) => {
     const { tool, input } = requestOf(entry);
     if (tool !== "Write" && tool !== "Edit" && tool !== "MultiEdit") return [];
-    const targets = piWriteTargetPaths(input);
-    return targets.ok ? targets.value : [];
-  }));
+    return [{ tool, position: index + 1, targets: piWriteTargetPaths(input) }];
+  });
+}
+
+/**
+ * Every path the transcript's write calls targeted, in call order
+ * (`writeCallReadings`). A call whose input names no provable target names
+ * nothing here; `piUnprovableWriteCalls` names that call instead.
+ */
+export function piWriteTargets(calls: readonly PiTranscriptToolCall[]): readonly string[] {
+  return Object.freeze(writeCallReadings(calls).flatMap(({ targets }) => targets.ok ? targets.value : []));
+}
+
+/**
+ * Every write call whose input names no provable target, in call order, as
+ * `<tool> call #<position>: <refusal>`. Such a call contributes no path to
+ * `piWriteTargets`, so a write it may still have made would go unattributed;
+ * naming it lets the settlement log show that gap.
+ */
+export function piUnprovableWriteCalls(calls: readonly PiTranscriptToolCall[]): readonly string[] {
+  return Object.freeze(writeCallReadings(calls).flatMap(({ tool, position, targets }) =>
+    targets.ok ? [] : [`${tool} call #${position}: ${targets.error}`]));
 }
 
 /** An explicit zero-failure marker from the common runner summaries. The
@@ -537,6 +563,8 @@ export function piStructuredTestResult(calls: readonly PiTranscriptToolCall[]): 
 export type PiTranscriptEvidence = Readonly<{
   /** Every path the transcript's file-tool calls targeted (`piWriteTargets`). */
   writeTargets: readonly string[];
+  /** Every write call that names no provable target (`piUnprovableWriteCalls`). */
+  unprovableWriteCalls: readonly string[];
   /** The latest attributable test run's structured verdict, or `null` when none proves one. */
   testResult: TestEvidence | null;
   /** Why the projection did, or did not, mint `testResult`. */
@@ -547,7 +575,8 @@ export type PiTranscriptEvidence = Readonly<{
  * The message-level reading of an implementation transcript, in the one
  * production order: parse the harness payload once (`parsePiMessages`),
  * project it against `cwd` (`piTranscriptToolCalls`), then fold the write
- * targets, the structured test verdict and its diagnostics from that same
+ * targets, the unprovable write calls, the structured test verdict and its
+ * diagnostics from that same
  * projection. Settlement and the evidence-classification tests both cross
  * this seam, so the order cannot drift between them.
  */
@@ -559,6 +588,7 @@ export function piTranscriptEvidence(messages: unknown, cwd: string): PiTranscri
     ok: true as const,
     value: Object.freeze({
       writeTargets: piWriteTargets(calls),
+      unprovableWriteCalls: piUnprovableWriteCalls(calls),
       testResult: piStructuredTestResult(calls),
       testDiagnostics: piStructuredTestDiagnostics(calls),
     }),

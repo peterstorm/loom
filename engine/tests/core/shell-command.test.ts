@@ -231,10 +231,12 @@ describe("readShellOperator", () => {
   it.each([
     [">& fd dup binds its &", "a 2>&1", 4, { separator: null, width: 1 }],
     [">| clobber binds its |", "a >|f", 3, { separator: null, width: 1 }],
+    ["n>| clobber binds its | after a digit", "a 2>|f", 4, { separator: null, width: 1 }],
     ["&& still separates", "a >&& b", 3, { separator: "&&", width: 2 }],
     ["|| still separates", "a >|| b", 3, { separator: "||", width: 2 }],
     ["a | after >> is a pipe (a syntax error bash runs nothing for)", "a >>| b", 4, { separator: "|", width: 1 }],
     ["a | after &> is a pipe", "a &>| b", 4, { separator: "|", width: 1 }],
+    ["a | after <> is a pipe", "a <>| b", 4, { separator: "|", width: 1 }],
   ] as const)("after an unquoted >: %s", (_name, text, index, operator) => {
     expect(operatorAfterUnquotedGt(text, index)).toEqual(operator);
   });
@@ -303,13 +305,20 @@ describe("the splitter and env-prefix strip read the one quote lexer", () => {
     }), { numRuns: 3000 });
   });
 
-  it("stripEnvPrefix returns an idempotent suffix that starts with no assignment", () => {
+  it("stripEnvPrefix returns an idempotent suffix that starts with no assignment, stripping exactly the prefix", () => {
+    const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
     fc.assert(fc.property(fc.tuple(fc.constantFrom("", "A=", "A=1 ", "B='x y' ", "C=a\\ b "), shellText), ([prefix, rest]) => {
       const segment = prefix + rest;
       const stripped = stripEnvPrefix(segment);
       expect(segment.endsWith(stripped)).toBe(true);
-      expect(stripped).not.toMatch(/^[A-Za-z_][A-Za-z0-9_]*=/);
+      expect(stripped).not.toMatch(ASSIGNMENT);
       expect(stripEnvPrefix(stripped)).toBe(stripped);
+      // The oracle: every prefix but a bare `A=` closes its value at its own
+      // unquoted, unescaped trailing space, so what is left is `rest` itself —
+      // trimmed after a stripped assignment, untouched when there was none.
+      // (A bare `A=`'s value runs on into `rest`.)
+      const expected = prefix === "" ? rest : rest.trimStart();
+      if (prefix !== "A=" && !ASSIGNMENT.test(expected)) expect(stripped).toBe(expected);
     }), { numRuns: 3000 });
   });
 });

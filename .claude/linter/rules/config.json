@@ -334,7 +334,7 @@
     },
     {
       "module": "engine/src/parsers/",
-      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins, the type barrel, ts-pattern, the two shared core vocabularies (tool-vocabulary, claude-record-kind) and the core's one JSON-object predicate (plain-record, a pure leaf with no imports) only.",
+      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins, the type barrel, ts-pattern, the two shared core vocabularies (tool-vocabulary, claude-record-kind) and the core's one JSON-object predicate (plain-record) and its single-diagnostic parse result (parse-result), both pure leaves with no imports, only.",
       "allow": [
         "./",
         "engine/src/parsers/",
@@ -343,6 +343,7 @@
         "engine/src/core/tool-vocabulary",
         "engine/src/core/claude-record-kind",
         "engine/src/core/plain-record",
+        "engine/src/core/parse-result",
         "ts-pattern"
       ],
       "deny": [
@@ -773,7 +774,6 @@
     "pi/implementation-brief-expansion.ts::triage.kind"
   ],
   "duplicateBlockBaseline": [
-    "engine/src/core/panel-program.ts::engine/src/core/panel-program.ts@4e66f2f0",
     "engine/src/handlers/helpers/programs/remediation-registration.ts::engine/src/handlers/helpers/programs/remediation-registration.ts@081d2ff1",
     "engine/src/handlers/helpers/red-then-green-status.ts::engine/src/handlers/helpers/stop-check-plan.ts@57aa1a8b",
     "engine/src/handlers/helpers/stop-check-plan.ts::engine/src/handlers/helpers/red-then-green-status.ts@57aa1a8b",
@@ -1610,7 +1610,6 @@
     "engine/src/handlers/helpers/store-review-findings.ts::handler",
     "engine/src/handlers/helpers/store-review-findings.ts::updateTaskFindings",
     "engine/src/handlers/helpers/store-spec-check.ts::runStoreSpecCheck",
-    "engine/src/handlers/helpers/store-test-evidence.ts::handler",
     "engine/src/handlers/helpers/suggest-spec-anchors.ts::handler",
     "engine/src/handlers/helpers/task-local-completion.ts::observeAvailableTaskScope",
     "engine/src/handlers/helpers/validate-model-bindings.ts::validateModelBindings",

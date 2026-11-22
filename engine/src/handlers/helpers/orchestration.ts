@@ -1493,6 +1493,25 @@ function unregisteredReviewerProblem(handle: RunDirHandle, requests: readonly Ag
   return null;
 }
 
+/** The panel programs ADR-0096 retired with their registered driver. */
+const RETIRED_PANEL_PROGRAMS: ReadonlySet<string> = new Set(["architecture", "refutation"]);
+
+/**
+ * Why a stored registration that no facade program claims cannot be driven.
+ * A Run Directory written by the retired registered panel driver still names
+ * its program: that run is well-formed but unsupported, so the refusal names
+ * the retirement and the way out (`abandon` binds without reading the
+ * registration). Any other unclaimed record is malformed.
+ */
+function unclaimedRegistrationRefusal(raw: unknown): string {
+  const kind = typeof raw === "object" && raw !== null && "kind" in raw ? raw.kind : undefined;
+  return typeof kind === "string" && RETIRED_PANEL_PROGRAMS.has(kind)
+    ? `registered orchestration program "${kind}" is a legacy panel program this engine no longer drives (ADR-0096); ` +
+      "abandon the run with `helper orchestration abandon --runs-root <root> --run <run-directory> --reason <text>` " +
+      "and start a fresh one"
+    : "registered orchestration program is malformed";
+}
+
 async function resumeOperation(args: readonly string[], emission: Emission): Promise<HookResult> {
   const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
@@ -1523,7 +1542,7 @@ async function resumeOperation(args: readonly string[], emission: Emission): Pro
       if (!driven.ok) return { kind: "error", message: driven.message };
       return emitRunAction(bound.value.handle, driven.action, emission);
     }
-    return { kind: "error", message: "registered orchestration program is malformed" };
+    return { kind: "error", message: unclaimedRegistrationRefusal(stored.value) };
   }
 
   const issued = bound.value.handle.readIssuedRequests();
@@ -1564,11 +1583,13 @@ type SlotWriteOperation = "submit" | "correlate";
 /**
  * The run's program registration as a CLI slot write sees it: none at all, or
  * the stored record's CLI-bindable facade parse, which can never be a
- * security-verification program.
+ * security-verification program. An unclaimed record carries the refusal that
+ * names it (`unclaimedRegistrationRefusal`).
  */
 type SlotWriteRegistration =
   | Readonly<{ kind: "unregistered" }>
-  | Readonly<{ kind: "stored"; facade: Exclude<CliBindableRegistrationParse, Readonly<{ kind: "native-capture-only" }>> }>;
+  | Exclude<CliBindableRegistrationParse, Readonly<{ kind: "native-capture-only" | "unclaimed" }>>
+  | Readonly<{ kind: "unclaimed"; refusal: string }>;
 
 const UNREGISTERED: SlotWriteRegistration = Object.freeze({ kind: "unregistered" });
 
@@ -1618,20 +1639,36 @@ function bindReservedRequest(
   if (reserved.program === "security-verification") return { ok: false, result: verifierSlotRefusal(operation) };
   const stored = handle.readProgramRegistration();
   if (!stored.ok) return { ok: false, result: { kind: "error", message: stored.error.message } };
-  const facade = stored.value === null ? null : parseCliBindableFacadeProgram(stored.value);
-  if (facade?.kind === "native-capture-only") return { ok: false, result: verifierSlotRefusal(operation) };
-  const registration: SlotWriteRegistration = facade === null
-    ? UNREGISTERED
-    : Object.freeze({ kind: "stored", facade });
-  return { ok: true, value: { issued: issued.value, reserved, registration } };
+  const bound = (registration: SlotWriteRegistration) =>
+    ({ ok: true as const, value: { issued: issued.value, reserved, registration } });
+  if (stored.value === null) return bound(UNREGISTERED);
+  const facade = parseCliBindableFacadeProgram(stored.value);
+  if (facade.kind === "native-capture-only") return { ok: false, result: verifierSlotRefusal(operation) };
+  return bound(facade.kind === "unclaimed"
+    ? Object.freeze({ kind: "unclaimed", refusal: unclaimedRegistrationRefusal(stored.value) })
+    : facade);
 }
+
+/**
+ * What an accepted submission drives once its bytes are captured: the run's
+ * facade program, or nothing for a run with no registration. A no-agent
+ * standalone disposition accepts no submission, so it is not a target.
+ */
+type SubmissionTarget =
+  | Readonly<{ kind: "unregistered" }>
+  | Readonly<{
+      kind: "registered";
+      program: Exclude<CliBindableFacadeProgram, Readonly<{ kind: "standalone-disposition" }>>;
+    }>;
+
+const UNREGISTERED_TARGET: SubmissionTarget = Object.freeze({ kind: "unregistered" });
 
 type SubmissionBinding = Readonly<{
   handle: RunDirHandle;
   requestId: string;
   attempt: 1 | 2;
   reserved: AgentRequestAuthority;
-  facadeRegistration: CliBindableFacadeProgram | null;
+  target: SubmissionTarget;
 }>;
 
 type SubmissionBindingResult =
@@ -1655,23 +1692,23 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
   if (reserved.slotId !== slotId || String(reserved.attempt) !== attempt) {
     return { ok: false, result: { kind: "error", message: `request ${requestId} is reserved for slot ${reserved.slotId} attempt ${reserved.attempt}, not ${slotId} attempt ${attempt}` } };
   }
-  const bindTo = (facadeRegistration: CliBindableFacadeProgram | null): SubmissionBindingResult =>
-    ({ ok: true, value: { handle: bound.value.handle, requestId, attempt: Number(attempt) as 1 | 2, reserved, facadeRegistration } });
+  const bindTo = (target: SubmissionTarget): SubmissionBindingResult =>
+    ({ ok: true, value: { handle: bound.value.handle, requestId, attempt: Number(attempt) as 1 | 2, reserved, target } });
   if (registration.kind === "unregistered") {
     const problem = unregisteredReviewerProblem(bound.value.handle, issued);
-    return problem === null ? bindTo(null) : { ok: false, result: { kind: "error", message: problem } };
+    return problem === null ? bindTo(UNREGISTERED_TARGET) : { ok: false, result: { kind: "error", message: problem } };
   }
-  const { facade } = registration;
-  if (facade.kind === "invalid") {
-    return { ok: false, result: { kind: "error", message: `registered orchestration program is invalid: ${facade.message}` } };
+  if (registration.kind === "invalid") {
+    return { ok: false, result: { kind: "error", message: `registered orchestration program is invalid: ${registration.message}` } };
   }
-  if (facade.kind === "unclaimed") {
-    return { ok: false, result: { kind: "error", message: "registered orchestration program is malformed" } };
+  if (registration.kind === "unclaimed") {
+    return { ok: false, result: { kind: "error", message: registration.refusal } };
   }
-  if (facade.program.kind === "standalone-disposition") {
+  const { program } = registration;
+  if (program.kind === "standalone-disposition") {
     return { ok: false, result: { kind: "error", message: "no-agent standalone disposition publication does not accept submissions" } };
   }
-  return bindTo(facade.program);
+  return bindTo(Object.freeze({ kind: "registered", program }));
 }
 
 type CapturedSubmission = Readonly<{ semanticRaw: string; artifact: unknown; alreadyCaptured: boolean }>;
@@ -1703,22 +1740,26 @@ async function captureSubmission(
 }
 
 async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedSubmission, emission: Emission): Promise<HookResult> {
-  const { facadeRegistration, handle, requestId, reserved } = binding;
-  if (facadeRegistration?.kind === "standalone-review") {
-    const driven = await resumeStandaloneFacade(handle, facadeRegistration);
-    return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
-  }
-  if (facadeRegistration?.kind === "wave-gate") {
-    if (reserved.program === "wave-gate") {
-      const applied = await applyWaveFacadeSubmission(handle, reserved, capture.semanticRaw);
-      if (!applied.ok) return { kind: "error", message: applied.message };
-    }
-    const driven = await resumeWaveGateFacade(handle, facadeRegistration);
-    return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
-  }
-  return printed(emission.output, capture.alreadyCaptured
+  const { target, handle, requestId, reserved } = binding;
+  const reportCaptured = (): HookResult => printed(emission.output, capture.alreadyCaptured
     ? { kind: "already-captured", requestId, slotId: reserved.slotId, attempt: reserved.attempt }
     : { kind: "captured", requestId, artifact: capture.artifact });
+  if (target.kind === "unregistered") return reportCaptured();
+  return match(target.program)
+    .with({ kind: "standalone-review" }, async (program): Promise<HookResult> => {
+      const driven = await resumeStandaloneFacade(handle, program);
+      return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
+    })
+    .with({ kind: "wave-gate" }, async (program): Promise<HookResult> => {
+      if (reserved.program === "wave-gate") {
+        const applied = await applyWaveFacadeSubmission(handle, reserved, capture.semanticRaw);
+        if (!applied.ok) return { kind: "error", message: applied.message };
+      }
+      const driven = await resumeWaveGateFacade(handle, program);
+      return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
+    })
+    .with({ kind: "remediation" }, reportCaptured)
+    .exhaustive();
 }
 
 /**
@@ -1746,7 +1787,8 @@ function submittedToolOutputs(args: readonly string[]): Readonly<{ ok: true; val
 
 /** Record the submitted attempt's read-coverage observation before its transcript, when the Run requires one. */
 async function recordSubmittedReadCoverage(binding: SubmissionBinding, toolOutputs: readonly string[] | null): Promise<string | null> {
-  if (binding.facadeRegistration?.kind !== "standalone-review" || binding.reserved.program !== "standalone-review") return null;
+  if (binding.target.kind !== "registered" || binding.target.program.kind !== "standalone-review" ||
+      binding.reserved.program !== "standalone-review") return null;
   const attempts = binding.handle.readCapturedAttempts();
   if (!attempts.ok) return attempts.error.message;
   if (attempts.value.has(captureKey(binding.reserved.slotId, binding.reserved.attempt))) return null;

@@ -181,6 +181,47 @@ describe("Task lifecycle migration", () => {
     }))).toContain(legacyRefusal("a schema-1 wave_gate_history entry (Wave 1 completed without a completion suite)"));
   });
 
+  // The legacy check runs before any document or Task parse, and takes the
+  // first shape it meets in a fixed order, so the operator is always told the
+  // one diagnostic ADR-0098 names, however else the State File is wrong.
+  const modern = (fields: Record<string, unknown> = {}) => ({ ...baseTask(), proof: pendingProof(), ...fields });
+  it.each([
+    [
+      "a legacy Task field over a malformed document field",
+      graph(modern({ new_tests_written: true }), { spec_file: 42 }),
+      'Task "T1" carrying new_tests_written',
+    ],
+    [
+      "a legacy Task field over a malformed field on the same Task",
+      graph(modern({ new_tests_written: true, status: "bogus" })),
+      'Task "T1" carrying new_tests_written',
+    ],
+    [
+      "an earlier Task's missing Proof over a later Task's legacy field",
+      graph(modern(), {
+        tasks: [{ ...baseTask(), status: "completed" }, modern({ id: "T2", legacy_execution_reservation: true })],
+      }),
+      'completed Task "T1" without a frozen proof',
+    ],
+    [
+      "an earlier Task's legacy field over a later Task's missing Proof",
+      graph(modern(), {
+        tasks: [modern({ unresolved_repository_paths: [] }), { ...baseTask(), id: "T2", status: "implemented" }],
+      }),
+      'Task "T1" carrying unresolved_repository_paths',
+    ],
+    [
+      "a missing manifest over a schema-1 wave_gate_history entry",
+      graph(modern(), {
+        verification_manifest: undefined,
+        wave_gate_history: [{ schemaVersion: 1, kind: "completed-wave-gate", wave: 1 }],
+      }),
+      "an execute-phase TaskGraph without verification_manifest",
+    ],
+  ] as const)("names %s", (_case, raw, shape) => {
+    expect(errorOf(raw)).toContain(legacyRefusal(shape));
+  });
+
   it("rejects every illegal modern status/Proof/revalidation combination", () => {
     const pending = pendingProof();
     const satisfied = evaluateProofObligations(pending.obligations, observedEvidence({
@@ -400,6 +441,19 @@ describe("Task attempt authority StateManager lockstep", () => {
       attempt_repository_baseline: repositoryBaseline,
       reserved_at: active.reservedAt,
     }, { executing_tasks: ["T1"] }))).toContain(legacyRefusal('implemented Task "T1" without a frozen proof'));
+  });
+
+  // The shape settlement used to refuse by name as `proof-unfrozen`: the load
+  // boundary now refuses it, so no settlement can be handed one.
+  it("refuses active authority on a proof-less pending Task, the shape settlement used to refuse as proof-unfrozen", () => {
+    const active = authority();
+    expect(errorOf(graph({
+      ...baseTask(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+    }, { executing_tasks: ["T1"] }))).toContain('tasks[0] ("T1"): active_implementation_attempt requires modern authored Proof');
   });
 
   it("rejects missing executing membership, baseline/digest drift, reservation-time drift, and receipt Task drift", () => {

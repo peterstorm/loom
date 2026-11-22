@@ -4,8 +4,8 @@
  *
  * Both halves were already covered separately — `tallyRefutations` and
  * `applyFindingOutcomes` in the core, `checkCriticalFindings` in the gate — and
- * they agree today. Nothing joined them. `complete-wave-gate.test.ts` contained
- * zero `refuted_findings` scenarios, so the feature's headline claim rested on
+ * they agree today. Nothing joined them. The gate-check suite (now
+ * `tests/core/wave-gate.test.ts`) contained zero `refuted_findings` scenarios, so the feature's headline claim rested on
  * two independently-correct pieces and the assumption that the derived view
  * `checkCriticalFindings` counts stays in step with the authoritative array
  * `applyFindingOutcomes` writes.

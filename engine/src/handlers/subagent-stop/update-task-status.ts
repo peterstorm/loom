@@ -120,12 +120,19 @@ export function claudeEpochLedger(
   return Object.freeze({ kind: "read", events: Object.freeze(eventsForEpoch(read.records, epochOf(agentId, agentType))) });
 }
 
-async function settleTranscriptUnavailable(
+/**
+ * Settle the attempt `authority` names with an exact non-consuming
+ * infrastructure Oracle receipt under the State File lock: the one shell for
+ * every observation this stop cannot make (transcript, project boundary,
+ * modified-file evidence). A stale or duplicate delivery is ignored and named,
+ * never reported as settled.
+ */
+async function settleInfrastructureUnavailable(
   manager: StateManager,
   authority: ImplementationAttemptAuthority,
   reason: string,
 ): Promise<HookResult> {
-  const observedAt = parseIsoInstant(new Date().toISOString(), "Claude transcript failure instant");
+  const observedAt = parseIsoInstant(new Date().toISOString(), "Claude infrastructure failure instant");
   if (!observedAt.ok) {
     return { kind: "error", message: `update-task-status: ${observedAt.error.errors.join("; ")}` };
   }
@@ -136,13 +143,13 @@ async function settleTranscriptUnavailable(
   if (settlement.kind === "error") {
     return {
       kind: "error",
-      message: `update-task-status: Oracle transcript infrastructure settlement failed: ${JSON.stringify(settlement.error)}`,
+      message: `update-task-status: Oracle infrastructure settlement failed: ${JSON.stringify(settlement.error)}`,
     };
   }
   if (settlement.kind === "ignored") {
     return {
       kind: "error",
-      message: `update-task-status: unavailable Claude transcript delivery was ignored as ${settlement.reason}; current authority was preserved`,
+      message: `update-task-status: ${reason}; the unavailable Claude delivery was ignored as ${settlement.reason}; current authority was preserved`,
     };
   }
   return {
@@ -288,7 +295,7 @@ export const runUpdateTaskStatus = async (
   // unlocatable or unreadable one becomes an infrastructure receipt.
   const transcriptPath = resolveAgentTranscriptPath(input);
   if (transcriptPath === null) {
-    return settleTranscriptUnavailable(
+    return settleInfrastructureUnavailable(
       mgr,
       authority,
       "Claude transcript unavailable: no resolvable transcript path",
@@ -299,21 +306,21 @@ export const runUpdateTaskStatus = async (
     rawTranscript = await readSettledJsonl(() => readFileSync(transcriptPath, "utf-8"));
   } catch (error) {
     const cause = error instanceof Error ? error.message : String(error);
-    return settleTranscriptUnavailable(mgr, authority, `Claude transcript unreadable: ${cause}`);
+    return settleInfrastructureUnavailable(mgr, authority, `Claude transcript unreadable: ${cause}`);
   }
   // Exact settlement cannot consume partial JSONL. Parse the complete
   // transcript before any file or test evidence extractor runs; a
   // malformed/truncated tail invalidates otherwise-valid earlier records.
   const integrity = parseCompleteClaudeJsonl(rawTranscript);
   if (integrity.kind === "malformed") {
-    return settleTranscriptUnavailable(mgr, authority, integrity.reason);
+    return settleInfrastructureUnavailable(mgr, authority, integrity.reason);
   }
   const transcriptContent = integrity.transcript;
   // A Pi session handed to this Claude reader is refused, not read as an
   // empty write set: a shrunken files_modified shrinks the Wave Gate lint set.
   const writeEvidence = parseFilesModified(transcriptContent);
   if (!writeEvidence.ok) {
-    return settleTranscriptUnavailable(mgr, authority, `Claude transcript unusable: ${writeEvidence.error}`);
+    return settleInfrastructureUnavailable(mgr, authority, `Claude transcript unusable: ${writeEvidence.error}`);
   }
   const rawFilesModified = writeEvidence.value;
   const bashTestOutput = parseBashTestOutput(transcriptContent, readPersistedOutput);
@@ -337,7 +344,7 @@ export const runUpdateTaskStatus = async (
     repositoryRoot = observeTaskGraphProjectBoundary(mgr.getPath()).root;
   } catch (error) {
     const reason = `Claude TaskGraph project boundary unavailable: ${error instanceof Error ? error.message : String(error)}`;
-    return settleTranscriptUnavailable(mgr, authority, reason);
+    return settleInfrastructureUnavailable(mgr, authority, reason);
   }
 
   let filesModified: string[];
@@ -353,29 +360,7 @@ export const runUpdateTaskStatus = async (
     // authority; clearing only executing_tasks could leave a re-executed
     // implemented Task green on evidence from before this attempt.
     const cause = error instanceof Error ? error.message : String(error);
-    const observedAt = parseIsoInstant(new Date().toISOString(), "Claude unsafe-path instant");
-    if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
-    let oracleFailure: string | null = null;
-    await mgr.update((state) => {
-      const applied = settleUnavailableImplementation(
-        state,
-        authority,
-        observedAt.value,
-        `Unsafe Claude modified-file evidence: ${cause}`,
-      );
-      if (applied.kind === "error") {
-        oracleFailure = JSON.stringify(applied.error);
-        return state;
-      }
-      return applied.state;
-    });
-    if (oracleFailure !== null) {
-      return { kind: "error", message: `update-task-status: Oracle infrastructure settlement failed: ${oracleFailure}` };
-    }
-    return {
-      kind: "error",
-      message: `update-task-status: unsafe modified-file evidence for ${taskId}: ${cause}`,
-    };
+    return settleInfrastructureUnavailable(mgr, authority, `unsafe modified-file evidence for ${taskId}: ${cause}`);
   }
 
   // Section 1: Test evidence — the agent's OWN epoch in the ledger first

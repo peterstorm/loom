@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { CODEBASE_FIT_CRITERION, criterionOf } from "../../src/core/panel-contract";
 import {
   PANEL_PROGRAM_MODEL_PROFILES,
+  describeArchitectureReplayError,
   reduceArchitectureProgram,
+  replayArchitecturePanelJournal,
   startArchitectureDispatchProgram,
   type ArchitectureEngineOperation,
+  type ArchitectureProgramInput,
   type ArchitectureProgramState,
   type HeadlessSpawnRequest,
   type InteractiveSpawnRequest,
@@ -50,10 +54,9 @@ import { createPublicationAuthorityResolver, parseOrchestrationRunId } from "../
 const { issuePanelRequests: issue, refutationPanelFixture, resolver: publicationResolver, withRewrittenPanelRegistration } =
   createPanelPublications();
 
-
-const architectureInput = {
-  candidateLenses: ["simplicity-first", "type-driven-fp"] as const,
-  judgeCriteria: ["simplicity", "pure functional core", "codebase fit + effort"] as const,
+const architectureInput: ArchitectureProgramInput = {
+  candidateLenses: ["simplicity-first", "type-driven-fp"],
+  judgeCriteria: [criterionOf("simplicity"), criterionOf("pure functional core"), criterionOf(CODEBASE_FIT_CRITERION)],
 };
 
 const spawnSucceeded = (requestId: string, attempt: 1 | 2 = 1) => ({
@@ -956,6 +959,44 @@ describe("current and historical Findings through the full persistent panel", ()
   });
 });
 
+describe("replayArchitecturePanelJournal — the journal folded through the program", () => {
+  it("replays the event prefix to the step the last event leaves", () => {
+    const replayed = replayArchitecturePanelJournal({
+      input: architectureInput,
+      events: [spawnSucceeded("architecture:candidate:2"), spawnSucceeded("architecture:candidate:1")],
+    });
+    const stepwise = value(reduceArchitectureProgram(
+      value(reduceArchitectureProgram(enterCandidates().state, spawnSucceeded("architecture:candidate:2"))).state,
+      spawnSucceeded("architecture:candidate:1"),
+    ));
+    expect(replayed).toEqual({ ok: true, value: stepwise });
+    expect(stepwise.action).toMatchObject({ type: "engine-operation", operation: "architecture-prepare-judges" });
+  });
+
+  it("refuses an input the start refuses, with the start's diagnostics one per line", () => {
+    const replayed = replayArchitecturePanelJournal({ input: { candidateLenses: [], judgeCriteria: [] }, events: [] });
+    expect(replayed).toEqual({
+      ok: false,
+      error: { kind: "start-refused", errors: ["candidate lenses must be non-empty", "judge criteria must be non-empty"] },
+    });
+    if (!replayed.ok) {
+      expect(describeArchitectureReplayError(replayed.error))
+        .toBe("candidate lenses must be non-empty\njudge criteria must be non-empty");
+    }
+  });
+
+  it("refuses at the first event the reducer refuses, naming the reducer's error", () => {
+    const duplicate = spawnSucceeded("architecture:candidate:1");
+    const replayed = replayArchitecturePanelJournal({ input: architectureInput, events: [duplicate, duplicate] });
+    const error = { kind: "duplicate-outcome", requestId: "architecture:candidate:1" } as const;
+    expect(replayed).toEqual({ ok: false, error: { kind: "event-refused", error } });
+    if (!replayed.ok) {
+      expect(describeArchitectureReplayError(replayed.error))
+        .toBe(`Panel program rejected event: ${JSON.stringify(error)}`);
+    }
+  });
+});
+
 describe("panel program construction invariants", () => {
   it("rejects empty and duplicate fan-out definitions at construction", () => {
     const empty = startArchitectureDispatchProgram({ candidateLenses: [], judgeCriteria: [] });
@@ -967,7 +1008,7 @@ describe("panel program construction invariants", () => {
 
     const duplicate = startArchitectureDispatchProgram({
       candidateLenses: ["simplicity-first", "simplicity-first"],
-      judgeCriteria: ["simplicity"],
+      judgeCriteria: [criterionOf("simplicity")],
     });
     expect(duplicate).toEqual({ ok: false, errors: ["candidate lenses must be distinct"] });
   });

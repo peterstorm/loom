@@ -29,6 +29,7 @@ import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../../sr
 import { taskFixture, observedEvidence } from "../../fixtures/task-lifecycle";
 import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
 import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { MANIFEST_ABSENT_REFUSAL } from "../../../src/core/manifested-task-graph";
 
 /**
  * The failed Proof of a no-new-tests Task over `fileList` whose attempt
@@ -153,14 +154,36 @@ function poisonedRecoveryRepository(label: string, artifact: string, declared: s
 }
 
 /**
+ * Wave 2 executing under the pre-I6 manifest, with T5 pending on an
+ * unresolved Proof over `src/a.ts`; `task` adds or overrides T5's fields.
+ */
+function wave2RecoveryGraph(task: Record<string, unknown>) {
+  return {
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+    spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
+    wave_gates: {},
+    tasks: [{
+      id: "T5", description: "implementation", agent: "code-implementer-agent",
+      wave: 2, status: "pending", proof: unresolvedProof(["src/a.ts"]), depends_on: [], new_tests_required: false,
+      file_list: ["src/a.ts"], files_modified: ["latest-only.ts"],
+      ...task,
+    }],
+  };
+}
+
+/**
  * Wave 2 after its spec-check passed and its gate completed, with T5 pending
  * on an unresolved Proof after a failed review evidence capture; `task`
  * adds or overrides T5's fields.
  */
 function gatedRecoveryGraph(task: Record<string, unknown>) {
   return {
-    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
-    spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
+    ...wave2RecoveryGraph({
+      review_status: "evidence_capture_failed",
+      review_error: "review transcript missing evidence",
+      review_evidence_failures: ["code-reviewer"],
+      ...task,
+    }),
     spec_check: {
       wave: 2, run_at: "before recovery", verdict: "PASSED",
       critical_count: 0, high_count: 0,
@@ -169,15 +192,6 @@ function gatedRecoveryGraph(task: Record<string, unknown>) {
     wave_gates: {
       "2": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
     },
-    tasks: [{
-      id: "T5", description: "implementation", agent: "code-implementer-agent",
-      wave: 2, status: "pending", proof: unresolvedProof(["src/a.ts"]), depends_on: [], new_tests_required: false,
-      review_status: "evidence_capture_failed",
-      review_error: "review transcript missing evidence",
-      review_evidence_failures: ["code-reviewer"],
-      file_list: ["src/a.ts"], files_modified: ["latest-only.ts"],
-      ...task,
-    }],
   };
 }
 
@@ -195,6 +209,20 @@ describe("historical baseline recovery CLI", () => {
     });
     expect(refusal.status).not.toBe(0);
     expect(refusal.stderr).toContain("reconcile-implementation-proof requires a git repository");
+    expect(readFileSync(statePath).equals(before)).toBe(true);
+  });
+
+  it("refuses a graph with no frozen Verification Manifest by name, leaving the State File byte-identical", () => {
+    const { root, statePath } = poisonedRecoveryRepository("loom-proof-unfrozen-", "src/a.ts", "src/a.ts");
+    const { verification_manifest: _frozen, ...unfrozen } = wave2RecoveryGraph({});
+    writeFileSync(statePath, JSON.stringify({ ...unfrozen, current_phase: "decompose" }, null, 2));
+    const before = readFileSync(statePath);
+
+    const refusal = spawnSync("bun", [CLI, "helper", "reconcile-implementation-proof", "--wave", "2"], {
+      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+    });
+    expect(refusal.status).not.toBe(0);
+    expect(refusal.stderr).toContain(`cannot reconcile: ${MANIFEST_ABSENT_REFUSAL}`);
     expect(readFileSync(statePath).equals(before)).toBe(true);
   });
 
@@ -339,26 +367,20 @@ describe("directory artifact packet recovery", () => {
   it("recovers a declared directory from the packet leaves below it", () => {
     const { root, historical, poisonedStart, packet, packetRelative, statePath } =
       poisonedRecoveryRepository("loom-proof-directory-recovery-", "src/feature/a.ts", "src/feature");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
-      wave_gates: {},
-      tasks: [{
-        id: "T5", description: "implementation", agent: "code-implementer-agent",
-        wave: 2, status: "pending", proof: unresolvedProof(["src/feature"]), depends_on: [], new_tests_required: false,
-        file_list: ["src/feature"], files_modified: ["latest-only.ts"],
-        start_sha: poisonedStart,
-        artifact_baseline: [{ artifact: "src/feature", snapshot: { kind: "missing" } }],
-        issued_review_packets: [{
-          task_id: "T5",
-          packet_id: packet.value.packetId,
-          packet_path: packetRelative,
-          base_sha: historical,
-          head_sha: poisonedStart,
-          scope: ["src/feature"],
-        }],
+    writeFileSync(statePath, JSON.stringify(wave2RecoveryGraph({
+      proof: unresolvedProof(["src/feature"]),
+      file_list: ["src/feature"],
+      start_sha: poisonedStart,
+      artifact_baseline: [{ artifact: "src/feature", snapshot: { kind: "missing" } }],
+      issued_review_packets: [{
+        task_id: "T5",
+        packet_id: packet.value.packetId,
+        packet_path: packetRelative,
+        base_sha: historical,
+        head_sha: poisonedStart,
+        scope: ["src/feature"],
       }],
-    }, null, 2));
+    }), null, 2));
 
     const recovered = spawnSync("bun", [
       CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
@@ -384,7 +406,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       failedTask(),
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
 
@@ -424,7 +446,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       withProof,
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
 
@@ -447,7 +469,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       },
       ["src/a.ts"],
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
     const newTestsWaived = reconcileTaskFromStoredEvidence(
@@ -461,7 +483,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       },
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
 
@@ -488,7 +510,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       failedTask(false),
       ["src/a.ts"],
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
 

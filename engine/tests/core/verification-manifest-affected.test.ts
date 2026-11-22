@@ -1,8 +1,8 @@
 /**
  * The verification manifest's I6/I7 half (AD-4, FR-015..FR-017): the optional
  * `affectedRunner` and `testFileSuffixes` source keys, the frozen `testFiles`
- * every freeze path carries, the digest over both, the legacy engine default
- * that keeps today's bytes for read-time fallbacks, and the affected command.
+ * every freeze path carries, the digest over both, the pre-I6 engine default
+ * that keeps today's bytes for graphs frozen with it, and the affected command.
  */
 
 import fc from "fast-check";
@@ -33,9 +33,8 @@ import type { ActiveWaveGateRegistration } from "../../src/types";
 import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
 import type { ManifestedTaskGraph } from "../../src/core/manifested-task-graph";
 
-/** The engine default's digest before this feature: every read-time fallback
- *  for a TaskGraph that carries no `verification_manifest` checks receipts
- *  stamped with it. */
+/** The pre-I6 engine default's digest: a TaskGraph frozen with that default
+ *  carries it, and its receipts are stamped with it. */
 const PRE_FEATURE_DEFAULT_DIGEST = "f151b9015dd8afd2c9ff94add17a86f6b5a9b0408931b31af70e9d4629823d6c";
 
 const ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.junit.xml";
@@ -77,7 +76,7 @@ const stored = (manifest: FrozenVerificationManifest): Record<string, unknown> =
 
 const DIGEST_MISMATCH = "frozenVerificationManifest.manifestDigest does not match its canonical authority";
 
-describe("the legacy engine default keeps today's bytes", () => {
+describe("the pre-I6 engine default keeps today's bytes", () => {
   it("FR-017: preI6DefaultVerificationManifest().manifestDigest equals the pre-feature default digest", () => {
     expect(preI6DefaultVerificationManifest().manifestDigest).toBe(PRE_FEATURE_DEFAULT_DIGEST);
     expect(stored(preI6DefaultVerificationManifest())).toEqual({
@@ -159,7 +158,7 @@ describe("wave-completion-suite-readiness under a graph frozen with the pre-feat
   const registration: ActiveWaveGateRegistration = {
     schemaVersion: 1,
     kind: "active-wave-gate",
-    runId: "run.legacy-fallback" as ActiveWaveGateRegistration["runId"],
+    runId: "run.pre-i6-default" as ActiveWaveGateRegistration["runId"],
     wave: 1,
     authorityDigest: "a".repeat(64) as ActiveWaveGateRegistration["authorityDigest"],
     revision: 0,

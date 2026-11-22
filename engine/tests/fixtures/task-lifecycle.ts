@@ -37,6 +37,7 @@ import { taskArtifactExpectation } from "../../src/core/task-artifact-expectatio
 import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy, taskVerificationPolicy } from "../../src/core/verification-policy";
 import { parseWaveGateAbandonment, type WaveGateAbandonment } from "../../src/core/wave-gate-registration";
 import { parseManifestedTaskGraph, type ManifestedTaskGraph } from "../../src/core/manifested-task-graph";
+import { isRecord } from "../../src/core/plain-record";
 
 /*
  * Protected-state builders. Each mints its value through the production
@@ -57,16 +58,13 @@ export function protectedGraphFixture(raw: unknown): TaskGraph {
   return labelledValue("protected TaskGraph", parseTaskGraph(withExecuteManifest(raw)));
 }
 
-const isGraphRecord = (raw: unknown): raw is Readonly<Record<string, unknown>> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw);
-
 /**
  * The one place a fixture graph gets its manifest: `graph` carrying the pre-I6
  * default when it is an execute-phase graph naming none, and `graph` itself
  * otherwise. Every graph builder here stamps through it.
  */
 function withExecuteManifest<G>(graph: G): G {
-  return isGraphRecord(graph) && graph.current_phase === "execute" && graph.verification_manifest === undefined
+  return isRecord(graph) && graph.current_phase === "execute" && graph.verification_manifest === undefined
     ? { ...graph, verification_manifest: preI6DefaultVerificationManifest() }
     : graph;
 }

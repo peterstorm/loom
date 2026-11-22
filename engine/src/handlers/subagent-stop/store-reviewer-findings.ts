@@ -109,7 +109,7 @@ const handler: HookHandler = async (stdin) => {
     const path = rawPath.replace(/^~/, process.env.HOME ?? "~");
     const parsedPrompt = parseFirstUserPrompt(readFileSync(path, "utf-8"));
     if (!parsedPrompt.ok) throw new Error(parsedPrompt.error);
-    trustedPrompt = parsedPrompt.prompt;
+    trustedPrompt = parsedPrompt.value;
   } catch (error) {
     const message = `cannot read trusted ${agentType} prompt (${error instanceof Error ? error.message : String(error)}) — review evidence cannot be attributed`;
     return discarded(message);

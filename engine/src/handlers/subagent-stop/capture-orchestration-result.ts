@@ -63,12 +63,11 @@ import {
 } from "../../core/claude-transcript-projection";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
-import type { BindingResult } from "../../orchestration/session-run-bindings";
+import type { BindingResult, RunLocation } from "../../orchestration/session-run-bindings";
 import {
   claudeRunContext,
   recordClaudeSpawnCorrelator,
   resolveClaudeStopRun,
-  type ClaudeRun,
   type ClaudeRunAuthority,
   type ClaudeRunContext,
 } from "../../orchestration/claude-run-authority";
@@ -206,7 +205,7 @@ function issuedEmissionVersionOf(
  * still waiting.
  */
 export type ClaudeRequestAuthority =
-  | Readonly<{ ok: true; bound: Readonly<{ request: AgentRequestAuthority; run: ClaudeRun }> | null }>
+  | Readonly<{ ok: true; bound: Readonly<{ request: AgentRequestAuthority; run: RunLocation }> | null }>
   | Readonly<{ ok: false; message: string }>;
 
 /**

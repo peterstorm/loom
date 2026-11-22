@@ -141,6 +141,19 @@ describe("resolveIssuingRun", () => {
       .toEqual({ ok: false, message: "Pi session run resolution names no issued request" });
   });
 
+  it("fails closed when one of two id-listing bindings is unreadable, in either order", () => {
+    // The unreadable run may well be the issuing one, so the readable binding
+    // beside it never resolves by elimination.
+    const broken = fakeRun("broken", [ALPHA]);
+    const valid = fakeRun("valid", [ALPHA]);
+    const issuedIdentities = (run: RunLocation): BindingResult<readonly TaskIdentity[]> =>
+      run.runDirectory === broken.binding.runDirectory ? failed("requests unreadable") : ok(valid.issued);
+    for (const order of [[broken, valid], [valid, broken]]) {
+      const twoRuns: IssuingRunReads = { bindings: () => ok(order.map(({ binding }) => binding)), issuedIdentities };
+      expect(resolveIssuingSessionBinding(twoRuns, [ALPHA], "pi")).toEqual({ ok: false, message: "requests unreadable" });
+    }
+  });
+
   it("propagates an unreadable registry or run instead of treating it as no claim", () => {
     const unreadableRegistry: IssuingRunReads = { bindings: () => failed("registry is invalid JSON"), issuedIdentities: neverRead.issuedIdentities };
     expect(resolveIssuingRun(null, unreadableRegistry, [ALPHA], "pi")).toEqual({ ok: false, message: "registry is invalid JSON" });

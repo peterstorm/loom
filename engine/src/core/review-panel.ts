@@ -251,12 +251,21 @@ export function waveFindingId(taskId: string, finding: Finding): WaveFindingId {
   return `${taskId}:${finding.id}` as WaveFindingId;
 }
 
-/** The finding set a Refutation Panel adjudicates, scoped to one wave (or the standalone subject). */
+/** A brief finding at `VERIFIED_SEVERITY`: the only severity a Refutation Panel adjudicates. */
+export type CriticalBriefFinding = BriefFinding & Readonly<{ severity: typeof VERIFIED_SEVERITY }>;
+
+const isCriticalBriefFinding = (finding: BriefFinding): finding is CriticalBriefFinding =>
+  finding.severity === VERIFIED_SEVERITY;
+
+/**
+ * The finding set a Refutation Panel adjudicates, scoped to one wave (or the
+ * standalone subject). Every finding is a `CriticalBriefFinding`, so an
+ * advisory finding cannot be written into a brief.
+ */
 export interface FindingBrief {
   readonly wave: number;
-  readonly severity: typeof VERIFIED_SEVERITY;
   readonly taskIds: readonly string[];
-  readonly findings: readonly BriefFinding[];
+  readonly findings: readonly CriticalBriefFinding[];
 }
 
 /**
@@ -277,15 +286,18 @@ export interface BriefSourceTask {
 }
 
 /** Collect the wave's verifiable findings — those at `VERIFIED_SEVERITY` — from
- *  the task graph. Pure. The brief records the severity so no reader assumes it. */
+ *  the task graph. Pure. Only a critical finding is projected, and the
+ *  projection keeps its severity, so each one types as a `CriticalBriefFinding`. */
 export function buildFindingBrief(wave: number, tasks: readonly BriefSourceTask[]): FindingBrief {
   const waveTasks = tasks.filter((task) => task.wave === wave);
   const findings = waveTasks.flatMap((task) =>
-    (task.findings ?? [])
-      .filter((finding) => finding.severity === VERIFIED_SEVERITY)
-      .map((finding) => projectFindingForPanel(task.id, finding)),
+    (task.findings ?? []).flatMap((finding) => {
+      if (finding.severity !== VERIFIED_SEVERITY) return [];
+      const projected = projectFindingForPanel(task.id, finding);
+      return isCriticalBriefFinding(projected) ? [projected] : [];
+    }),
   );
-  return { wave, severity: VERIFIED_SEVERITY, taskIds: waveTasks.map((task) => task.id), findings };
+  return { wave, taskIds: waveTasks.map((task) => task.id), findings };
 }
 
 /** Adapt an identified standalone finding set to the panel's scoped item model.
@@ -294,18 +306,7 @@ export function buildStandaloneFindingBrief(source: {
   readonly subjectId: typeof STANDALONE_REVIEW_SUBJECT;
   readonly findings: readonly Finding[];
 }): FindingBrief {
-  const task = {
-    id: STANDALONE_REVIEW_SUBJECT,
-    wave: 1,
-    findings: source.findings,
-  };
-  const built = buildFindingBrief(1, [task]);
-  return {
-    wave: 1,
-    severity: built.severity,
-    taskIds: [STANDALONE_REVIEW_SUBJECT],
-    findings: built.findings,
-  };
+  return buildFindingBrief(1, [{ id: STANDALONE_REVIEW_SUBJECT, wave: 1, findings: source.findings }]);
 }
 
 /** Exact current entry parser shared by artifact and persistent authority readers. */

@@ -321,7 +321,7 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
 
   /** The owner check the sibling `suite-authority.ts` authorizes for the graph's Wave, or null for none. */
   function gateOwnerCheck(value: TaskGraph) {
-    const suite = labelledValue("gate suite", authorizeGraphCompletionSuite(value, WORKSPACE));
+    const suite = labelledValue("gate suite", authorizeGraphCompletionSuite(manifestedGraphFixture(value), WORKSPACE));
     return suite.checks.find((check) => check.kind === "engine-owner-verification") ?? null;
   }
 

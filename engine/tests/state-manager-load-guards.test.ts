@@ -904,7 +904,7 @@ describe("parseTaskGraph protected completion authority", () => {
     expect(parseTaskGraph(JSON.parse(JSON.stringify(parsed.value))).ok).toBe(true);
   });
 
-  it("uses the legacy default manifest authority when the legacy-compatible field is absent", () => {
+  it("accepts a completion-suite receipt authorized against the pre-I6 default manifest the graph carries", () => {
     const receipt = acceptedReceipt(preI6DefaultVerificationManifest());
     expect(parseTaskGraph(graph({
       current_wave: 1,

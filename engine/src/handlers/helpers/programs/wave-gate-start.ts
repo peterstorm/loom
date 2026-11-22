@@ -12,6 +12,7 @@ import { admitWaveGateRegistration, successionPredecessorOf } from '../../../cor
 import { TASK_GRAPH_PATH } from '../../../config';
 import { parseActiveWaveGateRegistration, registerActiveWaveGate, StateManager } from '../../../state-manager';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
+import { parseManifestedTaskGraph } from '../../../core/manifested-task-graph';
 import type { DomainResult } from '../../../core/orchestration-contract';
 import type { RegisteredWaveGateProgram, WaveGateSuccessionAudit } from '../../../core/wave-gate-program';
 import { waveGateAuthorityDigest, waveReviewView } from '../../../core/wave-review-authority';
@@ -161,8 +162,8 @@ function reviewRolesOf(
  * been ruled out — protected execute/current-Wave authority, a registration
  * the locked install would refuse (an active gate already owning the Wave, a
  * completed Wave, a mismatched abandoned successor), unmet start prerequisites
- * (executing Tasks, implementation proof, test evidence, new tests) and, where
- * a Verification Manifest gates the Wave, full-tier lint. Every one of these
+ * (executing Tasks, implementation proof, test evidence, new tests), a graph
+ * without a frozen Verification Manifest, and full-tier lint. Every one of these
  * used to surface only after registration, leaving a run to abandon.
  *
  * It also plans the start's Successor Carry from the same snapshot, so the
@@ -200,11 +201,11 @@ export function prepareWaveGateFacadeStart(
     if (readiness.kind === "not-ready") {
       return { ok: false, message: `wave ${wave} cannot start its Wave Gate: ${readiness.failures.join("; ")}` };
     }
-    if (graph.verification_manifest !== undefined) {
-      const lint = runFullTierWaveLint(waveTasks);
-      if (lint.kind !== "allow") {
-        return { ok: false, message: `wave ${wave} fails full-tier lint before its Wave Gate can start: ${"message" in lint ? lint.message : lint.kind}` };
-      }
+    const manifested = parseManifestedTaskGraph(graph);
+    if (!manifested.ok) return { ok: false, message: manifested.error };
+    const lint = runFullTierWaveLint(waveTasks);
+    if (lint.kind !== "allow") {
+      return { ok: false, message: `wave ${wave} fails full-tier lint before its Wave Gate can start: ${"message" in lint ? lint.message : lint.kind}` };
     }
     const { succession, notCarried } = successorCarryOf(graph, wave, taskIds, destination.value.runsRoot, options);
     const rosters = reviewRolesOf(graph, taskIds, destination.value.runsRoot, succession, options);
@@ -267,12 +268,8 @@ export async function startWaveGateFacade(
   const { registration } = prepared;
   try {
     const manager = new StateManager(TASK_GRAPH_PATH);
-    // Publish the recoverable Run Directory program first. If publication is
-    // refused, protected state remains byte-identical and no unsupported
-    // active_wave_gate can be stranded.
-    const stored = await handle.registerProgram(registration);
-    if (!stored.ok) return failed(stored.error.message);
-    // The registration enters protected state only in its parsed form.
+    // The registration enters protected state only in its parsed form, parsed
+    // before anything is published so a refusal leaves no run behind.
     const active = parseActiveWaveGateRegistration({
       schemaVersion: 1,
       kind: "active-wave-gate",
@@ -283,7 +280,12 @@ export async function startWaveGateFacade(
       runsRoot: handle.identity.runsRoot,
       terminalOutcome: null,
     });
-    if (!active.ok) throw new Error(`Invalid active Wave Gate registration: ${active.error}`);
+    if (!active.ok) return failed(`invalid active Wave Gate registration: ${active.error}`);
+    // Publish the recoverable Run Directory program first. If publication is
+    // refused, protected state remains byte-identical and no unsupported
+    // active_wave_gate can be stranded.
+    const stored = await handle.registerProgram(registration);
+    if (!stored.ok) return failed(stored.error.message);
     await registerActiveWaveGate(manager, active.value, registration);
     reportNotCarried(handle.runId, prepared.notCarried);
     reportRosters(handle.runId, prepared.rosters);

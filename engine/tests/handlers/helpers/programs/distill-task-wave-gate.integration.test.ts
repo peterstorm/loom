@@ -17,7 +17,7 @@ import { parseNewTestEvidence, type TaskGraph } from "../../../../src/types";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { collectedChild } from "../../../fixtures/collected-child";
 import { facadeParentEnvironment } from "../../../fixtures/facade-parent";
-import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
+import { git as gitWithEnvironment, ignoredRunsRoot, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
 import { value } from "../../../fixtures/parse-result";
 import { disposeFixturePiSessions } from "../../../fixtures/pi-session";
 import { issuedWaveReviewerPayload } from "../../../fixtures/wave-reviewer-payload";
@@ -61,14 +61,11 @@ function project(distillStatus: "pending" | "implemented"): Project {
   const root = canonicalTempDir("loom-distill-wave-");
   roots.push(root);
   mkdirSync(join(root, "src"));
-  mkdirSync(join(root, "runs"));
+  const runsRoot = ignoredRunsRoot(root);
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
   writeFileSync(join(root, "spec.md"), specText);
   writeFileSync(join(root, "plan.md"), "# Model-free plan\n");
-  // The Run Directory lives in the repository: the completion suite's
-  // workspace digest must not see it change.
-  writeFileSync(join(root, ".gitignore"), "runs/\n");
   gitWithEnvironment(root, ["init", "-q"], PINNED_COMMIT_DATES);
   gitWithEnvironment(root, ["add", ".gitignore", "src/x.ts", "spec.md", "plan.md"], PINNED_COMMIT_DATES);
   gitWithEnvironment(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], PINNED_COMMIT_DATES);
@@ -82,7 +79,7 @@ function project(distillStatus: "pending" | "implemented"): Project {
   ]), spec_file: join(root, "spec.md"), plan_file: join(root, "plan.md"), spec_trace_version: 2 };
   const statePath = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(statePath, JSON.stringify(value(parseTaskGraph(graph))));
-  return { root, statePath, runsRoot: join(root, "runs") };
+  return { root, statePath, runsRoot };
 }
 
 function cliResult(p: Project, args: readonly string[], stdin = "") {

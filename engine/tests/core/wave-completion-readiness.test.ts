@@ -610,7 +610,7 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
   type OwnerMutation = InvariantVerdict["mutation"];
 
   /** The result every check of the graph's own suite would record: project exit, and the owner verdicts with `mutation`. */
-  function resultFor(state: TaskGraph, projectExit: number, mutation: OwnerMutation = unchangedRun): WaveCompletionSuiteResult {
+  function resultFor(state: ManifestedTaskGraph, projectExit: number, mutation: OwnerMutation = unchangedRun): WaveCompletionSuiteResult {
     const authority = value(authorizeGraphCompletionSuite(state, digest("b")));
     const owner = authority.checks.find((check) => check.kind === "engine-owner-verification");
     const observation: OwnerVerificationObservation | undefined = owner === undefined || owner.kind !== "engine-owner-verification" ? undefined : {
@@ -643,7 +643,7 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
     };
   }
 
-  function receiptFor(state: TaskGraph): AcceptedWaveCompletionReceipt {
+  function receiptFor(state: ManifestedTaskGraph): AcceptedWaveCompletionReceipt {
     const evaluated = evaluateAsRecorded(value(authorizeGraphCompletionSuite(state, digest("b"))), resultFor(state, 0));
     if (evaluated.kind !== "accepted") throw new Error(`receipt fixture rejected: ${JSON.stringify(evaluated)}`);
     return evaluated.receipt;

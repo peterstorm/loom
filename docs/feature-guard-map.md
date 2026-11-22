@@ -59,7 +59,7 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 618 src files / ~169.3k lines TS; `engine/tests/` holds 957 TS files / ~262.7k lines (fixtures and helpers included), of which 836 test files are executed (812 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 618 src files / ~169.6k lines TS; `engine/tests/` holds 959 TS files / ~264.0k lines (fixtures and helpers included), of which 838 test files are executed (814 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
@@ -960,8 +960,8 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **836 executed test files / ~262.7k lines** — 812 under `engine/tests/` (957 TS files there
-  including fixtures and helpers; core 310 test files, handlers 189, pi 50,
+- **838 executed test files / ~264.0k lines** — 814 under `engine/tests/` (959 TS files there
+  including fixtures and helpers; core 312 test files, handlers 188, pi 50,
   linter 47, orchestration 39, utils 35, machine 31, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).

@@ -42,7 +42,7 @@ describe("Claude Code harness records", () => {
       JSON.stringify({ type: "api-request-blob", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: "stale" }] } }),
       JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }),
     ].join("\n");
-    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, prompt: "Task ID: T1" });
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, value: "Task ID: T1" });
   });
 });
 
@@ -92,7 +92,7 @@ describe("parseFirstUserPrompt", () => {
       JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "Review Task T1" }] } }),
       JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "LOOM_REVIEW_CONTEXT: standalone" }] } }),
     ].join("\n");
-    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, prompt: "Review Task T1" });
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, value: "Review Task T1" });
   });
 
   it("reads no prompt or write set from a Pi session file: each reader fails closed", () => {
@@ -114,6 +114,30 @@ describe("parseFirstUserPrompt", () => {
     expect(parseFilesModified(`${claudeWrite}\n${header}`)).toEqual({ ok: false, error: PI_SESSION_REFUSAL });
     // A record typed session without a version is no Pi header.
     expect(parseFilesModified(`${JSON.stringify({ type: "session" })}\n${claudeWrite}`)).toEqual({ ok: true, value: ["/tmp/a.ts"] });
+  });
+
+  describe("a Pi session header refuses the write set wherever it sits", () => {
+    const header = JSON.stringify({ type: "session", version: 3, id: "pi-session" });
+    const claudeWrite = (path: string): string =>
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: path } }] } });
+
+    it.each([
+      ["the first line", [header, claudeWrite("/tmp/a.ts"), claudeWrite("/tmp/b.ts")]],
+      ["between two Claude writes", [claudeWrite("/tmp/a.ts"), header, claudeWrite("/tmp/b.ts")]],
+      ["after leading blank lines", ["", "   ", header, claudeWrite("/tmp/a.ts")]],
+      ["the last line", [claudeWrite("/tmp/a.ts"), claudeWrite("/tmp/b.ts"), header]],
+      ["an escaped type spelling", [claudeWrite("/tmp/a.ts"), '{"type":"\\u0073ession","version":3}']],
+    ])("as %s", (_position, lines) => {
+      expect(parseFilesModified(lines.join("\n"))).toEqual({ ok: false, error: PI_SESSION_REFUSAL });
+    });
+
+    it("reads no text from a Pi assistant tool call", () => {
+      const toolCall = JSON.stringify({
+        type: "message",
+        message: { role: "assistant", content: [{ type: "toolCall", name: "write", arguments: { path: "/tmp/pi.ts", content: "x" } }] },
+      });
+      expect(parseTranscript([header, toolCall].join("\n"))).toBe("");
+    });
   });
 
   it("fails closed when malformed JSON precedes a later valid user prompt", () => {
@@ -152,7 +176,7 @@ describe("parseFirstUserPrompt", () => {
       JSON.stringify({ type: "user", message }),
       JSON.stringify({ type: "user", message: { role: "user", content: "Review Task T3" } }),
     ].join("\n");
-    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, prompt: "Review Task T3" });
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, value: "Review Task T3" });
   });
 
   it("returns a typed failure for malformed user content", () => {

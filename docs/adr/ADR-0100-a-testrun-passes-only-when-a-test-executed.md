@@ -47,15 +47,24 @@ In `engine/src/core/structured-test-report.ts`:
 
 - `executedTestCount(summary)` is the number of tests a summary proves ran. With per-file results it is
   the sum of `executed - skipped`; without them it is `total`.
-- `testRunSummary(read, format)` is the only projection TestRun capture uses (`findReport`'s three report
-  sources, the JUnit report-dir scan through `junitReportRead`, and `engineRunReport`). It replaces
-  the declared-count projection, which is deleted. It takes the declared summary and holds it to the executed-count
-  rule wherever that rule reads the same bytes:
+- `readTestRunSummary(read, format)` is the only projection TestRun capture uses (`findReport`'s three
+  report sources, the JUnit report-dir scan through `junitReportRead`, and, through its null projection
+  `testRunSummary`, `engineRunReport`). It replaces the declared-count projection, which is deleted. It
+  takes the declared summary and holds it to the executed-count rule wherever that rule reads the same
+  bytes:
   - with per-file results, the summary is kept only when `executedTestCount` equals the executed-count
-    rule's total, else `null` (the run is untrusted, and a report-dir scan is refused);
+    rule's total, else it is refused as an `executed-count-disagreement` (the run is untrusted, and a
+    report-dir scan is refused);
   - without per-file results, the summary is minted from the executed-count rule's counts;
   - when the executed-count rule cannot count the report (a Vitest summary without its passed, pending
     and todo counts), the declared summary stands.
+
+  Every refusal is a named `TestRunSummaryRefusal`, which `findReport` writes to stderr through
+  `describeTestRunSummaryRefusal`, so an operator can tell a malformed report from one of the other
+  format or one whose counts disagree about what ran.
+- The seam enforces this by type, not by convention: a read's declared summary is held under a symbol
+  key the module does not export, so no caller can take it without the executed-count check.
+  `readTestRunSummary` and `executedTestCount` are the only ways to a TestRun summary and its count.
 - `mergeSummaries` sums `executedTestCount` when the merged result loses per-file results, so a recorded
   part's skipped testcases never reappear as run.
 

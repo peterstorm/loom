@@ -204,12 +204,15 @@ describe("buildFindingBrief", () => {
     expect(result.findings).toEqual([]);
   });
 
-  it("states the verified severity, the only one a brief can carry", () => {
-    const result = buildFindingBrief(1, [task({ findings: [finding({ severity: "advisory" })] })]);
-    expect(result.severity).toBe("critical");
-    expectTypeOf(result.severity).toEqualTypeOf<"critical">();
-    // @ts-expect-error an advisory brief is unrepresentable
-    const advisory: FindingBrief = { ...result, severity: "advisory" };
+  it("types every finding at the verified severity, the only one a brief can carry", () => {
+    const result = buildFindingBrief(1, [task({ findings: [
+      finding({ severity: "advisory", claim: "nit" }),
+      finding({ id: findingId("code-reviewer-2") }),
+    ] })]);
+    expect(result.findings.map(({ id, severity }) => [id, severity])).toEqual([["T1:code-reviewer-2", "critical"]]);
+    expectTypeOf<FindingBrief["findings"][number]["severity"]>().toEqualTypeOf<"critical">();
+    // @ts-expect-error an advisory finding cannot be written into a brief
+    const advisory: FindingBrief = { ...result, findings: [brief({ severity: "advisory" })] };
     void advisory;
   });
 });
