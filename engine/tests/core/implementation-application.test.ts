@@ -158,7 +158,6 @@ describe("Task-local byte-scope application core", () => {
     });
     expect(bytes.byteScope).toEqual({ kind: "accepted" });
     expect(bytes.attributedAttemptChangedPaths).toEqual([]);
-    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.taskBytesChangedOrUnobservable).toBe(false);
     // INV-DF1: the proof boundary predates the Task's production, so the
     // proof-scope change is task production the settlement must see — the
@@ -177,7 +176,6 @@ describe("Task-local byte-scope application core", () => {
       currentAttemptScope: baseline("src/a.ts", digest("b")),
     });
     expect(bytes.byteScope).toEqual({ kind: "accepted" });
-    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
     expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);

@@ -18,6 +18,7 @@ import { redThenGreenDuty } from "../../src/core/implementation-application";
 import {
   deriveProofObligations,
   derivePendingTaskProof,
+  redThenGreenRule,
   redThenGreenOwing,
   redThenGreenScope,
   taskRedThenGreenEra,
@@ -145,6 +146,22 @@ describe("redThenGreenOwing — the one red-then-green duty rule, against the re
       const scope = redThenGreenScope(frozen, written);
       expect(taskRedThenGreenEra(scope, taskId)).toBe(retiredTaskEra(scope, taskId));
     }), { numRuns: 500 });
+  });
+
+  it("population and the scope's rule agree: a Task's Proof owes I6 exactly when redThenGreenOwing says it is owed", () => {
+    fc.assert(fc.property(scopedTask, manifest, contracts, (task, frozen, written) => {
+      const scope = redThenGreenScope(frozen, written);
+      const era = taskRedThenGreenEra(scope, task.id);
+      const populated = deriveProofObligations({
+        declaredArtifactExpectation: "changed",
+        verificationPolicy: task.policy,
+        declaredArtifacts: task.fileList,
+        redThenGreen: era,
+      }).some(({ kind }) => kind === "red-then-green");
+      const owed = redThenGreenOwing(scope, task.id, task.policy).kind === "owed";
+      expect(populated).toBe(owed);
+      expect(redThenGreenRule(era, task.policy)).toBe(owed);
+    }), { numRuns: 2000 });
   });
 
   it("derives a red-then-green obligation exactly when the retired derivation did", () => {

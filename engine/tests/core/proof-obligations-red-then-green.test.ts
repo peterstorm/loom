@@ -13,6 +13,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   createImplementationAttemptAuthority,
+  observedByteScope,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
 import {
@@ -440,7 +441,7 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
       observedAt: "2026-10-16T00:01:00.000Z",
       evidence: JSON.parse(JSON.stringify({ ...observed(redThenGreen), filesModified: [] })),
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-    }, { kind: "accepted" });
+    }, observedByteScope([]));
   }
 
   it.each(ALL_GAPS.filter(({ kind }) => kind !== "ledger-unavailable"))("FR-009: the $kind gap mints its own receipt failure kind and retries", (gap) => {

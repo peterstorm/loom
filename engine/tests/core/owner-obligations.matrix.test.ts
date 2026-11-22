@@ -105,7 +105,7 @@ import { ensureWaveCompletionSuite } from "../../src/handlers/helpers/wave-compl
 import { runOwnerVerification, type OwnerVerificationInput } from "../../src/orchestration/owner-verification-runner";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { parseAuthoredTaskRoster, populateTaskGraph } from "../../src/core/task-graph-population";
-import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
+import { graphFixture, manifestedGraphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { briefOwnership, ownerObligation } from "../fixtures/owner-obligation";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 import { loomCommandsAt } from "../fixtures/loom-package-root";
@@ -355,7 +355,7 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
 
   const readiness = (value: TaskGraph, owner: OwnerCheckAuthority | null) =>
     deriveWaveCompletionSuiteReadiness(
-      { ...value, active_wave_completion_suite: receiptUnder(owner) },
+      manifestedGraphFixture({ ...value, active_wave_completion_suite: receiptUnder(owner) }),
       1,
       { kind: "observed", workspaceDigest: WORKSPACE },
     ).kind;
@@ -485,7 +485,7 @@ describe("INV-3 sibling rows — the gate runs owner verification for the Wave d
       const repo = buildOwnerVerificationRepo({ waveChanges, matrixTest: "discriminating" });
       const seen: OwnerVerificationInput[] = [];
       await ensureWaveCompletionSuite({
-        handle: repo.handle, manager: repo.manager, graph: repo.manager.load(), registration: repo.registration,
+        handle: repo.handle, manager: repo.manager, graph: manifestedGraphFixture(repo.manager.load()), registration: repo.registration,
         runOwnerVerification: async (input) => {
           seen.push(input);
           return { kind: "unavailable", failure: { kind: "unexpected-error", detail: "matrix row: the run is only observed" } };

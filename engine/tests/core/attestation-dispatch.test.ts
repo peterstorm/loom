@@ -137,7 +137,7 @@ describe("attestation dispatch emission", () => {
 
 // -- fixture helpers ---------------------------------------------------------
 
-import { createImplementationAttemptAuthority, settleImplementationAttempt, parseIsoInstant, parseReservationId, type ImplementationAttemptSettlementReceipt } from "../../src/core/implementation-completion";
+import { createImplementationAttemptAuthority, observedByteScope, settleImplementationAttempt, parseIsoInstant, parseReservationId, type ImplementationAttemptSettlementReceipt } from "../../src/core/implementation-completion";
 import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { observedEvidence } from "../fixtures/task-lifecycle";
 import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
@@ -167,7 +167,7 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
     observedAt: "2026-09-19T00:01:00.000Z",
     evidence: observedEvidence({ taskCompleted: false, testResult: { verdict: "trusted-pass" }, filesModified: [] }),
     proofEvaluationPolicy: { untrustedPass: "reject" },
-  }, { kind: "accepted" });
+  }, observedByteScope([]));
   if (!result.ok || result.value.kind !== "retry-required") throw new Error("retry receipt fixture failed");
   return result.value.receipt;
 };

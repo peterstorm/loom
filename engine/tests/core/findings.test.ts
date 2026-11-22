@@ -5,6 +5,7 @@ import { taskFixture as makeTaskFixture } from "../fixtures/task-lifecycle";
 import {
   applyFindingOutcomes,
   deduplicateFindingIds,
+  evidenceFailureError,
   findingsLockstepError,
   findingsUnionError,
   mergeFindings,
@@ -830,5 +831,15 @@ describe("recoverViewOnlyClaims", () => {
 
   it("recovers nothing when the views are already in step", () => {
     expect(recoverViewOnlyClaims([], [], { critical: [], advisory: [] })).toEqual([]);
+  });
+});
+
+describe("evidenceFailureError — distinct failed reviewers", () => {
+  it("names the first reviewer the failure list repeats", () => {
+    expect(evidenceFailureError(
+      { review_evidence_failures: ["code-reviewer", "type-design-analyzer", "code-reviewer", "type-design-analyzer"] },
+      "tasks[0]",
+      new Set(["code-reviewer", "type-design-analyzer"]),
+    )).toBe("tasks[0]: review_evidence_failures repeats 'code-reviewer'");
   });
 });

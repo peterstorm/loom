@@ -4,6 +4,7 @@ import {
   createImplementationAttemptAuthority,
   createEscalationRemediationReceipt,
   parseImplementationAttemptSettlementReceipt,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
   type ImplementationAttemptSettlementReceipt,
@@ -88,7 +89,7 @@ function settle(
     proof: proof(),
     active_implementation_attempt: attempt,
     implementation_attempt_history: history,
-  }, attempt, attempt, observed, { kind: "accepted" });
+  }, attempt, attempt, observed, observedByteScope([]));
   if (!result.ok || result.value.kind === "ignored") throw new Error("settlement fixture failed");
   return result.value.receipt;
 }
@@ -314,7 +315,7 @@ describe("bounded implementation retry admission", () => {
     }, attempt, attempt, {
       ...observation("2026-09-01T00:12:00.000Z", true),
       evidence: trustedPassEvidence(["src/extra.ts"], { newTestsWritten: false }),
-    }, { kind: "accepted" });
+    }, observedByteScope([]));
     if (!result.ok || result.value.kind !== "retry-required") throw new Error("attestation drift fixture failed");
     const terminalTask = {
       ...retryTask([result.value.receipt]),

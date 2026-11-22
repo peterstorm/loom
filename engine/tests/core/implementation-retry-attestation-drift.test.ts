@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   createEscalationRemediationReceipt,
   createImplementationAttemptAuthority,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
@@ -43,7 +44,7 @@ function driftReceipt(): ImplementationAttemptSettlementReceipt {
       newTestsWritten: false, newTestEvidence: "waived",
     }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-  }, { kind: "accepted" });
+  }, observedByteScope([]));
   if (!result.ok || result.value.kind === "ignored") throw new Error("drift settlement fixture failed");
   return result.value.receipt;
 }

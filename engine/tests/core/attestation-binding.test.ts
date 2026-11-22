@@ -21,6 +21,7 @@ import {
 } from "../../src/core/implementation-retry";
 import {
   createImplementationAttemptAuthority,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
   type ImplementationAttemptSettlementReceipt,
@@ -77,7 +78,7 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
     observedAt: "2026-09-19T00:02:00.000Z",
     evidence: observedEvidence({ taskCompleted: false, testResult: { verdict: "trusted-pass" }, filesModified: [] }),
     proofEvaluationPolicy: { untrustedPass: "reject" },
-  }, { kind: "accepted" });
+  }, observedByteScope([]));
   if (!result.ok || result.value.kind !== "retry-required") throw new Error("retry receipt fixture failed");
   return result.value.receipt;
 };

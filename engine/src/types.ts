@@ -227,22 +227,6 @@ export { newWaveGate, testResultPassed } from "./core/wave-gate-model";
 import type { TaskTestResult, WaveGate } from "./core/wave-gate-model";
 export type { TaskTestResult, WaveGate } from "./core/wave-gate-model";
 
-/**
- * Pre-refactor task graphs stored `tests_passed: boolean` on the task; the
- * field was replaced by `test_result` with NO compat read (the branch never
- * shipped). Such a task now reads as missing evidence — correct, but
- * mystifying without a note. Pure: returns the operator-facing explanation
- * when the raw task object carries the legacy field without its
- * replacement, null otherwise.
- */
-export function legacyTestsPassedNote(task: unknown): string | null {
-  if (typeof task !== "object" || task === null) return null;
-  const raw = task as Record<string, unknown>;
-  if (!("tests_passed" in raw) || "test_result" in raw) return null;
-  const id = typeof raw.id === "string" ? raw.id : "<unknown>";
-  return `legacy tests_passed found on task ${id}; re-run task or regenerate graph — field replaced by test_result`;
-}
-
 // --- Review findings ---
 //
 // The Finding/ReviewRun/Refutation vocabulary lives in the Finding concept's
@@ -1216,25 +1200,24 @@ export type WaveCompletionSuiteRequiredReason =
   | "workspace-observation-missing"
   | "workspace-observation-unavailable";
 
-/** Canonical completion-suite status. Digest/count data is carried by the
- * status value so JSON and human renderers remain policy-free projections. */
+/** Canonical completion-suite status of a graph whose Verification Manifest
+ * is frozen (`ManifestedTaskGraph`): a graph before `execute` has no suite
+ * readiness, and status reports that fact unavailable. Digest/count data is
+ * carried by the status value so JSON and human renderers remain policy-free
+ * projections. */
 export type WaveCompletionSuiteReadiness =
-  | Readonly<{
-      kind: "legacy-unavailable";
-      verificationManifestDigest: null;
-    }>
   | Readonly<{
       kind: "required";
       projectVerificationCoverage: ProjectVerificationCoverage;
       reason: WaveCompletionSuiteRequiredReason;
       detail: string;
-      verificationManifestDigest: ArtifactDigest | null;
+      verificationManifestDigest: ArtifactDigest;
       acceptedResultDigest: ArtifactDigest | null;
     }>
   | Readonly<{
       kind: "accepted";
       projectVerificationCoverage: ProjectVerificationCoverage;
-      verificationManifestDigest: ArtifactDigest | null;
+      verificationManifestDigest: ArtifactDigest;
       suiteDigest: ArtifactDigest;
       resultDigest: ArtifactDigest;
       workspaceDigest: ArtifactDigest;
@@ -1257,7 +1240,7 @@ export type WaveCompletionSuiteReadiness =
   | Readonly<{
       kind: "stale";
       projectVerificationCoverage: ProjectVerificationCoverage;
-      verificationManifestDigest: ArtifactDigest | null;
+      verificationManifestDigest: ArtifactDigest;
       suiteDigest: ArtifactDigest;
       resultDigest: ArtifactDigest;
       acceptedWorkspaceDigest: ArtifactDigest;

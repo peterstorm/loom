@@ -8,6 +8,7 @@ import {
   parseVerdictEnvelope,
   requireEntry,
   sanitizeProse,
+  type RunLayout,
   type VerdictEnvelope,
 } from "../../src/core/panel-kernel";
 import {
@@ -30,8 +31,8 @@ import { waveFindingIdFixture } from "../fixtures/wave-finding-id";
  */
 
 const RUN_DIR = "/runs/run.1";
-/** A layout of the brief/findings shape; the kernel is layout-agnostic. */
-const ITEM_LAYOUT = Object.freeze({ panel: "items", contextMd: "brief.md", contextJson: "brief.json", itemDir: "findings", verdictDir: "verdicts" });
+/** A layout of the brief/findings shape, typed by the production `RunLayout`; the kernel is layout-agnostic. */
+const ITEM_LAYOUT: RunLayout = Object.freeze({ contextMd: "brief.md", contextJson: "brief.json", itemDir: "findings", verdictDir: "verdicts" });
 
 describe("parseRunManifest — the shared item-set authority", () => {
   const spec = {

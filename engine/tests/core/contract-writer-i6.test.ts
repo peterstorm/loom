@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createImplementationAttemptAuthority,
+  observedByteScope,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
 import { renderImplementationBrief, RULE_DOCUMENTS, type RuleDocument } from "../../src/core/implementation-brief";
@@ -298,7 +299,7 @@ describe("settlement implements a test-only contract writer with no implementati
         redThenGreen: { kind: "unproven", gap: { kind: "implementation-write-missing" } },
       }),
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-    }, { kind: "accepted" });
+    }, observedByteScope([]));
     expect(result).toMatchObject({ ok: true, value: { kind: "implemented", receipt: { failureKinds: [] } } });
   });
 });

@@ -26,6 +26,7 @@ import {
   createImplementationAttemptAuthority,
   parseIsoInstant,
   parseReservationId,
+  observedByteScope,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
@@ -236,7 +237,7 @@ describe("attestation settlement through the Implementation Completion Oracle", 
     if (!created.ok) throw new Error(created.error.errors.join("; "));
     return created.value;
   })();
-  const acceptedByteScope = { kind: "accepted" } as const;
+  const acceptedByteScope = observedByteScope([]);
   const attestationProof = derivePendingTaskProof({
     verificationPolicy: ATTESTED_POLICY,
     declaredArtifacts: ["src/a.ts"],

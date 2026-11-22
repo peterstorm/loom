@@ -17,7 +17,9 @@ import {
   parseSemanticAttempt,
   parseTaskId,
   parseWave,
+  observedByteScope,
   settleImplementationAttempt,
+  unavailableByteScope,
   type ImplementationAttemptAuthority,
   type ImplementationAttemptSettlementReceipt,
   type TaskByteScopeOutcome,
@@ -68,15 +70,9 @@ function authority(
   }));
 }
 
-const ACCEPTED_BYTE_SCOPE: TaskByteScopeOutcome = Object.freeze({ kind: "accepted" });
-const OUT_OF_SCOPE_WRITES: TaskByteScopeOutcome = Object.freeze({
-  kind: "out-of-scope-writes",
-  paths: Object.freeze([value(parseReviewPath("foreign.ts"))] as const),
-});
-const UNAVAILABLE_BYTE_SCOPE: TaskByteScopeOutcome = Object.freeze({
-  kind: "observation-unavailable",
-  reason: "baseline missing",
-});
+const ACCEPTED_BYTE_SCOPE: TaskByteScopeOutcome = observedByteScope([]);
+const OUT_OF_SCOPE_WRITES: TaskByteScopeOutcome = observedByteScope([value(parseReviewPath("foreign.ts"))]);
+const UNAVAILABLE_BYTE_SCOPE: TaskByteScopeOutcome = unavailableByteScope("baseline missing");
 
 const authoredProof = () => derivePendingTaskProof({
   declaredArtifactExpectation: "changed",
@@ -617,5 +613,42 @@ describe("settlement receipt history", () => {
       first.receipt,
       { ...second.receipt, reservationId: first.receipt.reservationId },
     ]).ok).toBe(false);
+  });
+});
+
+describe("the byte-scope outcome's constructors — the only way to mint one", () => {
+  const reviewPath = fc.constantFrom("a.ts", "b/c.ts", "b/d.ts", "z.md", "Z.md").map((path) => value(parseReviewPath(path)));
+
+  it("accepts exactly when nothing was written outside, and otherwise names each outside path once, sorted", () => {
+    fc.assert(fc.property(fc.array(reviewPath, { maxLength: 8 }), (outside) => {
+      const outcome = observedByteScope(outside);
+      if (outside.length === 0) {
+        expect(outcome).toEqual({ kind: "accepted" });
+        return;
+      }
+      expect(outcome.kind).toBe("out-of-scope-writes");
+      if (outcome.kind !== "out-of-scope-writes") return;
+      expect(new Set(outcome.paths)).toEqual(new Set(outside));
+      expect(new Set(outcome.paths).size).toBe(outcome.paths.length);
+      expect(outcome.paths.every((path, index) => index === 0 || outcome.paths[index - 1]! < path)).toBe(true);
+      // Canonical: the order the shell observed the paths in never shows.
+      expect(observedByteScope([...outside].reverse())).toEqual(outcome);
+    }));
+  });
+
+  it("bounds an unavailable reason: never blank, at most MAX_REASON_LENGTH characters, a prefix of the trimmed text", () => {
+    fc.assert(fc.property(fc.oneof(fc.string(), fc.string({ minLength: 4_000, maxLength: 5_000 }), fc.constantFrom("", "  \n\t")), (text) => {
+      const { reason } = unavailableByteScope(text);
+      expect(reason.trim()).not.toBe("");
+      expect(reason.length).toBeLessThanOrEqual(4_096);
+      if (text.trim() !== "") expect(text.trim().startsWith(reason)).toBe(true);
+    }));
+    expect(unavailableByteScope("   ").reason).toBe("Task-local byte observation is unavailable");
+  });
+
+  it("refuses an unminted outcome at compile time", () => {
+    // @ts-expect-error a literal is not a minted byte-scope outcome
+    const forged: TaskByteScopeOutcome = { kind: "accepted" };
+    void forged;
   });
 });

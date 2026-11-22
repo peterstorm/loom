@@ -8,7 +8,7 @@
  * re-proves path and content authority; it does not attest the current file mode.
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  *
- * The pure at-rest wire grammar (every `(unknown → ParseResult)` parser for the
+ * The pure at-rest wire grammar (every `(unknown → LineParseResult)` parser for the
  * State File's shapes) lives in `state-file-wire.ts` and is re-exported below,
  * so this module's import surface is unchanged; only the dependency arrow
  * moved. This file owns what reads and writes bytes: session/pointer authority

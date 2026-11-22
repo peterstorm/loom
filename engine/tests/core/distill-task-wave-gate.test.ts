@@ -50,6 +50,7 @@ import {
   protectedGraphFixture,
   siblingTaskFixture,
   type DistillTaskFixtureInput,
+  manifestedGraphFixture,
 } from "../fixtures/task-lifecycle";
 import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
@@ -292,12 +293,12 @@ describe("Wave Gate checks over a Distill Task", () => {
     currentWaveWorkspace: COMPLETION_SUITE_WORKSPACE,
   };
   const activeGate = activeWaveGateFixture({ runId: RUN_ID, wave: 1, authorityDigest: AUTHORITY });
-  const gateGraph = (tasks: readonly Task[]): TaskGraph => graphOf(tasks, {
+  const gateGraph = (tasks: readonly Task[]) => manifestedGraphFixture(graphOf(tasks, {
     wave_gates: { "1": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: false } },
     spec_check: capturedSpecCheck({ wave: 1, runAt: "", criticalFindings: [] }),
     active_wave_gate: activeGate,
     active_wave_completion_suite: acceptedWaveCompletionSuite(activeGate),
-  });
+  }));
 
   it("implementation proof is owed: a pending Distill Task keeps the gate from starting", () => {
     const graph = graphOf([reviewed("T1"), distill("T2", ["T1"], "pending")]);
