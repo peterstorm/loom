@@ -461,10 +461,12 @@ function checkPlacement(units: readonly CoverageUnit[], ctx: Ctx): void {
  * refuses it, so the read path must too), each unit valid in its own right and
  * placed once, in canonical order.
  */
+const UNIT_CEILING = `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`;
+
 const coverageLedgerSchema = z
   .array(coverageUnitSchema, expecting("expected a top-level array"))
   .min(1, "a run always seeds at least one unit")
-  .max(SECURITY_AUDIT_LIMITS.units, `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`)
+  .max(SECURITY_AUDIT_LIMITS.units, UNIT_CEILING)
   .superRefine(checkPlacement)
   .readonly();
 
@@ -479,6 +481,8 @@ const invalid = (violations: readonly CoverageViolation[]): CoverageError => ({
   kind: "invalid-coverage-operation",
   violations,
 });
+
+const unitCeilingViolation = (path: string): CoverageViolation => wireViolation(path, UNIT_CEILING);
 
 /**
  * Parse a stored ledger document — the read path's one parser, and the only
@@ -508,10 +512,6 @@ export const sortLedger = (ledger: CoverageLedger): CoverageLedger =>
 const replaceUnit = (ledger: CoverageLedger, next: CoverageUnit): CoverageLedger =>
   ledger.map((unit) => (unit.coverage_id === next.coverage_id ? next : unit));
 
-/** Membership in a list a status may keep empty (`readonly []`): read as the
- *  string list it is. */
-const lists = (values: readonly string[], value: string): boolean => values.includes(value);
-
 // --- Seeding ---
 
 /** The coverage seed a run starts from, as `start`'s `units` payload carries it.
@@ -537,7 +537,7 @@ export type CoverageSeed = z.output<typeof coverageSeedSchema>;
 const coverageSeedsSchema = z
   .array(coverageSeedSchema, expecting("expected a top-level array"))
   .min(1, "a run must seed at least one unit")
-  .max(SECURITY_AUDIT_LIMITS.units, `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`);
+  .max(SECURITY_AUDIT_LIMITS.units, UNIT_CEILING);
 
 /** The statuses a unit may START in: nothing is in flight or hunted yet. */
 const SEEDABLE_STATUSES = ["planned", "not_applicable", "out_of_scope", "deferred"] as const;
@@ -632,10 +632,15 @@ export function parseCoverageSeeds(raw: unknown): DomainResult<CoverageLedger, C
  * finding's boundary because its unit was reassigned and re-hunted.
  */
 export function unitOfFingerprint(ledger: CoverageLedger, fingerprint: string): CoverageUnit | null {
-  return ledger.find((unit) => lists(unit.result_fingerprints, fingerprint)) ??
-    ledger.find((unit) => unit.attempts.some((attempt) => lists(attempt.result_fingerprints, fingerprint))) ??
+  return ledger.find((unit) => hasEntry(unit.result_fingerprints, fingerprint)) ??
+    ledger.find((unit) => unit.attempts.some((attempt) => hasEntry(attempt.result_fingerprints, fingerprint))) ??
     null;
 }
+
+/** Plain membership. A list a status keeps empty is typed `readonly []`, whose
+ *  own `includes` accepts nothing, so a status-dependent list is widened to
+ *  the string list it is before it is searched. */
+const hasEntry = (values: readonly string[], value: string): boolean => values.includes(value);
 
 // --- Owner identity ---
 
@@ -926,8 +931,10 @@ export type CriticError =
  *   construction;
  * - `resolveLeads`: a resolved prior lead is recorded on the unit that owns it.
  *
- * Every unit a phase builds is a parsed unit, and each phase keeps the ledger
- * sorted with every cell once, so the merged ledger needs no second pass.
+ * Every unit a phase builds is parsed by the unit schema, each phase keeps the
+ * ledger sorted with every cell once, and `acceptProposals` holds the unit
+ * ceiling, so the merged ledger is one `parseLedger` accepts with no second
+ * pass.
  */
 export function mergeCritic(
   ledger: CoverageLedger,
@@ -949,7 +956,9 @@ export function mergeCritic(
 }
 
 /** Phase 1: each missing unit the critic proposes, seeded `planned` at `wave`
- *  unless its cell is already in the ledger. */
+ *  unless its cell is already in the ledger. A ledger holds at most
+ *  `SECURITY_AUDIT_LIMITS.units` units: a proposal past the ceiling is refused
+ *  here, as `parseLedger` would refuse the merged ledger on its next read. */
 function acceptProposals(
   ledger: CoverageLedger,
   proposals: readonly CoverageProposal[],
@@ -961,6 +970,7 @@ function acceptProposals(
   for (const proposal of proposals) {
     const key = coverageSemanticKey(proposal.refs);
     if (present.has(key)) continue;
+    if (next.length >= SECURITY_AUDIT_LIMITS.units) return failure(invalid([unitCeilingViolation("missingUnits")]));
     const seeded = seedCoverageUnit({
       refs: proposal.refs,
       starting_paths: proposal.startingPaths,
@@ -979,13 +989,16 @@ function acceptProposals(
 }
 
 /** A settled unit's hunt as an archived attempt, and the unit planned again one
- *  wave on: nothing live is kept, so the next hunter starts fresh. */
-function archived(unit: SettledUnit, reason: string): PlannedUnit {
+ *  wave on: nothing live is kept, so the next hunter starts fresh. Parsed as
+ *  the unit it claims to be, like every other rebuilt unit: a history already
+ *  at `attemptsPerUnit` cannot grow past it into a ledger `parseLedger`
+ *  refuses. */
+function archived(ledger: CoverageLedger, unit: SettledUnit, reason: string): DomainResult<CoverageUnit, readonly CoverageViolation[]> {
   const {
     coverage_id, canonical_refs, surface, boundary, subsystem, attack_class, lifecycle, starting_paths,
     ordinary_attack_class_block, selected_companion_blocks, excluded_blocks, prior_status, attempts, wave, ...hunt
   } = unit;
-  return {
+  const replanned: PlannedUnit = {
     coverage_id, canonical_refs, surface, boundary, subsystem, attack_class,
     ...(lifecycle === undefined ? {} : { lifecycle }),
     starting_paths, ordinary_attack_class_block, selected_companion_blocks, excluded_blocks, prior_status,
@@ -998,6 +1011,7 @@ function archived(unit: SettledUnit, reason: string): PlannedUnit {
     result_fingerprints: [],
     unresolved: [],
   };
+  return rebuiltUnit(ledger, replanned, coverage_id);
 }
 
 /** Phase 2: each unit the critic reassigns, its settled attempt archived with
@@ -1018,7 +1032,9 @@ function reassignUnits(
     if (!isSettledUnit(unit)) return failure({ kind: "reassign-unit-has-no-evidence" as const, coverageId, status: unit.status });
     const reason = options.reassignmentReasons[coverageId];
     if (!isVisibleText(reason)) return failure({ kind: "missing-reassignment-reason" as const, coverageId });
-    next = replaceUnit(next, archived(unit, reason));
+    const replanned = archived(next, unit, reason);
+    if (!replanned.ok) return failure(invalid(replanned.error));
+    next = replaceUnit(next, replanned.value);
     reassigned.push(coverageId);
   }
   return success({ ledger: next, reassigned });
@@ -1044,7 +1060,7 @@ function resolveLeads(
     if (unit === undefined) {
       return failure({ kind: "unplaceable-resolution" as const, fingerprint, reason: `unknown coverage ID ${ownerId}` });
     }
-    if (!lists(unit.unresolved, fingerprint)) {
+    if (!hasEntry(unit.unresolved, fingerprint)) {
       return failure({ kind: "unplaceable-resolution" as const, fingerprint, reason: `${ownerId} does not carry this lead` });
     }
     const rest = rebuiltUnit(next, { ...unit, unresolved: unit.unresolved.filter((entry) => entry !== fingerprint) }, ownerId);
@@ -1056,9 +1072,10 @@ function resolveLeads(
 }
 
 /** One planned unit deferred: unassigned, with the reason as its one
- *  unresolved fact. Total: a planned unit already holds no owner and no
- *  evidence, and the caller proved the reason visible. */
-const asDeferred = (unit: PlannedUnit, reason: string): CoverageUnit => ({ ...unit, status: "deferred", unresolved: [reason] });
+ *  unresolved fact, parsed as the unit it claims to be like every other
+ *  rebuilt unit. */
+const asDeferred = (ledger: CoverageLedger, unit: PlannedUnit, reason: string): DomainResult<CoverageUnit, readonly CoverageViolation[]> =>
+  rebuiltUnit(ledger, { ...unit, status: "deferred", unresolved: [reason] }, unit.coverage_id);
 
 const deferralReasonRefused = (): CoverageError => invalid([wireViolation("reason", "a deferred unit requires a visible reason")]);
 
@@ -1071,7 +1088,18 @@ export function deferPlannedUnits(
   reason: string,
 ): DomainResult<CoverageLedger, CoverageError> {
   if (!isVisibleText(reason)) return failure(deferralReasonRefused());
-  return success(ledger.map((unit) => (unit.status === "planned" ? asDeferred(unit, reason) : unit)));
+  const deferred: CoverageUnit[] = [];
+  const violations: CoverageViolation[] = [];
+  for (const unit of ledger) {
+    if (unit.status !== "planned") {
+      deferred.push(unit);
+      continue;
+    }
+    const rebuilt = asDeferred(ledger, unit, reason);
+    if (rebuilt.ok) deferred.push(rebuilt.value);
+    else violations.push(...rebuilt.error);
+  }
+  return violations.length === 0 ? success(deferred) : failure(invalid(violations));
 }
 
 export type DeferralError =
@@ -1097,7 +1125,8 @@ export function deferUnit(
   const unit = ledger.find((candidate) => candidate.coverage_id === coverageId);
   if (unit === undefined) return failure({ kind: "unknown-coverage-id" as const, coverageId });
   if (unit.status !== "planned") return failure({ kind: "unit-not-planned" as const, coverageId, status: unit.status });
-  return success(replaceUnit(ledger, asDeferred(unit, reason)));
+  const deferred = asDeferred(ledger, unit, reason);
+  return deferred.ok ? success(replaceUnit(ledger, deferred.value)) : failure(invalid(deferred.error));
 }
 
 // --- Reporting ---

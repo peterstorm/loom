@@ -248,7 +248,8 @@ export function renderSpawnTaskText(facts: SpawnTaskFacts): string {
     facts.instruction;
 }
 
-/** The issued request a task's authority markers name. */
+/** The issued request a task's authority markers name: the one spelling of the
+ *  pair, which the `bound` arm below carries. */
 export type TaskIdentity = Readonly<{ requestId: RequestId; contextDigest: ContextDigest }>;
 
 /**
@@ -261,7 +262,7 @@ export type TaskIdentity = Readonly<{ requestId: RequestId; contextDigest: Conte
 export type IssuedTaskIdentity =
   | Readonly<{ kind: "unbound" }>
   | Readonly<{ kind: "malformed"; reason: string }>
-  | Readonly<{ kind: "bound"; requestId: RequestId; contextDigest: ContextDigest }>;
+  | (Readonly<{ kind: "bound" }> & TaskIdentity);
 
 /**
  * One marker as the lines of a task carry it. Every line that starts with
@@ -308,25 +309,16 @@ export function parseIssuedTaskIdentity(taskText: string): IssuedTaskIdentity {
     return canonicalRecord({ kind: "unbound" as const });
   }
   if (requestMarker.kind !== "bound" || digestMarker.kind !== "bound") {
-    return canonicalRecord({
-      kind: "malformed" as const,
-      reason: `task issuance identity is incomplete or contradictory: ${REQUEST_ID_MARKER} marker ${markerReason(requestMarker)}; ` +
-        `${CONTEXT_DIGEST_MARKER} marker ${markerReason(digestMarker)}`,
-    });
+    return malformedIdentity(`task issuance identity is incomplete or contradictory: ${REQUEST_ID_MARKER} marker ${markerReason(requestMarker)}; ` +
+      `${CONTEXT_DIGEST_MARKER} marker ${markerReason(digestMarker)}`);
   }
   const requestId = parseRequestId(requestMarker.value);
-  if (!requestId.ok) {
-    return canonicalRecord({
-      kind: "malformed" as const,
-      reason: `task ${REQUEST_ID_MARKER} marker is not canonical: ${requestId.error.message}`,
-    });
-  }
+  if (!requestId.ok) return malformedIdentity(notCanonical(REQUEST_ID_MARKER, requestId.error.message));
   const contextDigest = parseContextDigest(digestMarker.value);
-  if (!contextDigest.ok) {
-    return canonicalRecord({
-      kind: "malformed" as const,
-      reason: `task ${CONTEXT_DIGEST_MARKER} marker is not canonical: ${contextDigest.error.message}`,
-    });
-  }
+  if (!contextDigest.ok) return malformedIdentity(notCanonical(CONTEXT_DIGEST_MARKER, contextDigest.error.message));
   return canonicalRecord({ kind: "bound" as const, requestId: requestId.value, contextDigest: contextDigest.value });
 }
+
+const malformedIdentity = (reason: string): IssuedTaskIdentity => canonicalRecord({ kind: "malformed" as const, reason });
+
+const notCanonical = (marker: AuthorityMarker, message: string): string => `task ${marker} marker is not canonical: ${message}`;

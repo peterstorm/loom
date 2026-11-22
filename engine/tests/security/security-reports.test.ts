@@ -23,7 +23,7 @@ import {
   type CoverageLedger,
 } from "../../src/core/security-coverage";
 import { securityDisposition } from "../../src/core/security-disposition";
-import { HUNTER_AGENT as HUNTER, aRefs, aRunMetadata, ok } from "./fixtures";
+import { HUNTER_AGENT as HUNTER, aCommitId, aRefs, aRunMetadata, ok } from "./fixtures";
 import {
   derivePublication,
   renderFindingsDetail,
@@ -95,7 +95,7 @@ const metadata = aRunMetadata({
   runId: "audit-2026-11-07",
   target: "example/app",
   repo: "example/app",
-  scope: { kind: "diff", paths: ["src/reports/export.ts", "src/reports/query.ts", "src/webhooks/send.ts"], baseRef: "0".repeat(40), headRef: "1".repeat(40) },
+  scope: { kind: "diff", paths: ["src/reports/export.ts", "src/reports/query.ts", "src/webhooks/send.ts"], baseRef: aCommitId("0".repeat(40)), headRef: aCommitId("1".repeat(40)) },
   scopePaths: ["src/reports/export.ts", "src/reports/query.ts", "src/webhooks/send.ts"],
   sourceRef: { commit: "1".repeat(40), worktreeDirty: false },
   budget: 24,

@@ -4,7 +4,7 @@
  * the ANSI-C body), locale `$"…"` quoting, and unquoted/double-quoted parameter
  * expansion (`$name` / `${…}`). Both the guard's matching view
  * (core/guard-state-file `collapseVariants`) and the evidence scanner's
- * redirect-target reader (core/shell-write-targets `readRedirectTarget`) build
+ * redirect-target reader (core/shell-redirects `redirectTargetsOf`) build
  * on this, so a rule taught to one (ANSI-C in round 17, line-continuation + NUL
  * in round 18, parameter expansion in round 19) can never again be missing from
  * the other — the "twin scanners diverged" bug class that recurred rounds 15–18
@@ -49,7 +49,7 @@ import { decodeAnsiC, findAnsiCClose } from "./shell-ansi-c";
 /** Unquoted chars that end a word for the redirect-target reader. Includes the
  *  segment separators `|` and `;` and the control operator `&` so a redirect
  *  word stops at a command boundary even if the caller ever passes text that is
- *  NOT pre-split on those operators. (`readRedirectTarget` today receives
+ *  NOT pre-split on those operators. (`redirectTargetsOf` today receives
  *  per-segment slices from splitCommandSegmentsWithOps, so `|`/`;`/`&` cannot
  *  actually appear unquoted mid-word — this class makes the redirect-word
  *  contract self-contained rather than depending on that upstream precondition.) */
@@ -206,7 +206,7 @@ export interface NormalizedSpan {
  *     it can only ever fail to hide a guarded token, never conceal one. (The
  *     front gate and placeholderFor run on UNFLATTENED text, so it is NOT that
  *     substitutions were already removed.)
- *   - `"redirect-word"` (evidence `readRedirectTarget`, through
+ *   - `"redirect-word"` (evidence `redirectTargetsOf`, through
  *     `normalizeShellSpan`): stop (exclusive) at the first UNQUOTED word
  *     boundary (whitespace, `>` `<` `&` `(` `)` `|` `;`) and treat an unquoted
  *     backtick as a QUOTE so a `` >`cmd` `` target does not split

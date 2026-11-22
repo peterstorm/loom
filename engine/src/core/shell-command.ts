@@ -17,18 +17,17 @@ export function splitCommandSegmentsWithOps(command: string): readonly CommandSe
   const segments: CommandSegment[] = [];
   let start = 0;
   let pendingOp: SegmentOp | null = null;
-  let lastUnquoted = -1; // the last character the lexer read unquoted
+  let walk = OPERATOR_WALK_START;
   scanUnquoted<never>(command, 0, (_char, index) => {
-    const afterRedirect = lastUnquoted === index - 1 && command[lastUnquoted] === ">";
-    lastUnquoted = index;
-    const operator = shellOperatorAt(command, index, afterRedirect);
+    const read = readShellOperator(command, index, walk);
+    walk = read.walk;
+    const { operator } = read;
     if (operator === null) return CONTINUE;
     if (operator.separator !== null) {
       segments.push({ text: command.slice(start, index), opBefore: pendingOp });
       pendingOp = operator.separator;
       start = index + operator.width;
     }
-    lastUnquoted = index + operator.width - 1;
     return skip(index + operator.width);
   });
   segments.push({ text: command.slice(start), opBefore: pendingOp });
@@ -43,17 +42,48 @@ export function splitCommandSegmentsWithOps(command: string): readonly CommandSe
  */
 export type ShellOperator = Readonly<{ separator: SegmentOp | null; width: number }>;
 
+declare const operatorWalkBrand: unique symbol;
+
 /**
- * The ONE classification of the unquoted operators that cut a command line,
- * shared by every walker that cuts one — the segment splitter above and the
- * heredoc opener-line group walk (core/shell-heredoc). Null when the character
- * at `index` starts no operator.
+ * Where a walk over a command line stands, as far as operators care: the
+ * index of the last character it read UNQUOTED (`-1` before the first).
+ * Opaque: only `OPERATOR_WALK_START` and `readShellOperator` make one, so no
+ * walker can claim a `>` it never read.
+ */
+export type OperatorWalk = Readonly<{ lastUnquoted: number }> & { readonly [operatorWalkBrand]: true };
+
+const operatorWalk = (lastUnquoted: number): OperatorWalk => Object.freeze({ lastUnquoted }) as OperatorWalk;
+
+/** A walk that has read nothing yet. */
+export const OPERATOR_WALK_START: OperatorWalk = operatorWalk(-1);
+
+/** The operator a walk reads at one unquoted character, and the walk past it. */
+export type OperatorRead = Readonly<{ operator: ShellOperator | null; walk: OperatorWalk }>;
+
+/**
+ * Read the operator, if any, at `index` — a character the caller's walk reads
+ * UNQUOTED — and advance the walk past it. Every walker that cuts a command
+ * line (the segment splitter above and the heredoc opener-line group walk in
+ * core/shell-heredoc) reads its operators here, handing back the walk each
+ * call returned; the walkers differ only in which spans they skip unread.
  *
- * `afterRedirect` says whether the character before `index` is a `>` the
- * caller's walk read UNQUOTED (never one inside quotes or escaped as `\>`):
- * only then does the `&` or `|` after it bind to the redirect. Reading it off
- * the raw text let an escaped `\>` bind the `&` after it, so
- * `echo \>& rm <state>` read as one `echo` segment while bash ran the `rm`.
+ * The walk owns the one rule its callers used to copy: a `&` or `|` binds to a
+ * redirect only right after a `>` the walk itself read unquoted (never one
+ * inside quotes or escaped as `\>`). Reading it off the raw text let an
+ * escaped `\>` bind the `&` after it, so `echo \>& rm <state>` read as one
+ * `echo` segment while bash ran the `rm`.
+ */
+export function readShellOperator(text: string, index: number, walk: OperatorWalk): OperatorRead {
+  const afterRedirect = walk.lastUnquoted === index - 1 && text[walk.lastUnquoted] === ">";
+  const operator = shellOperatorAt(text, index, afterRedirect);
+  return { operator, walk: operatorWalk(operator === null ? index : index + operator.width - 1) };
+}
+
+/**
+ * The ONE classification of the unquoted operators that cut a command line.
+ * Null when the character at `index` starts no operator. `afterRedirect` is
+ * the walk's verdict (`readShellOperator`): the character before `index` is a
+ * `>` the walk read unquoted.
  *
  *  - `&&` / `||` — two-character separators;
  *  - `&>` / `&>>` — a redirect: binds, spanning the `&>`;
@@ -64,7 +94,7 @@ export type ShellOperator = Readonly<{ separator: SegmentOp | null; width: numbe
  *  - `|` — a pipe: separates as `|` (a group walk keeps pipe members together);
  *  - `;` and newline — separate as `;`, one character each (`;;` is two).
  */
-export function shellOperatorAt(text: string, index: number, afterRedirect: boolean): ShellOperator | null {
+function shellOperatorAt(text: string, index: number, afterRedirect: boolean): ShellOperator | null {
   const char = text[index];
   const next = text[index + 1];
   if (char === "&") {

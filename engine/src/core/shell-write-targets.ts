@@ -5,62 +5,9 @@
  * `extractEvidence`, which mints each target as a via-shell FileWrite.
  */
 
-import { normalizeShellSpan } from "./shell-normalize";
 import { splitCommandSegments, stripComment, stripEnvPrefix } from "./shell-command";
 import { CONTINUE, halt, lexShellQuotes } from "./shell-quoting";
-import { classifyFdDupWord, redirectsOf } from "./shell-redirects";
-
-/**
- * Read one redirect target starting at `start` (a redirect's `operandAt`):
- * skip whitespace, then normalize the word. Fd dups (`2>&1`, `>&-`) and
- * process substitution (`>(…)`) yield no file target (an empty value); a
- * `>&word` whose word is NOT a whole fd (`>&2/../r.json`) redirects to the
- * FILE `word` and IS read. `end` is where this reading of the word ends.
- */
-function readRedirectTarget(segment: string, start: number): Readonly<{ value: string; end: number }> {
-  let i = start;
-  while (i < segment.length && /\s/.test(segment[i])) i++;
-  if (i >= segment.length) return { value: "", end: i };
-  if (segment[i] === "&") {
-    const dup = classifyFdDupWord(segment, i + 1);
-    // fd dup (2>&1, >&2, >&-): no file is written
-    if (dup.isFdDup) return { value: "", end: dup.end };
-    // `>&word` with a non-fd word: bash redirects stdout+stderr TO THE FILE
-    // `word` — fall through and read it like any other target.
-    i++;
-  }
-  if (segment[i] === "(") return { value: "", end: i }; // process substitution: no static target
-  // The word's literal value comes from the SHARED normalizer, so a target
-  // spelled with ANSI-C / a line continuation mints the SAME path the guard
-  // sees (twin parity — one place owns the quote/escape/ANSI-C rules). Backtick
-  // quotes here so `` >`cmd` `` does not split mid-substitution.
-  return normalizeShellSpan(segment, i);
-}
-
-/**
- * Collect the target of every output redirect of one segment (`redirectsOf`,
- * the scan the guards read): `>`, `>>`, `>|`, `&>`, `&>>`, `n>`, `<>` and a
- * `>&file`, each read by `readRedirectTarget`.
- *
- * The scan cuts a target word where the quote lexer does; the normalizer can
- * read the same word further (a `${x:-a b}` span, an ANSI-C `$'a\'b'`). Where
- * the two readings end apart, the redirects after the normalizer's end are
- * collected too, so the targets are a superset of either reading's. Each
- * resume point is scanned once, so the work stays quadratic at worst.
- */
-function collectRedirectTargets(segment: string, out: string[]): void {
-  const scanned = new Set<number>();
-  const collectFrom = (from: number): void => {
-    if (scanned.has(from)) return;
-    scanned.add(from);
-    for (const redirect of redirectsOf(segment, from)) {
-      const target = readRedirectTarget(segment, redirect.operandAt);
-      if (target.value !== "") out.push(target.value);
-      if (target.end !== redirect.end) collectFrom(target.end);
-    }
-  };
-  collectFrom(0);
-}
+import { redirectTargetsOf } from "./shell-redirects";
 
 /** Quote-aware words of a segment with their quotes and escapes removed,
  *  stopping at the first unquoted redirect character (`>`, `<`, `&`) —
@@ -243,7 +190,7 @@ export function extractShellWriteTargets(command: string): string[] {
   const targets: string[] = [];
   for (const raw of splitCommandSegments(command)) {
     const segment = stripComment(raw);
-    collectRedirectTargets(segment, targets);
+    targets.push(...redirectTargetsOf(segment));
     collectTeeTargets(segment, targets);
     collectMoveCopyTargets(segment, targets);
   }

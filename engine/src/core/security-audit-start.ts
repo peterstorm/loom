@@ -16,26 +16,33 @@ import { z } from "zod/v4";
 import { compareStrings } from "./ordering";
 import { failure, type DomainResult } from "./orchestration-contract/identity";
 import {
-  SCOPE_REF_PATTERN,
   SECURITY_PROFILE_LENSES,
+  commitIdSchema,
   expecting,
   parseWire,
   stringListSchema,
+  type CommitId,
   type SecurityProfile,
   type SecurityRunMetadata,
   type WireViolation,
 } from "./security-audit-contract";
 import { runStatusOf, type CoverageLedger } from "./security-coverage";
-import { NO_STACK_SIGNALS, selectSecurityLenses, type LensSelection, type StackSignals } from "./security-lens-select";
+import {
+  NO_STACK_SIGNALS,
+  STACK_SIGNAL_NAMES,
+  STACK_SIGNAL_SHAPES,
+  selectSecurityLenses,
+  type LensSelection,
+} from "./security-lens-select";
 
 // --- The `start` payload ---
 
 /** What a run's scope is over, before its paths are derived from the seeds: a
- *  `tree` names no refs, a `diff` names both — the metadata's own scope union
- *  without its paths. */
+ *  `tree` names no refs, a `diff` names both commits — the metadata's own
+ *  scope union without its paths. */
 export type SecurityStartScope =
   | Readonly<{ kind: "tree"; baseRef: null; headRef: null }>
-  | Readonly<{ kind: "diff"; baseRef: string; headRef: string }>;
+  | Readonly<{ kind: "diff"; baseRef: CommitId; headRef: CommitId }>;
 
 const TREE_SCOPE: SecurityStartScope = Object.freeze({ kind: "tree", baseRef: null, headRef: null });
 
@@ -61,40 +68,45 @@ const startScopeSchema = z
       for (const ref of SCOPE_REFS) if (scope[ref] != null) refuse(ref, "a tree scope names no refs");
       return TREE_SCOPE;
     }
-    for (const ref of SCOPE_REFS) {
+    const commitOf = (ref: (typeof SCOPE_REFS)[number]): CommitId | null => {
       const value = scope[ref];
-      if (value == null) refuse(ref, "a diff scope names both refs");
-      else if (!SCOPE_REF_PATTERN.test(value)) refuse(ref, "expected a 40- or 64-hex commit id");
-    }
-    const { baseRef, headRef } = scope;
-    return baseRef == null || headRef == null ? z.NEVER : { kind: "diff", baseRef, headRef };
+      if (value == null) {
+        refuse(ref, "a diff scope names both refs");
+        return null;
+      }
+      const commit = commitIdSchema.safeParse(value);
+      if (!commit.success) refuse(ref, "expected a 40- or 64-hex commit id");
+      return commit.success ? commit.data : null;
+    };
+    const baseRef = commitOf("baseRef");
+    const headRef = commitOf("headRef");
+    return baseRef === null || headRef === null ? z.NEVER : { kind: "diff", baseRef, headRef };
   });
 
 const listSignal = stringListSchema.default([]);
 const flagSignal = z.boolean(expecting("expected a boolean")).default(false);
 
+/** The schema each stack-signal wire shape is parsed by. */
+const SIGNAL_SCHEMA = { boolean: flagSignal, "string-list": listSignal } as const;
+
+/** Each signal's schema, read off the lens selector's one signal table. */
+type SignalSchemas = { readonly [Signal in keyof typeof STACK_SIGNAL_SHAPES]: (typeof SIGNAL_SCHEMA)[(typeof STACK_SIGNAL_SHAPES)[Signal]] };
+
+// The entries are built from the typed table key by key; `fromEntries` only
+// forgets the per-key pairing the mapped type restates.
+const SIGNAL_SCHEMAS = Object.fromEntries(
+  STACK_SIGNAL_NAMES.map((name) => [name, SIGNAL_SCHEMA[STACK_SIGNAL_SHAPES[name]]]),
+) as SignalSchemas;
+
 /** Stack signals: an object drawing ONLY from the known signals, each with its
  *  own type. A signal the payload omits is not present (`[]` or `false`), which
  *  is what "no signal" means to the selector; a misspelled or mistyped signal
  *  is a violation, because silently dropping it changes which lenses the run
- *  selects while the payload still parses. Each field's schema is pinned to
- *  `StackSignals` by type, so a signal the selector adds is a compile error
- *  here until it is parsed. */
+ *  selects while the payload still parses. The fields are derived from the
+ *  selector's `STACK_SIGNAL_SHAPES` table, so a signal the selector adds is
+ *  parsed here with no second list to keep in step. */
 const stackSignalsSchema = z.strictObject(
-  {
-    languages: listSignal,
-    manifests: listSignal,
-    servesHttp: flagSignal,
-    rendersClientSide: flagSignal,
-    drivesModelsOrTools: flagSignal,
-    usesQueuesOrRpc: flagSignal,
-    isolatesTenants: flagSignal,
-    deploysInfrastructure: flagSignal,
-    hasNativeMemory: flagSignal,
-    hasAppOrLocalIpc: flagSignal,
-    hasReleasePipelines: flagSignal,
-    hasSharedResourcePressure: flagSignal,
-  } satisfies { [Signal in keyof StackSignals]: StackSignals[Signal] extends boolean ? typeof flagSignal : typeof listSignal },
+  SIGNAL_SCHEMAS,
   { error: (issue) => (issue.code === "invalid_type" ? "expected an object of stack signals" : undefined) },
 ).readonly();
 
