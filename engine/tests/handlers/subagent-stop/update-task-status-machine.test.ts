@@ -5,6 +5,9 @@
  *   trusted-pass at untrusted, labeled "machine-incomplete: <reqs>"
  * - a stop that carries no sidecar while attempts execute cannot name the
  *   attempt it settles: it preserves every reservation and touches no Task
+ * - an observation the locked settlement cannot make (unsafe modified paths,
+ *   new-test collection) settles a non-consuming infrastructure receipt,
+ *   releases the reservation and resets review
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -13,13 +16,18 @@ import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
 import { capVerdictForMachineCompletion } from "../../../src/core/implementation-evidence";
 import { SUBAGENT_DIR } from "../../../src/config";
-import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord, Requirement } from "../../../src/machine";
 import { reportSummary } from "../../machine/report-summary";
 import { executingGraphFixture, graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
-import { ARMED_ARTIFACT, armedClaudeImplementation, writesTranscript } from "../../fixtures/claude-implementation-attempt";
+import {
+  ARMED_ARTIFACT,
+  ARMED_EPOCH,
+  REGRESSION_ONLY,
+  armedClaudeImplementation,
+  writesTranscript,
+} from "../../fixtures/claude-implementation-attempt";
 import { AGENT_COMMAND_ORIGIN } from "../../../src/machine/types";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const run = `uts-machine-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
@@ -103,12 +111,6 @@ describe("capVerdictForMachineCompletion (pure)", () => {
   });
 });
 
-/** Regression required, new tests waived: a trusted pass alone can satisfy the Proof. */
-const REGRESSION_ONLY = {
-  regression: { kind: "required" as const },
-  newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
-};
-
 /** Arms T1, changes the declared artifact as its transcript says, and stops the Agent. */
 async function stopArmedImplementation(label: string, events: readonly EvidenceRecord[]) {
   const armed = await armedClaudeImplementation({ label, verificationPolicy: REGRESSION_ONLY });
@@ -123,8 +125,7 @@ async function stopArmedImplementation(label: string, events: readonly EvidenceR
 }
 
 describe("machine terminal requirements gate the persisted verdict (Fix 7)", () => {
-  const epoch = parseEpoch("a-1:code-implementer-agent");
-  if (epoch === null) throw new Error("the armed Agent epoch must parse");
+  const epoch = ARMED_EPOCH;
   const pass = { kind: "TestRun" as const, origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: reportSummary(5, 0) };
 
   it("a trusted-pass with unmet requirements lands as untrusted machine-incomplete", async () => {
@@ -168,6 +169,47 @@ describe("locked implementation settlement failures", () => {
     });
     const persisted = JSON.parse(readFileSync(armed.statePath, "utf-8"));
     expect(persisted.tasks[0]).toMatchObject({ status: "pending", revalidation_required: true });
+    expect(persisted.tasks[0].active_implementation_attempt).toBeUndefined();
+    expect(persisted.tasks[0].implementation_attempt_history).toContainEqual(expect.objectContaining({
+      transition: "infrastructure-blocked",
+      consumesSemanticAttempt: false,
+    }));
+    expect(persisted.executing_tasks).toEqual([]);
+  }, 30000);
+
+  it("settles an infrastructure receipt, releases execution and resets review when new-test collection fails", async () => {
+    const armed = await armedClaudeImplementation({
+      label: "new-test-unavailable",
+      verificationPolicy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        newTests: { kind: "required" },
+      },
+      seed: (graph) => ({
+        ...graph,
+        tasks: graph.tasks.map((task) => ({ ...task, review_status: "passed" as const })),
+      }),
+    });
+    disposals.push(armed.dispose);
+    // A start revision Git cannot resolve: the new-test diff cannot be collected.
+    const registered = JSON.parse(readFileSync(armed.statePath, "utf-8"));
+    chmodSync(armed.statePath, 0o644);
+    writeFileSync(armed.statePath, JSON.stringify({
+      ...registered,
+      tasks: registered.tasks.map((task: Record<string, unknown>) => ({ ...task, start_sha: "not-a-git-revision" })),
+    }));
+    chmodSync(armed.statePath, 0o444);
+    writeFileSync(join(armed.root, ARMED_ARTIFACT), "export const value = 2;\n");
+    writeFileSync(armed.transcript, writesTranscript("Changed the artifact.", [ARMED_ARTIFACT]));
+
+    const result = await runUpdateTaskStatus(armed.stopInput, [], { kind: "snapshot", events: [] }, armed.observation);
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("T1 completion infrastructure unavailable"),
+    });
+    const persisted = JSON.parse(readFileSync(armed.statePath, "utf-8"));
+    expect(persisted.tasks[0]).toMatchObject({ status: "pending", revalidation_required: true, review_status: "pending" });
+    expect(persisted.tasks[0].failure_reason).toContain("new-test observation unavailable");
     expect(persisted.tasks[0].active_implementation_attempt).toBeUndefined();
     expect(persisted.tasks[0].implementation_attempt_history).toContainEqual(expect.objectContaining({
       transition: "infrastructure-blocked",

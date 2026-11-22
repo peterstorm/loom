@@ -165,6 +165,45 @@ describe("validate-agent-model — the grandfathering rescue", () => {
     expect(result.kind).toBe("block");
   });
 
+  /** The rescue's spawn with `markers` as its authority lines, beside a context
+   *  path anchored to a planted authority that WOULD prove `haiku`. */
+  const markedSpawn = (markers: readonly string[]) => {
+    const runId = "run.grandfather1";
+    const contextPath = plantAuthority(canonicalRunDirectory("wave-gate-runs", runId), runId, "request:grandfathered-retry");
+    return JSON.stringify({
+      tool_name: "Agent",
+      tool_input: {
+        subagent_type: "loom:comment-analyzer",
+        model: "haiku",
+        prompt: [...markers, `LOOM_CONTEXT_PATH: ${contextPath}`, "Read the immutable context packet."].join("\n"),
+      },
+    });
+  };
+  const DIGEST = `LOOM_CONTEXT_DIGEST: ${"a".repeat(64)}`;
+
+  it.each([
+    ["a request marker with no digest marker", ["LOOM_REQUEST_ID: request:grandfathered-retry"],
+      `grandfathered model authority markers are unusable: task issuance identity is incomplete or contradictory: ` +
+        `LOOM_REQUEST_ID marker names request:grandfathered-retry; LOOM_CONTEXT_DIGEST marker is absent`],
+    ["two request markers that disagree", ["LOOM_REQUEST_ID: request:grandfathered-retry", "LOOM_REQUEST_ID: request:other", DIGEST],
+      `grandfathered model authority markers are unusable: task issuance identity is incomplete or contradictory: ` +
+        `LOOM_REQUEST_ID marker is contradictory; LOOM_CONTEXT_DIGEST marker names ${"a".repeat(64)}`],
+    ["a digest marker that is not canonical", ["LOOM_REQUEST_ID: request:grandfathered-retry", `LOOM_CONTEXT_DIGEST: ${"A".repeat(64)}`],
+      "grandfathered model authority markers are unusable: task LOOM_CONTEXT_DIGEST marker is not canonical"],
+    ["no authority markers at all", [],
+      "grandfathered model authority requires exact request and context markers"],
+  ] as const)("BLOCKS on %s, naming why the rescue could not read them and keeping the policy block", async (_case, markers, diagnostic) => {
+    const result = await validateAgentModel(markedSpawn(markers), []);
+
+    expect(result.kind).toBe("block");
+    const message = result.kind === "block" ? result.message : "";
+    // The original policy mismatch is kept; the rescue only adds why it did not apply.
+    expect(message).toContain("BLOCKED: Claude Code model policy failed for 'loom:comment-analyzer'");
+    expect(message.split("\n").filter((line) => line.startsWith("  - grandfathered"))).toEqual([
+      expect.stringContaining(diagnostic),
+    ]);
+  });
+
   it("BLOCKS the identical spawn when the authority sits outside the repository", async () => {
     // The C3 regression. Same self-consistent authority record, same markers —
     // only the location differs, and location is the entire trust signal.

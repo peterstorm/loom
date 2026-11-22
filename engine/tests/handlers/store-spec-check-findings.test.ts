@@ -646,7 +646,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     stopFields?: Record<string, unknown>;
     session?: string;
   }>) {
-    const tmpDir = realpathSync.native(canonicalTempDir(`loom-${input.label}-`));
+    const tmpDir = canonicalTempDir(`loom-${input.label}-`);
     const statePath = join(tmpDir, "active_task_graph.json");
     const transcriptPath = join(tmpDir, input.transcript === null ? "does-not-exist.jsonl" : "transcript.jsonl");
     if (input.transcript === "directory") mkdirSync(transcriptPath);
@@ -732,7 +732,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
   });
 
   it("derives and consumes the transcript when agent_transcript_path is absent", async () => {
-    const tmpDir = realpathSync.native(canonicalTempDir("loom-spec-derived-config-"));
+    const tmpDir = canonicalTempDir("loom-spec-derived-config-");
     const configDir = join(tmpDir, "claude-config");
     const projectDir = join(tmpDir, "project");
     const agentId = "a0a0057138606bfd0";

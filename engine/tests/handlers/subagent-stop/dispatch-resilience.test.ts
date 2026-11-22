@@ -13,7 +13,6 @@ import dispatch, { runDispatch } from "../../../src/handlers/subagent-stop/dispa
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
 import { SUBAGENT_DIR } from "../../../src/config";
-import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
@@ -22,9 +21,15 @@ import { reportSummary } from "../../machine/report-summary";
 import { resolveTaskGraph } from "../../../src/state-manager";
 import { AGENT_COMMAND_ORIGIN } from "../../../src/machine/types";
 import { executingGraphFixture, graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
-import { ARMED_ARTIFACT, armedClaudeImplementation, writesTranscript } from "../../fixtures/claude-implementation-attempt";
+import {
+  ARMED_ARTIFACT,
+  ARMED_EPOCH,
+  REGRESSION_ONLY,
+  armedClaudeImplementation,
+  writesTranscript,
+} from "../../fixtures/claude-implementation-attempt";
 import type { TaskGraph } from "../../../src/types";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const run = `dispatch-resilience-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
@@ -584,24 +589,11 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
   });
 });
 
-/** Regression required, new tests waived: a trusted pass alone can satisfy the Proof. */
-const REGRESSION_ONLY = {
-  regression: { kind: "required" as const },
-  newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
-};
-
 /** An exact Claude attempt for T1, disposed after the test. */
 async function armed(label: string, options: Readonly<{ publishSidecar?: boolean; seed?: (graph: TaskGraph) => TaskGraph }> = {}) {
   const attempt = await armedClaudeImplementation({ label, verificationPolicy: REGRESSION_ONLY, ...options });
   disposals.push(attempt.dispose);
   return attempt;
-}
-
-/** The armed attempt's epoch: the agent id and type its stop names. */
-function armedEpoch() {
-  const epoch = parseEpoch("a-1:code-implementer-agent");
-  if (epoch === null) throw new Error("the armed Agent epoch must parse");
-  return epoch;
 }
 
 describe("a cleanupSubagentFlag crash still runs update-task-status", () => {
@@ -672,7 +664,7 @@ describe("update-task-status honors the pre-unbind evidence snapshot", () => {
     // No <session>.evidence.jsonl exists — the snapshot is the only source,
     // exactly the bind-time truncation window the dispatcher closes.
     const snapshot: readonly EvidenceRecord[] = [{
-      epoch: armedEpoch(),
+      epoch: ARMED_EPOCH,
       event: {
         kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
         command: "npm test",
@@ -711,7 +703,7 @@ describe("an untrusted helper-reported pass never launders the ledger's trusted-
     writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
     writeFileSync(attempt.transcript, writesTranscript("Changed the artifact.", [ARMED_ARTIFACT]));
     const snapshot: readonly EvidenceRecord[] = [{
-      epoch: armedEpoch(),
+      epoch: ARMED_EPOCH,
       event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 1, report: null },
     }];
 
@@ -724,6 +716,85 @@ describe("an untrusted helper-reported pass never launders the ledger's trusted-
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" }); // ground truth persisted
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 1");
     expect(state.tasks[0].status).toBe("pending");
+  }, 30000);
+});
+
+describe("a prior trusted verdict survives a stop that carries no trusted evidence", () => {
+  /** Stops of the armed attempt that carry nothing trusted: no ledger line
+   *  at all, or an agent-command pass with no report (judged untrusted). */
+  const UNTRUSTED_STOPS: Readonly<Record<string, readonly EvidenceRecord[]>> = Object.freeze({
+    empty: [],
+    untrusted: [{
+      epoch: ARMED_EPOCH,
+      event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: null },
+    }],
+  });
+
+  for (const [stop, events] of Object.entries(UNTRUSTED_STOPS)) {
+    it(`an ${stop} stop keeps the earlier trusted-fail and still releases the reservation`, async () => {
+      const attempt = await armed(`trusted-kept-${stop}`, {
+        seed: (graph) => ({
+          ...graph,
+          tasks: graph.tasks.map((task) => ({
+            ...task, test_result: { verdict: "trusted-fail" }, test_evidence: "ledger: exit 1 (npm test)",
+          })),
+        }),
+      });
+      writeFileSync(attempt.transcript, writesTranscript("Stopped without changing the artifact.", []));
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events }, attempt.observation);
+      stderrSpy.mockRestore();
+      expect(result.kind, JSON.stringify(result)).toBe("passthrough");
+
+      const state = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
+      expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" });
+      expect(state.tasks[0].test_evidence).toBe("ledger: exit 1 (npm test)");
+      // The verdict stands, but the Agent still stopped: its reservation is
+      // released, or the duplicate-spawn check ghost-blocks the retry.
+      expect(state.tasks[0].status).toBe("pending");
+      expect(state.tasks[0].active_implementation_attempt).toBeUndefined();
+      expect(state.executing_tasks).toEqual([]);
+    }, 30000);
+  }
+});
+
+describe("a late stop never reopens a completed Task", () => {
+  it("redelivering the settled attempt's stop after the Task completed changes nothing", async () => {
+    const attempt = await armed("completed-kept");
+    writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
+    writeFileSync(attempt.transcript, writesTranscript("Changed the artifact.", [ARMED_ARTIFACT]));
+    const pass: readonly EvidenceRecord[] = [{
+      epoch: ARMED_EPOCH,
+      event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: reportSummary(5, 0) },
+    }];
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const settled = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: pass }, attempt.observation);
+    expect(settled.kind, JSON.stringify(settled)).toBe("passthrough");
+
+    // The Wave Gate then completes T1 (the protected State File is written
+    // the way its lock-holder writes it).
+    const implemented = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
+    expect(implemented.tasks[0]).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
+    chmodSync(attempt.statePath, 0o644);
+    writeFileSync(attempt.statePath, JSON.stringify({
+      ...implemented,
+      tasks: implemented.tasks.map((task: { id: string }) => task.id === "T1" ? { ...task, status: "completed" } : task),
+    }));
+    chmodSync(attempt.statePath, 0o444);
+    const before = readFileSync(attempt.statePath);
+
+    // A late SubagentStop for the same attempt arrives with no evidence at all.
+    const late = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: [] }, attempt.observation);
+    const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    stderrSpy.mockRestore();
+
+    expect(late.kind, JSON.stringify(late)).toBe("passthrough");
+    // The completed Task already holds this attempt's receipt: the redelivery is a duplicate.
+    expect(text).toContain("T1 result ignored (duplicate)");
+    expect(readFileSync(attempt.statePath).equals(before)).toBe(true);
+    const state = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
+    expect(state.tasks[0]).toMatchObject({ status: "completed", test_result: { verdict: "trusted-pass" } });
   }, 30000);
 });
 

@@ -16,7 +16,7 @@ import type { Task, TaskGraph } from "../../src/types";
 import { isDistillTask } from "../../src/core/distill-task";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import { runningEngineIdentity, StateManager } from "../../src/state-manager";
-import { taskFixture } from "../fixtures/task-lifecycle";
+import { manifestedGraphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
@@ -88,7 +88,8 @@ function writeState(
     ? join(dir, "active_task_graph.json")
     : join(dir, `.${layout}`, "state", "active_task_graph.json");
   const state: TaskGraph = {
-    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+    current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -297,7 +298,7 @@ describe("populate-task-graph — protected verification manifest authority", ()
       const before = stateBytes(statePath);
       writeManifest(dir, { ...manifestDocument(), checks: source === "configured" ? [] : manifestDocument().checks });
       const loaded = StateManager.fromPath(statePath)!.load();
-      expect(deriveWaveCompletionSuiteReadiness(loaded, 1, undefined)).toMatchObject({
+      expect(deriveWaveCompletionSuiteReadiness(manifestedGraphFixture(loaded), 1, undefined)).toMatchObject({
         kind: "required", projectVerificationCoverage: coverage,
       });
       expect(stateBytes(statePath)).toBe(before);

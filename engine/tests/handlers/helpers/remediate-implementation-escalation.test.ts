@@ -46,7 +46,6 @@ const installState = (taskFields: Record<string, unknown>): string | null => {
   cleanup.push(root);
   statePath = join(root, ".claude", "state", "active_task_graph.json");
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
-  const { terminal_receipt: _terminalReceipt, ...persistedFields } = taskFields;
   const graph = {
     current_phase: "execute",
     verification_manifest: preI6DefaultVerificationManifest(),
@@ -65,7 +64,7 @@ const installState = (taskFields: Record<string, unknown>): string | null => {
       status: "pending",
       depends_on: [],
       review_status: "pending",
-      ...persistedFields,
+      ...taskFields,
     }],
     wave_gates: {
       "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },

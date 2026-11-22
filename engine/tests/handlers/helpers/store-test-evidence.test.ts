@@ -104,17 +104,20 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(stderr).toContain("refusing to overwrite");
   });
 
-  it("a trusted-pass verdict is equally protected", () => {
-    writeFileSync(
-      statePath,
-      JSON.stringify(graphWith({ status: "implemented", proof: satisfiedProof([]), test_result: { verdict: "trusted-pass" } }), null, 2),
+  it("a trusted-pass verdict is equally protected, and the refusal writes nothing", () => {
+    const originalBytes = JSON.stringify(
+      graphWith({ status: "implemented", proof: satisfiedProof([]), test_result: { verdict: "trusted-pass" } }),
+      null,
+      2,
     );
+    writeFileSync(statePath, originalBytes);
 
     const { exitCode } = runHelper("TEST_PASSED: false\nTEST_EVIDENCE: fabricated failure\n");
     expect(exitCode).toBe(0);
 
     const task = readState().tasks[0];
     expect(task.test_result).toEqual({ verdict: "trusted-pass" });
+    expect(readFileSync(statePath, "utf8")).toBe(originalBytes);
   });
 
   it("rejects helper stdin for a revalidation-required Task without changing any stored evidence", () => {

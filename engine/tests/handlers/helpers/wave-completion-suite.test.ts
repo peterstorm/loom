@@ -46,7 +46,7 @@ import {
   type Task,
   type TaskGraph,
 } from "../../../src/types";
-import { satisfiedProof } from "../../fixtures/task-lifecycle";
+import { manifestedGraphFixture, satisfiedProof, waveGateAbandonmentFixture } from "../../fixtures/task-lifecycle";
 import { contentDigest } from "../../fixtures/acceptance-fixtures";
 
 const roots: string[] = [];
@@ -354,7 +354,7 @@ async function ensure(f: Fixture) {
   return ensureWaveCompletionSuite({
     handle: f.handle,
     manager: f.manager,
-    graph: f.manager.load(),
+    graph: manifestedGraphFixture(f.manager.load()),
     registration: f.registration,
   });
 }
@@ -419,12 +419,12 @@ function commitCompletion(f: Fixture, observed: Partial<CompletionObservations> 
 
 /** Abandon the fixture's run naming no successor, as `orchestration abandon` does. */
 async function abandonRun(f: Fixture): Promise<void> {
-  const abandoned = await f.manager.updateAndReturn((state) => abandonWaveGateRegistration(state, {
+  const abandoned = await f.manager.updateAndReturn((state) => abandonWaveGateRegistration(state, waveGateAbandonmentFixture({
     runsRoot: f.manager.load().active_wave_gate!.runsRoot!,
     runId: f.handle.runId as ActiveWaveGateRegistration["runId"],
     reason: "fix the advisory first",
     supersededBy: null,
-  }));
+  })));
   if (abandoned.kind !== "stamped") throw new Error(`fixture run not abandoned: ${abandoned.kind}`);
 }
 
@@ -612,7 +612,7 @@ describe("modern Wave completion suite shell", () => {
     const first = await ensure(f);
     expect(first, JSON.stringify(first)).toMatchObject({
       ok: true,
-      value: { kind: "accepted", disposition: "installed" },
+      value: { disposition: "installed" },
     });
     expect(reportCount(f.root)).toBe(1);
 
@@ -666,7 +666,7 @@ describe("modern Wave completion suite shell", () => {
     chmodSync(repairedExecutable, 0o755);
     expect(await ensure(f)).toMatchObject({
       ok: true,
-      value: { kind: "accepted", disposition: "installed" },
+      value: { disposition: "installed" },
     });
     const persisted = f.handle.readArtifactBytes(relativePath);
     expect(persisted.ok && persisted.value !== null).toBe(true);
@@ -818,7 +818,7 @@ describe("modern Wave completion suite shell", () => {
     const result = await ensureWaveCompletionSuite({
       handle: f.handle,
       manager: f.manager,
-      graph: staleGraph,
+      graph: manifestedGraphFixture(staleGraph),
       registration: f.registration,
       runCompletionCheck: mustNotRun,
     });
@@ -845,7 +845,7 @@ describe("modern Wave completion suite shell", () => {
     const result = await ensureWaveCompletionSuite({
       handle: f.handle,
       manager: f.manager,
-      graph: f.manager.load(),
+      graph: manifestedGraphFixture(f.manager.load()),
       registration: f.registration,
       runCompletionCheck,
     });
@@ -889,7 +889,7 @@ describe("modern Wave completion suite shell", () => {
     const result = await ensureWaveCompletionSuite({
       handle: foreignHandle.value,
       manager: f.manager,
-      graph: f.manager.load(),
+      graph: manifestedGraphFixture(f.manager.load()),
       registration: f.registration,
     });
 
@@ -914,7 +914,7 @@ describe("modern Wave completion suite shell", () => {
     it("accepts the contract Wave's expected RED, installing only the receipt; completion stamps the Acceptance Freeze", async () => {
       const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
       const result = await ensure(f);
-      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { disposition: "installed" } });
       const graph = f.manager.load();
       expect(completionOutcome(graph)).toMatchObject({ exitCode: 1 });
       expect(graph.acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
@@ -1017,7 +1017,7 @@ describe("modern Wave completion suite shell", () => {
       await f.manager.update((locked) => ({ ...locked, tasks: locked.tasks.map((entry) => entry.id === "T1" ? settled : entry) }));
       const successor = await registerSuccessor(f);
       const result = await ensure(successor);
-      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { disposition: "installed" } });
       expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
       expect(commitCompletion(successor).acceptance_contracts?.[0]?.freeze).toEqual({
         ...contractFreeze("claimant-wave"),
@@ -1028,7 +1028,7 @@ describe("modern Wave completion suite shell", () => {
     it("reads a Mocha report's absolute acceptance files against the repository: the contract Wave's RED is accepted", async () => {
       const f = contractFixture("mocha:AS-001=fail,AS-002=fail", "contract-wave");
       const result = await ensure(f);
-      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { disposition: "installed" } });
       expect(completionOutcome(f.manager.load())).toMatchObject({ exitCode: 1 });
     });
 
@@ -1058,7 +1058,7 @@ describe("modern Wave completion suite shell", () => {
     it("accepts a claimant Wave whose due testcase passes while a pending one still fails, leaving the freeze alone", async () => {
       const f = contractFixture("junit:AS-001=pass,AS-002=fail", "claimant-wave");
       const result = await ensure(f);
-      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { disposition: "installed" } });
       const graph = f.manager.load();
       expect(completionOutcome(graph)).toMatchObject({ exitCode: 1 });
       expect(graph.acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
@@ -1081,7 +1081,7 @@ describe("modern Wave completion suite shell", () => {
     it("re-records the roster green at the first gate after a Contract Revision, freezing the revised bytes on completion", async () => {
       const f = contractFixture("junit:AS-001=pass,AS-002=fail", "after-revision");
       const result = await ensure(f);
-      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { disposition: "installed" } });
       expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("after-revision"));
       expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
       expect(commitCompletion(f).acceptance_contracts?.[0]?.freeze).toEqual({
@@ -1105,7 +1105,7 @@ describe("modern Wave completion suite shell", () => {
       const result = await ensureWaveCompletionSuite({
         handle: f.handle,
         manager: f.manager,
-        graph: f.manager.load(),
+        graph: manifestedGraphFixture(f.manager.load()),
         registration: f.registration,
         runCompletionCheck,
       });
@@ -1151,7 +1151,7 @@ describe("modern Wave completion suite shell", () => {
     const result = await ensureWaveCompletionSuite({
       handle: f.handle,
       manager,
-      graph: manager.load(),
+      graph: manifestedGraphFixture(manager.load()),
       registration: f.registration,
     });
 
