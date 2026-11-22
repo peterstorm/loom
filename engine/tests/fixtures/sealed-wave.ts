@@ -12,7 +12,6 @@ import { parseTaskId, type TaskId } from "../../src/core/task-id";
 import type { ForwardFixAudit, Task, TaskGraph } from "../../src/types";
 import { semanticAttemptReceipt } from "./implementation-settlement";
 import { completedWaveGateFixture, protectedGraphFixture, satisfiedProof, taskFixture } from "./task-lifecycle";
-import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 /** A pending implementer Task of `wave` owning `file_list`; `extra` replaces any field. */
 export const waveTask = (id: string, wave: number, file_list: readonly string[], extra: Partial<Task> = {}): Task => taskFixture({
@@ -38,7 +37,6 @@ export function sealedWaveGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return protectedGraphFixture({
     spec_trace_version: 2,
     current_phase: "execute",
-    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

@@ -47,9 +47,10 @@ import {
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
 import {
+  manifestedGraphFixture,
   observedEvidence,
   completedWaveGateFixture,
-  satisfiedProof as eraSatisfiedProof,
+  satisfiedProof,
   taskFixture,
   trustedPassEvidence,
   type TaskFixtureInput,
@@ -100,8 +101,6 @@ import {
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
 
-const satisfiedProof = eraSatisfiedProof([]);
-
 const gateCheckMessage = (check: GateCheck): string => (check.passed ? check.summary : check.reason);
 
 const MODEL_FREE_PLAN_MODELS = Object.freeze({
@@ -118,7 +117,7 @@ const baseTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
-  proof: satisfiedProof,
+  proof: satisfiedProof([]),
   depends_on: [],
   test_result: { verdict: "trusted-pass" },
   test_evidence: "vitest: Tests 5 passed",
@@ -286,7 +285,8 @@ describe("checkSpecAlignment (pure)", () => {
     criticalFindings: overrides.criticalFindings ?? [],
   });
   const mkState = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
-    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+    current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -422,8 +422,9 @@ describe("evaluateWaveGate + applyGateDecision — checks run on the locked stat
     terminalOutcome: null,
   };
 
-  const mkGraph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
-    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+  const mkGraph = (overrides: Partial<TaskGraph> = {}) => manifestedGraphFixture({
+    current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -435,7 +436,7 @@ describe("evaluateWaveGate + applyGateDecision — checks run on the locked stat
     active_wave_gate: activeGate,
     active_wave_completion_suite: acceptedWaveCompletionSuite(activeGate),
     ...overrides,
-  });
+  } satisfies TaskGraph);
 
   const countingDeps = () => {
     const calls = { loadPlanModels: 0, fileExists: 0 };
@@ -918,7 +919,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     const readiness = deriveWaveReadiness(graph, statusDeps);
     expect(readiness.ok).toBe(true);
     if (!readiness.ok) return;
-    expect(readiness.value.gateDecision).toEqual(evaluateWaveGate(graph, 1, statusDeps));
+    expect(readiness.value.gateDecision).toEqual(evaluateWaveGate(manifestedGraphFixture(graph), 1, statusDeps));
     const resumeDecision = deriveNextAction(readiness.value);
     expect(resumeDecision.action).toMatchObject({
       kind: "blocked",
@@ -2078,7 +2079,8 @@ describe("protected active Wave Gate registration", () => {
   it("rejects nonterminal active authority that contradicts Phase, current Wave, or terminal history and blocks status", () => {
     const terminalHistory = completedWaveGateEntry({ runId: "completed-wave-run", wave: 1 });
     const raw = {
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+      current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
@@ -2129,12 +2131,14 @@ describe("protected active Wave Gate registration", () => {
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, tasks: [baseTask], wave_gates: {},
     };
-    const exactRegistration = {
-      ...registration,
-      authorityDigest: waveGateAuthorityDigest(1, taskIds, initial),
-    };
     writeFileSync(path, JSON.stringify(initial));
     const manager = new StateManager(path);
+    // The digest binds the graph as loaded, as wave-gate start computes it:
+    // the load boundary assembles fields in its own order, not the file's.
+    const exactRegistration = {
+      ...registration,
+      authorityDigest: waveGateAuthorityDigest(1, taskIds, manager.load()),
+    };
     try {
       const first = await registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration(exactRegistration)), { taskIds: taskIds });
       const replay = await registerActiveWaveGate(manager, value(parseActiveWaveGateRegistration(exactRegistration)), { taskIds: taskIds });
@@ -2207,11 +2211,11 @@ describe("protected active Wave Gate registration", () => {
       filePresence: (candidate) => ({ ok: true, exists: existsSync(join(root, candidate)) }),
     };
     try {
-      expect(evaluateWaveGate(manager.load(), null, live).verdict.kind).toBe("pass");
+      expect(evaluateWaveGate(manifestedGraphFixture(manager.load()), null, live).verdict.kind).toBe("pass");
       rmSync(artifact);
       let lockedFailure = "";
       await expect(commitActiveWaveGateCompletion(manager, (locked) => {
-        const liveDecision = evaluateWaveGate(locked, null, live);
+        const liveDecision = evaluateWaveGate(manifestedGraphFixture(locked), null, live);
         lockedFailure = liveDecision.verdict.kind === "fail" ? liveDecision.verdict.reason : "";
         const readiness = deriveWaveReadiness(locked, live);
         return readiness.ok

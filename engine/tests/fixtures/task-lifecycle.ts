@@ -35,6 +35,8 @@ import { isDistillTask } from "../../src/core/distill-task";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
 import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy, taskVerificationPolicy } from "../../src/core/verification-policy";
+import { parseWaveGateAbandonment, type WaveGateAbandonment } from "../../src/core/wave-gate-registration";
+import { parseManifestedTaskGraph, type ManifestedTaskGraph } from "../../src/core/manifested-task-graph";
 
 /*
  * Protected-state builders. Each mints its value through the production
@@ -46,20 +48,33 @@ import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy, taskVerificat
 /**
  * A whole protected TaskGraph, proven by the State File wire parser. An
  * execute-phase fixture that names no `verification_manifest` is stamped with
- * the pre-I6 default, so its Proofs keep the obligations it was written for;
- * the loader itself refuses a manifest-less execute graph (ADR-0098).
+ * the pre-I6 default (`withExecuteManifest`), so its Proofs keep the
+ * obligations it was written for. This fixture therefore mints only loadable
+ * graphs: a test of the loader's own refusal of a manifest-less execute graph
+ * (ADR-0098) opts out by passing its raw literal to `parseTaskGraph` directly.
  */
 export function protectedGraphFixture(raw: unknown): TaskGraph {
   return labelledValue("protected TaskGraph", parseTaskGraph(withExecuteManifest(raw)));
 }
 
-/** `raw` with the pre-I6 default manifest when it is an execute-phase graph naming none. */
-export function withExecuteManifest(raw: unknown): unknown {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
-  const graph = raw as Record<string, unknown>;
-  return graph.current_phase === "execute" && graph.verification_manifest === undefined
+const isGraphRecord = (raw: unknown): raw is Readonly<Record<string, unknown>> =>
+  typeof raw === "object" && raw !== null && !Array.isArray(raw);
+
+/**
+ * The one place a fixture graph gets its manifest: `graph` carrying the pre-I6
+ * default when it is an execute-phase graph naming none, and `graph` itself
+ * otherwise. Every graph builder here stamps through it.
+ */
+function withExecuteManifest<G>(graph: G): G {
+  return isGraphRecord(graph) && graph.current_phase === "execute" && graph.verification_manifest === undefined
     ? { ...graph, verification_manifest: preI6DefaultVerificationManifest() }
-    : raw;
+    : graph;
+}
+
+/** `graph` itself, proven a `ManifestedTaskGraph` by the production narrowing
+ *  every Wave Gate seam applies: the type a loaded execute-phase graph has. */
+export function manifestedGraphFixture<G extends TaskGraph>(graph: G): G & ManifestedTaskGraph {
+  return labelledValue("manifested TaskGraph", parseManifestedTaskGraph(graph));
 }
 
 /** An `active_wave_gate` anchor, proven by its State File parser: live by
@@ -82,6 +97,11 @@ export function activeWaveGateFixture(input: Readonly<{
     runsRoot: input.runsRoot ?? "/runs",
     terminalOutcome: input.terminalOutcome ?? null,
   }));
+}
+
+/** An abandonment to stamp, proven by its production parser. */
+export function waveGateAbandonmentFixture(input: Parameters<typeof parseWaveGateAbandonment>[0]): WaveGateAbandonment {
+  return labelledValue("Wave Gate abandonment", parseWaveGateAbandonment(input));
 }
 
 /** One completed `wave_gate_history` entry, proven by its State File parser,
@@ -171,11 +191,13 @@ export type TaskFixtureInput = TaskCommonMetadata & Readonly<{
  * Canonical execute-phase TaskGraph shell: the exact literal the graph writers
  * mint for a fresh wave. Tests that need anything beyond this shape pass their
  * own full literal — bespoke fixture sites stay bespoke. It freezes the
- * pre-I6 engine default manifest: every execute-phase graph carries one, and
- * that era owes no red-then-green, so the fixture Proofs stay exact.
+ * pre-I6 engine default manifest (`withExecuteManifest`): every execute-phase
+ * graph carries one, and that era owes no red-then-green, so the fixture
+ * Proofs stay exact. The result is proven a `ManifestedTaskGraph` by the
+ * production narrowing, so it serves every Wave Gate seam.
  */
-export function graphFixture(tasks: readonly Task[]): TaskGraph {
-  return {
+export function graphFixture(tasks: readonly Task[]): ManifestedTaskGraph {
+  const graph: TaskGraph = {
     current_phase: "execute",
     phase_artifacts: {},
     skipped_phases: [],
@@ -184,8 +206,8 @@ export function graphFixture(tasks: readonly Task[]): TaskGraph {
     current_wave: 1,
     tasks: [...tasks],
     wave_gates: {},
-    verification_manifest: preI6DefaultVerificationManifest(),
   };
+  return labelledValue("execute TaskGraph", parseManifestedTaskGraph(withExecuteManifest(graph)));
 }
 
 /**
@@ -420,22 +442,4 @@ export function reserveLiveAttempt(statePath: string): void {
   const raw: unknown = JSON.parse(readFileSync(statePath, "utf-8"));
   const graph = labelledValue("live-attempt State File", parseTaskGraph(raw));
   writeFileSync(statePath, JSON.stringify(executingGraphFixture(graph, ["T1"])));
-}
-
-/**
- * A raw execute-phase graph whose Wave 1 is blocked on review (implemented
- * and tested, reviews not complete), holding `tasks` exactly as given.
- */
-export function reviewBlockedWaveGraph<T>(tasks: readonly T[]) {
-  return {
-    current_phase: "execute",
-    verification_manifest: preI6DefaultVerificationManifest(),
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    current_wave: 1,
-    wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: false, blocked: true } },
-    tasks: [...tasks],
-  };
 }

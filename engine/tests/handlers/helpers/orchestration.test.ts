@@ -18,7 +18,8 @@ import {
 } from "../../../src/core/reviewer-contract";
 import { type GateDeps } from "../../../src/core/wave-gate-checks";
 import { BASE_WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
-import { evaluateTaskProof } from "../../../src/core/proof-obligations";
+import { evaluateTaskProof, type SatisfiedTaskProof } from "../../../src/core/proof-obligations";
+import type { Finding } from "../../../src/core/findings";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { i6PlanTask } from "../../fixtures/i6-plan-task";
 import { i6RunnerManifest } from "../../fixtures/i6-runner-manifest";
@@ -40,6 +41,7 @@ import {
 } from "../../../src/handlers/helpers/programs/standalone";
 import { parseActiveWaveGateRegistration, registerActiveWaveGate, StateManager } from "../../../src/state-manager";
 import { value } from "../../fixtures/parse-result";
+import { findingId } from "../../fixtures/finding-id";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
 import { publicationFile, refutationBatchEffectId } from "../../../src/handlers/helpers/programs/durable-requests";
@@ -53,13 +55,20 @@ import { prepareOrphanedWaveGateRecovery } from "../../../src/core/wave-gate-rep
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { createRunDirectory, openRunDirectory, inspectRunDirectoryEntry, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
-import type { Task, TaskGraph } from "../../../src/types";
+import { parseNewTestEvidence, type Task, type TaskGraph } from "../../../src/types";
 import {
   captureLoomRuntimeIdentity,
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
-import { executingGraphFixture, protectedGraphFixture, satisfiedProof, trustedPassEvidence } from "../../fixtures/task-lifecycle";
+import {
+  executingGraphFixture,
+  protectedGraphFixture,
+  satisfiedProof,
+  taskFixture,
+  trustedPassEvidence,
+  type TaskFixtureInput,
+} from "../../fixtures/task-lifecycle";
 import { issuedDescriptorWavePayload } from "../../fixtures/wave-reviewer-payload";
 import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
@@ -141,20 +150,41 @@ const FACT_CATEGORIES = [
   "waveGateCompletionEligibility",
 ] as const;
 
-/** An implemented Task over src/x.ts with passing tests, whose review is blocked on one critical `finding`. */
+/**
+ * The review-ready Wave Task the CLI scenarios gate: implemented over
+ * src/x.ts under a trusted pass with its new tests written, reviewed and
+ * passed at generation 0 with no findings. A scenario overrides only the
+ * fields it exercises, so the Task shape lives here once.
+ */
+function reviewedTarget(id: string, proof: SatisfiedTaskProof, overrides: Partial<TaskFixtureInput> = {}): Task {
+  return taskFixture({
+    id, description: "review target", agent: "code-implementer-agent", wave: 1,
+    status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+    test_result: { verdict: "trusted-pass" }, test_evidence: "passed",
+    new_test_observation: parseNewTestEvidence(true, "present"),
+    review_status: "passed", review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
+    ...overrides,
+  });
+}
+
+/** A `reviewedTarget` whose review is blocked on one critical `finding`. */
 function blockedReviewTarget(
   id: string,
-  proof: unknown,
-  finding: Readonly<{ claim: string }>,
-  trace: Record<string, unknown> = {},
-): Record<string, unknown> {
-  return {
-    id, description: "review target", agent: "code-implementer-agent", wave: 1,
-    status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], ...trace,
-    test_result: { verdict: "trusted-pass" }, test_evidence: "passed",
-    new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "blocked", review_generation: 0,
-    findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
-  };
+  proof: SatisfiedTaskProof,
+  finding: Finding,
+  overrides: Partial<TaskFixtureInput> = {},
+): Task {
+  return reviewedTarget(id, proof, {
+    ...overrides, review_status: "blocked", findings: [finding], critical_findings: [finding.claim],
+  });
+}
+
+/** The in-repository runs root `<root>/runs`, created. `repository()` gitignores
+ *  `runs/`, so a Run Directory there is engine output and never Wave workspace. */
+function runsRootIn(root: string): string {
+  const runsRoot = join(root, "runs");
+  mkdirSync(runsRoot, { recursive: true });
+  return runsRoot;
 }
 
 /** Wave 1's review epoch for `runId` and the passing spec-check it settled, over `planFile`. */
@@ -170,7 +200,8 @@ function passedSpecCheckEpoch(runId: string, batchEpoch: string, planFile: strin
 
 function executeGraph(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+    current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     spec_dir: ".claude/specs/x",
     phase_artifacts: {},
@@ -235,34 +266,6 @@ function passingWaveTaskProof() {
   );
   if (proof.state !== "satisfied") throw new Error("passing Wave Task proof fixture must be satisfied");
   return proof;
-}
-
-/** One valid implemented review Task; scenarios override only the authority
- * fact they exercise instead of restating the whole accepted baseline. */
-function reviewReadyTask(
-  proof: ReturnType<typeof passingWaveTaskProof>,
-  overrides: Partial<Task> = {},
-): Task {
-  return {
-    id: "T1",
-    description: "review target",
-    agent: "code-implementer-agent",
-    wave: 1,
-    status: "implemented",
-    proof,
-    depends_on: [],
-    file_list: ["src/x.ts"],
-    files_modified: ["src/x.ts"],
-    test_result: { verdict: "trusted-pass" },
-    test_evidence: "passed",
-    new_test_observation: { kind: "written", written: true, evidence: "present" },
-    review_status: "passed",
-    review_generation: 0,
-    findings: [],
-    critical_findings: [],
-    advisory_findings: [],
-    ...overrides,
-  } as unknown as Task;
 }
 
 function replayFromCapturedEvidence(handle: RunDirHandle) {
@@ -496,8 +499,7 @@ describe("inspectRunDirectoryEntry", () => {
   it("classifies a symlink at the run path as occupied, never as a usable directory", () => {
     const root = canonicalTempDir("loom-inspect-");
     cleanup.push(root);
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     symlinkSync("/nonexistent", join(runsRoot, "run.symlink"));
 
     const inspected = inspectRunDirectoryEntry(runsRoot, join(runsRoot, "run.symlink"));
@@ -513,8 +515,7 @@ describe("inspectRunDirectoryEntry", () => {
   it("classifies a non-directory entry (file) as occupied, never as a usable directory", () => {
     const root = canonicalTempDir("loom-inspect-");
     cleanup.push(root);
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     writeFileSync(join(runsRoot, "run.notadir"), "not a directory\n");
 
     const inspected = inspectRunDirectoryEntry(runsRoot, join(runsRoot, "run.notadir"));
@@ -553,7 +554,8 @@ describe("prepareOrphanedWaveGateRecovery", () => {
 
   function graph(): TaskGraph {
     return {
-      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(),
+      current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       current_wave: 1,
       spec_dir: ".claude/specs/x",
       phase_artifacts: {},
@@ -889,9 +891,8 @@ describe("orchestration CLI", () => {
 
   it("refuses a run directory that is not a child of its runs root", async () => {
     const root = project();
-    const runsRoot = join(root, "runs");
+    const runsRoot = runsRootIn(root);
     const outside = join(root, "elsewhere", "run.x");
-    mkdirSync(runsRoot, { recursive: true });
     mkdirSync(outside, { recursive: true });
 
     const result = (await runCli(["resume", "--runs-root", runsRoot, "--run", outside], "", root));
@@ -1022,9 +1023,8 @@ describe("orchestration CLI", () => {
 
   it("refuses unavailable wave-gate authority before claiming a Run Directory", async () => {
     const root = project();
-    const runsRoot = join(root, "runs");
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-gate");
-    mkdirSync(runsRoot, { recursive: true });
     const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: null }), root));
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("active_task_graph.json");
@@ -1181,9 +1181,8 @@ describe("orchestration CLI", () => {
 
   it("refuses a wave-gate start that another live run already owns before claiming a Run Directory", async () => {
     const root = project();
-    const runsRoot = join(root, "runs");
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.second");
-    mkdirSync(runsRoot, { recursive: true });
     writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph({
       active_wave_gate: {
         schemaVersion: 1, kind: "active-wave-gate", runId: "run.first", wave: 1,
@@ -1198,9 +1197,8 @@ describe("orchestration CLI", () => {
 
   it("refuses unavailable remediation source authority before claiming a Run Directory", async () => {
     const root = project();
-    const runsRoot = join(root, "runs");
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.remediation");
-    mkdirSync(runsRoot, { recursive: true });
     const result = (await runCli(["start", "remediation", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({
       sourceRunsRoot: "/missing", sourceRun: "/missing/run", supportPaths: [], defectFamily: { kind: "not-required" },
     }), root));
@@ -1692,12 +1690,11 @@ describe("orchestration CLI", () => {
     const graph = executeGraph({
       spec_file: null,
       plan_file: null,
-      tasks: [reviewReadyTask(proof)],
+      tasks: [reviewedTarget("T1", proof)],
     });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-missing-task");
     mkdirSync(runDir);
     const started = (await runCli([
@@ -1728,10 +1725,9 @@ describe("orchestration CLI", () => {
     writeFileSync(statePath, JSON.stringify(executeGraph({
       spec_file: null,
       plan_file: null,
-      tasks: [reviewReadyTask(proof)],
+      tasks: [reviewedTarget("T1", proof)],
     })));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-stale-request");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -1771,15 +1767,9 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1, status: "implemented", proof,
-        depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], test_result: { verdict: "trusted-pass" },
-        test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed",
-        review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      tasks: [reviewedTarget("T1", proof)],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-fresh-generation");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -1825,19 +1815,13 @@ describe("orchestration CLI", () => {
     const root = repository();
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
-    const task = (id: string) => ({
-      id, description: `review ${id}`, agent: "code-implementer-agent", wave: 1, status: "implemented", proof,
-      depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], test_result: { verdict: "trusted-pass" },
-      test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed",
-      review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
-    });
+    const task = (id: string) => reviewedTarget(id, proof, { description: `review ${id}` });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [task("T1"), task("T2")],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-sibling-stability");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -1877,7 +1861,7 @@ describe("orchestration CLI", () => {
     expect(proof.state).toBe("satisfied");
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const finding = {
-      id: "silent-failure-hunter-15", agent: "silent-failure-hunter", severity: "critical" as const,
+      id: findingId("silent-failure-hunter-15"), agent: "silent-failure-hunter", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "current packet must finish before this finding is adjudicated",
     };
     const graph = {
@@ -1888,8 +1872,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-review-recovery");
     mkdirSync(runDir);
     const started = (await runCli([
@@ -2051,23 +2034,19 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const finding = {
-      id: "finding-1", agent: "silent-failure-hunter", severity: "critical" as const,
+      id: findingId("finding-1"), agent: "silent-failure-hunter", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "a critical spec gap claim",
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       spec_trace_version: 2,
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {}, tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+      spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {}, tasks: [reviewedTarget("T1", proof, {
         spec_anchors: ["FR-001", "AS-001"], spec_contributions: [],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "pending", review_generation: 0,
-        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
-      }],
+        review_status: "pending", findings: [finding], critical_findings: [finding.claim],
+      })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-spec-retry-epoch");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2220,21 +2199,17 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const finding = {
-      id: "finding-1", agent: "silent-failure-hunter", severity: "critical" as const,
+      id: findingId("finding-1"), agent: "silent-failure-hunter", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "a critical spec gap claim",
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "pending", review_generation: 0,
-        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
-      }],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [reviewedTarget("T1", proof, {
+        review_status: "pending", findings: [finding], critical_findings: [finding.claim],
+      })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-spec-retry-lost-context");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2304,16 +2279,11 @@ describe("orchestration CLI", () => {
     writeFileSync(statePath, JSON.stringify({
       spec_trace_version: 2,
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: specPath, plan_file: null, wave_gates: {}, tasks: [{
-        id: "T1", description: "claims an undefined Requirement", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        spec_anchors: ["FR-404"], spec_contributions: [],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      spec_file: specPath, plan_file: null, wave_gates: {}, tasks: [reviewedTarget("T1", proof, {
+        description: "claims an undefined Requirement", spec_anchors: ["FR-404"], spec_contributions: [],
+      })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-facade-floor");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2370,15 +2340,10 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
-        id: "T1", description: "attempt-one rejection", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [reviewedTarget("T1", proof, { description: "attempt-one rejection" })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-attempt-one-rejection");
     mkdirSync(runDir);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -2439,15 +2404,10 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
-        id: "T1", description: "mixed retry target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [reviewedTarget("T1", proof, { description: "mixed retry target" })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-mixed-retry");
     mkdirSync(runDir);
     const started = (await runCli([
@@ -2505,25 +2465,22 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const activeFinding = {
-      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      id: findingId("code-reviewer-7"), agent: "code-reviewer", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "preserve active finding",
     };
     const refutedFinding = {
-      id: "silent-failure-hunter-3", agent: "silent-failure-hunter", severity: "critical" as const,
+      id: findingId("silent-failure-hunter-3"), agent: "silent-failure-hunter", severity: "critical" as const,
       file: "src/x.ts", line: 2, claim: "preserve refuted finding",
     };
     const resolvedFinding = {
-      id: "type-design-analyzer-2", agent: "type-design-analyzer", severity: "critical" as const,
+      id: findingId("type-design-analyzer-2"), agent: "type-design-analyzer", severity: "critical" as const,
       file: "src/x.ts", line: 3, claim: "preserve resolved finding",
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
-        id: "T1", description: "orphan recovery target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "blocked", review_generation: 7,
-        findings: [activeFinding], critical_findings: [activeFinding.claim], advisory_findings: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [blockedReviewTarget("T1", proof, activeFinding, {
+        description: "orphan recovery target", review_generation: 7,
         refuted_findings: [{
           finding: refutedFinding,
           refutations: [{ lens: "intent", reason: "not applicable to the protected behavior" }],
@@ -2539,10 +2496,9 @@ describe("orchestration CLI", () => {
             }],
           },
         }],
-      }],
+      })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const oldRun = join(runsRoot, "run.wave-orphaned");
     mkdirSync(oldRun);
     const started = (await runCli([
@@ -2733,15 +2689,9 @@ describe("orchestration CLI", () => {
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "restart target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      tasks: [reviewedTarget("T1", proof, { description: "restart target" })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const previousRun = join(runsRoot, "run.wave-exhausted");
     mkdirSync(previousRun);
     const started = await legacyWaveStart(root, runsRoot, previousRun);
@@ -2992,15 +2942,10 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
-        id: "T1", description: "partial restart", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [reviewedTarget("T1", proof, { description: "partial restart" })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const previousRun = join(runsRoot, "run.wave-partial-exhausted");
     mkdirSync(previousRun);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", previousRun], JSON.stringify({ wave: 1 }), root));
@@ -3078,15 +3023,10 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
-        id: "T1", description: "valid retry", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [reviewedTarget("T1", proof, { description: "valid retry" })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const previousRun = join(runsRoot, "run.wave-valid-retry");
     mkdirSync(previousRun);
     const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", previousRun], JSON.stringify({ wave: 1 }), root));
@@ -3126,15 +3066,10 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
-        id: "T1", description: "completion crash window", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [reviewedTarget("T1", proof, { description: "completion crash window" })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-crash-window");
     mkdirSync(runDir);
     const started = (await runCli([
@@ -3158,12 +3093,7 @@ describe("orchestration CLI", () => {
       wave_gates: {
         "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
       },
-      tasks: [{
-        id: "T1", description: "completion crash window", agent: "code-implementer-agent", wave: 1,
-        status: "completed", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      tasks: [reviewedTarget("T1", proof, { description: "completion crash window", status: "completed" })],
       wave_gate_history: [{
         schemaVersion: 2,
         kind: "completed-wave-gate",
@@ -3212,7 +3142,7 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     expect(proof.state).toBe("satisfied");
     const finding = {
-      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      id: findingId("code-reviewer-7"), agent: "code-reviewer", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
     const graph = {
@@ -3223,8 +3153,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-upheld-tally");
     mkdirSync(runDir);
 
@@ -3280,7 +3209,7 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     expect(proof.state).toBe("satisfied");
     const finding = {
-      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      id: findingId("code-reviewer-7"), agent: "code-reviewer", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
     const planFile = modelFreePlan(root);
@@ -3292,8 +3221,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-refuted-tally");
     mkdirSync(runDir);
 
@@ -3340,15 +3268,9 @@ describe("orchestration CLI", () => {
       current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: planFile, wave_gates: {},
       ...passedSpecCheckEpoch("run.wave-lint-block", "b".repeat(64), planFile),
-      tasks: [{
-        id: "T1", description: "lint target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
+      tasks: [reviewedTarget("T1", proof, { description: "lint target" })],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-lint-block");
     mkdirSync(runDir);
 
@@ -3737,7 +3659,7 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     expect(proof.state).toBe("satisfied");
     const finding = {
-      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      id: findingId("code-reviewer-7"), agent: "code-reviewer", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
     const planFile = modelFreePlan(root);
@@ -3747,8 +3669,7 @@ describe("orchestration CLI", () => {
       ...passedSpecCheckEpoch("run.wave-retired-refutation", "c".repeat(64), planFile),
       tasks: [blockedReviewTarget("T1", proof, finding)],
     }));
-    const runsRoot = join(root, "runs");
-    mkdirSync(runsRoot, { recursive: true });
+    const runsRoot = runsRootIn(root);
     const runDir = join(runsRoot, "run.wave-retired-refutation");
     mkdirSync(runDir);
 
@@ -4117,8 +4038,7 @@ describe("orchestration CLI", () => {
   describe("naming a fresh run", () => {
     it("creates a Run Directory named by its bare run id under --runs-root", async () => {
       const root = sourceProject();
-      const runsRoot = join(root, "runs");
-      mkdirSync(runsRoot, { recursive: true });
+      const runsRoot = runsRootIn(root);
 
       const started = (await runCli([
         "start", "standalone-review", "--runs-root", runsRoot, "--run", "run.bare-name",
@@ -4132,8 +4052,7 @@ describe("orchestration CLI", () => {
 
     it("resolves a full relative path to the same run as its bare name", async () => {
       const root = sourceProject();
-      const runsRoot = join(root, "runs");
-      mkdirSync(runsRoot, { recursive: true });
+      const runsRoot = runsRootIn(root);
       const input = JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false });
 
       const started = (await runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", "run.same-run"], input, root));
@@ -4176,8 +4095,7 @@ describe("orchestration CLI", () => {
 
     it("refuses a malformed payload without claiming the run directory", async () => {
       const root = project();
-      const runsRoot = join(root, "runs");
-      mkdirSync(runsRoot, { recursive: true });
+      const runsRoot = runsRootIn(root);
 
       const invalidJson = (await runCli([
         "start", "standalone-review", "--runs-root", runsRoot, "--run", "run.invalid-json",
@@ -4219,8 +4137,7 @@ describe("orchestration CLI", () => {
 
     it("accepts a bare sourceRun reference shape but refuses an absent source before claiming a run", async () => {
       const root = project();
-      const runsRoot = join(root, "runs");
-      mkdirSync(runsRoot, { recursive: true });
+      const runsRoot = runsRootIn(root);
 
       // The source review run does not exist yet, so the drive still blocks —
       // but on the SOURCE's own state, with the attribution the relation
@@ -4246,17 +4163,14 @@ describe("orchestration CLI", () => {
    *
    * This is the EXPECTED outcome on a harness that captures transcripts itself:
    * the extension stores the raw bytes at spawn completion and the parent's
-   * follow-up submit merely confirms it. The confirmation used to arrive as a
-   * bare sentence on stderr with a failing exit code — byte-identical to a real
-   * error — because the short-circuit that reads stored bytes covered only the
-   * since-retired registered panel driver, and a façade run fell through to a
-   * capture whose exclusive write could then only fail.
+   * follow-up submit only confirms them. Submit must therefore read the stored
+   * bytes and re-emit the run's action, never attempt a second exclusive
+   * capture write, which can only fail and would read as a real error.
    */
   describe("idempotent submit", () => {
     it("re-emits the run's action instead of failing on an already-captured attempt", async () => {
       const root = sourceProject();
-      const runsRoot = join(root, "runs");
-      mkdirSync(runsRoot, { recursive: true });
+      const runsRoot = runsRootIn(root);
       const started = (await runCli([
         "start", "standalone-review", "--runs-root", runsRoot, "--run", "run.idempotent-submit",
       ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), root));
@@ -4353,15 +4267,9 @@ describe("orchestration CLI", () => {
       writeFileSync(statePath, JSON.stringify({
         current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
         spec_trace_version: 2, spec_file: canonicalSpec(root), plan_file: modelFreePlan(root), wave_gates: {},
-        tasks: [{
-          id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-          status: "implemented", proof, depends_on: [], spec_anchors: ["FR-001", "AS-001"], spec_contributions: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-          findings: [], critical_findings: [], advisory_findings: [],
-        }],
+        tasks: [reviewedTarget("T1", proof, { spec_anchors: ["FR-001", "AS-001"], spec_contributions: [] })],
       }));
-      const runsRoot = join(root, "runs");
-      mkdirSync(runsRoot, { recursive: true });
+      const runsRoot = runsRootIn(root);
       const runDir = join(runsRoot, `run.${label}`);
       mkdirSync(runDir);
       const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
@@ -4604,8 +4512,7 @@ describe("orchestration CLI", () => {
     /** A standalone run with one captured slot and one rejected slot. */
     async function reviewRun(label: string) {
       const root = repository();
-      const runsRoot = join(root, "runs");
-      mkdirSync(runsRoot, { recursive: true });
+      const runsRoot = runsRootIn(root);
       // Select a scope whose roster lets this fixture capture one slot and
       // reject another, exercising both inspection projections.
       writeFileSync(join(root, "README.md"), "fixture, revised\n");
@@ -4816,12 +4723,8 @@ describe("orchestration CLI", () => {
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
       writeFileSync(statePath, JSON.stringify({
         current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-        spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
-          id: "T1", description: "abandon stamp target", agent: "code-implementer-agent", wave: 1,
-          status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_test_observation: { kind: "written", written: true, evidence: "present" }, review_status: "passed", review_generation: 0,
-          findings: [], critical_findings: [], advisory_findings: [],
-        }],
+        spec_file: null, plan_file: null, wave_gates: {},
+        tasks: [reviewedTarget("T1", proof, { description: "abandon stamp target" })],
       }));
       const runsRoot = canonicalTempDir("loom-wave-abandon-stamp-runs-");
       cleanup.push(runsRoot);

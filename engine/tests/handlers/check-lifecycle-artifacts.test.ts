@@ -4,12 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectFilePresence, loadPlanModelsSource } from "../../src/handlers/helpers/wave-gate-observers";
 import { checkLifecycleArtifacts, evaluateWaveGate, type PlanModelsSource } from "../../src/core/wave-gate-checks";
-import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
-import type { Task, TaskGraph } from "../../src/types";
+import { capturedSpecCheck } from "../../src/core/spec-check";
+import type { Task } from "../../src/types";
 import type { PlanModels } from "../../src/core/parse-plan-models";
-import { value } from "../fixtures/parse-result";
-import { satisfiedProof } from "../fixtures/task-lifecycle";
-import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { acceptedWaveCompletionSuite, COMPLETION_SUITE_WORKSPACE } from "../fixtures/accepted-wave-completion-suite";
+import {
+  activeWaveGateFixture,
+  manifestedGraphFixture,
+  protectedGraphFixture,
+  satisfiedProof,
+  siblingTaskFixture,
+} from "../fixtures/task-lifecycle";
 
 function waveTask(fileList: string[]): Task {
   return {
@@ -155,37 +160,56 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
 });
 
 describe("Wave Gate lifecycle wiring (check 7 is actually in the gate)", () => {
-  it("reads the architecture phase artifact as the plan when plan_file is null", () => {
-    const graph: TaskGraph = {
-      current_phase: "execute",
-      verification_manifest: preI6DefaultVerificationManifest(),
-      phase_artifacts: { architecture: "arch-plan.md" },
-      skipped_phases: [],
-      spec_file: null,
-      plan_file: null,
-      current_wave: 1,
-      tasks: [waveTask(["src/order-machine.ts"])],
-      wave_gates: {},
-      active_wave_gate: {
-        schemaVersion: 1,
-        kind: "active-wave-gate",
-        runId: value(parseOrchestrationRunId("lifecycle-wiring-run")),
-        wave: 1,
-        authorityDigest: value(parseArtifactDigest("e".repeat(64))),
-        revision: 0,
-        terminalOutcome: null,
-      },
-    };
+  const MACHINE = "src/order-machine.ts";
+  const ORDER_LIFECYCLE = loaded([{ id: "LC-1", title: "Order", machineFile: MACHINE }]);
+  const activeGate = activeWaveGateFixture({ runId: "lifecycle-wiring-run", wave: 1, authorityDigest: "e".repeat(64) });
+  /** A Wave every other gate check passes — a reviewed T1 owning the machine
+   *  file, a clean spec check and an accepted completion suite on the observed
+   *  workspace — under an architecture plan named only as a phase artifact.
+   *  Only the Lifecycle check can decide it. */
+  const graph = manifestedGraphFixture(protectedGraphFixture({
+    current_phase: "execute", phase_artifacts: { architecture: "arch-plan.md" }, skipped_phases: [],
+    spec_file: null, plan_file: null, current_wave: 1, executing_tasks: [],
+    tasks: [siblingTaskFixture({
+      id: "T1", status: "implemented", file_list: [MACHINE], files_modified: [MACHINE],
+      test_result: { verdict: "trusted-pass" }, new_tests_written: true, new_test_evidence: "one property",
+      review_status: "passed",
+    })],
+    wave_gates: { "1": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: false } },
+    spec_check: capturedSpecCheck({ wave: 1, runAt: "", criticalFindings: [] }),
+    active_wave_gate: activeGate,
+    active_wave_completion_suite: acceptedWaveCompletionSuite(activeGate),
+  }));
+
+  /** The gate over `graph`, with the machine file present or absent, and the plan files it read. */
+  const decide = (exists: boolean) => {
     const asked: (string | null | undefined)[] = [];
     const decision = evaluateWaveGate(graph, null, {
       loadPlanModels: (planFile) => {
         asked.push(planFile);
-        return loaded([{ id: "LC-1", title: "Order", machineFile: "src/order-machine.ts" }]);
+        return ORDER_LIFECYCLE;
       },
-      filePresence: () => ({ ok: true, exists: false }),
+      filePresence: (path) => ({ ok: true, exists: exists && path === MACHINE }),
+      currentWaveWorkspace: COMPLETION_SUITE_WORKSPACE,
     });
+    return { decision, asked };
+  };
+
+  it("fails on the Lifecycle check alone when the machine the architecture plan declares is absent", () => {
+    const { decision, asked } = decide(false);
     expect(asked).toEqual(["arch-plan.md"]);
-    expect(decision.verdict.kind).toBe("fail");
+    const lifecycle = checkLifecycleArtifacts(ORDER_LIFECYCLE, graph.tasks, () => ({ ok: true, exists: false }));
+    if (lifecycle.passed) throw new Error("the absent machine must fail the Lifecycle check");
+    expect(lifecycle.reason).toContain("LC-1");
+    expect(decision.checks.filter((check) => !check.passed)).toEqual([lifecycle]);
+    expect(decision.verdict).toEqual({ kind: "fail", reason: lifecycle.reason });
+  });
+
+  it("passes once that machine file exists", () => {
+    const { decision, asked } = decide(true);
+    expect(asked).toEqual(["arch-plan.md"]);
+    expect(decision.checks.every((check) => check.passed)).toBe(true);
+    expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: null });
   });
 
   it("observes a dangling symlink as an absent Lifecycle Machine artifact", () => {

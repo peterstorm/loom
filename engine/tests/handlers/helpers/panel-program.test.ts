@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   parseArchitecturePanelJournal,
+  type ArchitectureEngineOperation,
   type ArchitecturePanelJournal,
 } from "../../../src/core/panel-program";
 
@@ -81,6 +82,35 @@ describe("the architecture panel journal", () => {
       ok: false,
       error: "unknown architecture design lens: not-a-panel-lens",
     });
+  });
+
+  it("names an unknown lens before a malformed judgeCriteria, and the input shape otherwise", () => {
+    const shape = "architecture input requires exact PanelLens candidateLenses[] and judgeCriteria[]";
+    expect(parseArchitecturePanelJournal({ input: { candidateLenses: ["not-a-panel-lens"], judgeCriteria: 7 }, events: [] }))
+      .toEqual({ ok: false, error: "unknown architecture design lens: not-a-panel-lens" });
+    expect(parseArchitecturePanelJournal({ input: { ...architectureInput, judgeCriteria: [7] }, events: [] }))
+      .toEqual({ ok: false, error: shape });
+    expect(parseArchitecturePanelJournal({ input: { ...architectureInput, candidateLenses: ["simplicity-first", 7] }, events: [] }))
+      .toEqual({ ok: false, error: shape });
+    expect(parseArchitecturePanelJournal({ input: { judgeCriteria: architectureInput.judgeCriteria }, events: [] }))
+      .toEqual({ ok: false, error: shape });
+  });
+
+  it.each<ArchitectureEngineOperation>(["architecture-prepare-candidates", "architecture-prepare-judges", "architecture-aggregate"])(
+    "reads a journalled %s engine-outcome, carrying its error text",
+    (operationId) => {
+      expect(parseArchitecturePanelJournal({
+        input: architectureInput,
+        events: [{ type: "engine-outcome", operationId, outcome: "failed", error: "boom" }],
+      })).toMatchObject({ ok: true, value: { events: [{ type: "engine-outcome", operationId, outcome: "failed", error: "boom" }] } });
+    },
+  );
+
+  it("refuses an event whose error is not a string", () => {
+    expect(parseArchitecturePanelJournal({
+      input: architectureInput,
+      events: [{ type: "spawn-outcome", requestId: "architecture:candidate:1", attempt: 1, outcome: "failed", error: 7 }],
+    })).toEqual({ ok: false, error: "events[0].error must be a string" });
   });
 
   it("resumes an in-flight architecture prefix and preserves accepted slots", () => {
