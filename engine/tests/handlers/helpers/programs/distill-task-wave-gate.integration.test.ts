@@ -13,11 +13,11 @@ import { readWaveReviewContext } from "../../../../src/core/wave-review-authorit
 import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { parseTaskGraph } from "../../../../src/state-manager";
-import type { TaskGraph } from "../../../../src/types";
+import { parseNewTestEvidence, type TaskGraph } from "../../../../src/types";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { collectedChild } from "../../../fixtures/collected-child";
 import { facadeParentEnvironment } from "../../../fixtures/facade-parent";
-import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
+import { git as gitWithEnvironment, ignoredRunsRoot, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
 import { value } from "../../../fixtures/parse-result";
 import { disposeFixturePiSessions } from "../../../fixtures/pi-session";
 import { issuedWaveReviewerPayload } from "../../../fixtures/wave-reviewer-payload";
@@ -61,25 +61,25 @@ function project(distillStatus: "pending" | "implemented"): Project {
   const root = canonicalTempDir("loom-distill-wave-");
   roots.push(root);
   mkdirSync(join(root, "src"));
-  mkdirSync(join(root, "runs"));
+  const runsRoot = ignoredRunsRoot(root);
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
   writeFileSync(join(root, "spec.md"), specText);
   writeFileSync(join(root, "plan.md"), "# Model-free plan\n");
   gitWithEnvironment(root, ["init", "-q"], PINNED_COMMIT_DATES);
-  gitWithEnvironment(root, ["add", "src/x.ts", "spec.md", "plan.md"], PINNED_COMMIT_DATES);
+  gitWithEnvironment(root, ["add", ".gitignore", "src/x.ts", "spec.md", "plan.md"], PINNED_COMMIT_DATES);
   gitWithEnvironment(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], PINNED_COMMIT_DATES);
   const graph: TaskGraph = { ...graphFixture([
     taskFixture({ id: "T1", description: "review fixture", agent: "code-implementer-agent", wave: 1,
       depends_on: [], status: "implemented", proof: satisfiedProof(["src/x.ts"]), file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
       spec_anchors: ["FR-001", "AS-001"], spec_contributions: [], test_result: { verdict: "trusted-pass" },
-      test_evidence: "fixture checks passed", new_tests_written: true, new_test_evidence: "fixture tests present",
+      test_evidence: "fixture checks passed", new_test_observation: parseNewTestEvidence(true, "fixture tests present"),
       review_generation: 0, review_status: "pending", critical_findings: [], advisory_findings: [] }),
     distillTaskFixture({ id: "T2", wave: 1, scope: ["src/x.ts"], status: distillStatus, files_modified: [], review_generation: 0 }),
   ]), spec_file: join(root, "spec.md"), plan_file: join(root, "plan.md"), spec_trace_version: 2 };
   const statePath = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(statePath, JSON.stringify(value(parseTaskGraph(graph))));
-  return { root, statePath, runsRoot: join(root, "runs") };
+  return { root, statePath, runsRoot };
 }
 
 function cliResult(p: Project, args: readonly string[], stdin = "") {

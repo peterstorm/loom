@@ -34,13 +34,6 @@ import { parseOrchestrationRunId } from "./orchestration-contract/identity";
 import { RUN_LAYOUT_COMPONENTS } from "./engine-owned-paths";
 import { parseRepositoryPath } from "./repository-path";
 
-/** Extract a `LOOM_<NAME>: <value>` marker line's value from a spawn prompt, or
- *  null when the marker is absent. Markers are engine-authored, one per line. */
-export function loomMarkerValue(prompt: string, name: string): string | null {
-  const match = prompt.match(new RegExp(`^LOOM_${name}:[ \\t]*(\\S+)[ \\t]*$`, "m"));
-  return match ? match[1] : null;
-}
-
 /** The run directory a spawn belongs to, derived from its LOOM_CONTEXT_PATH
  *  marker (`<runDir>/contexts/<digest>.json`). Returns null when the marker is
  *  absent or does not have the fixed `contexts/<file>` tail — the caller then

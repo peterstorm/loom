@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REVIEW_SUB_AGENTS, BASE_WAVE_REVIEW_AGENTS, isReviewAgent } from "../src/core/agent-catalog-projections";
-import { carriedOverCount, resolveReviewFindings, resolveTaskReviewFindings } from "../src/core/review-output";
+import { resolveReviewFindings, resolveTaskReviewFindings } from "../src/core/review-output";
 import type { ReviewRun } from "../src/types";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "../src/core/context-packets";
 import { REVIEWER_PROTOCOL_V2 } from "../src/core/reviewer-contract";
@@ -175,7 +175,7 @@ describe("every archived v1 REVIEW_SUB_AGENT retains the Machine Summary contrac
     expect(resolved.findings.advisory).toEqual(["a nit"]);
     expect(resolved.findings.blockStatus.kind).toBe("used");
     // The block won cleanly, so nothing was carried over and nothing duplicated.
-    expect(carriedOverCount(resolved.findings.blockStatus)).toBe(0);
+    expect(resolved.findings.blockStatus).toEqual({ kind: "used" });
   });
 });
 

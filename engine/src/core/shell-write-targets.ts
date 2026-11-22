@@ -5,118 +5,30 @@
  * `extractEvidence`, which mints each target as a via-shell FileWrite.
  */
 
-import { normalizeShellSpan } from "./shell-normalize";
-import { classifyFdDupWord, splitCommandSegments, stripComment, stripEnvPrefix } from "./shell-command";
-import { isShellQuoteChar, type ShellQuoteChar } from "./shell-quoting";
+import { splitCommandSegments, stripComment, stripEnvPrefix } from "./shell-command";
+import { CONTINUE, halt, lexShellQuotes } from "./shell-quoting";
+import { redirectTargetsOf } from "./shell-redirects";
 
-/**
- * Read one redirect target starting at `start` (just past the `>`s):
- * skip whitespace, then collect the quote-aware, UNQUOTED word. Fd dups
- * (`2>&1`, `>&-`) and process substitution (`>(…)`) yield no file target;
- * a `>&word` whose word is NOT a whole fd (`>&2/../r.json`) redirects to
- * the FILE `word` and IS collected. Returns the scan position to resume from.
- */
-function readRedirectTarget(segment: string, start: number, out: string[]): number {
-  let i = start;
-  while (i < segment.length && /\s/.test(segment[i])) i++;
-  if (i >= segment.length) return i;
-  if (segment[i] === "&") {
-    const dup = classifyFdDupWord(segment, i + 1);
-    // fd dup (2>&1, >&2, >&-): no file is written
-    if (dup.isFdDup) return dup.end;
-    // `>&word` with a non-fd word: bash redirects stdout+stderr TO THE FILE
-    // `word` — fall through and collect it like any other target.
-    i++;
-  }
-  if (segment[i] === "(") return i; // process substitution: no static target
-  // The word's literal value comes from the SHARED normalizer, so a target
-  // spelled with ANSI-C / a line continuation mints the SAME path the guard
-  // sees (twin parity — one place owns the quote/escape/ANSI-C rules). Backtick
-  // quotes here so `` >`cmd` `` does not split mid-substitution.
-  const { value, end } = normalizeShellSpan(segment, i, { mode: "redirect-word" });
-  if (value !== "") out.push(value);
-  return end;
-}
-
-/** Collect `>`/`>>`/`&>`/`&>>`/`n>`/`n>>` targets in one segment — quote-aware. */
-function collectRedirectTargets(segment: string, out: string[]): void {
-  let quote: ShellQuoteChar | null = null;
-  let i = 0;
-  while (i < segment.length) {
-    const c = segment[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        i += 2;
-        continue;
-      }
-      if (c === quote) quote = null;
-      i++;
-      continue;
-    }
-    if (c === "\\") {
-      i += 2;
-      continue;
-    }
-    if (isShellQuoteChar(c)) {
-      quote = c;
-      i++;
-      continue;
-    }
-    if (c === "&" && segment[i + 1] === ">") {
-      i += segment[i + 2] === ">" ? 3 : 2;
-      i = readRedirectTarget(segment, i, out);
-      continue;
-    }
-    if (c === ">") {
-      i += segment[i + 1] === ">" ? 2 : 1;
-      i = readRedirectTarget(segment, i, out);
-      continue;
-    }
-    i++;
-  }
-}
-
-/** Quote-aware unquoted words of a segment, stopping at the first unquoted
- *  redirect character (`>`, `<`, `&`) — those belong to the redirect scan. */
+/** Quote-aware words of a segment with their quotes and escapes removed,
+ *  stopping at the first unquoted redirect character (`>`, `<`, `&`) —
+ *  those belong to the redirect scan. */
 function wordsBeforeRedirect(segment: string): string[] {
   const words: string[] = [];
   let current = "";
-  let quote: ShellQuoteChar | null = null;
-  for (let i = 0; i < segment.length; i++) {
-    const c = segment[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        current += segment[i + 1] ?? "";
-        i++;
-        continue;
-      }
-      if (c === quote) {
-        quote = null;
-        continue;
-      }
-      current += c;
-      continue;
-    }
-    if (c === "\\") {
-      current += segment[i + 1] ?? "";
-      i++;
-      continue;
-    }
-    if (isShellQuoteChar(c)) {
-      quote = c;
-      continue;
-    }
-    if (/[><&]/.test(c)) break;
-    if (/\s/.test(c)) {
-      if (current !== "") {
-        words.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += c;
-  }
-  if (current !== "") words.push(current);
+  const flush = (): void => {
+    if (current !== "") words.push(current);
+    current = "";
+  };
+  // Quote characters only delimit regions; an escape contributes the character it escapes.
+  lexShellQuotes<true>(segment, 0, (token) => {
+    if (token.kind === "escape") current += token.escaped;
+    if (token.kind !== "text") return CONTINUE;
+    if (token.quote === null && /[><&]/.test(token.char)) return halt(true);
+    if (token.quote === null && /\s/.test(token.char)) flush();
+    else current += token.char;
+    return CONTINUE;
+  });
+  flush();
   return words;
 }
 
@@ -254,7 +166,7 @@ function normalizeAbsolute(path: string): string {
 
 /**
  * Every file path a Bash command line writes, as far as its text names it:
- * redirections (`>`, `>>`, `&>`, `n>`, `n>>`), `tee` targets, and the
+ * redirections (`>`, `>>`, `>|`, `&>`, `n>`, `n>>`, `<>`, `>&file`), `tee` targets, and the
  * destinations of a literal `mv`, `git mv` or `cp` — quote-aware and
  * unquoted, per segment, comments stripped. These mint FileWrite evidence so
  * a report artifact STAGED via Bash (`cat > /tmp/r.json <<EOF …`,
@@ -278,7 +190,7 @@ export function extractShellWriteTargets(command: string): string[] {
   const targets: string[] = [];
   for (const raw of splitCommandSegments(command)) {
     const segment = stripComment(raw);
-    collectRedirectTargets(segment, targets);
+    targets.push(...redirectTargetsOf(segment));
     collectTeeTargets(segment, targets);
     collectMoveCopyTargets(segment, targets);
   }

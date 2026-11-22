@@ -29,6 +29,7 @@ const statusDeps: StatusDeps = {
 
 const graphWith = (tasks: readonly Record<string, unknown>[]): unknown => ({
   current_phase: "execute",
+  verification_manifest: preI6DefaultVerificationManifest(),
   current_wave: 1,
   phase_artifacts: {},
   skipped_phases: [],
@@ -136,9 +137,10 @@ describe("attestation dispatch emission", () => {
 
 // -- fixture helpers ---------------------------------------------------------
 
-import { createImplementationAttemptAuthority, createTaskCompletionSuiteAuthority, settleImplementationAttempt, parseIsoInstant, parseReservationId, type ImplementationAttemptSettlementReceipt } from "../../src/core/implementation-completion";
+import { createImplementationAttemptAuthority, observedByteScope, settleImplementationAttempt, parseIsoInstant, parseReservationId, type ImplementationAttemptSettlementReceipt } from "../../src/core/implementation-completion";
 import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { observedEvidence } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
   const instant = parseIsoInstant("2026-09-19T00:00:00.000Z");
@@ -153,11 +155,6 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
     if (!created.ok) throw new Error(created.error.errors.join("; "));
     return created.value;
   })();
-  const suite = (() => {
-    const built = createTaskCompletionSuiteAuthority(attempt);
-    if (!built.ok) throw new Error(built.error.errors.join("; "));
-    return built.value;
-  })();
   const result = settleImplementationAttempt({
     id: "T1",
     status: "pending",
@@ -170,13 +167,7 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
     observedAt: "2026-09-19T00:01:00.000Z",
     evidence: observedEvidence({ taskCompleted: false, testResult: { verdict: "trusted-pass" }, filesModified: [] }),
     proofEvaluationPolicy: { untrustedPass: "reject" },
-  }, {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: suite.implementationAuthorityDigest,
-    suiteDigest: suite.suiteDigest,
-    checks: [{ checkId: suite.checks[0].checkId, scope: "task", outcome: { kind: "accepted", changedPaths: [] } }],
-  });
+  }, observedByteScope([]));
   if (!result.ok || result.value.kind !== "retry-required") throw new Error("retry receipt fixture failed");
   return result.value.receipt;
 };

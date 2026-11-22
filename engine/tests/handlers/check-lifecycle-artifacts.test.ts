@@ -1,16 +1,20 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { describe, it, expect } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
-import gateHandler, {
-  loadPlanModelsSource,
-  type PlanModelsSource,
-} from "../../src/handlers/helpers/complete-wave-gate";
-import { checkLifecycleArtifacts } from "../../src/core/wave-gate-checks";
+import { join } from "node:path";
+import { inspectFilePresence, loadPlanModelsSource } from "../../src/handlers/helpers/wave-gate-observers";
+import { checkLifecycleArtifacts, evaluateWaveGate, type PlanModelsSource } from "../../src/core/wave-gate-checks";
+import { capturedSpecCheck } from "../../src/core/spec-check";
 import type { Task } from "../../src/types";
 import type { PlanModels } from "../../src/core/parse-plan-models";
-import { evaluateTaskProof } from "../../src/core/proof-obligations";
-import { trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { acceptedWaveCompletionSuite, COMPLETION_SUITE_WORKSPACE } from "../fixtures/accepted-wave-completion-suite";
+import {
+  activeWaveGateFixture,
+  manifestedGraphFixture,
+  protectedGraphFixture,
+  satisfiedProof,
+  siblingTaskFixture,
+} from "../fixtures/task-lifecycle";
 
 function waveTask(fileList: string[]): Task {
   return {
@@ -19,7 +23,7 @@ function waveTask(fileList: string[]): Task {
     agent: "code-implementer-agent",
     wave: 1,
     status: "implemented",
-    legacy_missing_proof: true,
+    proof: satisfiedProof([]),
     depends_on: [],
     file_list: fileList,
   };
@@ -155,121 +159,75 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
   });
 });
 
-describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", () => {
-  let dirs: string[] = [];
+describe("Wave Gate lifecycle wiring (check 7 is actually in the gate)", () => {
+  const MACHINE = "src/order-machine.ts";
+  const ORDER_LIFECYCLE = loaded([{ id: "LC-1", title: "Order", machineFile: MACHINE }]);
+  const activeGate = activeWaveGateFixture({ runId: "lifecycle-wiring-run", wave: 1, authorityDigest: "e".repeat(64) });
+  /** A Wave every other gate check passes — a reviewed T1 owning the machine
+   *  file, a clean spec check and an accepted completion suite on the observed
+   *  workspace — under an architecture plan named only as a phase artifact.
+   *  Only the Lifecycle check can decide it. */
+  const graph = manifestedGraphFixture(protectedGraphFixture({
+    current_phase: "execute", phase_artifacts: { architecture: "arch-plan.md" }, skipped_phases: [],
+    spec_file: null, plan_file: null, current_wave: 1, executing_tasks: [],
+    tasks: [siblingTaskFixture({
+      id: "T1", status: "implemented", file_list: [MACHINE], files_modified: [MACHINE],
+      test_result: { verdict: "trusted-pass" }, new_tests_written: true, new_test_evidence: "one property",
+      review_status: "passed",
+    })],
+    wave_gates: { "1": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: false } },
+    spec_check: capturedSpecCheck({ wave: 1, runAt: "", criticalFindings: [] }),
+    active_wave_gate: activeGate,
+    active_wave_completion_suite: acceptedWaveCompletionSuite(activeGate),
+  }));
 
-  function tempDir(): string {
-    const dir = mkdtempSync(join(process.cwd(), ".tmp-loom-gate-handler-"));
-    dirs.push(dir);
-    return dir;
-  }
-
-  afterEach(() => {
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-    dirs = [];
-    delete process.env.LOOM_STATE_PATH;
-  });
-
-  // The handler resolves LOOM_STATE_PATH lazily (taskGraphPath() at call
-  // time), so pointing it at a per-test state file needs no module reload —
-  // this runs identically under `bun test` and `vitest run`.
-  function loadGateWithState(statePath: string): typeof gateHandler {
-    process.env.LOOM_STATE_PATH = statePath;
-    return gateHandler;
-  }
-
-  function writeGateState(dir: string, planFile: string, machineFile: string): string {
-    const statePath = join(dir, "active_task_graph.json");
-    const proof = evaluateTaskProof(
-      { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [machineFile] },
-      trustedPassEvidence([machineFile]),
-    );
-    if (proof.state !== "satisfied") throw new Error("gate fixture proof must be satisfied");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute",
-      phase_artifacts: {},
-      skipped_phases: [],
-      spec_file: null,
-      plan_file: planFile,
-      current_wave: 1,
-      spec_check: {
-        wave: 1, run_at: "", verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
+  /** The gate over `graph`, with the machine file present or absent, and the plan files it read. */
+  const decide = (exists: boolean) => {
+    const asked: (string | null | undefined)[] = [];
+    const decision = evaluateWaveGate(graph, null, {
+      loadPlanModels: (planFile) => {
+        asked.push(planFile);
+        return ORDER_LIFECYCLE;
       },
-      executing_tasks: [],
-      tasks: [{
-        id: "T1", description: "implement machine", agent: "code-implementer-agent",
-        wave: 1, status: "implemented", proof, depends_on: [],
-        new_tests_required: true, test_result: { verdict: "trusted-pass" },
-        new_tests_written: true, new_test_evidence: "fixture lifecycle test evidence",
-        review_status: "passed", critical_findings: [], advisory_findings: [],
-        file_list: [machineFile],
-      }],
-      wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
-    }));
-    return statePath;
-  }
+      filePresence: (path) => ({ ok: true, exists: exists && path === MACHINE }),
+      currentWaveWorkspace: COMPLETION_SUITE_WORKSPACE,
+    });
+    return { decision, asked };
+  };
 
-  it("BLOCKS the gate when the bound machine file was never created", async () => {
-    const dir = tempDir();
-    const planFile = join(dir, "plan.md");
-    const machineFile = relative(process.cwd(), join(dir, "src", "order-machine.ts")); // never written
-    writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
-    const statePath = writeGateState(dir, planFile, machineFile);
-    const gate = loadGateWithState(statePath);
-    const result = await gate("", ["--wave", "1"]);
-    expect(result.kind).toBe("error");
-    if (result.kind === "error") {
-      expect(result.message).toContain("LC-1");
-      expect(result.message).toContain("not created");
+  it("fails on the Lifecycle check alone when the machine the architecture plan declares is absent", () => {
+    const { decision, asked } = decide(false);
+    expect(asked).toEqual(["arch-plan.md"]);
+    const lifecycle = checkLifecycleArtifacts(ORDER_LIFECYCLE, graph.tasks, () => ({ ok: true, exists: false }));
+    if (lifecycle.passed) throw new Error("the absent machine must fail the Lifecycle check");
+    expect(lifecycle.reason).toContain("LC-1");
+    expect(decision.checks.filter((check) => !check.passed)).toEqual([lifecycle]);
+    expect(decision.verdict).toEqual({ kind: "fail", reason: lifecycle.reason });
+  });
+
+  it("passes once that machine file exists", () => {
+    const { decision, asked } = decide(true);
+    expect(asked).toEqual(["arch-plan.md"]);
+    expect(decision.checks.every((check) => check.passed)).toBe(true);
+    expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: null });
+  });
+
+  it("observes a dangling symlink as an absent Lifecycle Machine artifact", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-gate-"));
+    try {
+      const machine = join(dir, "order-machine.ts");
+      symlinkSync(join(dir, "missing-machine-target.ts"), machine);
+      expect(inspectFilePresence(machine)).toEqual({ ok: true, exists: false });
+      const check = checkLifecycleArtifacts(
+        loaded([{ id: "LC-1", title: "Order", machineFile: machine }]),
+        [waveTask([machine])],
+        inspectFilePresence,
+      );
+      expect(check.passed).toBe(false);
+      if (!check.passed) expect(check.reason).toContain("LC-1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  it("passes the gate when the machine file exists on disk", async () => {
-    const dir = tempDir();
-    const planFile = join(dir, "plan.md");
-    const machineAbsolute = join(dir, "order-machine.ts");
-    const machineFile = relative(process.cwd(), machineAbsolute);
-    writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
-    writeFileSync(machineAbsolute, "export const machine = 1;\n");
-    const statePath = writeGateState(dir, planFile, machineFile);
-    const gate = loadGateWithState(statePath);
-    const result = await gate("", ["--wave", "1"]);
-    expect(result.kind).toBe("passthrough");
-  });
-
-  it("BLOCKS the gate when the declared machine path is a dangling symlink", async () => {
-    const dir = tempDir();
-    const planFile = join(dir, "plan.md");
-    const machineAbsolute = join(dir, "order-machine.ts");
-    const machineFile = relative(process.cwd(), machineAbsolute);
-    writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
-    symlinkSync(join(dir, "missing-machine-target.ts"), machineAbsolute);
-    const statePath = writeGateState(dir, planFile, machineFile);
-
-    const result = await loadGateWithState(statePath)("", ["--wave", "1"]);
-
-    expect(result.kind).toBe("error");
-    if (result.kind === "error") {
-      expect(result.message).toContain("LC-1");
-      expect(result.message).toContain("not created");
-    }
-  });
-
-  it("falls back to the architecture phase artifact when plan_file is null", async () => {
-    const dir = tempDir();
-    const planFile = join(dir, "plan.md");
-    const machineFile = relative(process.cwd(), join(dir, "order-machine.ts")); // never written
-    writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
-    const statePath = writeGateState(dir, planFile, machineFile);
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    state.plan_file = null;
-    state.phase_artifacts = { architecture: planFile };
-    writeFileSync(statePath, JSON.stringify(state));
-    const gate = loadGateWithState(statePath);
-    const result = await gate("", ["--wave", "1"]);
-    expect(result.kind).toBe("error");
-    if (result.kind === "error") expect(result.message).toContain("LC-1");
   });
 });
 

@@ -30,7 +30,9 @@ import {
   protectedGraphFixture,
   satisfiedProof,
   taskFixture,
+  executingGraphFixture,
 } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const ADVISORY = {
   id: findingId("comment-analyzer-1"),
@@ -80,6 +82,7 @@ function paused(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return protectedGraphFixture({
     spec_trace_version: 2,
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -307,14 +310,14 @@ describe("reopenableWave: the one Wave precondition Contract Revision and Task R
   });
 
   it("refuses outside the execute Phase before anything else", () => {
-    expect(refused({ ...paused({ executing_tasks: ["T2"] }), current_phase: "decompose" }))
+    expect(refused({ ...executingGraphFixture(paused(), ["T2"]), current_phase: "decompose" }))
       .toEqual({ kind: "not-executing", phase: "decompose" });
     expect(refused({ ...paused(), current_wave: undefined })).toMatchObject({ kind: "not-executing" });
   });
 
   it("refuses a live gate, or an abandoned tombstone of another Wave, before reservations", () => {
     const live = activeWaveGateFixture({ runId: "run.live", wave: 1, authorityDigest: "b".repeat(64) });
-    expect(refused(paused({ active_wave_gate: live, executing_tasks: ["T2"] })))
+    expect(refused(executingGraphFixture(paused({ active_wave_gate: live }), ["T2"])))
       .toEqual({ kind: "live-wave-gate", runId: "run.live", wave: 1 });
     expect(refused(paused({ active_wave_gate: { ...ABANDONED, wave: 2 } })))
       .toEqual({ kind: "live-wave-gate", runId: ABANDONED.runId, wave: 2 });

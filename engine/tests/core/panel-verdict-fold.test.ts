@@ -25,32 +25,22 @@ import {
   completePersistentRefutationPanel,
   panelRequestIdentity,
   parsePersistentRefutationPanelEvent,
-  parseRefutationPanelCheckpoint,
+  parseRefutationPanelCheckpointRecord,
   reducePersistentRefutationPanel,
   refutationPanelCheckpoint,
   startPersistentRefutationPanel,
   submitRefutationVerdict,
   type RefutationPanelState,
 } from "../../src/core/persistent-panel";
-import {
-  parsePanelVerdictSourceRecord,
-  panelVerdictSourceProvenance,
-  panelVerdictSourceRecord,
-  projectPanelVerdictSourceArm,
-  replayPanelVerdictSourceSelection,
-  type PanelVerdictSource,
-  type PanelVerdictSourceRecord,
-} from "../../src/core/panel-verdict-source";
-import { selectVerdictSource } from "../../src/core/emission-ingestion";
+import { projectPanelVerdictSourceArm } from "../../src/core/panel-verdict-source";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
 import { observeEmissionCalls, type EmissionCallFrame, type EmissionToolCall } from "../../src/core/emission-observation";
-import { parseRequestId, parseSlotId } from "../../src/core/orchestration-contract";
-import { canonicalStructuralEquals, parseArtifactDigest } from "../../src/core/orchestration-contract/identity";
+import { parseArtifactDigest } from "../../src/core/orchestration-contract/identity";
 import {
   createPanelPublications,
   type RefutationPanelFixture as RefutationFixture,
 } from "../fixtures/panel-authority";
-import { refusal, value } from "../fixtures/parse-result";
+import { value } from "../fixtures/parse-result";
 
 /** This suite's private publication store: its resolver reads only the panels issued here. */
 const { refutationPanelFixture, resolver: publicationResolver } = createPanelPublications();
@@ -448,7 +438,7 @@ describe("the durable accepted-event source arm", () => {
     const completed = value(completePersistentRefutationPanel(step.state, publicationResolver));
     const tallyEvent = completed.recordedEvent!;
     const checkpoint = value(refutationPanelCheckpoint(completed.state, [emissionEvent, extractionEvent, tallyEvent], publicationResolver));
-    const replayed = value(parseRefutationPanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), publicationResolver));
+    const replayed = value(parseRefutationPanelCheckpointRecord(JSON.parse(JSON.stringify(checkpoint)), publicationResolver)).step;
     expect(replayed.state.stage).toBe("done");
     const persistedEvents = JSON.parse(JSON.stringify(checkpoint.events)) as readonly { type?: string; source?: { toolCallId?: string } }[];
     const persistedEmission = persistedEvents.find((event) => event.type === "refutation-verdict-accepted" && event.source?.toolCallId === "call-cp");
@@ -456,135 +446,6 @@ describe("the durable accepted-event source arm", () => {
     // The reloaded prefix keeps the emission arm exactly as it was recorded.
     expect(replayed.state.stage === "done" && replayed.state.decision.verdicts).toHaveLength(2);
     expect(JSON.parse(JSON.stringify(checkpoint.events))[0]).toEqual(JSON.parse(JSON.stringify(emissionEvent)));
-  });
-});
-
-// ---------------------------------------------------------------------------
-// The durable panel verdict source record (the legacy path's replay authority)
-// ---------------------------------------------------------------------------
-
-function buildEmissionRecord(): {
-  record: PanelVerdictSourceRecord;
-  binding: IssuedEmissionBindingOf<"refutation-verdict">;
-  acceptedCall: EmissionToolCall;
-  rawJson: string;
-} {
-  const fixture = refutationFixture("record");
-  const binding = mintRefutationBinding(fixture.requests[0]!.authority.requestId);
-  const findingIds = fixture.authority.findings.map(({ id }) => id);
-  const call = callOf(binding, "call-record", validRefutationArguments(fixture.authority.lenses[0], findingIds));
-  const rawJson = "prose, not a verdict";
-  const selection = selectVerdictSource(binding, singleCallObservation(call), rawJson);
-  if (selection.kind !== "emission-tool-arguments") throw new Error("fixture selection must be emission");
-  const acceptedBytes = new TextEncoder().encode(selection.rawJson);
-  const record = value(panelVerdictSourceRecord({
-    requestId: fixture.requests[0]!.authority.requestId,
-    slotId: fixture.requests[0]!.authority.slotId,
-    attempt: 1,
-    source: panelVerdictSourceProvenance(binding, selection),
-    acceptedCall: selection.call,
-    payloadDigest: value(parseArtifactDigest(createHash("sha256").update(acceptedBytes).digest("hex"))),
-    payloadByteLength: acceptedBytes.length,
-  }));
-  return { record, binding, rawJson, acceptedCall: selection.call };
-}
-
-describe("the durable panel verdict source record", () => {
-  it("parses back byte-identically and replays the accepted call through the same seam", () => {
-    const { record, rawJson } = buildEmissionRecord();
-    const reparsed = value(parsePanelVerdictSourceRecord(JSON.parse(JSON.stringify(record))));
-    expect(canonicalStructuralEquals(reparsed, record)).toBe(true);
-    const replayed = value(replayPanelVerdictSourceSelection(reparsed, rawJson));
-    expect(replayed.kind).toBe("emission-tool-arguments");
-    if (replayed.kind !== "emission-tool-arguments") throw new Error("unreachable");
-    expect(replayed.call.toolCallId).toBe("call-record");
-  });
-
-  it("refuses tampered records instead of replaying them", () => {
-    const { record, rawJson, acceptedCall } = buildEmissionRecord();
-    const tamperedDigest = {
-      ...record,
-      source: { ...record.source, schemaDigest: value(parseArtifactDigest(hexDigest("tampered"))) },
-    };
-    const refusedDigest = replayPanelVerdictSourceSelection(value(parsePanelVerdictSourceRecord(tamperedDigest)), rawJson);
-    expect(refusedDigest.ok).toBe(false);
-    if (refusedDigest.ok) throw new Error("unreachable");
-    expect(refusedDigest.error).toContain("does not certify the frozen registry digest");
-
-    const tamperedCall = { ...record, acceptedCall: { ...acceptedCall, toolCallId: "other-call" } };
-    const refusedCall = parsePanelVerdictSourceRecord(tamperedCall);
-    expect(refusedCall.ok).toBe(false);
-    if (refusedCall.ok) throw new Error("unreachable");
-    expect(refusedCall.error).toContain("source arm");
-
-    const tamperedRequest = { ...record, requestId: "run.other-ref:refutation:verifier:1:1" };
-    const refusedRequest = parsePanelVerdictSourceRecord(tamperedRequest);
-    expect(refusedRequest.ok).toBe(false);
-    if (refusedRequest.ok) throw new Error("unreachable");
-    expect(refusedRequest.error).toContain("different request");
-
-    const callWithoutRecord = { ...record, acceptedCall: undefined };
-    const refusedMissing = parsePanelVerdictSourceRecord(callWithoutRecord);
-    expect(refusedMissing.ok).toBe(false);
-
-    const extractionWithCall = {
-      schemaVersion: 1,
-      kind: "panel-verdict-source",
-      requestId: record.requestId,
-      slotId: record.slotId,
-      attempt: 1,
-      source: { source: "extraction" },
-      acceptedCall,
-      payloadDigest: record.payloadDigest,
-      payloadByteLength: record.payloadByteLength,
-    };
-    const refusedExtraction = parsePanelVerdictSourceRecord(extractionWithCall);
-    expect(refusedExtraction.ok).toBe(false);
-  });
-
-  it("replays an extraction record verbatim with its retained refusal", () => {
-    const source: PanelVerdictSource = {
-      source: "extraction",
-      emissionRefusal: { code: "invalid-schema", message: "the arguments refused the frozen schema" },
-    };
-    const record = value(panelVerdictSourceRecord({
-      requestId: value(parseRequestId("run.record-extraction:refutation:verifier:1:1")),
-      slotId: value(parseSlotId("refutation-slot:abc")),
-      attempt: 2,
-      source,
-      payloadDigest: value(parseArtifactDigest(hexDigest("payload"))),
-      payloadByteLength: 42,
-    }));
-    const replayed = value(replayPanelVerdictSourceSelection(
-      value(parsePanelVerdictSourceRecord(JSON.parse(JSON.stringify(record)))),
-      "the raw attempt bytes",
-    ));
-    expect(replayed).toEqual({
-      kind: "extraction-over-refused-call",
-      rawJson: "the raw attempt bytes",
-      source: "extraction",
-      emissionRefusal: source.emissionRefusal,
-    });
-  });
-
-  it("never builds a record that carries a non-verdict producer kind, so none reaches the replay", () => {
-    const schemaDigest = value(parseArtifactDigest(hexDigest("schema")));
-    const built = panelVerdictSourceRecord({
-      requestId: value(parseRequestId("run.record-kind:judge:1:1")),
-      slotId: value(parseSlotId("judge:1")),
-      attempt: 1,
-      source: { source: "emission-tool", toolCallId: "call", producerKind: "reviewer-payload", emissionSchemaVersion: "v2", schemaDigest },
-      acceptedCall: {
-        requestId: value(parseRequestId("run.record-kind:judge:1:1")),
-        toolCallId: "call",
-        kind: { kind: "reviewer-payload" },
-        version: "v2",
-        arguments: {},
-      },
-      payloadDigest: value(parseArtifactDigest(hexDigest("payload"))),
-      payloadByteLength: 7,
-    });
-    expect(refusal(built)).toContain("is not a panel verdict kind");
   });
 });
 

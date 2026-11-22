@@ -13,7 +13,11 @@
  *
  * The explicit `LOOM_ORCHESTRATION_*` variables keep their precedence and their
  * semantics: when either is set it alone is the authority, and half of one is a
- * fault. Only when neither is set does the session binding decide.
+ * fault. Only when neither is set does the session binding decide. Both rules
+ * are the harness-neutral `explicitRun` / `resolveIssuingRun`
+ * (session-run-bindings.ts), and the prompt's markers are read by the one
+ * parser beside their writer (`parseIssuedTaskIdentity`, core/spawn-task-text);
+ * this module keeps only Claude's correlator I/O.
  *
  * Every function here answers one question for every Claude call site — the
  * PostToolUse spawn correlator, SubagentStop capture, and the SubagentStop
@@ -22,19 +26,28 @@
  * separate, explicitly named step its callers perform.
  *
  * Fail-closed discipline: an unreadable registry, a correlator that cannot be
- * read, or a marker no binding (or more than one) admits are errors, never a
- * silent "unrelated agent". Only the absence of any claim — no binding for the
- * session, no correlator and no request marker for this agent — is `unbound`.
+ * read, malformed markers, or an identity no binding (or more than one) issued
+ * are errors, never a silent "unrelated agent". Only the absence of any claim —
+ * no binding for the session, no correlator and no authority marker for this
+ * agent — is `unbound`.
  */
 
 import { subagentDir } from "../config";
+import { parseIssuedTaskIdentity, type TaskIdentity } from "../core/spawn-task-text";
 import { parseSessionId } from "../machine/evidence";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "./harness-capture-runtime";
 import { inspectRunDirectoryEntry, openRegisteredRunDirectory } from "./run-directory-handle";
-import { failed, ok, readSessionRunBindings, type BindingResult, type SessionRunBinding } from "./session-run-bindings";
-
-/** The run a hook was resolved to — the pair every run-directory primitive takes. */
-export type ClaudeRun = Readonly<{ runsRoot: string; runDirectory: string }>;
+import {
+  explicitRun,
+  failed,
+  ok,
+  readIssuedIdentities,
+  readSessionRunBindings,
+  resolveIssuingRun,
+  type BindingResult,
+  type RunLocation,
+  type SessionRunBinding,
+} from "./session-run-bindings";
 
 /**
  * `unbound`: the hook belongs to nobody's orchestration run (the ordinary
@@ -43,7 +56,7 @@ export type ClaudeRun = Readonly<{ runsRoot: string; runDirectory: string }>;
  */
 export type ClaudeRunAuthority =
   | Readonly<{ kind: "unbound" }>
-  | Readonly<{ kind: "bound"; run: ClaudeRun }>;
+  | Readonly<{ kind: "bound"; run: RunLocation }>;
 
 /**
  * A SubagentStop additionally distinguishes a request-bound agent whose
@@ -56,7 +69,7 @@ export type ClaudeRunAuthority =
  */
 export type ClaudeStopAuthority =
   | ClaudeRunAuthority
-  | Readonly<{ kind: "uncorrelated"; run: ClaudeRun; requestId: string }>;
+  | Readonly<{ kind: "uncorrelated"; run: RunLocation; identity: TaskIdentity }>;
 
 /** Everything run resolution reads, gathered at the hook boundary. */
 export type ClaudeRunContext = Readonly<{
@@ -91,27 +104,7 @@ export function claudeRunContext(
 }
 
 const UNBOUND: ClaudeRunAuthority = Object.freeze({ kind: "unbound" });
-const bound = (run: ClaudeRun): ClaudeRunAuthority => Object.freeze({ kind: "bound", run: Object.freeze({ ...run }) });
-
-const REQUEST_MARKER = /^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm;
-
-/** Every LOOM_REQUEST_ID marker an engine-issued Agent prompt carries (exactly one when it is engine-issued). */
-export function requestMarkers(prompt: string): readonly string[] {
-  return Object.freeze([...prompt.matchAll(REQUEST_MARKER)].map((match) => match[1]));
-}
-
-/**
- * The run the explicit environment names, `null` when it names none. Half an
- * authority is a fault, never "unrelated".
- */
-export function explicitClaudeRun(context: ClaudeRunContext): BindingResult<ClaudeRun | null> {
-  const { runsRoot, runDirectory } = context;
-  if (runsRoot === undefined && runDirectory === undefined) return ok(null);
-  if (runsRoot === undefined || runDirectory === undefined) {
-    return failed("Claude orchestration requires both run-root and run-directory authority");
-  }
-  return ok(Object.freeze({ runsRoot, runDirectory }));
-}
+const bound = (run: RunLocation): ClaudeRunAuthority => Object.freeze({ kind: "bound", run: Object.freeze({ ...run }) });
 
 function sessionBindings(context: ClaudeRunContext): BindingResult<readonly SessionRunBinding[]> {
   if (context.sessionId === undefined || context.sessionId === "") {
@@ -120,32 +113,26 @@ function sessionBindings(context: ClaudeRunContext): BindingResult<readonly Sess
   return readSessionRunBindings(context.bindingDirectory, context.sessionId, "claude-code");
 }
 
-/** The one binding that issued `requestId`; none or several is a fault. */
-function bindingIssuing(bindings: readonly SessionRunBinding[], requestId: string): BindingResult<ClaudeRun> {
-  const matches = bindings.filter((binding) => (binding.requestIds as readonly string[]).includes(requestId));
-  if (matches.length === 1) return ok(Object.freeze({ runsRoot: matches[0].runsRoot, runDirectory: matches[0].runDirectory }));
-  return failed(matches.length === 0
-    ? `no Claude Code session run binding contains issued request ${requestId}`
-    : `multiple Claude Code session run bindings contain issued request ${requestId}`);
-}
-
 /**
- * Resolve the run that issued `requestId`, the single LOOM_REQUEST_ID marker a
- * spawn prompt carries. A marker is a claim of engine authority: the explicit
- * run when one is set, otherwise exactly one session binding must have issued
- * it, or the claim fails closed. (A spawn with no marker claims nothing and
- * never reaches this question.)
+ * Resolve the run that issued `identity`, the request identity a spawn
+ * prompt's authority markers name. Markers are a claim of engine authority:
+ * the explicit run when one is set, otherwise exactly one session binding
+ * must have issued that request under that context digest, or the claim fails
+ * closed. (A spawn with no markers claims nothing and never reaches this
+ * question.)
  */
 export function resolveClaudeSpawnRun(
   context: ClaudeRunContext,
-  requestId: string,
-): BindingResult<ClaudeRun> {
-  const explicit = explicitClaudeRun(context);
+  identity: TaskIdentity,
+): BindingResult<RunLocation> {
+  const explicit = explicitRun(context, "claude-code");
   if (!explicit.ok) return explicit;
-  if (explicit.value !== null) return ok(explicit.value);
-  const bindings = sessionBindings(context);
-  if (!bindings.ok) return bindings;
-  return bindingIssuing(bindings.value, requestId);
+  return resolveIssuingRun(
+    explicit.value,
+    { bindings: () => sessionBindings(context), issuedIdentities: readIssuedIdentities },
+    [identity],
+    "claude-code",
+  );
 }
 
 /** Does this bound run hold a Claude correlator for `nativeId`? Absent runs hold nothing. */
@@ -170,8 +157,9 @@ function correlatesAgent(binding: SessionRunBinding, nativeId: string): BindingR
  * Explicit authority wins unchanged. Otherwise the bound run whose correlator
  * records this native `agent_id` owns the stop; a correlator in several bound
  * runs is ambiguous and fails closed. With no correlator anywhere, the agent's
- * own spawn prompt (`spawnPrompt`, read lazily and only then) decides: no marker
- * means an ordinary ad-hoc agent, and a marker names the request whose
+ * own spawn prompt (`spawnPrompt`, read lazily and only then) decides: no
+ * authority marker means an ordinary ad-hoc agent, malformed markers fail
+ * closed, and a bound identity names the request (and its digest) whose
  * correlator the caller must record before capturing (see ClaudeStopAuthority).
  */
 export function resolveClaudeStopRun(
@@ -179,7 +167,7 @@ export function resolveClaudeStopRun(
   nativeId: string,
   spawnPrompt: () => BindingResult<string | null>,
 ): BindingResult<ClaudeStopAuthority> {
-  const explicit = explicitClaudeRun(context);
+  const explicit = explicitRun(context, "claude-code");
   if (!explicit.ok) return explicit;
   if (explicit.value !== null) return ok(bound(explicit.value));
   // A session with no published binding has no run for any of its agents, and
@@ -208,33 +196,47 @@ export function resolveClaudeStopRun(
 
   const prompt = spawnPrompt();
   if (!prompt.ok) return prompt;
-  const markers = prompt.value === null ? [] : requestMarkers(prompt.value);
-  if (markers.length === 0) return ok(UNBOUND);
-  if (markers.length !== 1) {
-    return failed("Claude orchestration prompt must carry exactly one LOOM_REQUEST_ID marker");
-  }
-  const run = bindingIssuing(bindings.value, markers[0]);
-  return run.ok ? ok(Object.freeze({ kind: "uncorrelated" as const, run: run.value, requestId: markers[0] })) : run;
+  if (prompt.value === null) return ok(UNBOUND);
+  const identity = parseIssuedTaskIdentity(prompt.value);
+  if (identity.kind === "unbound") return ok(UNBOUND);
+  if (identity.kind === "malformed") return failed(`Claude orchestration prompt ${identity.reason}`);
+  const claimed: TaskIdentity = Object.freeze({ requestId: identity.requestId, contextDigest: identity.contextDigest });
+  // The explicit run was ruled out above, so only the bindings already read decide.
+  const run = resolveIssuingRun(
+    null,
+    { bindings: () => bindings, issuedIdentities: readIssuedIdentities },
+    [claimed],
+    "claude-code",
+  );
+  return run.ok ? ok(Object.freeze({ kind: "uncorrelated" as const, run: run.value, identity: claimed })) : run;
 }
 
 /**
- * Record that Claude agent `nativeId` answers issued request `requestId`.
+ * Record that Claude agent `nativeId` answers the issued request its prompt's
+ * authority markers name.
  *
  * The one correlator write both Claude boundaries share: PostToolUse after a
  * spawn returns, and SubagentStop when a foreground spawn finished first. The
+ * named request must be issued in this run for this role under the exact
+ * context digest the prompt carries, so an explicit run (which resolution
+ * does not open) is held to the same identity as a session-bound one. The
  * underlying write is idempotent for identical authority and refuses a
  * conflicting one, so whichever boundary runs second either agrees or fails.
  */
 export async function recordClaudeSpawnCorrelator(
-  run: ClaudeRun,
-  spawn: Readonly<{ requestId: string; role: string; nativeId: string }>,
+  run: RunLocation,
+  spawn: Readonly<{ identity: TaskIdentity; role: string; nativeId: string }>,
 ): Promise<BindingResult<null>> {
+  const { identity } = spawn;
   const opened = openRegisteredRunDirectory(run.runsRoot, run.runDirectory);
   if (!opened.ok) return failed(opened.error.message);
   const issued = opened.value.readIssuedRequests();
   if (!issued.ok) return failed(issued.error.message);
-  const request = issued.value.find(({ requestId }) => requestId === spawn.requestId);
-  if (request === undefined) return failed(`Claude spawn claims unissued request ${spawn.requestId}`);
+  const request = issued.value.find(({ requestId }) => requestId === identity.requestId);
+  if (request === undefined) return failed(`Claude spawn claims unissued request ${identity.requestId}`);
+  if (request.contextDigest !== identity.contextDigest) {
+    return failed(`Claude spawn request ${request.requestId} names context ${identity.contextDigest}, not its issued context ${request.contextDigest}`);
+  }
   if (request.role !== spawn.role) {
     return failed(`Claude spawn request ${request.requestId} belongs to ${request.role}, not ${spawn.role}`);
   }

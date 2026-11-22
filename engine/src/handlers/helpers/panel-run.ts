@@ -1,11 +1,12 @@
 /**
- * Panel run shell — the filesystem boundary every panel helper shares.
+ * Panel run shell — the filesystem boundary of the architecture panel's
+ * `helper panel-contract`.
  *
  * Companion to `core/panel-kernel.ts`: the kernel owns the pure envelope rules,
- * this owns the untrusted-path rules. Both panels write their artifacts into a
- * unique run directory under a runs-root inside the cwd, and both must reject
- * a symlinked hop, an escaping path, and an empty or non-regular artifact
- * before any agent output is believed.
+ * this owns the untrusted-path rules. The panel writes its artifacts into a
+ * unique run directory under a runs-root inside the cwd, and the helper must
+ * reject a symlinked hop, an escaping path, and an empty or non-regular
+ * artifact before any agent output is believed.
  *
  * Not pure: lstat/realpath/read/write. Kept out of `core/` for that reason.
  */
@@ -15,28 +16,19 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
 import { fail, ok } from "../../core/panel-kernel";
-import {
-  type AnchoredDirectory,
-  anchoredChildPath,
-  closeAnchoredDirectory,
-  ensureRelativeDirectoryNoFollow,
-  listDirectoryNamesNoFollow,
-  openDirectoryNoFollow,
-} from "../../utils/no-follow-fs";
 
-// `RunLayout` and the two layouts are pure data and live in the kernel, beside
+// `RunLayout` and the architecture layout are pure data and live in the kernel, beside
 // the manifest parsers that give them meaning — those parsers used to hardcode
 // `"interview.md"` / `"candidates"` while this module declared them as
 // constants, with nothing comparing the two. Re-exported so the shell's own
 // callers need not know where the definition moved.
-export { ARCHITECTURE_LAYOUT, REVIEW_LAYOUT } from "../../core/panel-kernel";
+export { ARCHITECTURE_LAYOUT } from "../../core/panel-kernel";
 export type { RunLayout } from "../../core/panel-kernel";
 
 export { argumentValue } from "./cli-args";
@@ -84,36 +76,6 @@ function entryErrors(label: string, path: string, kind: "directory" | "file"): s
     errors.push(`cannot inspect ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
   return errors;
-}
-
-/**
- * Bind a run DIRECTORY to an explicit panel-runs root, for the operations that
- * run before a manifest exists (the review panel writes its brief and manifest
- * from the engine). Same containment and symlink rules as parseRunBoundary,
- * minus the manifest itself.
- */
-export function parseRunDirectory(runsRoot: string, runDir: string): ParseResult<string> {
-  const cwd = realpathSync(process.cwd());
-  const absoluteRoot = resolve(runsRoot);
-  const absoluteRunDir = resolve(runDir);
-
-  const errors = runsRootErrors(cwd, relative(cwd, absoluteRoot));
-  if (runDir.split(/[\\/]/).some((segment) => segment === "." || segment === "..")) {
-    errors.push(`run directory must not contain dot path segments: ${runDir}`);
-  }
-  if (dirname(absoluteRunDir) !== absoluteRoot) {
-    errors.push("run directory must be directly inside --runs-root");
-  }
-  errors.push(...entryErrors("run directory", absoluteRunDir, "directory"));
-  try {
-    if (realpathSync(runDir) !== absoluteRunDir) {
-      errors.push(`run directory must resolve directly to its lexical path: ${runDir}`);
-    }
-  } catch (error) {
-    errors.push(`cannot resolve run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  return errors.length > 0 ? fail(errors) : ok(runDir);
 }
 
 /** Bind the run to an explicit panel-runs root and reject every symlinked hop. */
@@ -249,191 +211,6 @@ function surplusItemErrors(
       ];
 }
 
-/**
- * Prepare a run-scoped directory and prove every path the engine is about to
- * WRITE is safe to write.
- *
- * The read side has always been checked (`entryErrors`, `artifactError`); the
- * review panel is the first panel where the engine authors artifacts, and a
- * write follows a symlink just as happily as a read does. `mkdirSync` is a
- * silent no-op on an existing symlinked directory, and `writeFileSync` through
- * a symlinked `brief.md` lands the JSON wherever it points — outside the run
- * root the containment checks all compare against. Checked BEFORE the write,
- * because `artifactErrors` runs at the manifest step, by which time the bytes
- * have already landed.
- */
-export function requireRunDirectoriesNoFollow(
-  runDir: string,
-  directories: readonly string[],
-): ParseResult<void> {
-  // The run directory is the BASE: the operator's path to it may traverse a
-  // system symlink (macOS resolves `/var` to `/private/var`), while nothing
-  // BELOW it may. Resolving it once here is what lets every anchored open
-  // below hold to the strict no-symlink rule — the same reason
-  // `runArtifactErrors` compares containment against `realRunDir`.
-  const resolvedRunDir = realRunDir(runDir);
-  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
-  const root = resolvedRunDir.value;
-  const errors: string[] = [];
-  for (const directory of directories) {
-    const path = join(root, directory);
-    let anchored: AnchoredDirectory | null = null;
-    try {
-      const fromRun = relative(root, resolve(path));
-      if (fromRun === ".." || fromRun.startsWith(`..${sep}`) || isAbsolute(fromRun)) {
-        throw new Error(`run subdirectory escapes run directory: ${path}`);
-      }
-      anchored = openDirectoryNoFollow(path);
-    } catch (error) {
-      errors.push(`cannot anchor existing run subdirectory ${path}: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      if (anchored !== null) closeAnchoredDirectory(anchored);
-    }
-  }
-  return errors.length > 0 ? fail(errors) : ok(undefined);
-}
-
-export function prepareWriteTargets(
-  runDir: string,
-  directories: readonly string[],
-  files: readonly string[],
-): ParseResult<void> {
-  // Resolve the run BASE once, for the reason documented on
-  // `requireRunDirectoriesNoFollow`; every path built below it is then held to
-  // the strict no-symlink rule.
-  const resolvedRunDir = realRunDir(runDir);
-  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
-  const root = resolvedRunDir.value;
-  const errors: string[] = [];
-  let runDirectory: AnchoredDirectory | null = null;
-  try {
-    runDirectory = openDirectoryNoFollow(root);
-  } catch (error) {
-    errors.push(`cannot anchor run directory ${root}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  for (const directory of directories) {
-    const path = join(root, directory);
-    try {
-      if (runDirectory === null) throw new Error("run directory anchor is unavailable");
-      ensureRelativeDirectoryNoFollow(runDirectory, root, path);
-    } catch (error) {
-      errors.push(`cannot create ${path}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
-    errors.push(...entryErrors("run subdirectory", path, "directory"));
-  }
-  if (runDirectory !== null) closeAnchoredDirectory(runDirectory);
-  for (const file of files) {
-    const path = join(root, file);
-    try {
-      // Absent is the expected state for a fresh run directory and is fine;
-      // anything that EXISTS must be a plain file we are overwriting in place.
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink()) errors.push(`write target must not be a symbolic link: ${path}`);
-      else if (!stat.isFile()) errors.push(`write target must be a regular file: ${path}`);
-    } catch (error) {
-      // ONLY ENOENT means "nothing to follow, nothing to check". A blanket
-      // catch read EACCES on a parent component and ELOOP as "absent, safe to
-      // write" — which is precisely the state this function exists to refuse.
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-        errors.push(
-          `cannot verify write target ${path}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  }
-  return errors.length > 0 ? fail(errors) : ok(undefined);
-}
-
-/**
- * Anchored run-artifact operations now live in the orchestration layer so the
- * anchored RunDirHandle and these helpers share one implementation.
- * Re-exported here because they are part of this module's established public
- * surface.
- */
-export {
-  anchoredChildPath,
-  closeAnchoredDirectory,
-  openDirectoryNoFollow,
-  publishStagedRunFile,
-  readRunFileNoFollow,
-  removeRunFileNoFollow,
-  writeRunFileExclusiveNoFollow,
-  writeRunFileNoFollow,
-} from "../../utils/no-follow-fs";
-
-/**
- * Delete the artifacts in an item directory that the caller is not about to
- * write, and report what went.
- *
- * Only the engine-authored side needs this, and only because a re-brief is a
- * legitimate operation: after a finding is refuted or overridden, the next
- * brief names fewer findings, and the file for the departed one stayed behind.
- * The surplus was then caught two steps later by `runArtifactErrors` — with the
- * diagnostic "the panel that produced them was larger than the manifest
- * declares", which describes the opposite of what happened and sends the
- * operator looking for a resized panel that does not exist.
- *
- * Refuses rather than deletes anything that is not a plain file it recognizes:
- * this runs `rm` inside a directory derived from an argument, so a symlink or a
- * nested directory is a reason to stop, not something to clean up. Unknown
- * plain files ARE removed — a stale `finding-code-reviewer-9.json` is exactly
- * the surplus this exists to clear.
- */
-export function pruneSurplusItems(
-  runDir: string,
-  itemDir: string,
-  expected: readonly string[],
-): ParseResult<readonly string[]> {
-  const resolvedRunDir = realRunDir(runDir);
-  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
-  const directory = join(resolvedRunDir.value, itemDir);
-  const keep = new Set(expected);
-  let anchored: AnchoredDirectory | null = null;
-  let entries: readonly string[];
-  try {
-    anchored = openDirectoryNoFollow(directory);
-    entries = listDirectoryNamesNoFollow(anchored);
-  } catch (error) {
-    if (anchored !== null) closeAnchoredDirectory(anchored);
-    // A run directory that has never held items is the normal first-brief case.
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return ok([]);
-    return fail([
-      `cannot list ${directory}: ${error instanceof Error ? error.message : String(error)}`,
-    ]);
-  }
-
-  const removed: string[] = [];
-  const errors: string[] = [];
-  try {
-    for (const entry of entries) {
-      if (keep.has(entry)) continue;
-      const path = join(directory, entry);
-      const anchoredPath = anchoredChildPath(anchored, entry);
-      try {
-        const stat = lstatSync(anchoredPath);
-        if (stat.isSymbolicLink()) {
-          errors.push(`stale run artifact must not be a symbolic link: ${path}`);
-          continue;
-        }
-        if (!stat.isFile()) {
-          errors.push(`stale run artifact must be a regular file: ${path}`);
-          continue;
-        }
-        unlinkSync(anchoredPath);
-        removed.push(entry);
-      } catch (error) {
-        errors.push(
-          `cannot clear stale run artifact ${path}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  } finally {
-    closeAnchoredDirectory(anchored);
-  }
-  return errors.length > 0 ? fail(errors) : ok(removed);
-}
-
 /** Canonical per-criterion verdict path. Positional by index, but the content
  *  is re-validated against `criteria[index]` when read, so a verdict written to
  *  the wrong slot is a hard error rather than a silent mis-adjudication. */
@@ -458,9 +235,8 @@ export function realRunDir(runDir: string): ParseResult<string> {
  *
  * A surplus `verdict-4.json` is not junk to ignore — it is positive evidence
  * that the panel which actually RAN was larger than the criteria set now
- * claims. That is exactly the shape a shrunken panel leaves behind (see the
- * panel-size note in helpers/review-panel.ts), and ignoring it is what let a
- * 5-lens run be adjudicated as a 3-lens one with a lower absolute refutation
+ * claims. That is exactly the shape a shrunken panel leaves behind, and
+ * ignoring it is what let a 5-lens run be adjudicated as a 3-lens one with a lower absolute refutation
  * bar. Reported, never silently skipped.
  */
 function surplusVerdictErrors(verdictsDir: string, expected: number): string[] {

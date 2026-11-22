@@ -59,13 +59,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 624 src files / ~176.3k lines TS; `engine/tests/` holds 947 TS files / ~266.4k lines (fixtures and helpers included), of which 832 test files are executed (808 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
-| `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
+| `engine/` | The engine: 618 src files / ~169.6k lines TS; `engine/tests/` holds 959 TS files / ~264.0k lines (fixtures and helpers included), of which 838 test files are executed (814 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
-| `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
+| `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 125 docs incl. **96 ADRs** (index test-enforced) | — |
+| `docs/` | 129 docs incl. **100 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -277,14 +277,15 @@ the evidence ledger build on — the guard *sees* and the ledger *mints* the sam
 
 | Module | Owns | Divergence it killed |
 |---|---|---|
-| `shell-quoting.ts` | THE one quote-aware scan | backtick-as-opener drift (round 15–18 class) |
+| `shell-quoting.ts` | THE one quote lexer (`lexShellQuotes`) and its unquoted projection (`scanUnquoted`): the segment splitter, env-prefix strip, fused-redirect split, redirect scans and the evidence word reader all walk it | backtick-as-opener drift (round 15–18 class); six later hand-copied loops |
 | `shell-substitution.ts` | THE one substitution traversal (`scanSubstitutions`: quote state `'"/null`, `'` inside `"…"` literal, `$(…)`/backticks live in double quotes) | the round-20 double-quoted-apostrophe regression, round-21's incomplete fix |
-| `shell-normalize.ts` | THE one word normalizer: quote stripping, backslash escapes, line continuation, ANSI-C decode (NUL truncates), `$"…"`, parameter expansion — including the **default** forms (`${x:-w}` yields `w`) and the **alternate** forms (`${x:+w}`/`${x+w}`: empty on unset, `w` on set — the round-24 fail-open) | guard vs evidence scanner disagreeing about what a word *is* |
+| `shell-normalize.ts` | THE one word normalizer: quote stripping, backslash escapes, line continuation, ANSI-C decode (NUL truncates), `$"…"`, parameter expansion — including the **default** forms (`${x:-w}` yields `w`) and the **alternate** forms (`${x:+w}`/`${x+w}`: empty on unset, `w` on set — the round-24 fail-open). Two entry points: `normalizeShellSpan` (the evidence reader's redirect word, every variable unset) and `normalizeShellVariants` (the guard's matching view: every reveal/empty combination of the optional word forms, null past the bound) | guard vs evidence scanner disagreeing about what a word *is* |
 | `shell-ansi-c.ts` | shared `$'…'` decode | `\x2e`-spelled paths seen by one scanner and not the other |
-| `shell-command.ts` / `shell-command-head.ts` | segment splitting, tokenizer (`( ) { }` standalone so compound syntax never hides a head), wrapper unwrap (`sudo env timeout …`), the read-only-head / has-output-redirect halves | truncated-body analysis |
+| `shell-command.ts` / `shell-command-head.ts` | segment splitting (an `&` or `\|` binds to a redirect only after a `>` the walk read unquoted: `>&`, `>\|`; `readShellOperator` owns that walk for the splitter and the heredoc group walk alike), tokenizer (`( ) { }` standalone so compound syntax never hides a head), wrapper unwrap (`sudo env timeout …`), the read-only head | truncated-body analysis; `echo \>& rm <state>` read as one `echo` |
+| `shell-redirects.ts` | THE one output-redirect scan (`redirectsOf`: file-write, fd-dup, stderr-discard, and the targets a guard cannot name — file-dup, read-write, process-substitution, missing-target); `hasOutputRedirect`, `outputRedirectTargets` and the evidence reader's `redirectTargetsOf` are its projections, each by an exhaustive per-kind table | `>\|` named to the guard, minted as nothing |
 | `shell-heredoc.ts` | opener-line groups (compound-tracking), body data-vs-executed judgment | the heredoc inline-program gap |
 | `shell-match-views.ts` | reveal-monotonic matching views + glob intersection vs a directory | guards missing brace/class/parameter spellings of a path |
-| `shell-write-targets.ts` | the ledger-side reader: redirects, `tee`, `mv`/`git mv`/`cp` destinations (device streams never targets) | evidence missing writes the guard would see |
+| `shell-write-targets.ts` | the ledger-side reader: redirect targets (`redirectTargetsOf`: by kind, valued by the normalizer), `tee`, `mv`/`git mv`/`cp` destinations (device streams never targets) | evidence missing writes the guard would see |
 
 `tests/core/guard-state-file-walkers.test.ts` pins the walker contracts so any future
 drift is caught by an independent reference expectation. **Why it works:** the guard's
@@ -334,8 +335,9 @@ security-hunter). Key mechanics:
      command or the last segment after `&&`/`;`/`&`/`|` (with backgrounded tests and
      `$(…)`/`<(…)` nested runners never owning it). `npm test || true` yields
      `exit: null` ⇒ untrusted.
-  A zero-exit run counts as a pass only with a parsed report showing ≥ 1 test and no
-  failures; zero tests is a trusted **non-pass**. A later file write demotes an
+  A zero-exit run counts as a pass only with a parsed report showing ≥ 1 executed test
+  and no failures; zero executed tests (none declared, or all skipped, pending or todo)
+  is a trusted **non-pass** (ADR-0100). A later file write demotes an
   earlier pass. Untrusted verdicts carry a label naming how weak they are
   (`low-trust`, `degraded`, `fallback`, `snapshot-read-failed`, `helper-reported`).
 - **Attribution** (pure `attributeEvidence`): a call with `agent_id` records only
@@ -568,9 +570,10 @@ security-hunter). Key mechanics:
   `codebase-conventionist`), judges score every candidate per criterion, engine
   aggregates, **the user chooses** — ranking is advice. One normal architecture plan
   comes out.
-- **Durability**: registered panels replay `spawn-outcome`/`engine-outcome` journal
-  events on resume (ADR-0030); refutation panels persist as a checkpoint whose event
-  prefix must replay exactly and is **re-proved on every read**.
+- **Durability**: the architecture panel's parent replays its `spawn-outcome`/
+  `engine-outcome` journal through `helper panel-program architecture` (ADR-0096);
+  refutation panels persist as a checkpoint whose event prefix must replay exactly
+  and is **re-proved on every read**.
 
 ### 4.9 The Wave Gate
 
@@ -695,8 +698,8 @@ killed" — both engine-observed.
 
 ### 4.13 Persistence
 
-**The State File.** `state-manager.ts` + `state-file-wire.ts` (3.9k lines of pure
-`(unknown → ParseResult)` wire parsers — the whole graph is parsed before use,
+**The State File.** `state-manager.ts` + `state-file-wire.ts` (4.1k lines of pure
+`(unknown → LineParseResult)` wire parsers — the whole graph is parsed before use,
 "parse, do not cast"):
 
 1. mode `0444` at rest;
@@ -957,9 +960,9 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **832 executed test files / ~266.4k lines** — 808 under `engine/tests/` (947 TS files there
-  including fixtures and helpers; core 304 test files, handlers 196, pi 50,
-  linter 47, orchestration 38, utils 34, machine 30, acceptance 20, security 19, …)
+- **838 executed test files / ~264.0k lines** — 814 under `engine/tests/` (959 TS files there
+  including fixtures and helpers; core 312 test files, handlers 188, pi 50,
+  linter 47, orchestration 39, utils 35, machine 31, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
@@ -967,10 +970,10 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (96 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (100 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
-- **Smoke suites**: panel mode, review panel, standalone review, orchestration
-  facades, Pi resources, task-graph validation — real CLI processes, not mocks.
+- **Smoke suites**: panel mode, orchestration facades, Pi resources, task-graph
+  validation — real CLI processes, not mocks.
 - **Probes** are frozen evidence: the emission-readiness barrier's feasibility proof
   (counting provider substitute, negative controls) is retained and re-runnable.
 - **Calibration**: a corpus + preregistration/window/blinded-assessment discipline for
@@ -1001,9 +1004,11 @@ unusually candid; this section adds what the scans found beyond it.
 after it classifies; a quoted or substituted directory never matches). But
 `npm --prefix <dir> run verify` — the exact invocation loom's own root `package.json`
 prints — is **still not classified**: the head starts with `npm --prefix`, which
-matches neither a bare `npm run` head nor a test pattern. Its pass is therefore
-untrusted (`untrusted-regression-pass`). Safe-side by design (unclassified ⇒
-untrusted), and engine-run graphs sidestep it entirely (§4.6); the agent-command path
+matches neither a bare `npm run` head nor a test pattern. Under Claude Code its pass is
+therefore untrusted (`untrusted-regression-pass`); under Pi it proves no test result at
+all (`test-result-missing` — the Pi path has no regex fallback). Safe-side by design
+(unclassified ⇒ untrusted or absent), and engine-run graphs sidestep it entirely
+(§4.6); the agent-command path
 still cannot mint trusted evidence from that spelling.
 
 ### 8.2 The evidence ledger sees only what command text names
@@ -1092,10 +1097,9 @@ only by omission from the table. Structural honesty, not a strength guarantee.
 A tool call with no `agent_id` in a session with multiple active subagents is neither
 recorded nor gated (sole-active stands down). Pi children run **without the live
 phase gate** — Pi cannot name a tool call's caller — so their gating is via write
-grants and evidence grants only. Legacy graphs may attribute via
-`inferSoleExecutingTask`, but such a guess settles only through untrusted legacy
-resolution and can never complete a Task (completion requires engine-minted attempt
-authority).
+grants and evidence grants only. An implementation result without engine-minted
+attempt authority settles nothing: every executing Task carries an attempt
+(ADR-0098), so no Task is ever guessed from the executing set.
 
 Narrowed since the first scan: a trusted failing run whose every failing file belongs
 to another in-flight Task of the same Wave is now attributed to that owner instead of
@@ -1288,8 +1292,6 @@ invariant-id.ts — the branded Invariant id (INV-3) ·
 issued-emission-capability.ts — the emission capability contract ·
 judged-paths.ts — decompose-time rule: a judge never runs after its subject's Wave ·
 ledger-epoch-view.ts — one epoch's facts rendered for I6 ·
-legacy-archive.ts — read-only parsers for historical artifacts ·
-legacy-panel-decisions.ts — the legacy panel program's decisions: registration, verdict-source selection, submission settlement (AD-8/AD-9) ·
 lint-coverage-ignore.ts — the user's silenced-repository list ·
 lint-runtime-skew.ts — did the full-tier lint judge the current bytes ·
 loom-cli-command.ts — every command/path the engine prints that names itself ·
@@ -1340,7 +1342,7 @@ sibling-entry-point.ts — the one plan shape the plan model and the owner-verif
 spawn-admission.ts — the pure decision that accepts or blocks one Pi subagent spawn batch before any state mutation ·
 spawn-emission-gate.ts — the façade's emission gate: the verdict on a Pi parent's spawn batch ·
 spawn-request-authority.ts — an emitted spawn batch's request authorities, parsed once as the stored-request parser admits them ·
-spawn-task-text.ts — engine-issued spawn task text: authority markers, packet path, Skill marker, emission descriptor, delivery bootstrap ·
+spawn-task-text.ts — engine-issued spawn task text: authority markers, packet path, Skill marker, emission descriptor, delivery bootstrap; `parseIssuedTaskIdentity`, the one reader of the two authority markers for both harnesses (ADR-0099) ·
 spec-check.ts/spec-trace*.ts — requirement trace and its amendment/migration ·
 standalone-* (19 modules) — the standalone review program: kinds, scope, rosters, read coverage, attempt admission, transcripts, records, lineage, disposition, refutation, successor, checkpoint ·
 stop-check-*.ts — the stop-check planner and note surface ·
@@ -1404,8 +1406,9 @@ NPX_PREFIX_OPTION live here), harness-tool-call-types, ledger
 session-registry (adapter), test-report (trust judgment), parse-machine, mermaid,
 task-graph-pointer, types.
 
-**parsers/** — parse-transcript, parse-bash-test-output, parse-files-modified,
-parse-phase-artifacts, parse-subagent-{start,stop,lifecycle}-input.
+**parsers/** — parse-transcript, parse-bash-test-output, parse-files-modified
+(Claude Code JSONL only; a Pi session file reads as harness records and attributes
+nothing), parse-phase-artifacts, parse-subagent-{start,stop,lifecycle}-input.
 
 **orchestration/** — run-directory-handle (2.2k, anchored handle), program-journal,
 effect-runner, harness-capture-runtime, capture-attestation-store,
@@ -1429,7 +1432,7 @@ prefer-array-methods, switch-totality.
 
 **utils/** — no-follow-fs (anchored fs primitives, lowest shell layer), lock, path-presence
 (ENOENT-only absence), git* (command scope, execution policy, leaves, probe, spawn
-outcome), attempt-baseline, declared-artifact-snapshot, repository-change-baseline,
+outcome), declared-artifact-snapshot, repository-change-baseline,
 workspace-digest, agent-definition, agent-transcript-path, child-launch-route,
 claude-config-dir, emission-environment, find-file, frontmatter, hook-diagnostic,
 loom-package-root, model-routing-context, persisted-output, pi-auth-store,
@@ -1440,7 +1443,7 @@ file-absence, runtime-baseline-restore.
 **handlers/helpers/** — the façades: orchestration (status/brief/inspect/start/resume/
 restart/… plus the audited mutations add-task, withdraw-task, add-dependency,
 rescope-task, adopt-engine-revision, adopt-engine-run-tests), programs/ (37
-per-program drivers), security-audit, populate-task-graph, complete-wave-gate,
+per-program drivers), security-audit, populate-task-graph, wave-gate-observers,
 complete-orchestration, accept-plan-design-review, mutation-check,
 store-*-findings, validate-task-graph, write-verification-manifest, run-tests,
 amend-spec, suggest-affected-runner, retro-facts, record-retro,
@@ -1449,7 +1452,7 @@ task-addition-operations, and the rest of the whitelisted-helper surface
 
 ## Appendix C — `pi/` module-by-module
 
-extension.ts (registration shell, 717 ln); spawn machinery (spawn-{claims,
+extension.ts (registration shell, 718 ln); spawn machinery (spawn-{claims,
 claim-shell, graph, lifecycle, preparation, reservation}, reserved-{slot,results},
 subagent-{process,result,result-batch,result-route,settlement,stop}); emission
 machinery (emission-{tool,readiness,readiness-gate,readiness-protocol,
@@ -1459,4 +1462,6 @@ readiness-sequence,launch-bridge}, interactive-{rpc,subagent}); capability machi
 (review-capture, review-run-authority, trusted-review-witness); adapters
 (implementation-brief-expansion, rules-gate — twin of the Claude hook over one core,
 lint-coverage — twin over one shell, ask-user-question, resources, session-model-env,
-tool-input, transcript-adapter).
+tool-input, transcript-adapter — the one Pi transcript projection: messages →
+`HarnessToolCall`s paired with results through core/harness-tool-call's Pi vocabulary,
+folded into write targets and structured test evidence; no regex fallback).

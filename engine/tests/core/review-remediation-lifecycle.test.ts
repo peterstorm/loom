@@ -1,3 +1,4 @@
+import { satisfiedProof } from "../fixtures/task-lifecycle";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerDraftV2Schema } from "../../src/core/reviewer-contract";
@@ -96,6 +97,7 @@ import { parseTaskGraph } from "../../src/state-manager";
 import type { HeadSha, PacketId } from "../../src/core/review-packet";
 import type { PriorFindingVerdict, ReviewRun, Task, TaskGraph } from "../../src/types";
 import { findingId } from "../fixtures/finding-id";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 // Branded as parsePacketId/parseHeadSha would mint them, so these fixtures
 // bind exactly the way the production call site does.
@@ -123,7 +125,7 @@ function reviewedTask(): Task {
     agent: "code-implementer-agent",
     wave: 1,
     status: "implemented",
-    legacy_missing_proof: true,
+    proof: satisfiedProof([]),
     depends_on: [],
     review_status: "pending",
     review_generation: 1,
@@ -207,6 +209,7 @@ function applyAgent(
 function graph(task: Task): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     plan_title: "review lifecycle",

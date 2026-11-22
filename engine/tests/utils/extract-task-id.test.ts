@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { extractTaskId, isCanonicalFormat } from "../../src/utils/extract-task-id";
+import { extractTaskId } from "../../src/utils/extract-task-id";
 import { parseTaskId } from "../../src/core/task-id";
 
 describe("extractTaskId — property tests", () => {
@@ -34,7 +34,6 @@ describe("extractTaskId — property tests", () => {
         (taskId) => {
           const text = `**Task ID:** ${taskId}`;
           expect(parseTaskId(taskId)).toMatchObject({ ok: true, value: taskId });
-          expect(isCanonicalFormat(text)).toBe(true);
           expect(extractTaskId(text)).toBe(taskId);
         },
       ),

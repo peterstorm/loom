@@ -194,11 +194,6 @@ export function assertReviewPanelDisjoint(
 
 assertReviewPanelDisjoint();
 
-/** Implementation and finding-producing review agents used by execute-phase
- * dispatch sets. Refutation verifiers also classify as execute work, but remain
- * separate so SubagentStop never parses their verdicts as review findings. */
-export const EXECUTE_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...REVIEW_AGENTS]);
-
 /** Panel agents that would be MISROUTED away from architecture classification
  *  by colliding with an execute-phase or utility agent. validatePhaseOrder
  *  short-circuits UTILITY agents to passthrough before detectPhase runs;
@@ -333,9 +328,6 @@ export const SHIPPED_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url))
  * can be pointed at fixture machines per-test without a module reload.
  */
 export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? SHIPPED_MACHINES_DIR;
-
-/** Machines directory — resolved once at import (consumers that never re-point) */
-export const MACHINES_DIR = machinesDir();
 
 const shippedPins = parseMachinePins(SHIPPED_MACHINE_PINS);
 if (!shippedPins.ok) throw new Error(`loom config invariant violated: the generated machine pins do not parse: ${shippedPins.error}`);

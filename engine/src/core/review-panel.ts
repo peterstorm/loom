@@ -26,20 +26,11 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-// `posix.join`, not the platform default — the same rule, and the same reason,
-// as `panel-kernel.ts`. The paths this module SERIALIZES into `manifest.json`
-// are the ones `parseRunManifest` compares for exact string equality after
-// building its own with `posix.join`. Using the platform separator here meant
-// the engine wrote, on win32, a manifest its own validator rejects: one half of
-// a round trip disagreeing with the other about what "the same path" is, inside
-// a module that declares itself pure.
 import { match } from "ts-pattern";
-import { posix } from "node:path";
 import { z } from "zod/v4";
-import { parseFindingSeverity, parseStoredFindings } from "./findings";
+import { parseStoredFindings } from "./findings";
 import type { CurrentDraftFinding, LegacyDraftFinding } from "../types";
 
-const { join } = posix;
 import type {
   AdjudicatedFinding,
   Finding,
@@ -49,18 +40,15 @@ import type {
 } from "./findings";
 import {
   coverageErrors,
-  exactOrderedSetErrors,
   fail,
   isRecord,
   ok,
   parseCriteriaSet,
-  parseRunManifest,
   parseVerdictEnvelope,
   requireEntry,
   sanitizeProse,
   selectLenses,
   type ParseResult,
-  type RunLayout,
   type VerdictEnvelope,
 } from "./panel-kernel";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
@@ -113,7 +101,8 @@ export const REVIEW_LENSES_MIN = BASELINE_LENSES.length;
 /**
  * Default panel size — the two baselines plus one more: signal-selected when a
  * signal fires, otherwise the next lens in table order (`blast-radius`), which
- * is the common unsignalled case.
+ * is the common unsignalled case. Both the Wave Gate and standalone review
+ * convene their panel at this size.
  */
 export const REVIEW_LENSES_DEFAULT = 3;
 
@@ -129,7 +118,7 @@ export function parseReviewLens(raw: unknown): ReviewLens | null {
  * (N extra agents per wave against a subscription rate-limit window).
  * Revisit once the false-positive rate is measured.
  */
-export const VERIFIED_SEVERITY: FindingSeverity = "critical";
+export const VERIFIED_SEVERITY = "critical" satisfies FindingSeverity;
 
 const SENSITIVE_PATH =
   /auth|crypt|secret|token|password|credential|jwt|oauth|session|security|sanitiz|escap|injection/i;
@@ -147,7 +136,7 @@ const SENSITIVE_PATH =
  * So the trailing `$`s became `\b`, and the leading `/` became a boundary class
  * that also admits whitespace and the quoting characters a claim wraps a path
  * in. Neither loosening costs anything on the file side: a path has no leading
- * whitespace, and `foo.test.ts.bak` matching is the right answer for a lens
+ * whitespace, and foo.test.ts.bak matching is the right answer for a lens
  * SIGNAL — a heuristic that decides which perspective judges a finding, not a
  * gate that decides whether one survives.
  */
@@ -209,10 +198,10 @@ declare const WAVE_SCOPED: unique symbol;
  * would silently collapse two distinct findings into one item.
  *
  * Branded because the two id spaces are both strings and mixing them is
- * silent: hand `briefFindingFilename` a task-local `code-reviewer-1` and it
- * returns a filename two tasks in the same wave would both claim — exactly the
+ * silent: a task-local `code-reviewer-1` handed where a wave-scoped id belongs
+ * names a finding two tasks in the same wave would both claim — exactly the
  * collision the scoping exists to prevent. `waveFindingId`,
- * `parseWaveFindingId`, and `parseBriefFindingEntry` are the only constructors.
+ * `parseWaveFindingId` and `parseCurrentBriefFinding` are the only constructors.
  */
 export type WaveFindingId = string & { readonly [WAVE_SCOPED]: true };
 
@@ -262,30 +251,25 @@ export function waveFindingId(taskId: string, finding: Finding): WaveFindingId {
   return `${taskId}:${finding.id}` as WaveFindingId;
 }
 
-/** Run-scoped artifact filename for one brief finding. Colons are not portable
- *  in filenames; the manifest asserts these are unique, so the substitution
- *  cannot silently merge two findings. */
-export function briefFindingFilename(id: WaveFindingId): string {
-  return `finding-${id.replace(/[^A-Za-z0-9_.-]+/g, "-")}.json`;
-}
+/** A brief finding at `VERIFIED_SEVERITY`: the only severity a Refutation Panel adjudicates. */
+export type CriticalBriefFinding = BriefFinding & Readonly<{ severity: typeof VERIFIED_SEVERITY }>;
 
-interface FindingBriefBase {
-  readonly wave: number;
-  readonly severity: FindingSeverity;
-  readonly taskIds: readonly string[];
-  readonly findings: readonly BriefFinding[];
-}
-
-export type FindingBrief =
-  | Readonly<FindingBriefBase & { readonly source?: never }>
-  | Readonly<FindingBriefBase & {
-      readonly source: "standalone";
-      readonly wave: 1;
-      readonly taskIds: readonly [typeof STANDALONE_REVIEW_SUBJECT];
-    }>;
+const isCriticalBriefFinding = (finding: BriefFinding): finding is CriticalBriefFinding =>
+  finding.severity === VERIFIED_SEVERITY;
 
 /**
- * The five task fields this panel reads.
+ * The finding set a Refutation Panel adjudicates, scoped to one wave (or the
+ * standalone subject). Every finding is a `CriticalBriefFinding`, so an
+ * advisory finding cannot be written into a brief.
+ */
+export interface FindingBrief {
+  readonly wave: number;
+  readonly taskIds: readonly string[];
+  readonly findings: readonly CriticalBriefFinding[];
+}
+
+/**
+ * The three task fields this panel reads.
  *
  * Declared structurally rather than importing the whole `Task` aggregate, the
  * same narrowing `AdjudicatedFinding` already uses in the other direction. The
@@ -299,29 +283,21 @@ export interface BriefSourceTask {
   readonly id: string;
   readonly wave: number;
   readonly findings?: readonly Finding[];
-  readonly critical_findings?: readonly string[];
-  readonly advisory_findings?: readonly string[];
 }
 
-/** Collect the wave's verifiable findings from the task graph. Pure.
- *
- *  `severity` is a real parameter, not dead configurability: the brief round-
- *  trips through `parseFindingBriefJson`, which accepts an advisory brief from
- *  disk, so every downstream proof has to follow `brief.severity` rather than
- *  assume the default. It is also the seam `VERIFIED_SEVERITY`'s own "revisit
- *  once the false-positive rate is measured" note anticipates. */
-export function buildFindingBrief(
-  wave: number,
-  tasks: readonly BriefSourceTask[],
-  severity: FindingSeverity = VERIFIED_SEVERITY,
-): FindingBrief {
+/** Collect the wave's verifiable findings — those at `VERIFIED_SEVERITY` — from
+ *  the task graph. Pure. Only a critical finding is projected, and the
+ *  projection keeps its severity, so each one types as a `CriticalBriefFinding`. */
+export function buildFindingBrief(wave: number, tasks: readonly BriefSourceTask[]): FindingBrief {
   const waveTasks = tasks.filter((task) => task.wave === wave);
   const findings = waveTasks.flatMap((task) =>
-    (task.findings ?? [])
-      .filter((finding) => finding.severity === severity)
-      .map((finding) => projectFindingForPanel(task.id, finding)),
+    (task.findings ?? []).flatMap((finding) => {
+      if (finding.severity !== VERIFIED_SEVERITY) return [];
+      const projected = projectFindingForPanel(task.id, finding);
+      return isCriticalBriefFinding(projected) ? [projected] : [];
+    }),
   );
-  return { wave, severity, taskIds: waveTasks.map((task) => task.id), findings };
+  return { wave, taskIds: waveTasks.map((task) => task.id), findings };
 }
 
 /** Adapt an identified standalone finding set to the panel's scoped item model.
@@ -330,19 +306,7 @@ export function buildStandaloneFindingBrief(source: {
   readonly subjectId: typeof STANDALONE_REVIEW_SUBJECT;
   readonly findings: readonly Finding[];
 }): FindingBrief {
-  const task = {
-    id: STANDALONE_REVIEW_SUBJECT,
-    wave: 1,
-    findings: source.findings,
-  };
-  const built = buildFindingBrief(1, [task]);
-  return {
-    wave: 1,
-    severity: built.severity,
-    taskIds: [STANDALONE_REVIEW_SUBJECT],
-    findings: built.findings,
-    source: "standalone",
-  };
+  return buildFindingBrief(1, [{ id: STANDALONE_REVIEW_SUBJECT, wave: 1, findings: source.findings }]);
 }
 
 /** Exact current entry parser shared by artifact and persistent authority readers. */
@@ -365,431 +329,6 @@ export function parseCurrentBriefFinding(raw: unknown): ParseResult<BriefFinding
   } catch {
     return fail(["current Finding could not be safely inspected"]);
   }
-}
-
-function briefFindingJson(finding: BriefFinding) {
-  return {
-    ...(finding.protocolVersion === 2 ? { protocolVersion: 2 } : {}),
-    id: finding.id,
-    task_id: finding.taskId,
-    agent: finding.agent,
-    severity: finding.severity,
-    file: finding.file,
-    line: finding.line,
-    claim: finding.claim,
-    ...(finding.protocolVersion === 2 && finding.severity === "advisory" ? { reason: finding.reason } : {}),
-    ...(finding.protocolVersion === 2 && finding.basis !== undefined ? { basis: finding.basis } : {}),
-  };
-}
-
-/** The external snake_case contract for the brief. */
-export function serializeFindingBrief(brief: FindingBrief): string {
-  return JSON.stringify({
-    wave: brief.wave,
-    ...(brief.source === "standalone" ? { source_kind: "standalone" } : {}),
-    severity: brief.severity,
-    task_ids: brief.taskIds,
-    findings: brief.findings.map(briefFindingJson),
-  }, null, 2);
-}
-
-/** One finding's standalone run-scoped artifact. */
-export function serializeBriefFinding(finding: BriefFinding): string {
-  return JSON.stringify(briefFindingJson(finding), null, 2);
-}
-
-/** One brief entry, parsed. Only a fully-valid entry yields a finding; the
- *  errors are collected either way so a re-run learns all of them at once. */
-function parseBriefFindingEntry(
-  entry: unknown,
-  path: string,
-  taskIds: readonly string[] | null,
-  briefSeverity: FindingSeverity | null,
-): { readonly finding: BriefFinding | null; readonly errors: readonly string[] } {
-  if (!isRecord(entry)) return { finding: null, errors: [`${path} must be an object`] };
-  if (["protocolVersion", "basis", "reason"].some((key) => Object.hasOwn(entry, key))) {
-    const { task_id: taskId, ...fields } = entry;
-    const parsed = Object.hasOwn(entry, "taskId")
-      ? fail<BriefFinding>(["external Finding must use task_id"])
-      : parseCurrentBriefFinding({ ...fields, taskId });
-    if (!parsed.ok) return { finding: null, errors: parsed.errors.map((error) => `${path}: ${error}`) };
-    const finding = parsed.value;
-    const errors = [
-      ...(briefSeverity !== null && finding.severity !== briefSeverity ? [`${path}.severity must equal brief.severity`] : []),
-      ...(taskIds !== null && !taskIds.includes(finding.taskId) ? [`${path}.task_id is not one of brief.task_ids`] : []),
-    ];
-    return { finding: errors.length === 0 ? finding : null, errors };
-  }
-
-  const errors: string[] = [];
-  const id = typeof entry.id === "string" ? entry.id.trim() : "";
-  const parsedId = parseWaveFindingId(id);
-  const taskId = typeof entry.task_id === "string" ? entry.task_id.trim() : "";
-  const agent = typeof entry.agent === "string" ? entry.agent.trim() : "";
-  const claim = typeof entry.claim === "string" ? sanitizeProse(entry.claim) : "";
-  const severity = parseFindingSeverity(entry.severity);
-
-  if (id === "") errors.push(`${path}.id must be a non-empty string`);
-  else if (parsedId === null) errors.push(`${path}.id must match task-id:finding-id without whitespace or extra colons`);
-  if (taskId === "") errors.push(`${path}.task_id must be a non-empty string`);
-  if (agent === "") errors.push(`${path}.agent must be a non-empty string`);
-  if (claim === "") errors.push(`${path}.claim must be non-empty after sanitization`);
-  if (severity === null) errors.push(`${path}.severity is unknown`);
-  // VERIFIED_SEVERITY is a policy invariant — advisories skip the panel because
-  // refuting one saves nothing and the agent quota it burns is real. The brief
-  // filters on it; without this the re-parse that exists to stop the disk and
-  // the panel diverging would wave through the one divergence that matters,
-  // and a refuted advisory would be stripped from advisory_findings.
-  if (severity !== null && briefSeverity !== null && severity !== briefSeverity) {
-    errors.push(`${path}.severity must equal brief.severity (${briefSeverity}); received: ${severity}`);
-  }
-  if (taskIds !== null && taskId !== "" && !taskIds.includes(taskId)) {
-    errors.push(`${path}.task_id is not one of brief.task_ids: ${taskId}`);
-  }
-  if (id !== "" && taskId !== "" && !id.startsWith(`${taskId}:`)) {
-    errors.push(`${path}.id must be scoped by its task: ${taskId}:<finding id>`);
-  }
-
-  const file = typeof entry.file === "string" && entry.file.trim() !== "" ? sanitizeProse(entry.file) : "";
-  const line = Number.isInteger(entry.line) && (entry.line as number) > 0 ? (entry.line as number) : null;
-
-  return {
-    // Both the external grammar and the `${taskId}:` cross-field invariant are
-    // proven above; only the smart constructor's value earns the brand.
-    finding: errors.length === 0 && severity !== null && parsedId !== null
-      ? { id: parsedId, taskId, agent, severity, file: file || null, line, claim }
-      : null,
-    errors,
-  };
-}
-
-/** `undefined` for a wave brief (the absent or explicit `wave` kind), null for
- *  an unknown kind. */
-function parseBriefSourceKind(raw: unknown): "standalone" | undefined | null {
-  if (raw === undefined || raw === "wave") return undefined;
-  return raw === "standalone" ? "standalone" : null;
-}
-
-/** A standalone brief is always wave 1 over the single standalone subject. */
-function standaloneBriefErrors(wave: unknown, taskIds: readonly string[] | null): readonly string[] {
-  const errors: string[] = [];
-  if (wave !== 1) errors.push("standalone brief.wave must be 1");
-  if (taskIds === null || taskIds.length !== 1 || taskIds[0] !== STANDALONE_REVIEW_SUBJECT) {
-    errors.push(`standalone brief.task_ids must be exactly ['${STANDALONE_REVIEW_SUBJECT}']`);
-  }
-  return errors;
-}
-
-/** Finding ids must be unique, and stay unique once mapped to artifact filenames. */
-function briefFindingIdErrors(findings: readonly BriefFinding[]): readonly string[] {
-  const errors: string[] = [];
-  const ids = findings.map((finding) => finding.id);
-  if (new Set(ids).size !== ids.length) errors.push("brief finding ids must be unique");
-  const filenames = ids.map(briefFindingFilename);
-  if (new Set(filenames).size !== filenames.length) {
-    errors.push("brief finding ids must remain unique once mapped to filenames");
-  }
-  return errors;
-}
-
-/**
- * Re-parse the canonical brief rather than trusting the write that produced it,
- * the same discipline parseInterviewDigestJson applies: everything downstream
- * (lens selection, the manifest, the verdict envelopes) consumes only the
- * re-validated form, so the brief on disk and the panel's idea of the finding
- * set cannot diverge.
- */
-export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
-  if (!isRecord(raw)) return fail(["finding brief must be a JSON object"]);
-
-  const errors: string[] = [];
-  const wave = raw.wave;
-  if (!Number.isInteger(wave) || (wave as number) < 1) errors.push("brief.wave must be a positive integer");
-
-  const severity = parseFindingSeverity(raw.severity);
-  if (severity === null) {
-    errors.push("brief.severity must be 'critical' or 'advisory'");
-  }
-  const source = parseBriefSourceKind(raw.source_kind);
-  if (source === null) errors.push("brief.source_kind must be 'wave' or 'standalone' when present");
-
-  const taskIds = Array.isArray(raw.task_ids) && raw.task_ids.every((id) => typeof id === "string" && id.trim() !== "")
-    ? (raw.task_ids as string[]).map((id) => id.trim())
-    : null;
-  if (taskIds === null) errors.push("brief.task_ids must be an array of non-empty strings");
-
-  if (!Array.isArray(raw.findings)) {
-    return fail([...errors, "brief.findings must be an array"]);
-  }
-
-  const findings: BriefFinding[] = [];
-  for (const [index, entry] of raw.findings.entries()) {
-    const parsed = parseBriefFindingEntry(entry, `brief.findings[${index}]`, taskIds, severity);
-    errors.push(...parsed.errors);
-    if (parsed.finding) findings.push(parsed.finding);
-  }
-
-  if (source === "standalone") errors.push(...standaloneBriefErrors(wave, taskIds));
-  errors.push(...briefFindingIdErrors(findings));
-
-  if (errors.length > 0) return fail(errors);
-  return source === "standalone"
-    ? ok({
-        wave: 1,
-        severity: severity as FindingSeverity,
-        taskIds: [STANDALONE_REVIEW_SUBJECT],
-        findings,
-        source,
-      })
-    : ok({
-        wave: wave as number,
-        severity: severity as FindingSeverity,
-        taskIds: taskIds ?? [],
-        findings,
-      });
-}
-
-/** Does this brief hold anything the panel can adjudicate? */
-export function briefIsEmpty(brief: FindingBrief): boolean {
-  return brief.findings.length === 0;
-}
-
-/** The repair a graph whose views outrun its findings needs, named in the
- *  diagnostic itself — the same hint core/findings gives at the load boundary. */
-const BRIEF_REPAIR_HINT =
-  "Re-run the reviewers so every critical is emitted through the findings block, " +
-  "or repair and install the graph with: helper repair-task-graph";
-
-/**
- * `buildFindingBrief`'s postcondition: the brief accounts for every finding the
- * wave gate will count.
- *
- * If the brief is short, every later stage still SUCCEEDS — an empty item set
- * satisfies every length and coverage rule vacuously — and the run reports
- * "0 survived, 0 refuted", which is indistinguishable from a panel that
- * adjudicated the wave and upheld nothing. So the brief proves its own
- * completeness against the view the wave gate actually counts, and refuses to
- * be built otherwise.
- *
- * PER TASK, not summed across the wave. A wave-wide total let one task's surplus
- * offset another's orphans: the totals matched, the check passed, and the second
- * task's critical entered no brief, could never be refuted, and blocked the wave
- * permanently. Offending task ids are named because "the wave is short by one"
- * does not tell an operator which reviewer to re-run.
- */
-export function briefCompletenessErrors(
-  brief: FindingBrief,
-  tasks: readonly BriefSourceTask[],
-): readonly string[] {
-  // The wave is taken from the BRIEF and the filter is applied HERE, rather than
-  // trusting the caller to re-derive both. This function is documented as
-  // `buildFindingBrief`'s postcondition, and the shell was re-running
-  // `tasks.filter(t => t.wave === wave)` — the same predicate, written a second
-  // time, against a `wave` passed separately. Two copies of the subject a proof
-  // is about can drift, and if they do the proof holds over a different task set
-  // than the one the brief was built from, which proves nothing.
-  const wave = brief.wave;
-  const waveTasks = tasks.filter((task) => task.wave === wave);
-  if (waveTasks.length === 0) {
-    return [`no tasks in wave ${wave} — check --wave against .current_wave`];
-  }
-
-  const briefedPerTask = new Map<string, number>();
-  for (const finding of brief.findings) {
-    briefedPerTask.set(finding.taskId, (briefedPerTask.get(finding.taskId) ?? 0) + 1);
-  }
-
-  // The view that corresponds to THIS brief's severity. Hardcoding the critical
-  // view made the check wrong in both directions for any other severity: it
-  // rejected a complete advisory brief whenever the task also held criticals,
-  // and passed a short one whenever it held none — while the diagnostic below
-  // interpolated `brief.severity` and read as though it had checked that view
-  // all along. `buildFindingBrief` takes the severity as a parameter, so the
-  // proof of its postcondition has to follow it.
-  const viewOf = (task: BriefSourceTask): readonly string[] =>
-    (brief.severity === "critical" ? task.critical_findings : task.advisory_findings) ?? [];
-
-  const short = waveTasks.flatMap((task) => {
-    const counted = viewOf(task).length;
-    const briefed = briefedPerTask.get(task.id) ?? 0;
-    return counted > briefed ? [{ id: task.id, counted, briefed }] : [];
-  });
-
-  if (short.length > 0) {
-    return [
-      `wave ${wave}: ${short
-        .map((t) => `${t.id} has ${t.counted} ${brief.severity}_findings but only ${t.briefed} carry structured identity`)
-        .join("; ")} — ` +
-        `the panel cannot adjudicate the remainder, and a partial brief would report the rest as upheld. ` +
-        BRIEF_REPAIR_HINT,
-    ];
-  }
-
-  return briefIsEmpty(brief)
-    ? [
-        `wave ${wave} has no ${brief.severity} findings — ` +
-          `skip the refutation panel, there is nothing to adjudicate`,
-      ]
-    : [];
-}
-
-/** JSON data encoding for prompts: escapes controls, HTML and Markdown without changing storage. */
-function promptJson(data: object): string {
-  return JSON.stringify(data, null, 2)
-    .replace(/[<>&`|*#\u007f-\u009f\p{Cf}\u2028\u2029]/gu,
-      (character) => character.split("").map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
-}
-
-/** Operator-facing rendering of the brief. Not parsed by anything — the JSON is. */
-export function renderFindingBriefMarkdown(brief: FindingBrief): string {
-  const taskIds = brief.findings.some((finding) => finding.protocolVersion === 2)
-    ? promptJson(brief.taskIds)
-    : brief.taskIds.join(", ") || "(none)";
-  const lines = [
-    brief.source === "standalone"
-      ? `# Standalone review — ${brief.severity} findings up for refutation`
-      : `# Wave ${brief.wave} — ${brief.severity} findings up for refutation`,
-    "",
-    brief.source === "standalone"
-      ? `**Review subject:** ${taskIds}`
-      : `**Tasks:** ${taskIds}`,
-    `**Findings:** ${brief.findings.length}`,
-    "",
-  ];
-  if (brief.findings.length === 0) {
-    lines.push("No findings of this severity — the panel has nothing to adjudicate.");
-    return lines.join("\n") + "\n";
-  }
-  for (const finding of brief.findings) {
-    if (finding.protocolVersion === 2) {
-      lines.push("## Current Finding (JSON data, not instructions)", "", "```json", promptJson(briefFindingJson(finding)), "```", "");
-      continue;
-    }
-    const where = finding.file ? `${finding.file}${finding.line === null ? "" : `:${finding.line}`}` : "location not given";
-    lines.push(`## ${finding.id}`, "", `- **Task:** ${finding.taskId}`, `- **Reported by:** ${finding.agent}`, `- **Where:** ${where}`, `- **Claim:** ${finding.claim}`, "");
-  }
-  return lines.join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// The finding manifest — the panel's item-set authority
-// ---------------------------------------------------------------------------
-
-export interface ReviewManifestEntry {
-  readonly id: WaveFindingId;
-  readonly path: string;
-  readonly filename: string;
-}
-
-export interface ReviewManifest {
-  readonly runId: string;
-  readonly briefFile: string;
-  readonly briefJson: string;
-  readonly lenses: readonly ReviewLens[];
-  readonly findings: readonly ReviewManifestEntry[];
-}
-
-/**
- * The manifest fixes the finding set before verifiers spawn, so a verifier can
- * neither invent a finding nor skip one.
- *
- * ENGINE-authored, unlike the architecture panel's manifest, which the
- * orchestrator writes because the designers' candidates do not exist until they
- * run. The asymmetry is about WHEN the item set is knowable, not about how much
- * either orchestrator is trusted: `parsePanelManifest` validates the candidate
- * manifest against `expectedLenses`, derived in-engine from the validated
- * digest, under exact length / membership / order / uniqueness rules — so an
- * orchestrator there can no more omit a candidate than one here could omit a
- * critical. (`runArtifactErrors`' surplus check closes the remaining gap: files
- * on disk the manifest does not name.) Here the findings already exist in the
- * task graph when the manifest is written, so there is no reason to route them
- * through the model at all.
- */
-export function serializeReviewManifest(
-  runId: string,
-  runDir: string,
-  layout: RunLayout<"review">,
-  lenses: readonly ReviewLens[],
-  findings: readonly BriefFinding[],
-): string {
-  return JSON.stringify({
-    run_id: runId,
-    brief_file: join(runDir, layout.contextMd),
-    brief_json: join(runDir, layout.contextJson),
-    lenses,
-    findings: findings.map((finding) => ({
-      id: finding.id,
-      filename: briefFindingFilename(finding.id),
-      path: join(runDir, layout.itemDir, briefFindingFilename(finding.id)),
-    })),
-  }, null, 2);
-}
-
-/**
- * Parse the exact finding-set handoff and bind every path to one run root.
- *
- * The path/id/coverage rules are the kernel's (`parseRunManifest`) — the
- * architecture panel enforces the identical set over its candidate manifest.
- * Review-specific here: the item vocabulary is an open set of wave-scoped
- * finding ids rather than a closed enum, and the manifest carries an extra
- * `lenses` field (architecture derives its lens set from the candidates
- * themselves, so it has nothing equivalent to validate).
- */
-export function parseReviewManifest(
-  raw: unknown,
-  expectedRunDir: string,
-  layout: RunLayout<"review">,
-  expectedLenses: readonly ReviewLens[],
-  expectedFindingIds: readonly WaveFindingId[],
-): ParseResult<ReviewManifest> {
-  const parsed = parseRunManifest(raw, expectedRunDir, layout, {
-    label: "review manifest",
-    contextMdKey: "brief_file",
-    contextJsonKey: "brief_json",
-    itemsKey: "findings",
-    itemIdKey: "id",
-    itemNoun: ["finding", "findings"],
-    expectedIds: expectedFindingIds,
-    filenameOf: briefFindingFilename,
-  });
-
-  const errors: string[] = parsed.ok ? [] : [...parsed.errors];
-
-  const lenses: ReviewLens[] = [];
-  if (!isRecord(raw) || !Array.isArray(raw.lenses) || raw.lenses.length !== expectedLenses.length) {
-    errors.push(`manifest.lenses must contain exactly ${expectedLenses.length} lenses`);
-  } else {
-    for (const [index, rawLens] of raw.lenses.entries()) {
-      const lens = parseReviewLens(rawLens);
-      if (lens === null) {
-        errors.push(`manifest.lenses[${index}] is unknown: ${String(rawLens) || "<empty>"}`);
-        continue;
-      }
-      lenses.push(lens);
-    }
-    // The same four rules `parseRunManifest` applies to the finding array, from
-    // the same function. They were hand-rolled here — twenty lines from the call
-    // that could not carry them, because `RunManifestSpec` has no slot for a
-    // second validated id array — which is exactly the two-copies-of-one-rule
-    // setup the kernel exists to end.
-    errors.push(
-      ...exactOrderedSetErrors(lenses, expectedLenses, {
-        subject: "manifest lenses",
-        missing: "manifest is missing lens",
-        ordered: "manifest lenses",
-      }),
-    );
-  }
-
-  if (errors.length > 0 || !parsed.ok) return fail(errors);
-
-  return ok({
-    runId: parsed.value.runId,
-    briefFile: parsed.value.contextMd,
-    briefJson: parsed.value.contextJson,
-    lenses,
-    findings: parsed.value.entries,
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,137 +611,6 @@ export function defaultRefutationThreshold(lensCount: number): number {
   return Math.floor(lensCount / 2) + 1;
 }
 
-// ---------------------------------------------------------------------------
-// Run policy — the rules that decide whether a brief or a tally may proceed
-// ---------------------------------------------------------------------------
-//
-// These lived in `handlers/helpers/review-panel.ts`, inline in the I/O
-// function. Each one is a pure comparison over already-parsed values — two
-// integer comparisons, an equality, and a set difference — and each carries a
-// long comment naming a real bug it prevents: a shrunken panel adjudicating
-// under a lower absolute bar, a re-tally re-adjudicating a closed decision, a
-// brief for a wave the graph has closed. Rules that
-// consequential deserve direct unit tests, and inside the shell the only way to
-// reach them was to spawn the CLI against a temp filesystem. The equivalents
-// that were already in the core (`selectLenses`' bounds, `tallyRefutations`'
-// threshold range) each have one.
-
-/**
- * A brief may only be built for the wave the graph is actually on.
- *
- * `wave-gate.md` asked the operator to check this with `jq`, but the engine has
- * the graph in hand: a stale `--wave` produces a fully adjudicable brief whose
- * `tally` then writes `refuted_findings` and can promote a PAST wave's tasks
- * blocked → passed. `checkCriticalFindings` is wave-scoped, so the blast radius
- * is a corrupted audit record rather than an opened gate — still not a thing to
- * leave to a prose reminder.
- *
- * Fails CLOSED on a graph with no `current_wave`. The guard used to skip
- * entirely in that case, which is the state a graph is in before
- * `populate-task-graph` has run and exactly when "which wave is this?" has no
- * answer — so every `--wave` was accepted and the rule above did not apply at
- * all. An unknown current wave is not a licence to adjudicate an arbitrary one.
- */
-export function staleWaveError(requested: number, current: number | undefined): string | null {
-  if (current === undefined) {
-    return (
-      `the task graph records no current wave, so --wave ${requested} cannot be proven against ` +
-      `it — run the wave through /loom before briefing a review panel for it`
-    );
-  }
-  return current === requested
-    ? null
-    : `--wave ${requested} is not the graph's current wave (${current}) — a brief for a closed ` +
-      `wave re-adjudicates decisions that are already recorded`;
-}
-
-/**
- * The panel size is fixed for the LIFE of a run, not per invocation.
- *
- * A `--lenses` that disagrees with the size the manifest recorded is a re-sized
- * panel running under a name whose verdicts were cast by a different one.
- * Re-running `manifest` without `--lenses` used to rewrite a recorded 5-lens
- * panel to the 3-lens default; `readVerdicts` then iterated only the shrunken
- * list, verdict-4 and verdict-5 were silently ignored, the absolute refutation
- * bar fell from 3 to 2, and a finding the full panel had UPHELD came out refuted
- * — promoting the task blocked → passed at exit 0 with nothing on stderr.
- * Re-deriving the lens SET does not catch it: `selectReviewLenses` returns
- * nested prefixes, so a truncated list reproduces its own derivation exactly.
- */
-export function panelSizeConflict(requested: number | null, recorded: number | null): string | null {
-  if (requested === null || recorded === null || requested === recorded) return null;
-  return (
-    `this run's panel size is already fixed at ${recorded} lens(es); ` +
-    `--lenses ${requested} would re-size a panel whose verdicts were cast by the ` +
-    `recorded one — start a new run directory instead`
-  );
-}
-
-/**
- * Outcomes this run would re-adjudicate, given what the graph already records.
- *
- * A tally already applied would send `applyFindingOutcomes` looking for findings
- * it has itself moved into `refuted_findings`, where the invariant throw blames
- * "the task graph changed between brief and tally" — true of a
- * `store-review-findings` override landing mid-run, and wrong about the far
- * likelier cause: the operator re-ran `tally`. (A broken pipe on the canonical
- * output AFTER the state write lands is enough to invite that.) Named before the
- * write, so the diagnostic matches what happened.
- *
- * `alreadyRefuted` is wave-scoped to match the brief's id space, since
- * `applyFindingOutcomes` strips the `${taskId}:` prefix back off when it applies
- * an outcome.
- *
- * The test is overlap with the brief, NOT "refuted twice". Filtering on
- * `!survives` too made this a partial guard that a second tally could walk
- * straight past: tally 1 refutes F1 and upholds F2; the operator rewrites
- * `verdicts/` and re-runs; now F1 is upheld and F2 refuted, the two sets are
- * disjoint, nothing fires. The tally then ran against a brief the graph had
- * already moved on from — refuting F2 off a stale item set, promoting
- * `blocked → passed` if F2 was the last live critical, and serializing F1 as
- * `surviving` while the graph holds it refuted. Overlap alone is the honest
- * test and admits no false positive: a fresh brief is built from
- * `task.findings`, which excludes refuted findings, and `nextOrdinal` reads the
- * refuted set as a high-water mark so a new finding can never reuse a retired
- * id. Any overlap therefore means this brief predates an adjudication.
- */
-export function replayedOutcomes(
-  outcomes: readonly FindingOutcome[],
-  alreadyRefuted: ReadonlySet<string>,
-): readonly WaveFindingId[] {
-  return outcomes
-    .filter((outcome) => alreadyRefuted.has(outcome.finding.id))
-    .map((outcome) => outcome.finding.id);
-}
-
-/** The wave-scoped ids a graph already holds as refuted. */
-export function refutedIdsOf(
-  tasks: readonly { readonly id: string; readonly refuted_findings?: readonly { readonly finding: { readonly id: string } }[] }[],
-): ReadonlySet<string> {
-  return new Set(
-    tasks.flatMap((task) =>
-      (task.refuted_findings ?? []).map((record) => `${task.id}:${record.finding.id}`),
-    ),
-  );
-}
-
-/** The operator-facing diagnostic for a replayed tally. */
-export function replayError(replays: readonly WaveFindingId[]): string {
-  return (
-    `this run has already been tallied — ${replays.length} finding(s) are already recorded as ` +
-    `refuted on their task (${replays.join(", ")}). Re-tallying would re-adjudicate a closed ` +
-    `decision; start a new run directory to re-verify these findings.`
-  );
-}
-
-/** The panel size a written manifest records. Null when the file says nothing
- *  usable — `parseReviewManifest` is what rejects it, with a real diagnostic. */
-export function manifestLensCount(raw: unknown): number | null {
-  if (!isRecord(raw)) return null;
-  const lenses = raw.lenses;
-  return Array.isArray(lenses) && lenses.length > 0 ? lenses.length : null;
-}
-
 /**
  * Sibling to aggregateVerdicts, not a generalization of it: same input shape,
  * different decision. Architecture aggregation produces a TOTAL ORDER over
@@ -1330,30 +738,3 @@ export function countRefutationVotes(
     ? Object.freeze({ survives: false as const, votes, refutations: refuted })
     : Object.freeze({ survives: true as const, votes, refutations: Object.freeze(refutations) });
 }
-
-/** Serialize the tally for the gate summary and the operator. The external
- *  contract keeps `refuted_by` and `reasoning` as two aligned arrays — they are
- *  derived from one pair list here, so they cannot fall out of step. */
-export function serializeOutcomes(
-  outcomes: readonly FindingOutcome[],
-  lensesInOrder: readonly ReviewLens[],
-  threshold: number,
-): string {
-  return JSON.stringify({
-    lenses: lensesInOrder,
-    threshold,
-    surviving: outcomes.filter((outcome) => outcome.survives).length,
-    refuted: outcomes.filter((outcome) => !outcome.survives).length,
-    outcomes: outcomes.map((outcome) => ({
-      finding_id: outcome.finding.id,
-      task_id: outcome.finding.taskId,
-      claim: outcome.finding.claim,
-      survives: outcome.survives,
-      refuted_by: outcome.refutations.map((refutation) => refutation.lens),
-      upheld_by: outcome.upheldBy,
-      uncertain_from: outcome.uncertainFrom,
-      reasoning: outcome.refutations.map((refutation) => refutation.reason),
-    })),
-  }, null, 2);
-}
-

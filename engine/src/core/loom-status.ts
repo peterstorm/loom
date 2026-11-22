@@ -45,6 +45,7 @@ import {
 } from "./orchestration-contract";
 import type { GateDeps } from "./wave-gate-checks";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
+import { parseManifestedTaskGraph, type ManifestedTaskGraph } from "./manifested-task-graph";
 import {
   deriveWaveReadiness,
   isCanonicalWaveReadiness,
@@ -399,10 +400,7 @@ function deriveNonExecuteLoomStatus(
         reasons: nonEmptyOf("there is no active execute Wave"),
       }),
     }),
-    waveCompletionSuiteReadiness: canonicalRecord({
-      kind: "known",
-      value: deriveWaveCompletionSuiteReadiness(graph, null, currentWorkspace, currentResult),
-    }),
+    waveCompletionSuiteReadiness: nonExecuteSuiteReadiness(graph, currentWorkspace, currentResult),
     waveGateCompletionEligibility: canonicalRecord({
       kind: "known",
       value: canonicalRecord({
@@ -421,12 +419,31 @@ function deriveNonExecuteLoomStatus(
   });
 }
 
+/** A graph before `execute` carries no frozen Verification Manifest, so it has
+ * no completion suite readiness: the fact is unavailable and names why. */
+function nonExecuteSuiteReadiness(
+  graph: TaskGraph,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  currentResult: WaveCompletionResultObservation | undefined,
+): CanonicalStatusFacts["waveCompletionSuiteReadiness"] {
+  const manifested = parseManifestedTaskGraph(graph);
+  return manifested.ok
+    ? canonicalRecord({
+        kind: "known",
+        value: deriveWaveCompletionSuiteReadiness(manifested.value, null, currentWorkspace, currentResult),
+      })
+    : canonicalRecord({
+        kind: "unavailable",
+        reasons: nonEmptyOf(statusReason("completion-prerequisite-failed", manifested.error)),
+      });
+}
+
 /** Wave-scoped fact inventory. Every helper it calls reads only the parsed
  * graph, so this is derivable with or without an active Wave Gate
  * registration — which is what lets an unstarted Wave report real facts
  * instead of a blanket `unavailable`. */
 function waveScopedStatusFacts(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   wave: number,
   eligibility: WaveGateCompletionEligibility,
   currentWorkspace: WaveWorkspaceObservation | undefined,
@@ -453,7 +470,7 @@ function waveScopedStatusFacts(
 }
 
 function persistedTerminalBlockedStatus(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   currentWorkspace: WaveWorkspaceObservation | undefined,
   currentResult: WaveCompletionResultObservation | undefined,
 ): LoomStatus | null {
@@ -502,7 +519,7 @@ function finishedRunReasons(graph: TaskGraph): readonly StatusReason[] {
 }
 
 function committedTerminalStatus(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   currentWorkspace: WaveWorkspaceObservation | undefined,
   currentResult: WaveCompletionResultObservation | undefined,
 ): LoomStatus | null {
@@ -593,7 +610,7 @@ function skeletonsUnobservedReason(recovery: WaveImplementationRecovery, skeleto
  * window so the next branch runs.
  */
 function unstartedWaveStatus(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   deps: StatusDeps,
   skeletons: SkeletonStatusReport,
 ): LoomStatus | null {
@@ -817,29 +834,32 @@ function routeLoomStatus(
     );
   }
   if (parsed.value.tasks.length === 0) return unavailableStatus(UNPOPULATED_EXECUTE_RECOVERY);
-  const directoryUnavailable = runDirectoryUnavailableStatus(parsed.value, runDirectory);
+  const manifested = parseManifestedTaskGraph(parsed.value);
+  if (!manifested.ok) return unavailableStatus(manifested.error);
+  const graph = manifested.value;
+  const directoryUnavailable = runDirectoryUnavailableStatus(graph, runDirectory);
   if (directoryUnavailable !== null) return directoryUnavailable;
   const persistedBlocked = persistedTerminalBlockedStatus(
-    parsed.value,
+    graph,
     deps.currentWaveWorkspace,
     deps.currentWaveCompletionResult,
   );
   if (persistedBlocked !== null) return persistedBlocked;
   const committed = committedTerminalStatus(
-    parsed.value,
+    graph,
     deps.currentWaveWorkspace,
     deps.currentWaveCompletionResult,
   );
   if (committed !== null) return committed;
   // Before the readiness path, which requires a live registration: an execute
   // Wave may have no registration or only an abandoned Run tombstone.
-  const unstarted = unstartedWaveStatus(parsed.value, deps, skeletons);
+  const unstarted = unstartedWaveStatus(graph, deps, skeletons);
   if (unstarted !== null) return unstarted;
   if (lifecycleProof === null) {
-    const projected = projectedAdvisoryStatus(parsed.value, deps, runDirectory);
+    const projected = projectedAdvisoryStatus(graph, deps, runDirectory);
     if (projected !== null) return projected;
   }
-  const readiness = deriveWaveReadiness(parsed.value, deps, lifecycleProof);
+  const readiness = deriveWaveReadiness(graph, deps, lifecycleProof);
   return readiness.ok
     ? deriveLoomStatus(readiness.value)
     : deriveUnavailableLoomStatus(readiness.error.reasons);
@@ -854,7 +874,7 @@ export function renderLoomStatusJson(document: LoomStatusDocument): string {
 
 function projectCoverageDiagnostic(status: LoomStatus): readonly string[] {
   const fact = status.facts.waveCompletionSuiteReadiness;
-  if (fact.kind === "unavailable" || fact.value.kind === "legacy-unavailable") return [];
+  if (fact.kind === "unavailable") return [];
   return [`- ${renderProjectVerificationCoverage(fact.value.projectVerificationCoverage)}`];
 }
 

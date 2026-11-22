@@ -9,8 +9,12 @@ import {
   type SatisfiedTaskProof,
   type TaskProof,
 } from "../../src/core/proof-obligations";
+import { readFileSync, writeFileSync } from "node:fs";
 import type { RedThenGreenObservation } from "../../src/core/red-then-green-types";
 import { labelledValue } from "./parse-result";
+import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
+import { completedWaveGateEntry, type CompletedWaveGateInput } from "./accepted-wave-completion-suite";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import {
   parseActiveWaveGateRegistration,
   parseCompletedWaveGateRegistration,
@@ -31,6 +35,9 @@ import { isDistillTask } from "../../src/core/distill-task";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
 import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy, taskVerificationPolicy } from "../../src/core/verification-policy";
+import { parseWaveGateAbandonment, type WaveGateAbandonment } from "../../src/core/wave-gate-registration";
+import { parseManifestedTaskGraph, type ManifestedTaskGraph } from "../../src/core/manifested-task-graph";
+import { isRecord } from "../../src/core/plain-record";
 
 /*
  * Protected-state builders. Each mints its value through the production
@@ -39,9 +46,33 @@ import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy, taskVerificat
  * than leaving a test asserting against a state no engine could load.
  */
 
-/** A whole protected TaskGraph, proven by the State File wire parser. */
+/**
+ * A whole protected TaskGraph, proven by the State File wire parser. An
+ * execute-phase fixture that names no `verification_manifest` is stamped with
+ * the pre-I6 default (`withExecuteManifest`), so its Proofs keep the
+ * obligations it was written for. This fixture therefore mints only loadable
+ * graphs: a test of the loader's own refusal of a manifest-less execute graph
+ * (ADR-0098) opts out by passing its raw literal to `parseTaskGraph` directly.
+ */
 export function protectedGraphFixture(raw: unknown): TaskGraph {
-  return labelledValue("protected TaskGraph", parseTaskGraph(raw));
+  return labelledValue("protected TaskGraph", parseTaskGraph(withExecuteManifest(raw)));
+}
+
+/**
+ * The one place a fixture graph gets its manifest: `graph` carrying the pre-I6
+ * default when it is an execute-phase graph naming none, and `graph` itself
+ * otherwise. Every graph builder here stamps through it.
+ */
+function withExecuteManifest<G>(graph: G): G {
+  return isRecord(graph) && graph.current_phase === "execute" && graph.verification_manifest === undefined
+    ? { ...graph, verification_manifest: preI6DefaultVerificationManifest() }
+    : graph;
+}
+
+/** `graph` itself, proven a `ManifestedTaskGraph` by the production narrowing
+ *  every Wave Gate seam applies: the type a loaded execute-phase graph has. */
+export function manifestedGraphFixture<G extends TaskGraph>(graph: G): G & ManifestedTaskGraph {
+  return labelledValue("manifested TaskGraph", parseManifestedTaskGraph(graph));
 }
 
 /** An `active_wave_gate` anchor, proven by its State File parser: live by
@@ -66,30 +97,19 @@ export function activeWaveGateFixture(input: Readonly<{
   }));
 }
 
+/** An abandonment to stamp, proven by its production parser. */
+export function waveGateAbandonmentFixture(input: Parameters<typeof parseWaveGateAbandonment>[0]): WaveGateAbandonment {
+  return labelledValue("Wave Gate abandonment", parseWaveGateAbandonment(input));
+}
+
 /** One completed `wave_gate_history` entry, proven by its State File parser,
- *  with a completion receipt committed at the entry's own revision. */
-export function completedWaveGateFixture(input: Readonly<{
-  runId: string;
-  wave: number;
-  authorityDigest?: string;
-  revision?: number;
-}>): CompletedWaveGateRegistration {
-  const revision = input.revision ?? 1;
-  return labelledValue("protected wave_gate_history entry", parseCompletedWaveGateRegistration({
-    schemaVersion: 1,
-    kind: "completed-wave-gate",
-    runId: input.runId,
-    wave: input.wave,
-    authorityDigest: input.authorityDigest ?? "d".repeat(64),
-    revision,
-    completionReceipt: {
-      kind: "protected-wave-state-committed",
-      effectId: `effect:wave-gate-complete:${input.runId}`,
-      runId: input.runId,
-      committedRevision: revision,
-      stateDigest: "e".repeat(64),
-    },
-  }));
+ *  with a completion receipt committed at the entry's own revision and the
+ *  accepted completion suite it archived. */
+export function completedWaveGateFixture(input: CompletedWaveGateInput): CompletedWaveGateRegistration {
+  return labelledValue(
+    "protected wave_gate_history entry",
+    parseCompletedWaveGateRegistration(completedWaveGateEntry(input)),
+  );
 }
 
 /** The I6 run a satisfied fixture shows: red run 0, then the first write to an
@@ -168,10 +188,14 @@ export type TaskFixtureInput = TaskCommonMetadata & Readonly<{
 /**
  * Canonical execute-phase TaskGraph shell: the exact literal the graph writers
  * mint for a fresh wave. Tests that need anything beyond this shape pass their
- * own full literal — bespoke fixture sites stay bespoke.
+ * own full literal — bespoke fixture sites stay bespoke. It freezes the
+ * pre-I6 engine default manifest (`withExecuteManifest`): every execute-phase
+ * graph carries one, and that era owes no red-then-green, so the fixture
+ * Proofs stay exact. The result is proven a `ManifestedTaskGraph` by the
+ * production narrowing, so it serves every Wave Gate seam.
  */
-export function graphFixture(tasks: readonly Task[]): TaskGraph {
-  return {
+export function graphFixture(tasks: readonly Task[]): ManifestedTaskGraph {
+  const graph: TaskGraph = {
     current_phase: "execute",
     phase_artifacts: {},
     skipped_phases: [],
@@ -181,22 +205,43 @@ export function graphFixture(tasks: readonly Task[]): TaskGraph {
     tasks: [...tasks],
     wave_gates: {},
   };
+  return labelledValue("execute TaskGraph", parseManifestedTaskGraph(withExecuteManifest(graph)));
 }
 
 /**
  * The pending Proof a fixture Task carries, derived under the Task's own
  * expectation (`taskArtifactExpectation`), as population derives it. A
  * Distill Task (`agent: DISTILL_AGENT`) is derived under its engine-only
- * policy, so its Proof is exactly task-completed and behaviour-preserved.
+ * policy, so its Proof is exactly task-completed and behaviour-preserved; a
+ * Task naming an explicit `verification_policy` is derived under that policy.
  */
 function fixturePendingProof(input: TaskFixtureInput) {
   return derivePendingTaskProof({
-    ...(isDistillTask(input)
-      ? { verificationPolicy: DISTILL_VERIFICATION_POLICY }
-      : { newTestsRequired: input.new_tests_required ?? true }),
+    ...fixtureProofPolicy(input),
     declaredArtifacts: input.file_list ?? [],
     declaredArtifactExpectation: taskArtifactExpectation(input),
   });
+}
+
+/** The policy a fixture Task's pending Proof is derived under. */
+function fixtureProofPolicy(input: TaskFixtureInput) {
+  if (isDistillTask(input)) return { verificationPolicy: DISTILL_VERIFICATION_POLICY };
+  if (input.verification_policy !== undefined) return { verificationPolicy: taskVerificationPolicy(input) };
+  return { newTestsRequired: input.new_tests_required ?? true };
+}
+
+/**
+ * The satisfied Proof an implemented or completed fixture Task carries when
+ * the fixture supplies none: its own pending obligations, met by the evidence
+ * an honest completion records (a Distill Task's untouched scope, otherwise a
+ * trusted pass that changed exactly its declared files with new tests).
+ */
+function fixtureSatisfiedProof(input: TaskFixtureInput, pending: ReturnType<typeof fixturePendingProof>): SatisfiedTaskProof {
+  const files = input.file_list ?? [];
+  if (isDistillTask(input)) return satisfiedDistillProof(files);
+  const evaluated = evaluateProofObligations(pending.obligations, trustedPassEvidence(files));
+  if (evaluated.state !== "satisfied") throw new Error(`fixture Task ${input.id} has no satisfiable default Proof`);
+  return evaluated;
 }
 
 /** The policy population stamps on a Distill Task, unless the fixture states its own. */
@@ -238,9 +283,7 @@ export function taskFixture(input: TaskFixtureInput): Task {
       : { ...metadata, status: "pending", proof };
   }
   if (status === "implemented" || status === "completed") {
-    return suppliedProof?.state === "satisfied"
-      ? { ...metadata, status, proof: suppliedProof }
-      : { ...metadata, status, legacy_missing_proof: true };
+    return { ...metadata, status, proof: suppliedProof?.state === "satisfied" ? suppliedProof : fixtureSatisfiedProof(input, pending) };
   }
   const evaluated = suppliedProof?.state === "failed"
     ? suppliedProof
@@ -337,4 +380,64 @@ export function i6PendingTaskFixture(input: TaskFixtureInput): Task {
       redThenGreen: "owed-if-new-tests",
     }),
   };
+}
+
+/**
+ * An implemented or completed Task under an I6-era manifest: the pending
+ * Proof `i6PendingTaskFixture` derives, satisfied by an honest completion
+ * that changed exactly its declared files with new tests, shown red then green.
+ */
+export function i6SatisfiedTaskFixture(input: TaskFixtureInput & Readonly<{ status: "implemented" | "completed" }>): Task {
+  const pending = i6PendingTaskFixture(input);
+  const files = pending.file_list ?? [];
+  const proof = evaluateProofObligations(
+    pending.proof.obligations,
+    trustedPassEvidence(files, { redThenGreen: shownRedThenGreen(files[0]) }),
+  );
+  if (proof.state !== "satisfied") throw new Error(`fixture Task ${input.id} has no satisfiable I6 Proof`);
+  const { revalidation_required: _revalidation, ...metadata } = pending as Task & { revalidation_required?: true };
+  return { ...metadata, status: input.status, proof };
+}
+
+/**
+ * `graph` with `taskIds` executing, each under its own exact implementation
+ * attempt authority (the only executing shape the State File loads), proven
+ * by the State File wire parser. `reservedAt` defaults to a fixed instant long
+ * past, so a fixture attempt is aged unless a test reserves it now.
+ */
+export function executingGraphFixture(
+  graph: TaskGraph,
+  taskIds: readonly string[],
+  reservedAt = "2026-08-24T00:00:00.000Z",
+): TaskGraph {
+  const tasks = graph.tasks.map((task) => {
+    if (!taskIds.includes(task.id)) return task;
+    // The registration scope: every declared and already-modified path, once.
+    const scope = [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])];
+    const baseline = scope.map((artifact) => ({ artifact, snapshot: { kind: "missing" as const } }));
+    const authority = createImplementationAttemptAuthority({
+      taskId: task.id, wave: task.wave, semanticAttempt: 1, reservationId: `fixture-${task.id}`,
+      headSha: "1".repeat(40), reservedAt,
+      taskScopeBaseline: baseline, dirtySetBaseline: [],
+    });
+    if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    return {
+      ...task,
+      active_implementation_attempt: authority.value,
+      attempt_artifact_baseline: baseline,
+      attempt_repository_baseline: [],
+      reserved_at: authority.value.reservedAt,
+    };
+  });
+  return protectedGraphFixture({ ...graph, executing_tasks: [...taskIds], tasks });
+}
+
+/**
+ * Re-reserves T1 of the State File at `statePath` under exact attempt
+ * authority, as a live implementation attempt holds it.
+ */
+export function reserveLiveAttempt(statePath: string): void {
+  const raw: unknown = JSON.parse(readFileSync(statePath, "utf-8"));
+  const graph = labelledValue("live-attempt State File", parseTaskGraph(raw));
+  writeFileSync(statePath, JSON.stringify(executingGraphFixture(graph, ["T1"])));
 }

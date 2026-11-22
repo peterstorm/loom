@@ -5,12 +5,9 @@ import type { CurrentDraftFinding, Finding } from "../../src/types";
 import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2, STANDALONE_REVIEW_SUBJECT } from "../../src/core/reviewer-contract";
 import { parseReviewerPayloadV2 } from "../../src/core/reviewer-protocol";
 import {
-  buildFindingBrief, buildStandaloneFindingBrief, parseFindingBriefJson, parseCurrentBriefFinding,
-  projectFindingForPanel, serializeFindingBrief, serializeBriefFinding, renderFindingBriefMarkdown,
-  serializeReviewManifest, parseReviewManifest, selectReviewLenses, reviewSignals, briefCompletenessErrors,
+  buildFindingBrief, buildStandaloneFindingBrief, parseCurrentBriefFinding, projectFindingForPanel,
   type BriefFinding,
 } from "../../src/core/review-panel";
-import { REVIEW_LAYOUT } from "../../src/core/panel-kernel";
 import {
   canonicalStandalonePanelFindingAuthority, canonicalStandalonePanelFindings, freezeStandalonePanelAuthority,
   parseFrozenStandalonePanelAuthority, parseStandalonePanelOutcomes,
@@ -45,18 +42,13 @@ describe("versioned panel Finding conservation", () => {
       .not.toMatchTypeOf<BriefFinding>();
   });
 
-  it("round-trips exact current strings, both evidence arms, duplicates and counts beside historical entries", () => {
+  it("conserves exact current strings, both evidence arms, duplicates and counts beside historical entries", () => {
     fc.assert(fc.property(fc.string({ maxLength: 100 }), fc.integer({ min: 0, max: 100 }), fc.boolean(), (suffix, confidence, trace) => {
       const first = current(hostile + suffix, confidence, trace);
       const findings = [{ ...legacy, agent: "old-reviewer" }, first, { ...first, id: findingId("code-reviewer-2") }];
       const task = taskOf(findings);
       const before = JSON.stringify(findings);
-      const brief = buildFindingBrief(1, [task]);
-      expect(briefCompletenessErrors(brief, [task])).toEqual([]);
-      const raw = serializeFindingBrief(brief);
-      const loaded = value(parseFindingBriefJson(JSON.parse(raw)));
-      expect(loaded).toEqual(brief);
-      expect(serializeFindingBrief(loaded)).toBe(raw);
+      const loaded = buildFindingBrief(1, [task]);
       expect(loaded.findings.map(({ id }) => id)).toEqual(["T1:old-reviewer-1", "T1:code-reviewer-1", "T1:code-reviewer-2"]);
       expect(reviewFindingCounts(loaded.findings)).toEqual({ critical: 3, advisory: 0 });
       expect(loaded.findings[1]?.claim).toBe(first.claim);
@@ -71,41 +63,20 @@ describe("versioned panel Finding conservation", () => {
     const draft: CurrentDraftFinding = { protocolVersion: 2, severity: "advisory", file: null, line: null,
       claim: hostile, reason: hostile, ...(includeBasis ? { basis } : {}) };
     const findings = attributeFindings([draft], "comment-analyzer");
-    const brief = buildFindingBrief(1, [taskOf(findings)], "advisory");
-    const loaded = value(parseFindingBriefJson(JSON.parse(serializeFindingBrief(brief))));
-    expect(loaded).toEqual(brief);
-    const entry = loaded.findings[0]!;
+    const entry = projectFindingForPanel("T1", findings[0]!);
     if (entry.severity !== "advisory") throw new Error("advisory expected");
     expect(entry.reason).toBe(hostile);
-    expect(Object.hasOwn(loaded.findings[0]!, "basis")).toBe(includeBasis);
+    expect(Object.hasOwn(entry, "basis")).toBe(includeBasis);
     expect(buildStandaloneFindingBrief({ subjectId: "standalone-review", findings }).findings).toEqual([]);
   });
 
-  it("encodes current prompt text as reversible JSON data without control/HTML/Markdown injection", () => {
-    const finding = current();
-    const brief = buildFindingBrief(1, [taskOf([finding])]);
-    const stored = serializeFindingBrief(brief);
-    const rendered = renderFindingBriefMarkdown(brief);
-    expect(rendered).not.toContain("<script>");
-    expect(rendered).not.toContain("# injected");
-    expect(rendered).not.toMatch(/[\u001b\u0085\p{Cf}]/u);
-    const data = /```json\n([\s\S]*?)\n```/.exec(rendered)?.[1];
-    expect(data).toBeDefined();
-    expect(JSON.parse(data!)).toEqual(JSON.parse(serializeBriefFinding(brief.findings[0]!)));
-    expect(serializeFindingBrief(brief)).toBe(stored);
-    expect(brief.findings[0]?.claim).toBe(hostile);
-  });
-
-  it("does not alias mutable caller basis and renders current task metadata as data", () => {
+  it("does not alias mutable caller basis", () => {
     const input = JSON.parse(JSON.stringify(current()));
     const projected = projectFindingForPanel("<script>#task", input);
     const before = JSON.stringify(projected);
     input.basis.consequence.impact = "mutated";
     input.basis.evidence.reference = "mutated";
     expect(JSON.stringify(projected)).toBe(before);
-    const rendered = renderFindingBriefMarkdown({ wave: 1, severity: "critical", taskIds: ["<script>#task"], findings: [projected] });
-    expect(rendered).not.toContain("<script>");
-    expect(rendered).not.toContain("#task");
   });
 
   it("pins distinct historical Wave and standalone authority projections instead of rewriting history", () => {
@@ -114,7 +85,7 @@ describe("versioned panel Finding conservation", () => {
     expect(wave.agent).toBe(" old{reviewer} ");
     expect(standalone.agent).toBe("oldreviewer");
     expect(wave.claim).toBe("old  claim");
-    expect(serializeBriefFinding(wave)).toBe(JSON.stringify({ id: "standalone-review:old-reviewer-1", task_id: "standalone-review", agent: " old{reviewer} ", severity: "critical", file: null, line: null, claim: "old  claim" }, null, 2));
+    expect(wave).toStrictEqual({ id: "standalone-review:old-reviewer-1", taskId: "standalone-review", agent: " old{reviewer} ", severity: "critical", file: null, line: null, claim: "old  claim" });
     const found = current();
     expect(canonicalStandalonePanelFindingAuthority([found])[0]).toEqual(projectFindingForPanel("standalone-review", found));
   });
@@ -124,14 +95,6 @@ describe("versioned panel Finding conservation", () => {
     expect(projectFindingForPanel("T1", { ...legacy, claim: "{}" }).claim).toContain("unusable after sanitization");
   });
 
-  it("binds the full mixed item roster and ordered lenses through manifest reload", () => {
-    const brief = buildFindingBrief(1, [taskOf([legacy, current()])]);
-    const lenses = value(selectReviewLenses(reviewSignals(brief.findings), 3));
-    const raw = JSON.parse(serializeReviewManifest("run.panel", "panel-runs/run.panel", REVIEW_LAYOUT, lenses, brief.findings));
-    expect(value(parseReviewManifest(raw, "panel-runs/run.panel", REVIEW_LAYOUT, lenses, brief.findings.map(({ id }) => id))).findings).toHaveLength(2);
-    raw.findings.pop();
-    expect(parseReviewManifest(raw, "panel-runs/run.panel", REVIEW_LAYOUT, lenses, brief.findings.map(({ id }) => id)).ok).toBe(false);
-  });
 });
 
 const mutations: readonly (readonly [string, (entry: Record<string, unknown>) => void])[] = [
@@ -151,8 +114,6 @@ describe("current brief and independently frozen parent authority refuse downgra
     const entry = JSON.parse(JSON.stringify(projectFindingForPanel("T1", current())));
     mutate(entry);
     expect(parseCurrentBriefFinding(entry).ok).toBe(false);
-    const { taskId, ...rest } = entry;
-    expect(parseFindingBriefJson({ wave: 1, severity: "critical", task_ids: ["T1"], findings: [{ ...rest, task_id: taskId }] }).ok).toBe(false);
   });
 
   it("refuses changed or wholly stripped basis against parent projection even with recomputed self-digests", () => {

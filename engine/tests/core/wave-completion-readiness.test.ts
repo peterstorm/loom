@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { commitWaveGateCompletion, deriveWaveReadiness } from "../../src/core/wave-gate-machine";
+import {
+  commitWaveGateCompletion,
+  deriveWaveReadiness,
+  lockedWaveGateCompletion,
+  type WaveCompletionCommit,
+} from "../../src/core/wave-gate-machine";
 import { checkWaveCompletionSuite, evaluateWaveGate, type GateDeps } from "../../src/core/wave-gate-checks";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import {
@@ -18,7 +23,7 @@ import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { authorizeGraphCompletionSuite } from "../../src/core/owner-verification/suite-authority";
 import type { InvariantVerdict, OwnerVerificationObservation } from "../../src/core/owner-verification/types";
 import { ownerObligation } from "../fixtures/owner-obligation";
-import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
+import { evaluateAsRecorded, greenCompletionSuiteResult } from "../fixtures/completion-suite-evaluation";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
@@ -39,7 +44,8 @@ import {
   WaveWorkspaceObservation,
 } from "../../src/types";
 import { value } from "../fixtures/parse-result";
-import { trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { manifestedGraphFixture, trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { MANIFEST_ABSENT_REFUSAL, type ManifestedTaskGraph } from "../../src/core/manifested-task-graph";
 
 const digest = (fill: string): ArtifactDigest => fill.repeat(64) as ArtifactDigest;
 const workspace = (fill: string): WaveWorkspaceObservation => ({
@@ -102,34 +108,10 @@ function acceptedReceipt(
   reportByteLength = 10,
 ): AcceptedWaveCompletionReceipt {
   const authority = value(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest, null));
-  const evaluated = evaluateAsRecorded(authority, {
-    kind: "wave-completion-suite-result",
-    runId: authority.runId,
-    wave: authority.wave,
-    revision: authority.revision,
-    authorityDigest: authority.authorityDigest,
-    manifestDigest: authority.manifestDigest,
-    suiteDigest: authority.suiteDigest,
-    workspaceDigest: authority.workspaceDigest,
-    checks: authority.checks.map((check) => ({
-      checkId: check.checkId,
-      scope: "wave",
-      outcome: {
-        kind: "observed",
-        exitCode: 0,
-        timedOut: false,
-        signal: null,
-        report: check.reportPolicy.kind === "not-required"
-          ? { kind: "not-required" }
-          : {
-              kind: "produced",
-              path: check.reportPolicy.path,
-              digest: reportDigest,
-              byteLength: reportByteLength,
-            },
-      },
-    })),
-  });
+  const evaluated = evaluateAsRecorded(
+    authority,
+    greenCompletionSuiteResult(authority, { digest: reportDigest, byteLength: reportByteLength }),
+  );
   if (evaluated.kind !== "accepted") throw new Error("suite fixture must be accepted");
   return evaluated.receipt;
 }
@@ -212,11 +194,11 @@ function observedResult(
 function modernGraph(
   receipt: AcceptedWaveCompletionReceipt | undefined,
   manifest: FrozenVerificationManifest = defaultVerificationManifest(),
-): TaskGraph {
-  return graph({
+): ManifestedTaskGraph {
+  return {
+    ...graph(receipt === undefined ? {} : { active_wave_completion_suite: receipt }),
     verification_manifest: manifest,
-    ...(receipt === undefined ? {} : { active_wave_completion_suite: receipt }),
-  });
+  };
 }
 
 function readinessIdentity(
@@ -271,12 +253,6 @@ describe("Wave completion suite gate readiness", () => {
         waveCompletionSuiteReadiness: { value: { kind: "accepted", projectVerificationCoverage: expectedHistoricalCoverage } },
       } });
     expect(historical.wave_gate_history).toBe(committed.graph.wave_gate_history);
-  });
-
-  it("does not borrow current configuration for schema-v1 history", () => {
-    const committed = value(commitWaveGateCompletion(value(deriveWaveReadiness(graph(), deps()))));
-    expect(deriveWaveCompletionSuiteReadiness({ ...committed.graph, verification_manifest: manifestWithReport() }, 1, workspace("d")))
-      .toEqual({ kind: "legacy-unavailable", verificationManifestDigest: null });
   });
 
   it("fails a modern graph that has no accepted suite or persisted result", () => {
@@ -472,19 +448,24 @@ describe("Wave completion suite gate readiness", () => {
       });
   });
 
-  it("preserves direct legacy compatibility with an explicit legacy-unavailable summary", () => {
-    const state = graph();
-    const decision = evaluateWaveGate(state, null, deps());
+  it("blocks status on an execute graph carrying no verification_manifest, naming why (ADR-0098)", () => {
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph() }, deps(workspace("b")));
 
-    expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: null });
-    expect(decision.checks[4]).toEqual({
-      passed: true,
-      summary: "4. Wave completion suite: legacy-unavailable (verification_manifest and active receipt absent).",
+    expect(status.next.reasons).toEqual([{ kind: "authority-unavailable", message: MANIFEST_ABSENT_REFUSAL, taskId: null }]);
+    expect(status.facts.waveCompletionSuiteReadiness.kind).toBe("unavailable");
+  });
+
+  it("reports suite readiness unavailable before execute, when no manifest is frozen yet", () => {
+    const status = deriveLoomStatusFromParsedGraph(
+      { ok: true, value: graph({ current_phase: "decompose", active_wave_gate: undefined }) },
+      deps(workspace("b")),
+    );
+
+    expect(status.facts.waveCompletionSuiteReadiness).toEqual({
+      kind: "unavailable",
+      reasons: [{ kind: "completion-prerequisite-failed", message: MANIFEST_ABSENT_REFUSAL, taskId: null }],
     });
-    expect(value(deriveWaveReadiness(state, deps())).facts.waveCompletionSuiteReadiness).toEqual({
-      kind: "known",
-      value: { kind: "legacy-unavailable", verificationManifestDigest: null },
-    });
+    expect(renderLoomStatusHuman(status)).not.toContain("checks configured");
   });
 });
 
@@ -541,12 +522,16 @@ describe("Wave completion authority and atomic commit", () => {
     );
   });
 
-  it("refuses modern completion without a current accepted suite", () => {
+  it("refuses completion without a current accepted suite: a proven snapshot without one is never eligible", () => {
     const readiness = value(deriveWaveReadiness(modernGraph(undefined), deps(workspace("b"))));
-    expect(commitWaveGateCompletion(readiness)).toMatchObject({
+    const refused = commitWaveGateCompletion(readiness);
+    expect(refused).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("completion readiness is ineligible") },
     });
+    if (!refused.ok) {
+      expect(refused.error.message).toContain("Wave completion suite required (accepted-suite-missing)");
+    }
   });
 
   it("archives schema v2 and keeps historical accepted suite evidence accepted after live workspace changes", () => {
@@ -570,9 +555,10 @@ describe("Wave completion authority and atomic commit", () => {
     expect(committed.graph.active_wave_completion_suite).toBeUndefined();
     expect(committed.graph.active_wave_gate).toBeUndefined();
     expect(committed.graph.wave_gate_history).toEqual([committed.completedRegistration]);
-    expect(deriveWaveCompletionSuiteReadiness(committed.graph, 1, workspace("b")))
+    const committedGraph = manifestedGraphFixture(committed.graph);
+    expect(deriveWaveCompletionSuiteReadiness(committedGraph, 1, workspace("b")))
       .toMatchObject({ kind: "accepted", resultDigest: receipt.resultDigest });
-    const historicalAfterLiveChange = deriveWaveCompletionSuiteReadiness(committed.graph, 1, workspace("d"));
+    const historicalAfterLiveChange = deriveWaveCompletionSuiteReadiness(committedGraph, 1, workspace("d"));
     expect(historicalAfterLiveChange).toEqual({
       kind: "accepted",
       projectVerificationCoverage: { kind: "configured", checkIds: ["project:test"] },
@@ -585,13 +571,14 @@ describe("Wave completion authority and atomic commit", () => {
     expect(historicalAfterLiveChange.kind).not.toBe("stale");
   });
 
-  it("writes schema v1 only for field-absent legacy compatibility", () => {
-    const committed = value(commitWaveGateCompletion(
-      value(deriveWaveReadiness(graph(), deps())),
-    ));
-
-    expect(committed.completedRegistration.schemaVersion).toBe(1);
-    expect("completionSuite" in committed.completedRegistration).toBe(false);
+  it("never commits a graph carrying no verification_manifest: readiness, the only way to a commit, refuses it (ADR-0098)", () => {
+    expect(deriveWaveReadiness(graph(), deps(workspace("b")))).toEqual({
+      ok: false,
+      error: {
+        kind: "wave-readiness-unavailable",
+        reasons: [{ kind: "authority-unavailable", message: MANIFEST_ABSENT_REFUSAL, taskId: null }],
+      },
+    });
   });
 });
 
@@ -611,17 +598,19 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
   }));
 
   /** A stamped graph whose one Wave-1 Task lists `files`: INV-1 is owed exactly when they change its family. */
-  const stampedGraph = (files: readonly string[], receipt?: AcceptedWaveCompletionReceipt): TaskGraph => graph({
-    tasks: [{ ...task, file_list: [...files] }],
+  const stampedGraph = (files: readonly string[], receipt?: AcceptedWaveCompletionReceipt): ManifestedTaskGraph => ({
+    ...graph({
+      tasks: [{ ...task, file_list: [...files] }],
+      owner_obligations: [ADMISSION],
+      ...(receipt === undefined ? {} : { active_wave_completion_suite: receipt }),
+    }),
     verification_manifest: manifestWithReport(),
-    owner_obligations: [ADMISSION],
-    ...(receipt === undefined ? {} : { active_wave_completion_suite: receipt }),
   });
 
   type OwnerMutation = InvariantVerdict["mutation"];
 
   /** The result every check of the graph's own suite would record: project exit, and the owner verdicts with `mutation`. */
-  function resultFor(state: TaskGraph, projectExit: number, mutation: OwnerMutation = unchangedRun): WaveCompletionSuiteResult {
+  function resultFor(state: ManifestedTaskGraph, projectExit: number, mutation: OwnerMutation = unchangedRun): WaveCompletionSuiteResult {
     const authority = value(authorizeGraphCompletionSuite(state, digest("b")));
     const owner = authority.checks.find((check) => check.kind === "engine-owner-verification");
     const observation: OwnerVerificationObservation | undefined = owner === undefined || owner.kind !== "engine-owner-verification" ? undefined : {
@@ -654,7 +643,7 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
     };
   }
 
-  function receiptFor(state: TaskGraph): AcceptedWaveCompletionReceipt {
+  function receiptFor(state: ManifestedTaskGraph): AcceptedWaveCompletionReceipt {
     const evaluated = evaluateAsRecorded(value(authorizeGraphCompletionSuite(state, digest("b"))), resultFor(state, 0));
     if (evaluated.kind !== "accepted") throw new Error(`receipt fixture rejected: ${JSON.stringify(evaluated)}`);
     return evaluated.receipt;
@@ -727,7 +716,7 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
   it("a terminal receipt carrying ownerVerification stays accepted from history, whatever the live roster", () => {
     const receipt = receiptFor(stampedGraph([OWNER]));
     const { active_wave_gate: _active, ...rest } = stampedGraph(["src/other.ts"]);
-    const terminal: TaskGraph = {
+    const terminal: ManifestedTaskGraph = {
       ...rest,
       wave_gate_history: [{
         schemaVersion: 2,
@@ -748,6 +737,86 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
       resultDigest: receipt.resultDigest,
       workspaceDigest: digest("b"),
       checkCount: 3,
+    });
+  });
+});
+
+describe("lockedWaveGateCompletion: the locked commit proves it retires exactly the active authority", () => {
+  type Derive = Parameters<typeof lockedWaveGateCompletion>[1];
+  const manifest = manifestWithReport();
+  const suite = acceptedReceipt(manifest);
+  const locked = modernGraph(suite, manifest);
+  /** The real commit the locked graph derives. */
+  const derive: Derive = (state) => commitWaveGateCompletion(value(deriveWaveReadiness(state, deps(workspace("b")))));
+  const committed = (): WaveCompletionCommit => value(derive(locked));
+  /** `derive` answering the real commit with `change` applied. */
+  const deriving = (change: (commit: WaveCompletionCommit) => WaveCompletionCommit): Derive => () =>
+    ({ ok: true, value: change(committed()) });
+  const withTerminal = (commit: WaveCompletionCommit, terminal: Partial<WaveCompletionCommit["completedRegistration"]>) =>
+    ({ ...commit, completedRegistration: { ...commit.completedRegistration, ...terminal } });
+
+  it("returns the derived commit when it terminalizes, archives and retires exactly the active authority", () => {
+    const result = lockedWaveGateCompletion(locked, derive);
+    expect(result).toEqual(derive(locked));
+    expect(result.ok).toBe(true);
+  });
+
+  it.each<readonly [string, TaskGraph]>([
+    ["a graph outside execute", { ...locked, current_phase: "decompose" }],
+    ["a graph with no current Wave", { ...locked, current_wave: undefined }],
+    ["a graph with no active Wave Gate", { ...locked, active_wave_gate: undefined }],
+  ])("refuses %s as missing authority, never deriving", (_name, state) => {
+    let derived = false;
+    expect(lockedWaveGateCompletion(state, (graph) => { derived = true; return derive(graph); }))
+      .toEqual({ ok: false, error: "Protected execute/current Wave Gate authority is missing" });
+    expect(derived).toBe(false);
+  });
+
+  it.each<readonly [string, TaskGraph]>([
+    ["an active gate for another Wave", { ...locked, current_wave: 2 }],
+    ["a terminal active gate", {
+      ...locked,
+      active_wave_gate: { ...registration, terminalOutcome: { kind: "terminal-abandoned", reason: "abandoned", supersededBy: null } },
+    }],
+  ])("refuses %s as contradictory or terminal", (_name, state) => {
+    expect(lockedWaveGateCompletion(state, derive))
+      .toEqual({ ok: false, error: "Protected active/current Wave Gate authority is contradictory or terminal" });
+  });
+
+  it("refuses with the derivation's own message when the locked derivation refuses", () => {
+    const refusing: Derive = () => ({ ok: false, error: { kind: "wave-completion-commit-rejected", message: "drifted under the lock" } });
+    expect(lockedWaveGateCompletion(locked, refusing)).toEqual({ ok: false, error: "drifted under the lock" });
+  });
+
+  it.each<readonly [string, (commit: WaveCompletionCommit) => WaveCompletionCommit]>([
+    ["another run", (commit) => withTerminal(commit, { runId: "run.other" as WaveCompletionCommit["completedRegistration"]["runId"] })],
+    ["another Wave", (commit) => withTerminal(commit, { wave: 2 })],
+    ["another authority digest", (commit) => withTerminal(commit, { authorityDigest: digest("f") as WaveCompletionCommit["completedRegistration"]["authorityDigest"] })],
+    ["a revision that is not the next one", (commit) => withTerminal(commit, { revision: commit.completedRegistration.revision + 1 })],
+    ["a receipt that is not the archived one", (commit) => ({ ...commit, receipt: { ...commit.receipt } })],
+  ])("refuses a result naming %s as not terminalizing the locked registration", (_name, change) => {
+    expect(lockedWaveGateCompletion(locked, deriving(change)))
+      .toEqual({ ok: false, error: "Completion result does not terminalize the exact locked active registration" });
+  });
+
+  it("refuses a result archiving a suite that is not the exact active one", () => {
+    const copied = deriving((commit) => withTerminal(commit, { completionSuite: { ...commit.completedRegistration.completionSuite } }));
+    expect(lockedWaveGateCompletion(locked, copied))
+      .toEqual({ ok: false, error: "Completion must archive the exact active Wave completion suite" });
+  });
+
+  it("refuses when the locked graph holds no active suite to archive", () => {
+    expect(lockedWaveGateCompletion({ ...locked, active_wave_completion_suite: undefined }, () => derive(locked)))
+      .toEqual({ ok: false, error: "Completion must archive the exact active Wave completion suite" });
+  });
+
+  it.each<readonly [string, (commit: WaveCompletionCommit) => WaveCompletionCommit]>([
+    ["the active gate", (commit) => ({ ...commit, graph: { ...commit.graph, active_wave_gate: registration } })],
+    ["the active suite", (commit) => ({ ...commit, graph: { ...commit.graph, active_wave_completion_suite: suite } })],
+  ])("refuses a result graph that still carries %s", (_name, change) => {
+    expect(lockedWaveGateCompletion(locked, deriving(change))).toEqual({
+      ok: false,
+      error: "Completion must retire active gate and completion-suite authority before the next Wave can register",
     });
   });
 });

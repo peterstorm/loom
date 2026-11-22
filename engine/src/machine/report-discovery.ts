@@ -19,12 +19,26 @@ import type { TestReportSummary } from "./types";
 import type { TestRunOutput } from "./extract-evidence";
 import {
   bunRunSummary,
+  describeTestRunSummaryRefusal,
   mergeSummaries,
   parseBunConsoleCollectionErrors,
-  parseJunitXml,
-  parseVitestJson,
-  readJunitReport,
-} from "./test-report";
+  junitReportRead,
+  readTestReportText,
+  readTestRunSummary,
+  type StructuredReportFormat,
+  type TestRunSummaryRead,
+  type TestRunSummaryRefusal,
+} from "../core/structured-test-report";
+
+/** The TestRun summary of report text that must be `format`, or why it cannot vouch. */
+const summaryOf = (text: string, format: StructuredReportFormat): TestRunSummaryRead =>
+  readTestRunSummary(readTestReportText(text), format);
+
+/** A refused report, named with why it cannot vouch, so an operator can tell
+ *  a malformed report from one of the wrong format, over budget, or whose
+ *  counts disagree about what ran (ADR-0100). */
+const refusedReport = (report: string, refusal: TestRunSummaryRefusal): string =>
+  `${refusal.kind === "malformed-counts" ? "malformed " : ""}${report} ${describeTestRunSummaryRefusal(refusal)}`;
 
 /** Extract an explicit report path from the command itself (vitest/jest --outputFile). */
 export function outputFileFromCommand(command: string): string | null {
@@ -305,7 +319,7 @@ function readJunitDir(dir: string, nowMs: number, callStartMs: number): DirRepor
       .filter((p) => isFresh(p, nowMs, callStartMs));
     for (const path of fresh) {
       // Exhaustive: a new read kind must decide here whether the dir can still vouch.
-      const refused = match(readJunitReport(readFileSync(path, "utf-8")))
+      const refused = match(junitReportRead(readTestReportText(readFileSync(path, "utf-8"))))
         .with({ kind: "parsed" }, ({ summary }) => {
           summaries.push(summary);
           return false;
@@ -315,10 +329,10 @@ function readJunitDir(dir: string, nowMs: number, callStartMs: number): DirRepor
           process.stderr.write(`findReport: skipping '${path}' — not a JUnit report (no testsuite/testcase element)\n`);
           return false;
         })
-        .with({ kind: "refused" }, () => {
+        .with({ kind: "refused" }, ({ refusal }) => {
           // Named, so the operator can tell a refused report from no report.
           process.stderr.write(
-            `findReport: malformed JUnit report '${path}', or its per-file results disagree with its counts — the run's reports cannot vouch\n`,
+            `findReport: ${refusedReport(`JUnit report '${path}'`, refusal)} — the run's reports cannot vouch\n`,
           );
           return true;
         })
@@ -438,19 +452,19 @@ export function findReport(
         process.stderr.write(`findReport: Bun JUnit report '${path}' does not exist\n`);
       } else if (presence === "present" && isFresh(path, nowMs, callStartMs)) {
         try {
-          const parsed = parseJunitXml(readFileSync(path, "utf-8"));
-          if (parsed) {
+          const parsed = summaryOf(readFileSync(path, "utf-8"), "junit-xml");
+          if (parsed.ok) {
             const errors = collectionErrors();
-            if (errors.length > 0 && parsed.files.kind !== "recorded") {
+            if (errors.length > 0 && parsed.value.files.kind !== "recorded") {
               // Named, so a withheld red is explainable: a report without
               // per-file results has no file to attribute the errors to.
               process.stderr.write(
                 `findReport: Bun JUnit report '${path}' records no per-file results, so the console's collection errors (${errors.join(", ")}) cannot join it\n`,
               );
             }
-            return bunRunSummary(parsed, errors);
+            return bunRunSummary(parsed.value, errors);
           }
-          process.stderr.write(`findReport: malformed Bun JUnit report '${path}'\n`);
+          process.stderr.write(`findReport: ${refusedReport(`Bun JUnit report '${path}'`, parsed.error)}\n`);
         } catch (e) {
           process.stderr.write(
             `findReport: cannot read Bun JUnit report '${path}': ${errMessage(e)}\n`,
@@ -473,9 +487,9 @@ export function findReport(
       noStamp(`--outputFile '${path}'`);
     } else if (explicitReportExists(path, "--outputFile report") && isFresh(path, nowMs, callStartMs)) {
       try {
-        const parsed = parseVitestJson(readFileSync(path, "utf-8"));
-        if (parsed) return parsed;
-        process.stderr.write(`findReport: malformed --outputFile report '${path}'\n`);
+        const parsed = summaryOf(readFileSync(path, "utf-8"), "vitest-json");
+        if (parsed.ok) return parsed.value;
+        process.stderr.write(`findReport: ${refusedReport(`--outputFile report '${path}'`, parsed.error)}\n`);
       } catch (e) {
         // Unreadable explicit report (permissions, race, path is a dir):
         // fall through to the next report source — the TestRun fact must
@@ -486,10 +500,10 @@ export function findReport(
   }
 
   if (/--reporter[= ]json|--json\b/.test(segment)) {
-    const parsed = parseVitestJson(stdout.trim());
-    if (parsed) return parsed;
+    const parsed = summaryOf(stdout.trim(), "vitest-json");
+    if (parsed.ok) return parsed.value;
     process.stderr.write(
-      "findReport: --reporter=json requested but stdout carried no parseable summary\n",
+      `findReport: --reporter=json requested but stdout carried no parseable summary: what it printed ${describeTestRunSummaryRefusal(parsed.error)}\n`,
     );
   }
 

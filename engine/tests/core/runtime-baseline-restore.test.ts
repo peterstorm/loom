@@ -150,7 +150,7 @@ describe("runtimeBaselineRestoreForTasks", () => {
     const { root, revision } = gitFixture();
     writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
     const { attempt_repository_baseline: _omitted, ...unrecorded } = taskWith({ id: "T7" });
-    expect(() => runtimeBaselineRestoreForTasks(root, [taskWith(), { ...unrecorded, legacy_execution_reservation: true }]))
+    expect(() => runtimeBaselineRestoreForTasks(root, [taskWith(), { ...unrecorded, active_implementation_attempt: {} }]))
       .toThrow("in-flight attempt T7 has no recorded repository baseline, so no runtime-baseline restore applies");
     expect(runtimeBaselineRestoreForTasks(root, [taskWith(), unrecorded]).get("engine/src/core/task.ts")).toBe(revision);
   });
@@ -201,7 +201,6 @@ describe("runtime-baseline restoration rules (pure)", () => {
   it.each<readonly [string, RuntimeBaselineTask, ReturnType<typeof inFlightAttemptBaseline>]>([
     ["a stored baseline", { id: "T1", attempt_repository_baseline: [] }, { kind: "recorded", repositoryBaseline: [] }],
     ["an active attempt without one", { id: "T2", active_implementation_attempt: {} }, { kind: "unrecorded", taskId: "T2" }],
-    ["a legacy reservation without one", { id: "T3", legacy_execution_reservation: true }, { kind: "unrecorded", taskId: "T3" }],
     ["no in-flight attempt", { id: "T4" }, null],
   ])("classifies a task with %s", (_name, task, expected) => {
     expect(inFlightAttemptBaseline(task)).toEqual(expected);

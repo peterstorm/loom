@@ -1,25 +1,6 @@
 /** Guarded Skill Machine policy over shared structured report facts. */
 
-import type { TestReportSummary } from "../core/structured-test-report";
-
-export {
-  bunRunSummary,
-  mergeSummaries,
-  parseBunConsoleCollectionErrors,
-  parseJunitXml,
-  parseReportSource,
-  parseReportCounts,
-  parseReportSummary,
-  parseStructuredTestReportBytes,
-  parseVitestJson,
-  readJunitReport,
-  type JunitReportRead,
-  type ReportCounts,
-  type StructuredReportError,
-  type StructuredReportErrorReason,
-  type StructuredReportParseResult,
-  type TestReportSummary,
-} from "../core/structured-test-report";
+import { executedTestCount, type TestReportSummary } from "../core/structured-test-report";
 
 // --- Pure judgment ---
 
@@ -41,8 +22,9 @@ export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" 
 /**
  * The TestRun trust rule:
  * - nonzero exit                                    → trusted-fail (a real failure is ground truth)
- * - exit 0 or unknown + report, ≥1 test, 0 failures → trusted-pass
- * - exit 0 or unknown + report with 0 tests         → trusted-fail (nothing ran)
+ * - exit 0 or unknown + report, ≥1 test executed,
+ *   0 failures                                      → trusted-pass
+ * - exit 0 or unknown + report with 0 tests executed → trusted-fail (nothing ran)
  * - exit 0 or unknown + report with failures        → trusted-fail
  * - exit 0 or unknown + report recording a file
  *   that failed to collect or import                → trusted-fail
@@ -53,6 +35,10 @@ export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" 
  * would read a run whose only failure is a broken file as a pass. The report's
  * recorded per-file results (INV-8: reconciled with those counts) carry it; an
  * unrecorded summary is judged on its counts alone.
+ *
+ * "Executed" is `executedTestCount` (ADR-0100): a skipped, pending, todo or
+ * disabled test did not run, so a report whose every test was skipped is the
+ * zero-test case, not a pass.
  *
  * An unknown exit does NOT sink a run that produced a report. A structured
  * JUnit/vitest-JSON report is STRONGER evidence about what happened than a
@@ -79,7 +65,7 @@ export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" 
 export function judgeTestRun(exit: number | null, report: TestReportSummary | null): TestVerdict {
   if (exit !== null && exit !== 0) return { verdict: "trusted-fail" };
   if (report === null) return { verdict: "untrusted" };
-  return report.total > 0 && report.failed === 0 && !recordsCollectionError(report)
+  return executedTestCount(report) > 0 && report.failed === 0 && !recordsCollectionError(report)
     ? { verdict: "trusted-pass" }
     : { verdict: "trusted-fail" };
 }

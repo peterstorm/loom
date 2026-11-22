@@ -213,9 +213,4 @@ export const initialState: PhaseState = { phaseIndex: 0, counts: ZERO_COUNTS };
 
 // --- Parse results (parse, don't validate) ---
 
-export type ParseResult<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: string };
-
-export const parseOk = <T>(value: T): ParseResult<T> => ({ ok: true, value });
-export const parseErr = <T>(error: string): ParseResult<T> => ({ ok: false, error });
+export { parseErr, parseOk, type LineParseResult } from "../core/parse-result";

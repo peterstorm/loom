@@ -46,6 +46,7 @@ import {
   activeWaveGateFixture,
   completedWaveGateFixture,
   protectedGraphFixture,
+  executingGraphFixture,
 } from "../fixtures/task-lifecycle";
 
 const NOW = Date.parse("2026-11-18T09:00:00.000Z");
@@ -511,7 +512,7 @@ describe("withdrawTask removes an added Task that was never dispatched", () => {
   it.each<[string, () => TaskGraph, readonly string[], WithdrawTaskRefusal["kind"]]>([
     ["a Task add-task did not append", () => withAdded(), ["--task", "T4"], "not-an-added-task"],
     ["a graph outside the execute Phase", () => withAdded({ current_phase: "decompose" }), [], "not-executing"],
-    ["an active implementation reservation", () => withAdded({ executing_tasks: ["T4"] }), [], "implementation-active"],
+    ["an active implementation reservation", () => executingGraphFixture(withAdded(), ["T4"]), [], "implementation-active"],
     ["a live Wave Gate", () => withAdded({
       active_wave_gate: activeWaveGateFixture({ runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64) }),
     }), [], "live-wave-gate"],

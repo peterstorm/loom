@@ -463,13 +463,6 @@ export function parseWaveNumber(raw: unknown, path = "wave"): Parsed<WaveNumber>
   return total(() => parseWave(raw, path));
 }
 
-export function parseRegistrationRevision(
-  raw: unknown,
-  path = "revision",
-): Parsed<RegistrationRevision> {
-  return total(() => parseRevision(raw, path));
-}
-
 function parseWorkingDirectory(raw: unknown, path: string): Parsed<RepositoryRelativePath> {
   if (raw === ".") return success(".");
   const parsed = parseReviewPath(raw, path);

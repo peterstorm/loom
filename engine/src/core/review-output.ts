@@ -398,12 +398,6 @@ export type FindingsBlockStatus =
    */
   | { readonly kind: "partial"; readonly carriedOver: number };
 
-/** How many claims an arbitration carried across. Zero for the arms that carry
- *  none, which is now a fact about the union rather than a convention. */
-export function carriedOverCount(status: FindingsBlockStatus): number {
-  return status.kind === "superseded" || status.kind === "partial" ? status.carriedOver : 0;
-}
-
 /**
  * One reviewer's output, parsed. `drafts` is authoritative; `critical` and
  * `advisory` are DERIVED views over it, materialized here so the ~10 existing

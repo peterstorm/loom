@@ -43,15 +43,18 @@ const wire = (fingerprint: string, overrides: Parameters<typeof aVerdict>[0] = {
 /** Ballots as adjudication receives them: through the ballot parser. */
 const ballots = (...wires: readonly VerdictWire[]): readonly VerificationVerdict[] => ok(parseVerificationVerdicts(wires));
 
+/** One planned, unassigned unit for the `/export` idor cell. */
+const seededUnit = () => ok(seedCoverageUnit(aSeed({
+  refs: aRefs({ surface: "http:GET /export", boundary: "tenant", subsystem: "reports", attack_class: "idor" }),
+  starting_paths: ["src/export.ts"],
+  ordinary_attack_class_block: null,
+  selected_companion_blocks: [],
+})));
+
 /** One unit, assigned to `agentId` and — unless `settle` is false — settled
  *  covered by it: the ledger shape `adjudicateRun` derives its INV-S3 facts from. */
 const ledgerOwnedBy = (agentId: string, settle = true): CoverageLedger => {
-  const seeded = ok(seedCoverageUnit(aSeed({
-    refs: aRefs({ surface: "http:GET /export", boundary: "tenant", subsystem: "reports", attack_class: "idor" }),
-    starting_paths: ["src/export.ts"],
-    ordinary_attack_class_block: null,
-    selected_companion_blocks: [],
-  })));
+  const seeded = seededUnit();
   const assigned = ok(assignUnits([seeded], [{ coverageId: seeded.coverage_id, agentId }]));
   if (!settle) return assigned.ledger;
   const owner = assigned.assigned[0]!.ownerId;
@@ -69,6 +72,16 @@ const ledgerOwnedBy = (agentId: string, settle = true): CoverageLedger => {
  *  `refutation` profile, so a unit it hunted makes every ballot same-profile. */
 const HUNTED = ledgerOwnedBy(HUNTER_AGENT);
 const HUNTED_ON_THE_VERIFIER_PROFILE = ledgerOwnedBy("security-critic-agent");
+/** The same cell before anyone hunted it. */
+const UNHUNTED: CoverageLedger = [seededUnit()];
+
+/** HUNTED's one unit, read as the covered unit it is, so a case can re-own it
+ *  or give it a history and still hold a unit the ledger type admits. */
+const huntedUnit = () => {
+  const [unit] = HUNTED;
+  if (unit?.status !== "covered") throw new Error("HUNTED settles its unit covered");
+  return unit;
+};
 
 const adjudicate = (ledger: CoverageLedger, claims: readonly string[], verdicts: readonly VerificationVerdict[]): Adjudication =>
   ok(adjudicateRun({ ledger, findings: findings(claims), verdicts })).adjudication;
@@ -140,9 +153,7 @@ describe("adjudication", () => {
   });
 
   it("refuses a claim when the ledger records no hunting profile (unattributed)", () => {
-    const [unit] = HUNTED;
-    const unhunted: CoverageLedger = [{ ...unit!, status: "planned", agent_id: null, reviewed_paths: [], local_checks: [] }];
-    const unattributed = adjudicate(unhunted, ["authz:1"], ballots(wire("authz:1")));
+    const unattributed = adjudicate(UNHUNTED, ["authz:1"], ballots(wire("authz:1")));
     expect(unattributed.confirmed).toEqual([]);
     expect(unattributed.gaps).toEqual([{ kind: "unattributed", fingerprint: "authz:1" }]);
   });
@@ -151,27 +162,26 @@ describe("adjudication", () => {
 describe("huntingProfiles", () => {
   it("derives the hunt profile from owners and archived attempts, through the owner grammar", () => {
     expect(huntingProfiles(HUNTED)).toEqual({ ok: true, value: ["focused-review"] });
-    const [unit] = HUNTED;
-    const reassigned = [{ ...unit!, agent_id: anAgentId(`${HUNTER_AGENT}--2`), wave: 2, attempts: [{
-      wave: 1, status: "covered" as const, agent_id: HUNTER_AGENT, reviewed_paths: unit!.reviewed_paths,
-      local_checks: unit!.local_checks, result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
+    const unit = huntedUnit();
+    const reassigned = [{ ...unit, agent_id: anAgentId(`${HUNTER_AGENT}--2`), wave: 2, attempts: [{
+      wave: 1, status: "covered" as const, agent_id: HUNTER_AGENT, reviewed_paths: unit.reviewed_paths,
+      local_checks: unit.local_checks, result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
     }] }];
     expect(huntingProfiles(reassigned)).toEqual({ ok: true, value: ["focused-review"] });
   });
 
   it("fails closed on an owner — live or archived — the catalog cannot place", () => {
-    const [unit] = HUNTED;
-    expect(huntingProfiles([{ ...unit!, agent_id: anAgentId("hunter-a") }])).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
-    const archived = [{ ...unit!, agent_id: anAgentId(`${HUNTER_AGENT}--2`), wave: 2, attempts: [{
-      wave: 1, status: "covered" as const, agent_id: anAgentId("ghost-hunter"), reviewed_paths: unit!.reviewed_paths,
-      local_checks: unit!.local_checks, result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
+    const unit = huntedUnit();
+    expect(huntingProfiles([{ ...unit, agent_id: anAgentId("hunter-a") }])).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
+    const archived = [{ ...unit, agent_id: anAgentId(`${HUNTER_AGENT}--2`), wave: 2, attempts: [{
+      wave: 1, status: "covered" as const, agent_id: anAgentId("ghost-hunter"), reviewed_paths: unit.reviewed_paths,
+      local_checks: unit.local_checks, result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
     }] }];
     expect(huntingProfiles(archived)).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "ghost-hunter" } });
   });
 
   it("is empty for a ledger that names no hunter", () => {
-    const [unit] = HUNTED;
-    expect(huntingProfiles([{ ...unit!, status: "planned", agent_id: null, reviewed_paths: [], local_checks: [] }])).toEqual({ ok: true, value: [] });
+    expect(huntingProfiles(UNHUNTED)).toEqual({ ok: true, value: [] });
   });
 });
 
@@ -188,8 +198,8 @@ describe("adjudicateRun", () => {
   });
 
   it("refuses rather than adjudicates when an owner cannot be placed", () => {
-    const [unit] = HUNTED;
-    const decided = adjudicateRun({ ledger: [{ ...unit!, agent_id: anAgentId("hunter-a") }], findings: findings(["a:1"]), verdicts: ballots(wire("a:1")) });
+    const unit = huntedUnit();
+    const decided = adjudicateRun({ ledger: [{ ...unit, agent_id: anAgentId("hunter-a") }], findings: findings(["a:1"]), verdicts: ballots(wire("a:1")) });
     expect(decided).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
   });
 });

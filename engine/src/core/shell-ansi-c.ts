@@ -28,7 +28,7 @@ export function findAnsiCClose(text: string, start: number): number {
  * at the first NUL and drops the NUL and everything after it IN THAT BODY
  * (`$'a\x00b'` → `a`). Truncating (rather than merely dropping the NUL and
  * decoding on) matches bash for BOTH consumers: the guard sees the real
- * executed span, and the evidence twin (readRedirectTarget) mints the real
+ * executed span, and the evidence twin (redirectTargetsOf) mints the real
  * written path instead of an over-long one. A standalone `$'\x00'` body decodes
  * to empty, so any literal after the close-quote still rejoins (`x$'\x00'y` →
  * `xy`). An unknown escape drops the backslash and keeps the char

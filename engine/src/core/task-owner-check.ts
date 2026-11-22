@@ -56,6 +56,7 @@ import {
   exactKeys,
   parseTaskRecord,
   recordedTask,
+  taskRecordAnswerLines,
   taskRecordDigest,
   taskRecordJson,
   type RecordedTask,
@@ -68,12 +69,6 @@ import {
   type TaskRecordWire,
 } from "./task-record";
 import type { AffectedRunner } from "./verification-manifest";
-
-/** The longest one `helper owner-check` run may take; a run it cannot launch in time is refused, never half-judged. */
-export const TASK_OWNER_CHECK_DEADLINE_MS = 480_000;
-
-/** The tool-call timeout an implementer gives the helper: the deadline, plus room to open and remove its worktrees. */
-export const TASK_OWNER_CHECK_BASH_TIMEOUT_MS = 600_000;
 
 // ---------------------------------------------------------------------------
 // The duty
@@ -455,9 +450,6 @@ export function renderTaskOwnerCheckBlock(cause: TaskOwnerCheckBlockCause, comma
   return [
     "LOOM TASK OWNER CHECK: an owned Invariant your Task writes is not yet answered by its matrix test.",
     ...blockCauseLines(cause),
-    "",
-    `Run it as one Bash call with a timeout of ${TASK_OWNER_CHECK_BASH_TIMEOUT_MS} ms, then your final verification run:`,
-    `  ${command}`,
-    `This check blocks at most ${blocksRemaining} more time(s); after that your stop proceeds and the Wave Gate judges.`,
+    ...taskRecordAnswerLines(command, blocksRemaining),
   ].join("\n");
 }

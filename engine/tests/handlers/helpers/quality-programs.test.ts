@@ -19,6 +19,7 @@ import { LOCAL_PI_MODEL_ARGUMENT } from "../../fixtures/local-pi-binding";
 import { afterEach, describe, expect, it } from "vitest";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../../src/runtime-compatibility";
 import { readReviewPacketPostimage } from "../../../src/handlers/helpers/review-packet";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const ENGINE = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const ROOT = resolve(ENGINE, "..");
@@ -92,6 +93,7 @@ function writeReviewPacketTaskGraph(
 ): void {
   writeFileSync(statePath, JSON.stringify({
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -245,10 +247,8 @@ describe("quality-program helper boundaries", () => {
       // The shared ProgramParse failure constructor (`failed`): the plan design
       // acceptance and its evidence reader build the same refusals with it.
       "engine/src/handlers/helpers/accept-plan-design-review.ts -> program-result",
-      "engine/src/handlers/helpers/orchestration.ts -> legacy-panel",
       "engine/src/handlers/helpers/orchestration.ts -> remediation-events",
-      // The run-directory-only effect runner: the façade's transcript capture
-      // and the legacy panel driver share it, so neither restates it.
+      // The run-directory-only effect runner the façade's transcript capture uses.
       "engine/src/handlers/helpers/orchestration.ts -> run-directory-effects",
       "engine/src/handlers/helpers/orchestration.ts -> standalone-disposition",
       "engine/src/handlers/helpers/orchestration.ts -> standalone-source",
@@ -363,30 +363,6 @@ describe("quality-program helper boundaries", () => {
     expect(prompt).not.toContain(`(${selected.state})`);
     expect(prompt).not.toContain("seeded");
     expect(prompt).not.toContain(selected.expected_criticals[0]!.claim);
-  });
-
-  it("event-sources the exact refutation batch and waits for all slots before tally", () => {
-    const input = {
-      input: {
-        criticalFindingIds: ["T1:code-reviewer-1"],
-        lenses: ["reproduction", "intent", "blast-radius"],
-      },
-      events: [],
-    };
-    const first = JSON.parse(cli(["helper", "panel-program", "refutation"], JSON.stringify(input)));
-    expect(first.action.type).toBe("spawn-batch");
-    expect(first.action.requests.map((request: { modelProfile: string }) => request.modelProfile))
-      .toEqual(["refutation", "refutation", "refutation"]);
-
-    input.events.push({
-      type: "spawn-outcome",
-      requestId: "refutation:verifier:1",
-      attempt: 1,
-      outcome: "succeeded",
-    } as never);
-    const partial = JSON.parse(cli(["helper", "panel-program", "refutation"], JSON.stringify(input)));
-    expect(partial.action).toBeNull();
-    expect(partial.state.stage).toBe("verifiers");
   });
 
   it("event-sources the architecture candidate batch and waits for every slot", () => {
@@ -897,27 +873,5 @@ describe("quality-program helper boundaries", () => {
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain("must not traverse a symlink");
     expect(existsSync(join(outside, "packet.json"))).toBe(false);
-  });
-
-  it("rejects an unknown refutation lens at the CLI boundary", () => {
-    const run = spawnSync("bun", [CLI, "helper", "panel-program", "refutation"], {
-      cwd: disposableDirectory(),
-      env: admittedEnv(),
-      input: JSON.stringify({ input: { criticalFindingIds: ["T1:F1"], lenses: ["invented"] }, events: [] }),
-      encoding: "utf-8",
-    });
-    expect(run.status).not.toBe(0);
-    expect(run.stderr).toContain("unknown refutation lens");
-  });
-
-  it("rejects a task-local finding id before constructing a refutation program", () => {
-    const run = spawnSync("bun", [CLI, "helper", "panel-program", "refutation"], {
-      cwd: disposableDirectory(),
-      env: admittedEnv(),
-      input: JSON.stringify({ input: { criticalFindingIds: ["code-reviewer-1"], lenses: ["intent"] }, events: [] }),
-      encoding: "utf-8",
-    });
-    expect(run.status).not.toBe(0);
-    expect(run.stderr).toContain("wave-scoped task-id:finding-id");
   });
 });

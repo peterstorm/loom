@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { authorityMarkedPrompt as markedPrompt, canonicalTaskIdentity } from "../fixtures/issued-task-identity";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../src/orchestration/context-packets";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
@@ -51,8 +52,12 @@ afterEach(() => {
 
 type StagedRun = Readonly<{ runsRoot: string; runDirectory: string; requests: readonly AgentRequestAuthority[] }>;
 
-/** One registered run with one reserved request per id, all for code-reviewer. */
-async function stagedRun(name: string, requestIds: readonly string[]): Promise<StagedRun> {
+/**
+ * One registered run with one reserved request per id, all for code-reviewer.
+ * `contextLabel` varies the published context, so two runs can issue the same
+ * request id under different context digests.
+ */
+async function stagedRun(name: string, requestIds: readonly string[], contextLabel = "context"): Promise<StagedRun> {
   const runsRoot = join(base, `runs-${name}`);
   const runDirectory = join(runsRoot, `run.${name}`);
   mkdirSync(runDirectory, { recursive: true });
@@ -60,7 +65,7 @@ async function stagedRun(name: string, requestIds: readonly string[]): Promise<S
   if (!opened.ok) throw new Error(opened.error.message);
   const requests: AgentRequestAuthority[] = [];
   for (const [index, requestId] of requestIds.entries()) {
-    const section = encodeByteSection("test", `context for ${requestId}`);
+    const section = encodeByteSection("test", `${contextLabel} for ${requestId}`);
     if (!section.ok) throw new Error(section.error.message);
     const packet = buildContextPacket({
       requestId: requestId as AgentRequestAuthority["requestId"],
@@ -85,6 +90,13 @@ async function stagedRun(name: string, requestIds: readonly string[]): Promise<S
   }
   return { runsRoot, runDirectory, requests };
 }
+
+/** A context digest no staged run issued. */
+const FOREIGN_DIGEST = "f".repeat(64);
+
+/** The prompt the engine issued for `request`. */
+const issuedPrompt = (request: AgentRequestAuthority, body = "Review."): string =>
+  markedPrompt(request.requestId, request.contextDigest, body);
 
 async function bind(run: StagedRun, requestIds: readonly string[] = run.requests.map(({ requestId }) => requestId)) {
   const registered = await registerSessionRunBinding(bindingDirectory, SESSION, {
@@ -154,7 +166,7 @@ describe("Claude PostToolUse spawn correlation through the session run binding",
     await bind(other);
 
     const result = await recordClaudeSpawnCorrelation(
-      spawnPayload("LOOM_REQUEST_ID: request:alpha:1\nReview.", "agent-alpha"), bindingDirectory);
+      spawnPayload(issuedPrompt(issuing.requests[0]!), "agent-alpha"), bindingDirectory);
 
     expect(result).toEqual({ kind: "allow" });
     expect(correlator(issuing, "agent-alpha")).toMatchObject({ requestId: "request:alpha:1", role: "code-reviewer" });
@@ -173,22 +185,79 @@ describe("Claude PostToolUse spawn correlation through the session run binding",
     await bind(await stagedRun("bound", ["request:alpha:1"]));
 
     const result = await recordClaudeSpawnCorrelation(
-      spawnPayload("LOOM_REQUEST_ID: request:stale:1\nReview.", "agent-x"), bindingDirectory);
+      spawnPayload(markedPrompt("request:stale:1", FOREIGN_DIGEST), "agent-x"), bindingDirectory);
 
     expect(result).toMatchObject({
       kind: "error",
-      message: "no Claude Code session run binding contains issued request request:stale:1",
+      message: `no Claude Code session run binding contains issued request/context authority request:stale:1@${FOREIGN_DIGEST}`,
     });
   });
 
-  it("fails closed when several session bindings claim the marker", async () => {
+  it("refuses an issued request id whose context digest the binding's run did not issue, recording nothing", async () => {
+    const run = await stagedRun("bound", ["request:alpha:1"]);
+    await bind(run);
+
+    const result = await recordClaudeSpawnCorrelation(
+      spawnPayload(markedPrompt("request:alpha:1", FOREIGN_DIGEST), "agent-x"), bindingDirectory);
+
+    expect(result).toEqual({
+      kind: "error",
+      message: `no Claude Code session run binding contains issued request/context authority request:alpha:1@${FOREIGN_DIGEST}`,
+    });
+    expect(correlator(run, "agent-x")).toBeNull();
+  });
+
+  it("refuses a mismatched context digest under explicit authority too, recording nothing", async () => {
+    const explicit = await stagedRun("explicit", ["request:alpha:1"]);
+    process.env[RUNS_ROOT_ENV] = explicit.runsRoot;
+    process.env[RUN_DIR_ENV] = explicit.runDirectory;
+
+    const result = await recordClaudeSpawnCorrelation(
+      spawnPayload(markedPrompt("request:alpha:1", FOREIGN_DIGEST), "agent-env"), bindingDirectory);
+
+    expect(result).toEqual({
+      kind: "error",
+      message: `Claude spawn request request:alpha:1 names context ${FOREIGN_DIGEST}, not its issued context ${explicit.requests[0]!.contextDigest}`,
+    });
+    expect(correlator(explicit, "agent-env")).toBeNull();
+  });
+
+  it.each([
+    ["a request marker without its digest", "LOOM_REQUEST_ID: request:alpha:1\nReview.", "LOOM_CONTEXT_DIGEST marker is absent"],
+    ["a digest marker without its request", `LOOM_CONTEXT_DIGEST: ${FOREIGN_DIGEST}\nReview.`, "LOOM_REQUEST_ID marker is absent"],
+    ["two different request markers", "LOOM_REQUEST_ID: request:a\nLOOM_REQUEST_ID: request:b\nGo.", "LOOM_REQUEST_ID marker is contradictory"],
+  ])("fails closed on %s, recording nothing", async (_label, prompt, reason) => {
+    const run = await stagedRun("bound", ["request:alpha:1"]);
+    await bind(run);
+
+    const result = await recordClaudeSpawnCorrelation(spawnPayload(prompt, "agent-x"), bindingDirectory);
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(reason) });
+    expect(correlator(run, "agent-x")).toBeNull();
+  });
+
+  it("tells apart two bound runs issuing one request id by the context digest", async () => {
+    const first = await stagedRun("first", ["request:alpha:1"], "first context");
+    const second = await stagedRun("second", ["request:alpha:1"], "second context");
+    await bind(first);
+    await bind(second);
+
+    const result = await recordClaudeSpawnCorrelation(
+      spawnPayload(issuedPrompt(second.requests[0]!), "agent-second"), bindingDirectory);
+
+    expect(result).toEqual({ kind: "allow" });
+    expect(correlator(second, "agent-second")).toMatchObject({ requestId: "request:alpha:1" });
+    expect(correlator(first, "agent-second")).toBeNull();
+  });
+
+  it("fails closed when several session bindings issued the same request and context", async () => {
     const first = await stagedRun("first", ["request:alpha:1"]);
     const second = await stagedRun("second", ["request:alpha:1"]);
     await bind(first);
     await bind(second);
 
     const result = await recordClaudeSpawnCorrelation(
-      spawnPayload("LOOM_REQUEST_ID: request:alpha:1\nReview.", "agent-x"), bindingDirectory);
+      spawnPayload(issuedPrompt(first.requests[0]!), "agent-x"), bindingDirectory);
 
     expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("multiple Claude Code session run bindings") });
     expect(correlator(first, "agent-x")).toBeNull();
@@ -204,7 +273,7 @@ describe("Claude PostToolUse spawn correlation through the session run binding",
     expect(registered.ok).toBe(true);
 
     const result = await recordClaudeSpawnCorrelation(
-      spawnPayload("LOOM_REQUEST_ID: request:alpha:1\nReview.", "agent-x"), bindingDirectory);
+      spawnPayload(issuedPrompt(run.requests[0]!), "agent-x"), bindingDirectory);
 
     expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("belongs to Pi, not Claude Code") });
     expect(correlator(run, "agent-x")).toBeNull();
@@ -218,7 +287,7 @@ describe("Claude PostToolUse spawn correlation through the session run binding",
     process.env[RUN_DIR_ENV] = explicit.runDirectory;
 
     const result = await recordClaudeSpawnCorrelation(
-      spawnPayload("LOOM_REQUEST_ID: request:alpha:1\nReview.", "agent-env"), bindingDirectory);
+      spawnPayload(issuedPrompt(explicit.requests[0]!), "agent-env"), bindingDirectory);
 
     expect(result).toEqual({ kind: "allow" });
     expect(correlator(explicit, "agent-env")).not.toBeNull();
@@ -233,7 +302,7 @@ describe("Claude SubagentStop capture through the session run binding", () => {
     const run = await stagedRun("capture", ["request:alpha:1"]);
     await bind(run);
     await bind(await stagedRun("unrelated", ["request:beta:1"]));
-    const prompt = "LOOM_REQUEST_ID: request:alpha:1\nReview.";
+    const prompt = issuedPrompt(run.requests[0]!);
     expect(await recordClaudeSpawnCorrelation(spawnPayload(prompt, "agent-alpha"), bindingDirectory)).toEqual({ kind: "allow" });
 
     const result = await captureOrchestrationResult(stop("agent-alpha", handbackTranscript("alpha", prompt, payload)), []);
@@ -245,7 +314,7 @@ describe("Claude SubagentStop capture through the session run binding", () => {
   it("captures a foreground spawn whose stop precedes its PostToolUse, then agrees with that PostToolUse", async () => {
     const run = await stagedRun("foreground", ["request:alpha:1"]);
     await bind(run);
-    const prompt = "LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: request:alpha:1\nReview.";
+    const prompt = `LOOM_REVIEW_CONTEXT: standalone\n${issuedPrompt(run.requests[0]!)}`;
 
     const result = await captureOrchestrationResult(stop("agent-fg", handbackTranscript("fg", prompt, payload)), []);
 
@@ -279,10 +348,12 @@ describe("Claude SubagentStop capture through the session run binding", () => {
     await bind(second);
     process.env[RUNS_ROOT_ENV] = first.runsRoot;
     process.env[RUN_DIR_ENV] = first.runDirectory;
-    await recordClaudeSpawnCorrelation(spawnPayload("LOOM_REQUEST_ID: request:alpha:1\nGo.", "agent-dup"), bindingDirectory);
+    expect(await recordClaudeSpawnCorrelation(spawnPayload(issuedPrompt(first.requests[0]!, "Go."), "agent-dup"), bindingDirectory))
+      .toEqual({ kind: "allow" });
     process.env[RUNS_ROOT_ENV] = second.runsRoot;
     process.env[RUN_DIR_ENV] = second.runDirectory;
-    await recordClaudeSpawnCorrelation(spawnPayload("LOOM_REQUEST_ID: request:beta:1\nGo.", "agent-dup"), bindingDirectory);
+    expect(await recordClaudeSpawnCorrelation(spawnPayload(issuedPrompt(second.requests[0]!, "Go."), "agent-dup"), bindingDirectory))
+      .toEqual({ kind: "allow" });
     delete process.env[RUNS_ROOT_ENV];
     delete process.env[RUN_DIR_ENV];
 
@@ -295,9 +366,26 @@ describe("Claude SubagentStop capture through the session run binding", () => {
     await bind(await stagedRun("bound", ["request:alpha:1"]));
 
     const result = await captureOrchestrationResult(
-      stop("agent-x", handbackTranscript("stale", "LOOM_REQUEST_ID: request:stale:1\nGo.", payload)), []);
+      stop("agent-x", handbackTranscript("stale", markedPrompt("request:stale:1", FOREIGN_DIGEST, "Go."), payload)), []);
 
-    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("no Claude Code session run binding contains issued request request:stale:1") });
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining(`no Claude Code session run binding contains issued request/context authority request:stale:1@${FOREIGN_DIGEST}`),
+    });
+  });
+
+  it("fails closed on a foreground stop whose spawn prompt names a mismatched context digest, capturing nothing", async () => {
+    const run = await stagedRun("bound", ["request:alpha:1"]);
+    await bind(run);
+
+    const result = await captureOrchestrationResult(
+      stop("agent-x", handbackTranscript("mismatch", markedPrompt("request:alpha:1", FOREIGN_DIGEST, "Go."), payload)), []);
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining(`no Claude Code session run binding contains issued request/context authority request:alpha:1@${FOREIGN_DIGEST}`),
+    });
+    expect(correlator(run, "agent-x")).toBeNull();
   });
 
   it("fails closed on an unreadable binding registry", async () => {
@@ -324,7 +412,7 @@ describe("resolveClaudeStopRun", () => {
   it("never reads the spawn prompt once a bound run's correlator claims the agent", async () => {
     const run = await stagedRun("claimed", ["request:alpha:1"]);
     await bind(run);
-    await recordClaudeSpawnCorrelation(spawnPayload("LOOM_REQUEST_ID: request:alpha:1\nGo.", "agent-a"), bindingDirectory);
+    await recordClaudeSpawnCorrelation(spawnPayload(issuedPrompt(run.requests[0]!, "Go."), "agent-a"), bindingDirectory);
     let promptReads = 0;
 
     const resolved = resolveClaudeStopRun(context(), "agent-a", () => { promptReads += 1; return { ok: true, value: null }; });
@@ -337,13 +425,34 @@ describe("resolveClaudeStopRun", () => {
     const run = await stagedRun("pending", ["request:alpha:1"]);
     await bind(run);
 
-    const resolved = resolveClaudeStopRun(context(), "agent-a", () => ({ ok: true, value: "LOOM_REQUEST_ID: request:alpha:1" }));
+    const resolved = resolveClaudeStopRun(context(), "agent-a", () => ({ ok: true, value: issuedPrompt(run.requests[0]!) }));
 
     expect(resolved).toEqual({ ok: true, value: {
       kind: "uncorrelated",
       run: { runsRoot: run.runsRoot, runDirectory: run.runDirectory },
-      requestId: "request:alpha:1",
+      identity: { requestId: "request:alpha:1", contextDigest: run.requests[0]!.contextDigest },
     } });
+  });
+
+  it("refuses a spawn prompt whose request marker carries no context digest", async () => {
+    await bind(await stagedRun("pending", ["request:alpha:1"]));
+
+    expect(resolveClaudeStopRun(context(), "agent-a", () => ({ ok: true, value: "LOOM_REQUEST_ID: request:alpha:1" })))
+      .toEqual({
+        ok: false,
+        message: "Claude orchestration prompt task issuance identity is incomplete or contradictory: " +
+          "LOOM_REQUEST_ID marker names request:alpha:1; LOOM_CONTEXT_DIGEST marker is absent",
+      });
+  });
+
+  it("refuses a spawn prompt naming its issued request under another context digest", async () => {
+    await bind(await stagedRun("pending", ["request:alpha:1"]));
+
+    expect(resolveClaudeStopRun(context(), "agent-a", () => ({ ok: true, value: markedPrompt("request:alpha:1", FOREIGN_DIGEST) })))
+      .toEqual({
+        ok: false,
+        message: `no Claude Code session run binding contains issued request/context authority request:alpha:1@${FOREIGN_DIGEST}`,
+      });
   });
 
   it("treats an unsafe session id as naming no registry", () => {
@@ -367,19 +476,17 @@ describe("resolveClaudeStopRun", () => {
 
 describe("resolveClaudeSpawnRun", () => {
   it("requires a session id to resolve a marker without explicit authority", () => {
-    expect(resolveClaudeSpawnRun(context({ sessionId: undefined }), "request:alpha:1"))
+    expect(resolveClaudeSpawnRun(context({ sessionId: undefined }), canonicalTaskIdentity("request:alpha:1", FOREIGN_DIGEST)))
       .toMatchObject({ ok: false, message: expect.stringContaining("no session_id") });
   });
 
   it("returns the explicit run without consulting bindings", () => {
-    expect(resolveClaudeSpawnRun(context({ runsRoot: "/r", runDirectory: "/r/run.x", sessionId: undefined }), "request:alpha:1"))
+    expect(resolveClaudeSpawnRun(context({ runsRoot: "/r", runDirectory: "/r/run.x", sessionId: undefined }), canonicalTaskIdentity("request:alpha:1", FOREIGN_DIGEST)))
       .toEqual({ ok: true, value: { runsRoot: "/r", runDirectory: "/r/run.x" } });
   });
 });
 
 describe("establishClaudeStopRun foreground refusals", () => {
-  const prompt = "LOOM_REQUEST_ID: request:alpha:1\nReview.";
-
   /**
    * Point Claude's transcript/meta derivation at an empty hermetic config tree,
    * so nothing the real harness wrote for this session can answer for the agent.
@@ -420,7 +527,7 @@ describe("establishClaudeStopRun foreground refusals", () => {
     const result = await establishClaudeStopRun({
       session_id: SESSION,
       agent_id: "agent-roleless",
-      agent_transcript_path: handbackTranscript("roleless", prompt, "{}"),
+      agent_transcript_path: handbackTranscript("roleless", issuedPrompt(run.requests[0]!), "{}"),
     }, context());
 
     expect(result).toMatchObject({ ok: false, message: expect.stringContaining("has no agent role to correlate") });
@@ -435,7 +542,7 @@ describe("establishClaudeStopRun foreground refusals", () => {
     const result = await establishClaudeStopRun({
       session_id: SESSION,
       agent_id: "agent-badmeta",
-      agent_transcript_path: handbackTranscript("badmeta", prompt, "{}"),
+      agent_transcript_path: handbackTranscript("badmeta", issuedPrompt(run.requests[0]!), "{}"),
     }, context());
 
     expect(result).toMatchObject({ ok: false, message: expect.stringContaining("cannot resolve the role of Claude agent agent-badmeta") });

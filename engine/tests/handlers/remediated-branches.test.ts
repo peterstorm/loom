@@ -158,6 +158,10 @@ describe("Claude orchestration spawn correlation", () => {
     tool_response: { agent_id: "native-agent-1" },
   });
 
+  /** Both authority markers, as the engine writes them, then the instruction. */
+  const marked = (requestId: string): string =>
+    `LOOM_REQUEST_ID: ${requestId}\nLOOM_CONTEXT_DIGEST: ${"a".repeat(64)}\nGo.`;
+
   it("passes through a call carrying no engine marker at all", async () => {
     // PostToolUse is global: an unrelated Task call in the same session must
     // not be claimed by this run.
@@ -166,21 +170,29 @@ describe("Claude orchestration spawn correlation", () => {
     expect(result.kind).toBe("passthrough");
   });
 
-  it("refuses a prompt carrying more than one request marker", async () => {
+  it("refuses a prompt carrying two different request markers", async () => {
     const result = await recordOrchestrationSpawn(
-      spawn("LOOM_REQUEST_ID: request:a\nLOOM_REQUEST_ID: request:b\nGo."),
+      spawn(`LOOM_REQUEST_ID: request:a\nLOOM_REQUEST_ID: request:b\nLOOM_CONTEXT_DIGEST: ${"a".repeat(64)}\nGo.`),
       [],
     );
 
     expect(result.kind).toBe("error");
     if (result.kind !== "error") return;
-    expect(result.message).toContain("exactly one LOOM_REQUEST_ID marker");
+    expect(result.message).toContain("LOOM_REQUEST_ID marker is contradictory");
+  });
+
+  it("refuses a request marker without its context digest marker", async () => {
+    const result = await recordOrchestrationSpawn(spawn("LOOM_REQUEST_ID: request:a\nGo."), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    expect(result.message).toContain("LOOM_CONTEXT_DIGEST marker is absent");
   });
 
   it("refuses a spawn with no agent role", async () => {
     const result = await recordOrchestrationSpawn(JSON.stringify({
       tool_name: "Task",
-      tool_input: { prompt: "LOOM_REQUEST_ID: request:a\nGo." },
+      tool_input: { prompt: marked("request:a") },
       tool_response: { agent_id: "native-agent-1" },
     }), []);
 
@@ -195,7 +207,7 @@ describe("Claude orchestration spawn correlation", () => {
   ])("refuses a response carrying %s native agent ids", async (_label, response) => {
     const result = await recordOrchestrationSpawn(JSON.stringify({
       tool_name: "Task",
-      tool_input: { subagent_type: "loom:code-reviewer", prompt: "LOOM_REQUEST_ID: request:a\nGo." },
+      tool_input: { subagent_type: "loom:code-reviewer", prompt: marked("request:a") },
       tool_response: response,
     }), []);
 
@@ -208,7 +220,7 @@ describe("Claude orchestration spawn correlation", () => {
     const opened = openRunDirectory(runsRoot, runDirectory);
     expect(opened.ok).toBe(true);
 
-    const result = await recordOrchestrationSpawn(spawn("LOOM_REQUEST_ID: request:never-issued\nGo."), []);
+    const result = await recordOrchestrationSpawn(spawn(marked("request:never-issued")), []);
 
     expect(result.kind).toBe("error");
     if (result.kind !== "error") return;
@@ -226,7 +238,7 @@ describe("Claude orchestration spawn correlation", () => {
   it("refuses half-supplied run authority", async () => {
     delete process.env[RUN_DIR_ENV];
 
-    const result = await recordOrchestrationSpawn(spawn("LOOM_REQUEST_ID: request:a\nGo."), []);
+    const result = await recordOrchestrationSpawn(spawn(marked("request:a")), []);
 
     expect(result.kind).toBe("error");
     if (result.kind !== "error") return;
@@ -249,7 +261,7 @@ describe("Claude orchestration spawn correlation", () => {
     delete process.env[RUNS_ROOT_ENV];
     delete process.env[RUN_DIR_ENV];
 
-    const result = await recordOrchestrationSpawn(spawn("LOOM_REQUEST_ID: request:a\nGo."), []);
+    const result = await recordOrchestrationSpawn(spawn(marked("request:a")), []);
 
     expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("no session_id") });
   });

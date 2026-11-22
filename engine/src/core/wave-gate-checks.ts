@@ -30,6 +30,7 @@ import {
 import type { ProofFailure } from "./proof-obligations";
 import { renderProjectVerificationCoverage } from "./verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
+import type { ManifestedTaskGraph } from "./manifested-task-graph";
 import { canonicalRecord, type NonEmpty, nonEmptyOf } from "./orchestration-contract";
 import type { FrozenPathObservations } from "./acceptance-contract";
 import { waveReviewStanding, waveReviewView } from "./wave-review-authority";
@@ -40,10 +41,6 @@ export type GateCheck =
 
 const pass = (summary: string): GateCheck => canonicalRecord({ passed: true, summary });
 const fail = (reason: string): GateCheck => canonicalRecord({ passed: false, reason });
-
-export function gateCheckMessage(check: GateCheck): string {
-  return check.passed ? check.summary : check.reason;
-}
 
 function proofFailureMessage(failure: ProofFailure): string {
   return match(failure)
@@ -63,11 +60,11 @@ function proofFailureMessage(failure: ProofFailure): string {
 }
 
 function unreadyTaskMessage(task: Task): string {
-  const failures = task.proof?.state === "failed"
+  const failures = task.proof.state === "failed"
     ? `, failures=[${task.proof.failures.map(proofFailureMessage).join(", ")}]`
     : "";
   const revalidation = task.revalidation_required === true ? ", revalidation=fresh-test-evidence-required" : "";
-  return `${task.id} (status=${task.status}, proof=${task.proof?.state ?? "missing"}${revalidation}${failures})`;
+  return `${task.id} (status=${task.status}, proof=${task.proof.state}${revalidation}${failures})`;
 }
 
 export function checkNoExecutingTasks(tasks: readonly Task[], executingTaskIds: readonly string[]): GateCheck {
@@ -81,7 +78,7 @@ export function checkNoExecutingTasks(tasks: readonly Task[], executingTaskIds: 
 export function checkImplementationProof(tasks: readonly Task[]): GateCheck {
   const unready = tasks.filter((task) =>
     task.revalidation_required === true ||
-    (task.status !== "implemented" && task.status !== "completed") || task.proof?.state !== "satisfied"
+    (task.status !== "implemented" && task.status !== "completed") || task.proof.state !== "satisfied"
   );
   return unready.length === 0
     ? pass(`1. Implementation proof verified (${tasks.length}/${tasks.length} tasks).`)
@@ -295,15 +292,13 @@ export interface GateDeps {
 }
 
 export function checkWaveCompletionSuite(
-  state: TaskGraph,
+  state: ManifestedTaskGraph,
   wave: number,
   currentWorkspace: WaveWorkspaceObservation | undefined,
   currentResult: WaveCompletionResultObservation | undefined = undefined,
 ): GateCheck {
   const readiness = deriveWaveCompletionSuiteReadiness(state, wave, currentWorkspace, currentResult);
   return match(readiness)
-    .with({ kind: "legacy-unavailable" }, () =>
-      pass("4. Wave completion suite: legacy-unavailable (verification_manifest and active receipt absent)."))
     .with({ kind: "required" }, (value) => fail(
       `FAILED: Wave completion suite required (${value.reason}): ${value.detail}. ` +
       renderProjectVerificationCoverage(value.projectVerificationCoverage),
@@ -427,7 +422,7 @@ export function deriveWaveStartReadiness(state: TaskGraph, waveTasks: readonly T
     : canonicalRecord({ kind: "not-ready" as const, failures: nonEmptyOf(first, ...rest) });
 }
 
-function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
+function waveGateChecks(state: ManifestedTaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
   return Object.freeze([
     ...waveStartPrerequisiteChecks(state, waveTasks),
     checkWaveCompletionSuite(
@@ -452,7 +447,7 @@ function passedGateDecision(state: TaskGraph, wave: number, checks: readonly Gat
   });
 }
 
-export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps: GateDeps): GateDecision {
+export function evaluateWaveGate(state: ManifestedTaskGraph, waveArg: number | null, deps: GateDeps): GateDecision {
   const authority = waveGateAuthorityCheck(state, waveArg);
   if (authority.failures.length > 0) {
     return failedGateDecision(
@@ -485,7 +480,7 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
   const defaultGate = newWaveGate();
   const clearedTasks = state.tasks.map((task): Task => {
     if (task.wave !== decision.wave || task.status === "completed") return task;
-    if (task.status !== "implemented" || task.proof?.state !== "satisfied") return task;
+    if (task.status !== "implemented" || task.proof.state !== "satisfied") return task;
     // A Task exempt from Wave review completes with its Wave but was never
     // reviewed, so completion writes it no `passed`: its exemption is derived
     // from its role (`waveReviewStanding`), not from a stored status.
@@ -493,7 +488,6 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
       ...task,
       status: "completed",
       proof: task.proof,
-      legacy_missing_proof: undefined,
       ...(waveReviewStanding(task).kind === "reviewed" ? { review_status: "passed" as const } : {}),
     };
   });

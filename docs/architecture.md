@@ -108,7 +108,7 @@ Important parser boundaries include:
 - `parsers/parse-phase-artifacts.ts` — derives phase artifacts from completed Agent output;
 - `core/parse-plan-models.ts` — parses exact lifecycle, pipeline, invariant (including ownership), and contract declarations;
 - `core/acceptance-contract/wire.ts` — parses persisted Acceptance Contracts and their freeze, and the gate expectation and per-check report facts a suite result or receipt records (`core/completion-suite.ts` parses the observation envelope around them);
-- `core/structured-test-report.ts` — projects a strict JUnit report into testcases for acceptance judgment;
+- `core/structured-test-report.ts` — reads a structured test report once (`readTestReport`) and projects it: the TestRun summary (declared counts held to the executed count, ADR-0100), the executed-count completion counts, and a strict JUnit report's testcases for acceptance judgment;
 - `core/review-output.ts` and `core/findings.ts` — parse, identify, reconcile, and classify review Findings;
 - `core/review-packet.ts` — parses immutable code-review scope packets;
 - `core/panel-contract.ts` / `core/review-panel.ts` — validate architecture and refutation verdicts;
@@ -130,7 +130,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Finding lifecycle | `findings.ts`, `review-output.ts`, `review-packet.ts` | Stable identity, generations, packet-bound remediation verification |
 | Advisory dispositions | `advisory-disposition.ts` (the record and its one constructor, `advisoryDecisionTasks` (the Tasks a gate counts advisories over), `waveAdvisories` (the advisories a decision request issues), the anchor, and `issuedPriorFindings`, the rule behind `waveReviewPriorFindings` in `wave-review-authority.ts`, the one prior selector Wave review issuance and the restart carry read), `advisory-disposition-record.ts` (`helper orchestration disposition`: the stdin parse and the pure append) ([ADR-0090](adr/ADR-0090-advisory-decisions-are-recorded-on-the-taskgraph.md)) | Decisions on advisories outlive the gate run; a deferred or dismissed advisory is not reissued while its bytes hold; approval needs a decision on each |
 | Architecture panel | `panel-kernel.ts`, `panel-contract.ts`, `panel-program.ts` | Lenses, exact candidates/criteria, verdict validation, ranking, retries |
-| Refutation panel | `panel-kernel.ts`, `review-panel.ts`, `panel-program.ts` | Exact critical set, verifier lenses, majority tally, retained audit |
+| Refutation panel | `panel-kernel.ts`, `review-panel.ts`, `persistent-panel.ts` | Exact critical set, verifier lenses, majority tally, retained audit |
 | Standalone review | `standalone-review.ts`, the one owner of source, disposition and successor preparation, issued admission, roster aggregation and the review reducer; `standalone-successor-reviewer.ts` is a named entry surface into it | Frozen scope/roster, successor admission, aggregation, current refutation work, authoritative result |
 | Standalone lineage | `standalone-lineage-contract.ts` (the wire contract below the aggregate), `standalone-disposition-machine.ts` (advisory publication without Agents) | Original identity and history, explicit policy and source joins, complete current assessment |
 | Plan design review | `plan-design-review.ts` | The kind and its roster, the State File record, the gate decision |
@@ -141,7 +141,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Engine-owned paths | `engine-owned-paths.ts`, the one definition of every repository path class the engine writes or protects (Git metadata, each harness's state and review directories, Run Directory layouts, completion reports); `engine-runtime-paths.ts` adds the State File's own lock and staging leaves. the workspace digest, defect accounting and remediation each exclude the classes they mean (Task scope judges the State File's own companions through `engine-runtime-paths.ts`), and remediation records the digest of the one evidence table its predicate interprets, and the lint rule `.claude/linter/rules/inv-10-one-engine-owned-path-module.json` refuses a module that restates one of the paths (loom#198, Cause 2) | One answer to "is this path the engine's?" |
 | Remediation | `remediation-machine.ts` | Scope authority, excluded evidence paths (`isEngineEvidencePath`, for both harnesses; an authority recorded under the earlier Claude-only policy digest stays readable and is held to the current policy), audit/stage/install lifecycle |
 | Model policy | `model-profiles.ts` (profile and Agent Catalog, resolution, issuance eligibility), `agent-catalog-projections.ts`, `pi-spawn-input.ts`, `model-calibration.ts` | Explicit cross-harness bindings, catalog-derived dispatch sets, deterministic calibration scoring |
-| Compatibility | `legacy-archive.ts` | Read-only parsers for historical artifacts; never new domain behavior |
+| Spawn request identity | `spawn-task-text.ts`: `renderSpawnTaskText` writes a task's `LOOM_REQUEST_ID` / `LOOM_CONTEXT_DIGEST` markers and `parseIssuedTaskIdentity` is their one reader (unbound, malformed or bound; identical repeats are one identity); `orchestration/session-run-bindings.ts` holds `resolveIssuingRun` (with its session half, `resolveIssuingSessionBinding`), the one rule for the run that issued them. Claude's correlator and SubagentStop, Pi's spawn and result paths, the issued emission capability and the grandfathered model rescue all cross it, and the lint rule `.claude/linter/rules/inv-11-one-request-marker-parser.json` refuses a module that restates a marker (ADR-0099) | One answer, on both harnesses, to "which issued request and run does this task name?" |
 
 ### Algebraic state machines
 
@@ -198,10 +198,7 @@ The registered programs are driven by `handlers/helpers/programs/`. The façade 
 
 Each program persists in its Run Directory (ADR-0029). Durable history is an append-only journal of dedup-keyed events (the record format and its parser in `orchestration/program-journal.ts`; `RunDirHandle` owns the append, read and checkpoint operations). A checkpoint is only a projection beside it.
 
-Panels persist in one of two forms:
-
-- **Registered panels**, including every architecture panel, append `spawn-outcome` and `engine-outcome` events and rebuild by replaying them on resume (ADR-0030).
-- **Refutation panels** inside a review persist as a checkpoint whose event prefix must replay exactly to its recorded state, and that state is re-proved on every read. The persistent panel program in `core/persistent-panel` is this panel's alone.
+A **Refutation Panel** inside a review persists as a checkpoint whose event prefix must replay exactly to its recorded state, and that state is re-proved on every read. The persistent panel program in `core/persistent-panel` is this panel's alone. The architecture panel is not a registered program: `/loom --panel` keeps its evidence as files in its panel run directory and replays its dispatch journal through the stateless `helper panel-program architecture` (ADR-0096).
 
 Because an append is idempotent on its dedup key, a crash between publishing an artifact and journalling its event resumes by republishing the same bytes and journalling the event once.
 
@@ -247,7 +244,7 @@ It is orchestration authority: an Agent that could edit it could forge phase com
 | `spec_file`, `plan_file` | `null` (`spec_file` is set at once with `--skip-specify`) | Recorded when the phase artifact appears |
 | `tasks`, `wave_gates` | `[]`, `{}` | Installed by `populate-task-graph` with `github_issue`, `current_wave` and `executing_tasks` |
 
-Task status moves `pending` → `implemented` (the exact attempt satisfies proof and the Task-local suite) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).
+Task status moves `pending` → `implemented` (the exact attempt satisfies proof within its byte scope) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).
 
 ### Immutable Run Directories
 
@@ -434,12 +431,12 @@ Determinism is scoped to what Loom can observe and own:
 
 - semantic design/review correctness still depends on models and user judgment;
 - a tool call with no `agent_id` cannot be attributed in a contended session, so it is neither recorded nor gated; Pi children run without the live phase gate, because Pi cannot name a tool call’s caller;
-- a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), or on Pi to the first Task id in the parent's spawn prompt; such a guess settles only through the untrusted legacy resolution, which stores its evidence but leaves the Task pending for revalidation and reports the attribution as unproven, and it can never complete a Task, because completion requires engine-minted attempt authority;
+- an implementation result that holds no engine-minted attempt authority settles nothing: every executing Task of a loadable State File carries an attempt (ADR-0098), so the engine never guesses a Task from the executing set or a parent's spawn prompt;
 - report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals; likewise a security sandbox receipt's nonce binds it to its artifact path but does not authenticate it against a hunter that writes the artifact itself, and a security ballot is bound to its issued verifier spawn, but against a subagent that evades the shell-string guard (on either harness) a verification run's capture file stays writable (no capture attestation backs it, so neither harness imports or counts such a slot; see [Running a security audit](./security-audit.md#honest-limits));
 - the shell guard judges command text, not an abstract Bash execution graph;
 - a machine's digest pin is engine source the user's account can write, so code an agent gets executed indirectly (a Git hook, a package script) could rewrite a machine and its pin together; pinning turns that into a coordinated change of shipped code, and only OS isolation would close it;
 - Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
-- legacy readers remain for historical evidence but are frozen in `core/legacy-archive.ts`.
+- legacy State File shapes, including Wave Gates that predate registration, are refused at load (ADR-0098); the manual standalone-review and review-panel helpers and their unversioned formats are retired (ADR-0096), so their historical run directories are inert.
 
 These are documented boundaries, not silent claims of enforcement. The evidence ledger's own limits, including what red-then-green does not prove, are in [Guarded Skill Machines](../machines/README.md#known-residual-limits).
 

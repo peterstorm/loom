@@ -18,7 +18,6 @@ import type {
   SpawnBatchAction,
   VerifiedIndexInstalled,
 } from '../../../core/orchestration-contract';
-import type { BlockedAction as PanelBlockedAction, DoneAction as PanelDoneAction } from '../../../core/panel-program';
 import type { RemediationState } from '../../../core/remediation-machine';
 import type { StandaloneReviewMachineState } from '../../../core/standalone-review';
 import type { PublishedStandaloneDisposition } from '../../../core/standalone-review-model';
@@ -35,7 +34,7 @@ export type FacadeSpawnRequest = Readonly<{
   task: string;
 }>;
 
-/** A spawn batch re-emitted from durable authority (reissues, retries, pending panel requests). */
+/** A spawn batch re-emitted from durable authority (reissues, retries, pending requests). */
 export type FacadeSpawnBatch = Readonly<{
   kind: "spawn-batch";
   runId: OrchestrationRunId;
@@ -53,8 +52,7 @@ export type FacadeBlockedDiagnostic =
   /** A security-verification run that can never complete: a brief exhausted its retry, or its audit moved. */
   | Readonly<{ kind: "security-verification-blocked"; message: string }>
   | WaveCompletionSuiteDiagnostic
-  | Extract<StandaloneReviewMachineState, Readonly<{ kind: "terminal-blocked" | "recoverable-blocked" }>>
-  | PanelBlockedAction;
+  | Extract<StandaloneReviewMachineState, Readonly<{ kind: "terminal-blocked" | "recoverable-blocked" }>>;
 
 export type FacadeBlockedAction = Readonly<{
   kind: "blocked";
@@ -84,9 +82,7 @@ export type FacadeDoneAction =
       runId: OrchestrationRunId;
       /** Wave Gate completion receipt, standalone result artifact, disposition publication, or remediation installation. */
       outcome: ProtectedWaveStateCommitted | ArtifactRef | StandaloneDispositionPublishedOutcome | RemediationInstalledOutcome;
-    }>
-  // The legacy panel's terminal step names its panel, not its run.
-  | Readonly<{ kind: "done"; panel: PanelDoneAction["panel"]; outcome: PanelDoneAction["outcome"] }>;
+    }>;
 
 export type FacadeAction =
   | FacadeSpawnBatch

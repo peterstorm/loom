@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import fc from "fast-check";
-import { SUBAGENT_DIR, MACHINES_DIR, guardedLocations } from "../../../src/config";
+import { SUBAGENT_DIR, guardedLocations, machinesDir } from "../../../src/config";
 import { guardStateFileDecision, WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
 import { runGuardStateFile, stampCallStart } from "../../../src/handlers/pre-tool-use/guard-state-file";
 import { type SessionRegistry } from "../../../src/machine/evidence";
@@ -69,7 +69,7 @@ describe("guard-state-file — property tests", () => {
           // quoting are intentionally blocked even when the literal source
           // does not name a protected path.
           (s) => !s.includes("active_task_graph") && !s.includes("review-invocations") &&
-            !s.includes(SUBAGENT_DIR) && !s.includes(MACHINES_DIR) &&
+            !s.includes(SUBAGENT_DIR) && !s.includes(machinesDir()) &&
             !/[?*{}[\]`$\\'"\n\r]|[<>]\(/.test(s),
         ),
         (cmd) => {
@@ -103,6 +103,15 @@ describe("guard-state-file — edge cases", () => {
     );
   });
 
+  it("a helper invocation is read in shell words, and a word holding whitespace never vouches", () => {
+    // One shell word spanning the whole invocation runs a command NAMED that text.
+    expect(guardDecision(`x'/bun cli.ts helper mark-tests-passed '; echo f > active_task_graph.json`)).toBe("block");
+    // A spaced word is a different reading of the line from a whitespace split: no trust.
+    expect(guardDecision(`bun '/a b/cli.ts' helper mark-tests-passed > active_task_graph.json`)).toBe("block");
+    expect(guardDecision(`bun \${X:-a b}/cli.ts helper mark-tests-passed > active_task_graph.json`)).toBe("block");
+    expect(guardDecision(`'bun' "cli.ts" 'helper' "mark-tests-passed" > active_task_graph.json`)).toBe("allow");
+  });
+
   it("a helper name in a comment does NOT bypass the guard", () => {
     expect(guardDecision('echo x >> active_task_graph.json # cleanup-state')).toBe("block");
     expect(guardDecision('# set-phase\necho x >> active_task_graph.json')).toBe("block");
@@ -120,12 +129,12 @@ describe("guard-state-file — edge cases", () => {
       ),
     ).toBe("block");
     expect(
-      guardDecision(`bun cli.ts helper cleanup-state && rm -rf ${MACHINES_DIR}`),
+      guardDecision(`bun cli.ts helper cleanup-state && rm -rf ${machinesDir()}`),
     ).toBe("block");
   });
 
   it("a REAL helper invocation cannot vouch for a task-graph write in ANOTHER segment (segment-scoped allow)", () => {
-    // The round-11 fix covered SUBAGENT_DIR/MACHINES_DIR; these pin the
+    // The round-11 fix covered SUBAGENT_DIR/machinesDir(); these pin the
     // task-graph / review-invocations variant of the same smuggle.
     expect(
       guardDecision(
@@ -273,7 +282,7 @@ describe("guard-state-file — edge cases", () => {
   it("glob / brace state-file paths are caught by the state-DIR guard (round-14 bypass)", () => {
     // The file literal never appears — only the directory does; the dir
     // pattern (derived from the task-graph path's dirname, mirroring the
-    // SUBAGENT_DIR/MACHINES_DIR dir guards) must catch the write.
+    // SUBAGENT_DIR/machinesDir() dir guards) must catch the write.
     expect(guardDecision("sed -i s/x/y/ .claude/state/active_task*.json")).toBe("block");
     expect(guardDecision("truncate -s0 .claude/state/*.json")).toBe("block");
     expect(
@@ -392,6 +401,23 @@ describe("guard-state-file — edge cases", () => {
     // Precision: real fd dups stay allowed.
     expect(guardDecision("cat active_task_graph.json >&2")).toBe("allow");
     expect(guardDecision("cat active_task_graph.json 2>&1")).toBe("allow");
+  });
+
+  it("an escaped `\\>` binds nothing: the `&` after it runs the next command (escaped-operator bypass)", () => {
+    // The splitter read `>&` off the raw text, so `\>&` bound the `&` as an fd
+    // dup and `echo \>& rm <state>` was ONE read-only `echo` segment.
+    expect(guardDecision("echo \\>& rm .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo \\>| rm .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo '>'& rm .claude/state/active_task_graph.json")).toBe("block");
+  });
+
+  it("`>|` is one clobbering redirect, judged like `>`", () => {
+    expect(guardDecision("echo forged >| active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo forged 2>| .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision(`bun cli.ts helper set-phase execute >| ${SUBAGENT_DIR}/s.evidence.jsonl`)).toBe("block");
+    expect(guardDecision("cat active_task_graph.json >| /tmp/copy.json")).toBe(
+      guardDecision("cat active_task_graph.json > /tmp/copy.json"),
+    );
   });
 
   it("`cd` is NOT allowlisted — cwd relocation launders relative writes (round-16 bypass)", () => {
@@ -839,7 +865,7 @@ describe("guard-state-file — edge cases", () => {
     ).toBe("block");
     expect(
       guardDecision(
-        `bun cli.ts helper store-test-evidence >> ${MACHINES_DIR}/code-implementer-agent.machine.json`,
+        `bun cli.ts helper store-test-evidence >> ${machinesDir()}/code-implementer-agent.machine.json`,
       ),
     ).toBe("block");
     // Precision: the helper may redirect into its OWN (non-protected-dir)
@@ -931,14 +957,14 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision(`ls ${SUBAGENT_DIR}`)).toBe("allow");
   });
 
-  it("machine definition files are guarded (derived from MACHINES_DIR) — rm cannot silently disarm the gate", () => {
-    expect(guardDecision(`rm ${MACHINES_DIR}/code-implementer-agent.machine.json`)).toBe("block");
-    expect(guardDecision(`rm -rf ${MACHINES_DIR}`)).toBe("block");
-    expect(guardDecision(`echo '{}' > ${MACHINES_DIR}/code-implementer-agent.machine.json`)).toBe("block");
-    expect(guardDecision(`mv ${MACHINES_DIR}/code-implementer-agent.machine.json /tmp/`)).toBe("block");
+  it("machine definition files are guarded (derived from machinesDir()) — rm cannot silently disarm the gate", () => {
+    expect(guardDecision(`rm ${machinesDir()}/code-implementer-agent.machine.json`)).toBe("block");
+    expect(guardDecision(`rm -rf ${machinesDir()}`)).toBe("block");
+    expect(guardDecision(`echo '{}' > ${machinesDir()}/code-implementer-agent.machine.json`)).toBe("block");
+    expect(guardDecision(`mv ${machinesDir()}/code-implementer-agent.machine.json /tmp/`)).toBe("block");
     // reads stay allowed
-    expect(guardDecision(`cat ${MACHINES_DIR}/code-implementer-agent.machine.json`)).toBe("allow");
-    expect(guardDecision(`ls ${MACHINES_DIR}`)).toBe("allow");
+    expect(guardDecision(`cat ${machinesDir()}/code-implementer-agent.machine.json`)).toBe("allow");
+    expect(guardDecision(`ls ${machinesDir()}`)).toBe("allow");
   });
 });
 
@@ -1297,7 +1323,7 @@ describe("guard-state-file — guarded-path patterns resolve machinesDir() at de
   });
 
   it("a write into a re-pointed LOOM_MACHINES_DIR blocks without a module reload", () => {
-    // The old patterns froze MACHINES_DIR at import; bind/gate/resolver all
+    // The old patterns froze the machines dir at import; bind/gate/resolver all
     // resolve machinesDir() at call time, so a re-pointed dir was gated but
     // its definitions were NOT write-guarded.
     process.env.LOOM_MACHINES_DIR = "/tmp/loom-repointed-machines";

@@ -22,19 +22,20 @@ import type { AcceptedReviewAuthority } from "../src/types";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   freezeVerificationManifest,
   type FrozenVerificationManifest,
 } from "../src/core/verification-manifest";
 import {
   type AcceptedWaveCompletionReceipt,
 } from "../src/core/completion-suite";
-import { evaluateAsRecorded } from "./fixtures/completion-suite-evaluation";
+import { evaluateAsRecorded, greenCompletionSuiteResult } from "./fixtures/completion-suite-evaluation";
 import { canonicalJson } from "../src/core/review-packet";
 import { sha256Hex } from "../src/core/digest";
 import fc from "fast-check";
 import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../src/core/reviewer-contract";
 import { value } from "./fixtures/parse-result";
+import { completedWaveGateEntry, type CompletedWaveGateInput } from "./fixtures/accepted-wave-completion-suite";
 
 function currentReviewTask(generation = 1) {
   const slot = { agent: "code-reviewer", slot_id: "slot:code-reviewer", attempted: 1 as const, request_id: "request:code-reviewer:1", context_digest: "d".repeat(64) };
@@ -101,6 +102,7 @@ const validTask = {
 
 const graph = (overrides: Record<string, unknown> = {}) => ({
   current_phase: "execute",
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,
@@ -158,22 +160,9 @@ describe("parseTaskGraph protected Task paths", () => {
 // wave_gate_history
 // ---------------------------------------------------------------------------
 
-const completedEntry = (overrides: Record<string, unknown> = {}) => ({
-  schemaVersion: 1,
-  kind: "completed-wave-gate",
-  runId: "completed-wave-run",
-  wave: 1,
-  authorityDigest: DIGEST("f"),
-  revision: 3,
-  completionReceipt: {
-    kind: "protected-wave-state-committed",
-    effectId: "completed-wave-effect",
-    runId: "completed-wave-run",
-    committedRevision: 3,
-    stateDigest: DIGEST("e"),
-  },
-  ...overrides,
-});
+/** A schema-2 history entry, completed at revision 3 with the suite it archived. */
+const completedEntry = (input: Partial<CompletedWaveGateInput> = {}) =>
+  completedWaveGateEntry({ runId: "completed-wave-run", wave: 1, authorityDigest: DIGEST("f"), revision: 3, ...input });
 
 describe("parseCompletedWaveGateRegistration cross-field checks", () => {
   it("accepts the self-consistent entry these cases are varied from", () => {
@@ -201,20 +190,13 @@ describe("parseWaveGateHistory duplicate and collision checks", () => {
   });
 
   it("refuses a history that completes the same Wave twice", () => {
-    const secondRun = completedEntry({
-      runId: "second-wave-run",
-      completionReceipt: { ...completedEntry().completionReceipt, runId: "second-wave-run" },
-    });
+    const secondRun = completedEntry({ runId: "second-wave-run" });
     expect(errorOf(graph({ wave_gate_history: [completedEntry(), secondRun] })))
       .toContain("duplicate completed Waves");
   });
 
   it("accepts two genuinely distinct completed Waves", () => {
-    const secondRun = completedEntry({
-      runId: "second-wave-run",
-      wave: 2,
-      completionReceipt: { ...completedEntry().completionReceipt, runId: "second-wave-run" },
-    });
+    const secondRun = completedEntry({ runId: "second-wave-run", wave: 2 });
     expect(parseTaskGraph(graph({ wave_gate_history: [completedEntry(), secondRun] })).ok).toBe(true);
   });
 
@@ -647,35 +629,7 @@ function acceptedReceipt(
 ): AcceptedWaveCompletionReceipt {
   const active = activeWaveGate();
   const authority = value(authorizeWaveCompletionSuite(manifest, active, DIGEST("c"), null));
-  const rawResult = {
-    kind: "wave-completion-suite-result",
-    runId: authority.runId,
-    wave: authority.wave,
-    revision: authority.revision,
-    authorityDigest: authority.authorityDigest,
-    manifestDigest: authority.manifestDigest,
-    suiteDigest: authority.suiteDigest,
-    workspaceDigest: authority.workspaceDigest,
-    checks: authority.checks.map((check) => ({
-      checkId: check.checkId,
-      scope: "wave",
-      outcome: {
-        kind: "observed",
-        exitCode: 0,
-        timedOut: false,
-        signal: null,
-        report: check.reportPolicy.kind === "not-required"
-          ? { kind: "not-required" }
-          : {
-              kind: "produced",
-              path: check.reportPolicy.path,
-              digest: DIGEST("d"),
-              byteLength: 10,
-            },
-      },
-    })),
-  };
-  const evaluated = evaluateAsRecorded(authority, rawResult);
+  const evaluated = evaluateAsRecorded(authority, greenCompletionSuiteResult(authority, { digest: DIGEST("d"), byteLength: 10 }));
   if (evaluated.kind !== "accepted") throw new Error("fixture evaluation failed");
   return evaluated.receipt;
 }
@@ -875,13 +829,13 @@ describe("parseTaskGraph wave_review_epoch authority", () => {
 // ---------------------------------------------------------------------------
 
 describe("parseCompletedWaveGateRegistration schema v1/v2 history", () => {
-  it("round-trips historical v1 unchanged and modern v2 with its exact accepted suite", () => {
-    const v1 = completedEntry();
-    const v2 = completedV2Entry();
-    expect(parseCompletedWaveGateRegistration(JSON.parse(JSON.stringify(v1)))).toEqual({
-      ok: true,
-      value: v1,
+  it("round-trips v2 with its exact accepted suite and refuses the retired suite-less v1 (ADR-0098)", () => {
+    const { completionSuite: _suite, ...suiteless } = completedV2Entry();
+    expect(parseCompletedWaveGateRegistration(JSON.parse(JSON.stringify({ ...suiteless, schemaVersion: 1 })))).toEqual({
+      ok: false,
+      error: "wave_gate_history entry schemaVersion must be 2",
     });
+    const v2 = completedV2Entry();
     expect(parseCompletedWaveGateRegistration(JSON.parse(JSON.stringify(v2)))).toEqual({
       ok: true,
       value: v2,
@@ -890,11 +844,10 @@ describe("parseCompletedWaveGateRegistration schema v1/v2 history", () => {
   });
 
   it("rejects schema ambiguity, missing fields, and surplus fields", () => {
-    const v1 = completedEntry();
     const v2 = completedV2Entry();
     const { completionSuite: _suite, ...v2WithoutSuite } = v2;
     for (const malformed of [
-      { ...v1, completionSuite: acceptedReceipt() },
+      { ...v2, schemaVersion: 1 },
       v2WithoutSuite,
       { ...v2, surplus: true },
       { ...v2, schemaVersion: 3 },
@@ -921,13 +874,15 @@ describe("parseCompletedWaveGateRegistration schema v1/v2 history", () => {
 });
 
 describe("parseTaskGraph protected completion authority", () => {
-  it("keeps pre-Slice-2 graphs readable when both protected fields are absent", () => {
+  it("keeps a live gate readable before its suite is accepted, and refuses it without a manifest (ADR-0098)", () => {
     const parsed = parseTaskGraph(graph({ current_wave: 1, active_wave_gate: activeWaveGate() }));
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
-      expect(parsed.value.verification_manifest).toBeUndefined();
+      expect(parsed.value.verification_manifest).toEqual(preI6DefaultVerificationManifest());
       expect(parsed.value.active_wave_completion_suite).toBeUndefined();
     }
+    expect(errorOf(graph({ current_wave: 1, active_wave_gate: activeWaveGate(), verification_manifest: undefined })))
+      .toContain("legacy State File refused (ADR-0098): an execute-phase TaskGraph without verification_manifest");
   });
 
   it("round-trips valid manifest and receipt into canonical deeply frozen values", () => {
@@ -949,8 +904,8 @@ describe("parseTaskGraph protected completion authority", () => {
     expect(parseTaskGraph(JSON.parse(JSON.stringify(parsed.value))).ok).toBe(true);
   });
 
-  it("uses the legacy default manifest authority when the legacy-compatible field is absent", () => {
-    const receipt = acceptedReceipt(legacyDefaultVerificationManifest());
+  it("accepts a completion-suite receipt authorized against the pre-I6 default manifest the graph carries", () => {
+    const receipt = acceptedReceipt(preI6DefaultVerificationManifest());
     expect(parseTaskGraph(graph({
       current_wave: 1,
       active_wave_gate: activeWaveGate(),
@@ -1164,7 +1119,7 @@ describe("parseTaskGraph safe generation and Wave boundaries", () => {
     ["current Wave", { current_wave: unsafe }],
     ["Wave review epoch", { wave_review_epoch: waveReviewEpoch({ wave: unsafe }) }],
     ["active Wave Gate", { current_wave: unsafe, active_wave_gate: activeWaveGate({ wave: unsafe }) }],
-    ["completed Wave history", { wave_gate_history: [completedEntry({ wave: unsafe })] }],
+    ["completed Wave history", { wave_gate_history: [{ ...completedEntry(), wave: unsafe }] }],
   ])("rejects an unsafe %s", (_label, fields) => {
     expect(errorOf(graph(fields))).toMatch(/safe|wave_review_epoch/u);
   });

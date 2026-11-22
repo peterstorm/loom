@@ -1,7 +1,8 @@
 # ADR-0017: Issuance-aware instructions and honest degraded routes
 
 ## Status
-Accepted
+Accepted. Amended by ADR-0099: the task identity read from the `LOOM_REQUEST_ID` / `LOOM_CONTEXT_DIGEST`
+markers is `parseIssuedTaskIdentity` (`core/spawn-task-text.ts`), the one reader every harness uses.
 
 ## Context
 Grammar-constrained decoding adds an optional emission path: a producer Agent

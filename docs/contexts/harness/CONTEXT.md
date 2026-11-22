@@ -40,6 +40,14 @@ _Avoid_: Skill state machine, agent statechart, phase gate (alone)
 The pure decision that accepts or blocks one subagent spawn batch before any state changes, returning an allow or a block that names the exact guard that decided. The Hook is the shell that gathers its inputs and applies it.
 _Avoid_: Spawn gate (that is the Hook applying the decision), spawn validation
 
+**Issued Task Identity**:
+The request id and Context Packet digest a spawned task's two authority markers (`LOOM_REQUEST_ID`, `LOOM_CONTEXT_DIGEST`) name: unbound (neither appears), malformed (one without the other, two different values, or a non-canonical value) or bound. Written only by `renderSpawnTaskText` and read only by `parseIssuedTaskIdentity`, for both harnesses. It locates the **Agent Request Authority**; it never is authority on its own.
+_Avoid_: Request marker (one of the two lines), prompt metadata, request id (alone — the digest is half the identity)
+
+**Issuing Run**:
+The orchestration run that issued a task's identity: the explicit run the `LOOM_ORCHESTRATION_*` pair names (both or neither), otherwise the one session run binding whose run issued every named request under its exact digest. None or several is a refusal, never "unrelated". One rule answers it for Claude Code and Pi: `resolveIssuingRun` gives its location, and `resolveIssuingSessionBinding` (its session half) gives the binding Pi keeps.
+_Avoid_: Bound run (a run a session binding lists, whether or not it issued this request), current run
+
 **Write Grant**:
 A one-time Pi capability minted per spawn that lets one child write while a TaskGraph is active. An implementation Agent's grant covers the session and is bound to its Task; a phase or panel writer's grant is scoped to the artifact directories its prompt names. Issuance follows the Agent's role: a read-only Agent (judge, verifier, reviewer, decompose, spec-check) receives none even when its prompt names artifact paths.
 _Avoid_: Write permit, edit allowance, blanket phase write, Scoped Write Grant (as the name of the concept — "scoped" is the phase and panel writers' kind)
@@ -78,6 +86,10 @@ _Avoid_: Review cache, accepted result fallback, global witness map
 The Pi child's handler that records its tool calls into the parent session's Evidence Ledger, under the child's own Epoch. Only a child holding a valid parent-issued **Write Grant** records; any other child records nothing and says so. It adds no live phase gate on Pi.
 _Avoid_: Pi transcript converter, Pi evidence bridge
 
+**Pi Transcript Projection**:
+The one reading of a finished Pi child's messages: each tool call it made, in call order, under the same Pi tool vocabulary the **Pi Ledger Recorder** and the write guard use, paired with the first result after it that names its id, or unfinished. Settlement reads a child's write targets and its structured test result only as folds over it; a run with no structured test result records none, never a regex reading of the transcript.
+_Avoid_: Claude JSONL lowering, transcript fallback, files-modified parser (for Pi)
+
 ### Emission
 
 **Payload Producer**:
@@ -105,6 +117,7 @@ _Avoid_: startup notification, readiness flag, parent hash check
 - An **Agent** has exactly one **Agent Catalog** record and resolves exactly one **LLM Profile** before spawn
 - A Pi child runs on exactly one **Launch Route**, which carries one **Served-Model Evidence**
 - An engine-issued Agent request has exactly one **Agent Request Authority**
+- An engine-issued spawn task carries exactly one bound **Issued Task Identity**, which names at most one **Issuing Run**
 - A Pi-launched mutating CLI process must match the extension's **Runtime Revision**
 - An Agent run is bound to at most one **Guarded Skill Machine**
 - A spawn batch gets exactly one **Spawn Admission** decision
@@ -114,6 +127,7 @@ _Avoid_: startup notification, readiness flag, parent hash check
 - A Pi spawn batch has exactly one **Spawn Claims Ledger**; an **Orphaned Spawn Claim** belongs to none
 - A session's TaskGraph pointer has one **Session TaskGraph Pointer Lease Registry** with one lease per binder
 - A session and review root have at most one current run in the **Trusted Review Witness Aggregate**
+- A finished Pi implementation child has exactly one **Pi Transcript Projection**; its write targets and test result are folds over it
 - A **Payload Producer** has one or two producer kinds; each kind has exactly one **Emission Tool**
 - An ingested payload has exactly one **Emission Source**
 - Emission is enabled only on a **Qualified Emission Route** and only past the **Readiness Barrier**

@@ -18,6 +18,7 @@ import type { RedThenGreenObservation } from "../../core/red-then-green-types";
 import type { ContractConformance } from "../../core/skeleton/types";
 import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
 import type { FrozenVerificationManifest } from "../../core/verification-manifest";
+import { parseManifestedTaskGraph } from "../../core/manifested-task-graph";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import { artifactCovers } from "../../core/path-coverage";
 import { invalidateTaskReview } from "../../core/review-output";
@@ -142,7 +143,7 @@ function recoverPacketEvidence(
   for (const binding of bindings) {
     const task = state.tasks.find((candidate) => candidate.id === binding.taskId && candidate.wave === wave);
     if (!task) throw new Error(`packet binding names no Task ${binding.taskId} in wave ${wave}`);
-    if (task.status === "completed" || task.proof?.state === "satisfied") {
+    if (task.status === "completed" || task.proof.state === "satisfied") {
       throw new Error(`packet binding names ${binding.taskId}, which already has satisfied implementation proof`);
     }
     const inspectedPacket = inspectRepositoryPath(
@@ -218,7 +219,7 @@ function recoverPacketEvidence(
 
 function taskCompletionWasObserved(task: Task): boolean {
   const proof = task.proof;
-  if (proof === undefined || proof.state === "pending") return false;
+  if (proof.state === "pending") return false;
   return proof.results.some((result) =>
     result.state === "satisfied" && result.evidence.kind === "task-completed"
   );
@@ -232,7 +233,7 @@ function taskCompletionWasObserved(task: Task): boolean {
  */
 function carriedRedThenGreen(task: Task): RedThenGreenObservation | undefined {
   const proof = task.proof;
-  if (proof === undefined || proof.state === "pending") return undefined;
+  if (proof.state === "pending") return undefined;
   for (const result of proof.results) {
     if (result.state === "satisfied" && result.evidence.kind === "red-then-green") {
       const { red, implementationWrite, green } = result.evidence;
@@ -246,13 +247,9 @@ function carriedRedThenGreen(task: Task): RedThenGreenObservation | undefined {
  * The I6 era reconcile re-derives obligations under, from the one
  * `redThenGreenDuty` answer: a Task's frozen Proof decides (INV-6), so a
  * frozen red-then-green obligation is kept even when the manifest froze no
- * classification (reconcile reads no ledger and needs none). A Task with no
- * frozen Proof that its era obligates is refused by name: reconcile would
- * otherwise fail it as `ledger-unavailable`, which no retry can repair. The
- * throw aborts the locked update, so the handler reports it without changing
- * state, as it does every other reconcile refusal.
+ * classification (reconcile reads no ledger and needs none).
  */
-function reconcileEra(task: Task, verificationManifest: FrozenVerificationManifest | undefined): RedThenGreenEra {
+function reconcileEra(task: Task, verificationManifest: FrozenVerificationManifest): RedThenGreenEra {
   const duty = redThenGreenDuty(task, verificationManifest);
   switch (duty.kind) {
     case "not-owed":
@@ -260,8 +257,6 @@ function reconcileEra(task: Task, verificationManifest: FrozenVerificationManife
     case "owed":
     case "classification-unfrozen":
       return "owed-if-new-tests";
-    case "proof-unfrozen":
-      throw new Error(`cannot reconcile: ${duty.reason}`);
     default: {
       const unreachable: never = duty;
       return unreachable;
@@ -297,18 +292,15 @@ const settledOnlyByAttempt = (task: Task): boolean =>
  * not invent completion or test provenance: it keeps the prior completion
  * observation, stored test result, structured writes, prior satisfied I6
  * facts, and current byte delta. `verificationManifest` is the TaskGraph's
- * frozen manifest (`undefined` only for a TaskGraph frozen before manifests
- * existed); whether I6 is owed is the Task's `redThenGreenDuty` under it (see
- * `reconcileEra`). Both are required, so every caller states its graph's era
- * rather than defaulting into the legacy one. `contractConformance` is the
- * observation's verdict over the Task's current bytes (AD-5), required for
- * the same reason: every caller decides it. */
+ * frozen manifest, which every graph that holds Tasks carries; whether I6 is
+ * owed is the Task's `redThenGreenDuty` under it (see `reconcileEra`).
+ * `contractConformance` is the observation's verdict over the Task's current
+ * bytes (AD-5), required so every caller decides it. */
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
-  allowLegacyPositiveMigration: boolean,
-  verificationManifest: FrozenVerificationManifest | undefined,
+  verificationManifest: FrozenVerificationManifest,
   contractConformance: ContractConformance,
 ): Task {
   if (task.status === "completed" || settledOnlyByAttempt(task)) return task;
@@ -324,8 +316,7 @@ export function reconcileTaskFromStoredEvidence(
       redThenGreen: reconcileEra(task, verificationManifest),
     },
     {
-      taskCompleted: taskCompletionWasObserved(task) ||
-        (allowLegacyPositiveMigration && task.legacy_missing_proof === true),
+      taskCompleted: taskCompletionWasObserved(task),
       testResult: task.test_result,
       filesModified: proofArtifactsChanged,
       newTestsWritten,
@@ -335,16 +326,6 @@ export function reconcileTaskFromStoredEvidence(
     },
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
-  if (proof.state === "satisfied" && task.legacy_missing_proof === true && allowLegacyPositiveMigration) {
-    return {
-      ...task,
-      status: "implemented",
-      proof,
-      revalidation_required: undefined,
-      legacy_missing_proof: undefined,
-      ...storedNewTestEvidence(collectedNewTests),
-    };
-  }
   // The duplicated pending shape is load-bearing, not noise: Task's ADT makes
   // `revalidation_required: true` a literal on the satisfied arm, so the two
   // objects must be built per-arm for TS to prove the legal state. Collapsing
@@ -355,7 +336,6 @@ export function reconcileTaskFromStoredEvidence(
         status: "pending",
         proof,
         revalidation_required: true,
-        legacy_missing_proof: undefined,
         ...storedNewTestEvidence(collectedNewTests),
       }
     : {
@@ -363,13 +343,12 @@ export function reconcileTaskFromStoredEvidence(
         status: "pending",
         proof,
         revalidation_required: task.revalidation_required,
-        legacy_missing_proof: undefined,
         ...storedNewTestEvidence(collectedNewTests),
       };
 }
 
 function failureSummary(task: Task): string {
-  if (task.proof?.state !== "failed") return task.proof?.state ?? "missing";
+  if (task.proof.state !== "failed") return task.proof.state;
   return task.proof.failures.map((failure) =>
     failure.kind === "declared-artifact-not-changed" || failure.kind === "declared-artifact-drifted" ||
       failure.kind === "declared-artifact-contract-violated"
@@ -442,15 +421,19 @@ const handler: HookHandler = async (_stdin, args) => {
       if (!state.tasks.some((task) => task.wave === wave)) {
         throw new Error(`Wave ${wave} has no tasks`);
       }
+      // Every Task is re-derived under the graph's frozen manifest; a graph
+      // without one is refused before any Task is read.
+      const manifested = parseManifestedTaskGraph(state);
+      if (!manifested.ok) throw new Error(`cannot reconcile: ${manifested.error}`);
+      const verificationManifest = manifested.value.verification_manifest;
       const recoveredPackets = recoveredBaselineSha !== null && packetBindings.length > 0
         ? recoverPacketEvidence(root, state, wave, recoveredBaselineSha, packetBindings)
         : { modifiedPathsByTask: new Map(), auditByTask: new Map() };
       let recoveredWritesApplied = false;
       const tasks = state.tasks.map((task) => {
-        if (task.wave !== wave || task.status === "completed" || task.proof?.state === "satisfied") return task;
+        if (task.wave !== wave || task.status === "completed" || task.proof.state === "satisfied") return task;
         // Before any byte is read: a Distill Task has no baseline to read against.
         if (settledOnlyByAttempt(task)) return task;
-        if (task.legacy_missing_proof === true && recoveredBaselineSha === null) return task;
         const recoveredPaths = recoveredPackets.modifiedPathsByTask.get(task.id) ?? [];
         // Historical recovery may alter only Tasks carrying engine-issued,
         // registration-verified packet evidence. Ordinary reconciliation has
@@ -529,8 +512,7 @@ const handler: HookHandler = async (_stdin, args) => {
           sourceTask,
           proofArtifactsChanged,
           collectedNewTests.value,
-          recoveredBaselineSha !== null && recoveredPaths.length > 0,
-          state.verification_manifest,
+          verificationManifest,
           conformance.value,
         );
       });
@@ -559,11 +541,11 @@ const handler: HookHandler = async (_stdin, args) => {
   const tasks = published.tasks.filter((task) => task.wave === wave);
   for (const task of tasks) {
     process.stderr.write(
-      `${task.id}: status=${task.status}, proof=${task.proof?.state ?? "missing"}` +
-      `${task.proof?.state === "failed" ? `, failures=[${failureSummary(task)}]` : ""}\n`,
+      `${task.id}: status=${task.status}, proof=${task.proof.state}` +
+      `${task.proof.state === "failed" ? `, failures=[${failureSummary(task)}]` : ""}\n`,
     );
   }
-  const failed = tasks.filter((task) => task.proof?.state !== "satisfied");
+  const failed = tasks.filter((task) => task.proof.state !== "satisfied");
   return failed.length === 0
     ? { kind: "passthrough" }
     : {

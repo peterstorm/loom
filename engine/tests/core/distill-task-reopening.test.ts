@@ -55,6 +55,7 @@ import {
   protectedGraphFixture,
   siblingTaskFixture,
 } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const authored = (id: string, wave: number, status: TaskStatus, extra: Partial<Task> = {}): Task => siblingTaskFixture({
   id,
@@ -469,7 +470,7 @@ describe("reopening a completed Wave sweeps its Distill Task back", () => {
   const runId = value(parseOrchestrationRunId("wave-run"));
   const reviewedTask = (id: string): Task => authored(id, 3, "completed", { review_generation: 7 });
   const graph = (): TaskGraph => ({
-    current_phase: "execute", current_wave: 4, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 4, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
     tasks: [
       reviewedTask("T19"), reviewedTask("T22"), authored("T23", 4, "pending", { review_generation: 0 }),
       distill("T30", 3, [fileOf("T19"), fileOf("T22")], "completed"),

@@ -1092,8 +1092,7 @@ export async function settleAttempt(
       parserModifiedPaths: modified,
       parserPathLabel: "skeleton fixture result paths",
       taskCompleted,
-      testResult: { verdict: "trusted-pass" },
-      testEvidence: "skeleton fixture pass",
+      test: { result: { verdict: "trusted-pass" }, evidence: "skeleton fixture pass" },
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
       ledger: { kind: "read", events: [] },
     }, productionExactSettlementPorts(repo.root, repo.statePath));

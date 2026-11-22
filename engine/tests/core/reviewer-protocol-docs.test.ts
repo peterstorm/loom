@@ -11,7 +11,6 @@ import {
   decideRequestEmissionRoute, emissionToolPrimaryInstruction, issuedReviewerPayloadClaim, notProvidedEmissionCapability,
   projectEmissionTaskText, providedEmissionCapability, type IssuedProducerClaim,
 } from "../../src/core/issued-emission-capability";
-import { renderPanelVerdictInstructions, type PanelVerdictInstructionRoute } from "../../src/core/panel-verdict-source";
 import { sha256Hex } from "../../src/core/digest";
 import {
   parseContextDigest, parseRequestId,
@@ -135,24 +134,11 @@ describe("explicit extraction-only routes retain final-message instructions (FR-
     expect(renderReviewerWireInstructions({ kind: "extraction-only", reason: "extraction surface" }, retained)).toBe(retained);
   });
 
-  it("the panel verdict kinds render the frozen wording for their exact tools and retain the panel's final-message contracts verbatim on extraction-only", () => {
+  it("the panel verdict kinds render the frozen wording for their exact tools", () => {
     const verdictKinds = ["judge-verdict", "refutation-verdict"] as const;
     for (const kind of verdictKinds) {
       const binding = mustMint({ kind, version: "v1" });
-      const emissionRoute: PanelVerdictInstructionRoute = Object.freeze({ kind: "emission" as const, binding });
-      expect(renderPanelVerdictInstructions(emissionRoute, "canonical refutation verdict")).toBe(
-        reviewerEmissionToolContract(binding.toolName),
-      );
-      expect(renderPanelVerdictInstructions(emissionRoute, "canonical refutation verdict")).toBe(
-        emissionToolPrimaryInstruction(binding),
-      );
-      const extractionRoute: PanelVerdictInstructionRoute = Object.freeze({
-        kind: "extraction-only" as const, reason: "the panel verdict spawn surface is extraction-only",
-      });
-      // The panel's own minted final-message wording passes through verbatim.
-      const panelContract =
-        "Adjudicate every Wave Finding through lens 'correctness' and emit exact refutation verdict JSON.";
-      expect(renderPanelVerdictInstructions(extractionRoute, panelContract)).toBe(panelContract);
+      expect(emissionToolPrimaryInstruction(binding)).toBe(reviewerEmissionToolContract(binding.toolName));
     }
   });
 });

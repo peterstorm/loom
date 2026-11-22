@@ -16,7 +16,7 @@ import { CLARIFY_THRESHOLD } from "../../core/phase-policy";
 import { PHASE_AGENT_MAP } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { findFile } from "../../utils/find-file";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
@@ -370,7 +370,7 @@ export function observePhaseTransition(
 }
 
 const handler: HookHandler = async (stdin) => {
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     return {
       kind: "error",

@@ -1,13 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, expectTypeOf } from "vitest";
 import {
-  parseReportCounts,
-  parseVitestJson,
-  parseJunitXml,
-  parseStructuredTestReportBytes,
+  executedTestCount,
+  junitReportRead,
   mergeSummaries,
-  judgeTestRun,
-} from "../../src/machine/test-report";
-import { reportSummary } from "./report-summary";
+  parseReportCounts,
+  parseReportSummary,
+  readTestReport,
+  readTestReportText,
+  reportCounts,
+  reportTestcases,
+  testRunSummary,
+  type TestReport,
+} from "../../src/core/structured-test-report";
+import { judgeTestRun } from "../../src/machine/test-report";
+import { countedReport, reportSummary, summarizedReport } from "./report-summary";
 
 describe("parseReportCounts (shared count-sanity gate)", () => {
   it("accepts sane non-negative integer counts with failed ≤ total", () => {
@@ -24,76 +30,74 @@ describe("parseReportCounts (shared count-sanity gate)", () => {
   });
 });
 
-describe("parseVitestJson", () => {
+describe("testRunSummary — Vitest JSON", () => {
   it("parses vitest/jest JSON summary", () => {
     const json = JSON.stringify({ numTotalTests: 12, numFailedTests: 2, success: false });
-    expect(parseVitestJson(json)).toEqual({ total: 12, failed: 2, source: "vitest-json" });
+    expect(summarizedReport(json, "vitest-json")).toEqual({ total: 12, failed: 2, source: "vitest-json" });
   });
 
   it("rejects JSON without the summary fields", () => {
-    expect(parseVitestJson(JSON.stringify({ tests: 5 }))).toBeNull();
-    expect(parseVitestJson("not json")).toBeNull();
-    expect(parseVitestJson("null")).toBeNull();
+    expect(summarizedReport(JSON.stringify({ tests: 5 }), "vitest-json")).toBeNull();
+    expect(summarizedReport("not json", "vitest-json")).toBeNull();
+    expect(summarizedReport("null", "vitest-json")).toBeNull();
   });
 
   it("rejects insane counts — negatives, non-integers, failed > total (fail closed to untrusted)", () => {
-    expect(parseVitestJson(JSON.stringify({ numTotalTests: -1, numFailedTests: 0 }))).toBeNull();
-    expect(parseVitestJson(JSON.stringify({ numTotalTests: 5, numFailedTests: -2 }))).toBeNull();
-    expect(parseVitestJson(JSON.stringify({ numTotalTests: 5.5, numFailedTests: 0 }))).toBeNull();
-    expect(parseVitestJson(JSON.stringify({ numTotalTests: 5, numFailedTests: 0.5 }))).toBeNull();
-    expect(parseVitestJson(JSON.stringify({ numTotalTests: 3, numFailedTests: 7 }))).toBeNull();
+    expect(summarizedReport(JSON.stringify({ numTotalTests: -1, numFailedTests: 0 }), "vitest-json")).toBeNull();
+    expect(summarizedReport(JSON.stringify({ numTotalTests: 5, numFailedTests: -2 }), "vitest-json")).toBeNull();
+    expect(summarizedReport(JSON.stringify({ numTotalTests: 5.5, numFailedTests: 0 }), "vitest-json")).toBeNull();
+    expect(summarizedReport(JSON.stringify({ numTotalTests: 5, numFailedTests: 0.5 }), "vitest-json")).toBeNull();
+    expect(summarizedReport(JSON.stringify({ numTotalTests: 3, numFailedTests: 7 }), "vitest-json")).toBeNull();
   });
 });
 
-describe("parseJunitXml", () => {
+describe("testRunSummary — JUnit XML", () => {
   it("sums tests, failures, and errors across testsuites", () => {
     const xml = `<?xml version="1.0"?>
       <testsuites>
         <testsuite name="a" tests="10" failures="1" errors="0"></testsuite>
         <testsuite name="b" tests="5" failures="0" errors="2"></testsuite>
       </testsuites>`;
-    expect(parseJunitXml(xml)).toEqual({ total: 15, failed: 3, source: "junit-xml" });
+    expect(summarizedReport(xml, "junit-xml")).toEqual({ total: 15, failed: 3, source: "junit-xml" });
   });
 
   it("returns null for XML without testsuite counts", () => {
-    expect(parseJunitXml("<foo/>")).toBeNull();
-    expect(parseJunitXml("<testsuite>")).toBeNull();
+    expect(summarizedReport("<foo/>", "junit-xml")).toBeNull();
+    expect(summarizedReport("<testsuite>", "junit-xml")).toBeNull();
   });
 
   it("rejects a malformed report whose failures+errors exceed tests (fail closed to untrusted)", () => {
-    expect(parseJunitXml('<testsuite tests="1" failures="1" errors="1"/>')).toBeNull();
+    expect(summarizedReport('<testsuite tests="1" failures="1" errors="1"/>', "junit-xml")).toBeNull();
   });
 });
 
-describe("parseStructuredTestReportBytes", () => {
-  const bytes = (content: string): Uint8Array => new TextEncoder().encode(content);
-
+describe("reportCounts — the executed-count rule", () => {
   it("counts actual Vitest executions rather than declared or skipped tests", () => {
-    expect(parseStructuredTestReportBytes(bytes(JSON.stringify({
+    expect(countedReport(JSON.stringify({
       numTotalTests: 5,
       numPassedTests: 2,
       numFailedTests: 1,
       numPendingTests: 2,
       numTodoTests: 0,
-    })))).toEqual({ ok: true, value: { total: 3, failed: 1, source: "vitest-json" } });
+    }))).toEqual({ ok: true, value: { total: 3, failed: 1, source: "vitest-json" } });
 
-    expect(parseStructuredTestReportBytes(bytes(JSON.stringify({
+    expect(countedReport(JSON.stringify({
       numTotalTests: 4,
       numPassedTests: 0,
       numFailedTests: 0,
       numPendingTests: 4,
       numTodoTests: 0,
-    })))).toEqual({ ok: true, value: { total: 0, failed: 0, source: "vitest-json" } });
+    }))).toEqual({ ok: true, value: { total: 0, failed: 0, source: "vitest-json" } });
   });
 
   it("subtracts skipped JUnit cases from actual executions", () => {
     const report = '<testsuite tests="3" failures="0" errors="0" skipped="2"></testsuite>';
-    expect(parseStructuredTestReportBytes(bytes(report))).toEqual({
+    expect(countedReport(report)).toEqual({
       ok: true,
       value: { total: 1, failed: 0, source: "junit-xml" },
     });
     const childOnlySkip = '<testsuite tests="1" failures="0"><testcase><skipped/></testcase></testsuite>';
-    expect(parseStructuredTestReportBytes(bytes(childOnlySkip))).toEqual({
+    expect(countedReport(childOnlySkip)).toEqual({
       ok: true,
       value: { total: 0, failed: 0, source: "junit-xml" },
     });
@@ -104,36 +108,39 @@ describe("parseStructuredTestReportBytes", () => {
       <testsuites><testcase name="skip"><skipped/></testcase>
       <!-- tests 1 --><!-- pass 0 --><!-- fail 0 --><!-- cancelled 0 -->
       <!-- skipped 1 --><!-- todo 0 --></testsuites>`;
-    expect(parseStructuredTestReportBytes(bytes(report))).toEqual({
+    expect(countedReport(report)).toEqual({
       ok: true,
       value: { total: 0, failed: 0, source: "junit-xml" },
     });
   });
 
   it("fails closed for fatal UTF-8, no format, ambiguity, and malformed counts", () => {
-    const invalidUtf8 = parseStructuredTestReportBytes(Uint8Array.from([0xc3, 0x28]));
+    const invalidUtf8 = reportCounts(readTestReport(Uint8Array.from([0xc3, 0x28])));
     expect(invalidUtf8).toMatchObject({ ok: false, error: { reason: "invalid-utf8" } });
-    expect(parseStructuredTestReportBytes(bytes("plain output"))).toMatchObject({
+    expect(countedReport("plain output")).toMatchObject({
       ok: false, error: { reason: "unrecognized-format" },
     });
-    expect(parseStructuredTestReportBytes(bytes(JSON.stringify({
+    const ambiguous = JSON.stringify({
       numTotalTests: 1,
       numPassedTests: 1,
       numFailedTests: 0,
       numPendingTests: 0,
       numTodoTests: 0,
       attachment: '<testsuite tests="1" failures="0"/>',
-    })))).toMatchObject({ ok: false, error: { reason: "ambiguous-format" } });
-    expect(parseStructuredTestReportBytes(bytes(JSON.stringify({
+    });
+    expect(countedReport(ambiguous)).toMatchObject({ ok: false, error: { reason: "ambiguous-format" } });
+    // Only the executed-count rule refuses the ambiguity: the TestRun summary reads the Vitest JSON it parsed as.
+    expect(summarizedReport(ambiguous, "vitest-json")).toEqual({ total: 1, failed: 0, source: "vitest-json" });
+    expect(countedReport(JSON.stringify({
       numTotalTests: 1,
       numPassedTests: 2,
       numFailedTests: 0,
       numPendingTests: 0,
       numTodoTests: 0,
-    })))).toMatchObject({ ok: false, error: { reason: "malformed-counts" } });
-    expect(parseStructuredTestReportBytes(bytes(
+    }))).toMatchObject({ ok: false, error: { reason: "malformed-counts" } });
+    expect(countedReport(
       '<testsuite tests="1" failures="0" skipped="2"></testsuite>',
-    ))).toMatchObject({ ok: false, error: { reason: "malformed-counts" } });
+    )).toMatchObject({ ok: false, error: { reason: "malformed-counts" } });
   });
 });
 
@@ -193,6 +200,146 @@ describe("judgeTestRun — the R2 trust rule", () => {
 
   it("unknown exit + report with 0 tests → trusted-fail (nothing ran)", () => {
     expect(judgeTestRun(null, reportSummary(0, 0, "vitest-json"))).toEqual({ verdict: "trusted-fail" });
+  });
+
+  // ADR-0100: a skipped, pending or todo test did not run. A report in which
+  // every test was skipped takes the zero-test verdict above, not a pass.
+  describe("an all-skipped report is the zero-test case: trusted-fail (nothing ran)", () => {
+    const allSkippedVitest = JSON.stringify({
+      numTotalTests: 3, numPassedTests: 0, numFailedTests: 0, numPendingTests: 2, numTodoTests: 1,
+      testResults: [{
+        name: "/repo/a.test.ts", status: "passed",
+        assertionResults: [{ status: "pending" }, { status: "skipped" }, { status: "todo" }],
+      }],
+    });
+    const allSkippedJunit = '<testsuites><testsuite name="a.test.ts" tests="2" failures="0" errors="0" skipped="2">' +
+      '<testcase classname="a.test.ts" name="one"><skipped/></testcase>' +
+      '<testcase classname="a.test.ts" name="two"><skipped/></testcase></testsuite></testsuites>';
+
+    it("the TestRun summary keeps the declared total, and its executed count is the executed-count rule's 0", () => {
+      const vitest = summarizedReport(allSkippedVitest, "vitest-json");
+      const junit = summarizedReport(allSkippedJunit, "junit-xml");
+      expect(vitest).toMatchObject({ total: 3, failed: 0 });
+      expect(junit).toMatchObject({ total: 2, failed: 0 });
+      expect(executedTestCount(vitest!)).toBe(0);
+      expect(executedTestCount(junit!)).toBe(0);
+      expect(countedReport(allSkippedVitest)).toMatchObject({ ok: true, value: { total: 0 } });
+      expect(countedReport(allSkippedJunit)).toMatchObject({ ok: true, value: { total: 0 } });
+    });
+
+    it.each([0, null])("judgeTestRun reads an all-skipped Vitest JSON report as trusted-fail (exit %s)", (exit) => {
+      expect(judgeTestRun(exit, summarizedReport(allSkippedVitest, "vitest-json"))).toEqual({ verdict: "trusted-fail" });
+    });
+
+    it.each([0, null])("judgeTestRun reads an all-skipped JUnit report as trusted-fail (exit %s)", (exit) => {
+      expect(judgeTestRun(exit, summarizedReport(allSkippedJunit, "junit-xml"))).toEqual({ verdict: "trusted-fail" });
+    });
+
+    it("TestReport carries no declared summary a caller could take without the executed-count check", () => {
+      expectTypeOf<TestReport>().not.toHaveProperty("declared");
+      expectTypeOf<TestReport>().toHaveProperty("executed");
+      const read = readTestReportText(allSkippedJunit);
+      expect(read.kind === "report" ? Object.keys(read.report) : null).not.toContain("declared");
+    });
+
+    it("every exported projection reads one all-skipped JUnit report consistently", () => {
+      const read = readTestReportText(allSkippedJunit);
+      const summary = testRunSummary(read, "junit-xml");
+      expect(summary).toMatchObject({ total: 2, failed: 0, source: "junit-xml" });
+      expect(executedTestCount(summary!)).toBe(0);
+      expect(reportCounts(read)).toEqual({ ok: true, value: { total: 0, failed: 0, source: "junit-xml" } });
+      expect(junitReportRead(read)).toEqual({ kind: "parsed", summary });
+      expect(reportTestcases(read)).toMatchObject({
+        ok: true,
+        value: [{ name: "one", outcome: "skipped" }, { name: "two", outcome: "skipped" }],
+      });
+    });
+
+    it("a summary-only all-skipped JUnit report mints the executed-count rule's zero and is trusted-fail", () => {
+      const summary = summarizedReport('<testsuite tests="2" failures="0" skipped="2"/>', "junit-xml");
+      expect(summary).toEqual({ total: 0, failed: 0, source: "junit-xml" });
+      expect(judgeTestRun(0, summary)).toEqual({ verdict: "trusted-fail" });
+    });
+
+    it("an all-skipped ledger line with per-file results reads back as trusted-fail", () => {
+      const readBack = parseReportSummary(2, 0, "junit-xml", {
+        kind: "recorded",
+        results: [{ file: "a.test.ts", executed: 2, failed: 0, skipped: 2, collectionError: false }],
+      });
+      expect(judgeTestRun(0, readBack)).toEqual({ verdict: "trusted-fail" });
+    });
+
+    it("one test that ran beside skipped ones is still a pass", () => {
+      const partly = JSON.stringify({
+        numTotalTests: 3, numPassedTests: 1, numFailedTests: 0, numPendingTests: 2, numTodoTests: 0,
+        testResults: [{
+          name: "/repo/a.test.ts", status: "passed",
+          assertionResults: [{ status: "passed" }, { status: "pending" }, { status: "skipped" }],
+        }],
+      });
+      expect(judgeTestRun(0, summarizedReport(partly, "vitest-json"))).toEqual({ verdict: "trusted-pass" });
+    });
+  });
+});
+
+describe("executedTestCount — what a TestRun summary proves ran", () => {
+  it("is the recorded testcases less the skipped ones", () => {
+    const summary = parseReportSummary(5, 1, "vitest-json", {
+      kind: "recorded",
+      results: [
+        { file: "/repo/a.test.ts", executed: 3, failed: 1, skipped: 1, collectionError: false },
+        { file: "/repo/b.test.ts", executed: 2, failed: 0, skipped: 2, collectionError: false },
+      ],
+    })!;
+    expect(executedTestCount(summary)).toBe(2);
+  });
+
+  it("is the total of a summary that records no per-file results", () => {
+    expect(executedTestCount(reportSummary(4, 1, "junit-xml"))).toBe(4);
+  });
+});
+
+describe("testRunSummary — held to the executed-count rule", () => {
+  it("keeps a declared-only Vitest summary the executed-count rule cannot count", () => {
+    const json = JSON.stringify({ numTotalTests: 2, numFailedTests: 0 });
+    expect(countedReport(json)).toMatchObject({ ok: false, error: { reason: "malformed-counts" } });
+    expect(summarizedReport(json, "vitest-json")).toEqual({ total: 2, failed: 0, source: "vitest-json" });
+  });
+
+  it("refuses a report whose per-file results and summary counts disagree about what ran", () => {
+    const disagreeing = JSON.stringify({
+      numTotalTests: 2, numPassedTests: 2, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0,
+      testResults: [{ name: "/repo/a.test.ts", status: "passed", assertionResults: [{ status: "skipped" }, { status: "skipped" }] }],
+    });
+    expect(countedReport(disagreeing)).toMatchObject({ ok: true, value: { total: 2 } });
+    expect(summarizedReport(disagreeing, "vitest-json")).toBeNull();
+  });
+
+  it("refuses a report of the other format", () => {
+    expect(summarizedReport('<testsuite tests="1"/>', "vitest-json")).toBeNull();
+    expect(summarizedReport(JSON.stringify({ numTotalTests: 1, numFailedTests: 0 }), "junit-xml")).toBeNull();
+  });
+});
+
+describe("mergeSummaries — skipped testcases never reappear as run", () => {
+  it("a merge that loses per-file results sums each part's executed count", () => {
+    const allSkipped = parseReportSummary(2, 0, "junit-xml", {
+      kind: "recorded",
+      results: [{ file: "a.test.ts", executed: 2, failed: 0, skipped: 2, collectionError: false }],
+    })!;
+    const merged = mergeSummaries([allSkipped, reportSummary(0, 0, "junit-xml")]);
+    expect(merged).toEqual({ total: 0, failed: 0, source: "junit-xml" });
+    expect(judgeTestRun(0, merged)).toEqual({ verdict: "trusted-fail" });
+  });
+
+  it("a merge that keeps per-file results keeps the declared totals", () => {
+    const part = (file: string) => parseReportSummary(2, 0, "junit-xml", {
+      kind: "recorded",
+      results: [{ file, executed: 2, failed: 0, skipped: 1, collectionError: false }],
+    })!;
+    const merged = mergeSummaries([part("a.test.ts"), part("b.test.ts")])!;
+    expect(merged.total).toBe(4);
+    expect(executedTestCount(merged)).toBe(2);
   });
 });
 

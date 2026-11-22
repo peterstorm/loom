@@ -1,10 +1,11 @@
 /**
  * A Task under the I6-era manifest, as the plan-edit suites (re-scope,
  * dependency edits) build them: a pending one carries the Proof population
- * derives for it there; `extra` replaces any field.
+ * derives for it there, an implemented or completed one that Proof satisfied
+ * by an honest red-then-green completion; `extra` replaces any field.
  */
 import type { Task } from "../../src/types";
-import { i6PendingTaskFixture, taskFixture } from "./task-lifecycle";
+import { i6PendingTaskFixture, i6SatisfiedTaskFixture, taskFixture } from "./task-lifecycle";
 
 const REQUIRED = { regression: { kind: "required" as const }, new_tests: { kind: "required" as const } };
 
@@ -15,5 +16,8 @@ export const i6PlanTask = (id: string, wave: number, fileList: readonly string[]
     verification_policy: REQUIRED, review_status: "pending" as const,
     ...extra,
   };
-  return extra.status === undefined || extra.status === "pending" ? i6PendingTaskFixture(input) : taskFixture(input);
+  const { status } = input;
+  if (status === undefined || status === "pending") return i6PendingTaskFixture(input);
+  if (status === "implemented" || status === "completed") return i6SatisfiedTaskFixture({ ...input, status });
+  return taskFixture(input);
 };

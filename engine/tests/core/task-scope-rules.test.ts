@@ -20,7 +20,7 @@ import {
   suggestRunnerPreset,
   type RepositoryRunnerFacts,
 } from "../../src/core/runner-presets";
-import { defaultVerificationManifest, freezeVerificationManifest, legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
+import { defaultVerificationManifest, freezeVerificationManifest, preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../../src/core/task-graph-population";
 import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 import { indexedSpec } from "../fixtures/spec-index-fixture";
@@ -76,7 +76,7 @@ describe("frozenNonTestFiles", () => {
   });
 
   it("names none on a graph frozen before the classification existed, or with no manifest", () => {
-    expect(frozenNonTestFiles(legacyDefaultVerificationManifest(), ["src/a.ts"])).toEqual([]);
+    expect(frozenNonTestFiles(preI6DefaultVerificationManifest(), ["src/a.ts"])).toEqual([]);
     expect(frozenNonTestFiles(undefined, ["src/a.ts"])).toEqual([]);
   });
 });

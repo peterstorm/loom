@@ -15,19 +15,29 @@ import {
   parseBunConsoleCollectionErrors,
   parseReportSource,
   REPORT_SOURCES,
-  parseJunitXml,
+  describeTestRunSummaryRefusal,
+  MAX_STRUCTURED_REPORT_BYTES,
+  junitReportRead,
   parseReportCounts,
   parseReportSummary,
-  parseStructuredTestReportBytes,
-  parseVitestJson,
-  readJunitReport,
+  readTestReport,
+  readTestReportText,
+  readTestRunSummary,
+  reportCounts,
   reconcileFileResults,
   type TestFileResult,
   type TestReportFiles,
+  type StructuredReportFormat,
+  type TestReportRead,
   type TestReportSummary,
+  type TestRunSummaryRefusal,
 } from "../../src/core/structured-test-report";
 import { judgeTestRun } from "../../src/machine/test-report";
-import { reportSummary } from "../machine/report-summary";
+import { reportSummary, summarizedReport } from "../machine/report-summary";
+
+/** The TestRun summary of a JUnit XML or a Vitest JSON report text, or null. */
+const junitSummary = (xml: string): TestReportSummary | null => summarizedReport(xml, "junit-xml");
+const vitestSummary = (json: string): TestReportSummary | null => summarizedReport(json, "vitest-json");
 import type { BunVersion } from "../../scripts/bun-version-pin";
 import { bunFixture, optionalBunFixture, RECORDED_BUN_RELEASES } from "../fixtures/bun-console-fixtures";
 
@@ -187,7 +197,7 @@ describe("Vitest JSON per-file projection", () => {
   const assertion = (status: string) => ({ status, title: status, ancestorTitles: [], failureMessages: [] });
 
   it("AS-001: each testResults entry becomes one file under its reported name, with executed and failed assertions", () => {
-    const summary = parseVitestJson(report([
+    const summary = vitestSummary(report([
       { name: "/repo/tests/a.test.ts", status: "passed", assertionResults: [assertion("passed")] },
       { name: "/repo/tests/b.test.ts", status: "failed", assertionResults: [assertion("passed"), assertion("failed")] },
     ]));
@@ -198,7 +208,7 @@ describe("Vitest JSON per-file projection", () => {
   });
 
   it("FR-001: a failed entry with no assertionResults is a collection error, not a failing testcase", () => {
-    const summary = parseVitestJson(report([
+    const summary = vitestSummary(report([
       { name: "/repo/tests/broken.test.ts", status: "failed", assertionResults: [], message: "Cannot find module" },
       { name: "/repo/tests/b.test.ts", status: "failed", assertionResults: [assertion("passed"), assertion("passed"), assertion("failed")] },
     ]));
@@ -209,7 +219,7 @@ describe("Vitest JSON per-file projection", () => {
   });
 
   it("FR-006: an assertion that neither passed nor failed is a declared testcase that never ran", () => {
-    const summary = parseVitestJson(report(
+    const summary = vitestSummary(report(
       [{
         name: "/repo/tests/a.test.ts",
         status: "passed",
@@ -221,7 +231,7 @@ describe("Vitest JSON per-file projection", () => {
   });
 
   it("FR-004: a report without testResults keeps its summary with per-file results unrecorded", () => {
-    expect(parseVitestJson(JSON.stringify({ numTotalTests: 4, numFailedTests: 0 }))?.files).toEqual({ kind: "unrecorded" });
+    expect(vitestSummary(JSON.stringify({ numTotalTests: 4, numFailedTests: 0 }))?.files).toEqual({ kind: "unrecorded" });
   });
 
   it("AS-002: testResults that are malformed or contradict the counts make the report untrusted", () => {
@@ -236,14 +246,14 @@ describe("Vitest JSON per-file projection", () => {
       [valid, valid],
       [{ ...valid, assertionResults: [assertion("passed")] }],
     ]) {
-      expect(parseVitestJson(report(testResults)), JSON.stringify(testResults)).toBeNull();
+      expect(vitestSummary(report(testResults)), JSON.stringify(testResults)).toBeNull();
     }
   });
 });
 
 describe("JUnit per-file projection", () => {
   it("AS-001: testcases group by classname, and a synthetic testcase named after its classname is a collection error", () => {
-    const summary = parseJunitXml(`<testsuites tests="4" failures="2">
+    const summary = junitSummary(`<testsuites tests="4" failures="2">
       <testsuite name="tests/broken.test.ts" tests="1" failures="1">
         <testcase classname="tests/broken.test.ts" name="tests/broken.test.ts"><failure type="Error"/></testcase>
       </testsuite>
@@ -261,7 +271,7 @@ describe("JUnit per-file projection", () => {
   });
 
   it("AS-001: one classname reported under several suites is one file", () => {
-    const summary = parseJunitXml(`<testsuites>
+    const summary = junitSummary(`<testsuites>
       <testsuite tests="1"><testcase classname="com.example.A" name="one"/></testsuite>
       <testsuite tests="1" failures="1"><testcase classname="com.example.A" name="two"><failure/></testcase></testsuite>
     </testsuites>`);
@@ -269,14 +279,14 @@ describe("JUnit per-file projection", () => {
   });
 
   it("FR-004: summary-only reports and testcases without a classname keep the summary with per-file results unrecorded", () => {
-    expect(parseJunitXml('<testsuite tests="3" failures="1"/>')?.files).toEqual({ kind: "unrecorded" });
-    const unattributed = parseJunitXml('<testsuite tests="2"><testcase classname="a" name="x"/><testcase name="y"/></testsuite>');
+    expect(junitSummary('<testsuite tests="3" failures="1"/>')?.files).toEqual({ kind: "unrecorded" });
+    const unattributed = junitSummary('<testsuite tests="2"><testcase classname="a" name="x"/><testcase name="y"/></testsuite>');
     expect(unattributed).toMatchObject({ total: 2, failed: 0 });
     expect(unattributed?.files).toEqual({ kind: "unrecorded" });
   });
 
   it("AS-002: a JUnit report whose testcases contradict its counts stays untrusted", () => {
-    expect(parseJunitXml('<testsuite tests="2" failures="0"><testcase classname="a" name="x"/></testsuite>')).toBeNull();
+    expect(junitSummary('<testsuite tests="2" failures="0"><testcase classname="a" name="x"/></testsuite>')).toBeNull();
   });
 
   it("AS-002: Maven failsafe's failsafe-summary.xml is not a JUnit report at all, so it is told apart from a refused one", () => {
@@ -289,45 +299,47 @@ describe("JUnit per-file projection", () => {
     <skipped>0</skipped>
     <failureMessage xsi:nil="true" />
 </failsafe-summary>`;
-    expect(readJunitReport(failsafeSummary)).toEqual({ kind: "not-junit" });
-    expect(readJunitReport("<coverage><package name=\"a\"/></coverage>")).toEqual({ kind: "not-junit" });
-    expect(parseJunitXml(failsafeSummary)).toBeNull();
+    expect(junitReportRead(readTestReportText(failsafeSummary))).toEqual({ kind: "not-junit" });
+    expect(junitReportRead(readTestReportText("<coverage><package name=\"a\"/></coverage>"))).toEqual({ kind: "not-junit" });
+    expect(junitSummary(failsafeSummary)).toBeNull();
   });
 
   it("AS-002: a malformed or unreconciled JUnit report is refused, never mistaken for a non-report document", () => {
-    for (const refused of [
-      '<testsuite tests="1" failures="2"/>', // impossible counts
-      '<testsuite tests="2" failures="0"><testcase classname="a" name="x"/></testsuite>', // unreconciled
-      "<testsuite>", // unterminated
-      "<testcase classname=\"a\" name=\"x\"/>", // a bare testcase root is JUnit-shaped, not foreign
-      "<wrapper><testsuite tests=\"1\"/></wrapper>", // JUnit content under a foreign root
-      '<x:testsuite xmlns:x="urn:x" tests="1"/>', // a namespaced JUnit root
-      "not xml at all", // undeterminable: fail closed
-      "",
-    ]) {
-      expect(readJunitReport(refused), refused).toEqual({ kind: "refused" });
+    const malformed = { kind: "malformed-counts" } as const;
+    const unrecognized = { kind: "unrecognized" } as const;
+    for (const [refused, refusal] of [
+      ['<testsuite tests="1" failures="2"/>', malformed], // impossible counts
+      ['<testsuite tests="2" failures="0"><testcase classname="a" name="x"/></testsuite>', malformed], // unreconciled
+      ["<testsuite>", malformed], // unterminated
+      ["<testcase classname=\"a\" name=\"x\"/>", unrecognized], // a bare testcase root is JUnit-shaped, not foreign
+      ["<wrapper><testsuite tests=\"1\"/></wrapper>", malformed], // JUnit content under a foreign root
+      ['<x:testsuite xmlns:x="urn:x" tests="1"/>', unrecognized], // a namespaced JUnit root
+      ["not xml at all", unrecognized], // undeterminable: fail closed
+      ["", unrecognized],
+    ] as const) {
+      expect(junitReportRead(readTestReportText(refused)), refused).toEqual({ kind: "refused", refusal });
     }
   });
 
-  it("AS-001: a valid JUnit report parses to the same summary parseJunitXml mints", () => {
+  it("AS-001: a valid JUnit report parses to the same summary testRunSummary projects", () => {
     const xml = '<testsuite tests="2" failures="1"><testcase classname="a" name="x"/><testcase classname="a" name="y"><failure/></testcase></testsuite>';
-    const read = readJunitReport(xml);
+    const read = junitReportRead(readTestReportText(xml));
     expect(read.kind).toBe("parsed");
-    expect(read.kind === "parsed" ? read.summary : null).toEqual(parseJunitXml(xml));
+    expect(read.kind === "parsed" ? read.summary : null).toEqual(junitSummary(xml));
     expect(read.kind === "parsed" ? read.summary.files : null).toEqual(recorded([result("a", 2, 1)]));
   });
 
   it("AS-004: per-file identity is the testcase's own file attribute when written, else its classname — never a suite's", () => {
-    const withFile = parseJunitXml('<testsuite name="ignored-suite-name" file="ignored/file.ts" tests="1"><testcase classname="./weird path/x.test.ts" name="t" file="other.ts"/></testsuite>');
+    const withFile = junitSummary('<testsuite name="ignored-suite-name" file="ignored/file.ts" tests="1"><testcase classname="./weird path/x.test.ts" name="t" file="other.ts"/></testsuite>');
     expect(withFile?.files).toEqual(recorded([result("other.ts", 1, 0)]));
-    const classnameOnly = parseJunitXml('<testsuite name="ignored-suite-name" file="ignored/file.ts" tests="1"><testcase classname="./weird path/x.test.ts" name="t"/></testsuite>');
+    const classnameOnly = junitSummary('<testsuite name="ignored-suite-name" file="ignored/file.ts" tests="1"><testcase classname="./weird path/x.test.ts" name="t"/></testsuite>');
     expect(classnameOnly?.files).toEqual(recorded([result("./weird path/x.test.ts", 1, 0)]));
   });
 
   it.each(RECORDED_BUN_RELEASES)("AS-004: a real Bun %s report groups by the file attribute: describe titles and top-level tests' empty classname are not files", (release) => {
     // Bun writes the describe chain (or "" at top level) as classname and the
     // test file as the testcase's file attribute.
-    const summary = parseJunitXml(bunFixture(release, "mixed.junit.xml"));
+    const summary = junitSummary(bunFixture(release, "mixed.junit.xml"));
     expect(summary).toMatchObject({ total: 4, failed: 1, source: "junit-xml" });
     expect(summary?.files).toEqual(recorded([result("src/b.test.ts", 1, 0), result("src/c.test.ts", 3, 1)]));
   });
@@ -375,7 +387,7 @@ describe("Bun console collection errors", () => {
 });
 
 describe("bunRunSummary — Bun's JUnit report with its console collection errors", () => {
-  const junit = (release: BunVersion): TestReportSummary => parseJunitXml(bunFixture(release, "mixed.junit.xml"))!;
+  const junit = (release: BunVersion): TestReportSummary => junitSummary(bunFixture(release, "mixed.junit.xml"))!;
 
   it.each(RECORDED_BUN_RELEASES)("adds a file that never loaded as Bun %s counts it: one failing testcase that is a collection error", (release) => {
     // Bun's own summary for this run: "Ran 5 tests across 3 files", "2 fail".
@@ -415,7 +427,7 @@ describe("bunRunSummary — Bun's JUnit report with its console collection error
   });
 
   it("cannot attribute collection errors to a JUnit summary whose testcases were unrecorded, so it stays as it was", () => {
-    const unrecorded = parseJunitXml('<testsuite tests="3" failures="1"/>')!;
+    const unrecorded = junitSummary('<testsuite tests="3" failures="1"/>')!;
     expect(bunRunSummary(unrecorded, ["src/a.test.ts"])).toEqual(unrecorded);
   });
 
@@ -428,7 +440,7 @@ describe("bunRunSummary — Bun's JUnit report with its console collection error
 
 describe("strict structured-report parser keeps the remediation wire shape", () => {
   it("FR-004: executed-count summaries are counts alone and keep exactly total, failed and source", () => {
-    const parsed = parseStructuredTestReportBytes(bytes('<testsuite tests="2" failures="1"><testcase classname="a" name="x"/><testcase classname="a" name="y"><failure/></testcase></testsuite>'));
+    const parsed = reportCounts(readTestReport(bytes('<testsuite tests="2" failures="1"><testcase classname="a" name="x"/><testcase classname="a" name="y"><failure/></testcase></testsuite>')));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect("files" in parsed.value).toBe(false);
@@ -470,7 +482,7 @@ describe("mergeSummaries merges per-file results", () => {
 describe("judgeTestRun over per-file results", () => {
   /** Vitest JSON counts no testcase for a file that failed to import, so a run
    *  whose only failure is a collection error reports numFailedTests: 0. */
-  const collectionOnly = parseVitestJson(JSON.stringify({
+  const collectionOnly = vitestSummary(JSON.stringify({
     numTotalTests: 2, numPassedTests: 2, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0,
     testResults: [
       { name: "/repo/tests/broken.test.ts", status: "failed", message: "Cannot find module", assertionResults: [] },
@@ -485,8 +497,58 @@ describe("judgeTestRun over per-file results", () => {
   });
 
   it("FR-004: unrecorded summaries are judged on their counts alone", () => {
-    expect(judgeTestRun(0, parseVitestJson(JSON.stringify({ numTotalTests: 2, numFailedTests: 0 })))).toEqual({ verdict: "trusted-pass" });
+    expect(judgeTestRun(0, vitestSummary(JSON.stringify({ numTotalTests: 2, numFailedTests: 0 })))).toEqual({ verdict: "trusted-pass" });
     expect(judgeTestRun(0, reportSummary(2, 0, "junit-xml"))).toEqual({ verdict: "trusted-pass" });
     expect(judgeTestRun(0, mint([result("tests/green.test.ts", 2, 0)]))).toEqual({ verdict: "trusted-pass" });
+  });
+});
+
+describe("readTestRunSummary — why a report cannot stand as a TestRun summary", () => {
+  const vitestCounts = { numTotalTests: 2, numPassedTests: 2, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0 };
+  const junitXml = '<testsuite tests="1" failures="0"><testcase classname="a" name="x"/></testsuite>';
+
+  it.each<[name: string, read: () => TestReportRead, format: StructuredReportFormat, refusal: TestRunSummaryRefusal]>([
+    ["over the byte budget", () => readTestReport(new Uint8Array(MAX_STRUCTURED_REPORT_BYTES + 1)), "junit-xml",
+      { kind: "unreadable", reason: "resource-limit" }],
+    ["not UTF-8", () => readTestReport(Uint8Array.from([0xc3, 0x28])), "vitest-json", { kind: "unreadable", reason: "invalid-utf8" }],
+    ["neither format", () => readTestReportText("plain output"), "vitest-json", { kind: "unrecognized" }],
+    ["foreign XML", () => readTestReportText('<failsafe-summary result="0"/>'), "junit-xml", { kind: "unrecognized" }],
+    ["a JUnit report asked for as Vitest JSON", () => readTestReportText(junitXml), "vitest-json",
+      { kind: "other-format", expected: "vitest-json", found: "junit-xml" }],
+    ["a Vitest report asked for as JUnit XML", () => readTestReportText(JSON.stringify(vitestCounts)), "junit-xml",
+      { kind: "other-format", expected: "junit-xml", found: "vitest-json" }],
+    ["impossible counts", () => readTestReportText('<testsuite tests="1" failures="2"/>'), "junit-xml", { kind: "malformed-counts" }],
+    ["per-file results that skip what the counts say ran (ADR-0100)", () => readTestReportText(JSON.stringify({
+      ...vitestCounts,
+      testResults: [{ name: "/repo/a.test.ts", status: "passed", assertionResults: [{ status: "skipped" }, { status: "skipped" }] }],
+    })), "vitest-json", { kind: "executed-count-disagreement", declared: 0, executed: 2 }],
+  ])("refuses %s, by name", (_name, read, format, refusal) => {
+    expect(readTestRunSummary(read(), format)).toEqual({ ok: false, error: refusal });
+  });
+
+  it("summarizes an ambiguous Vitest report as the Vitest JSON it parsed as, while the executed-count rule refuses it", () => {
+    const ambiguous = readTestReportText(JSON.stringify({ ...vitestCounts, attachment: '<testsuite tests="1" failures="0"/>' }));
+    expect(reportCounts(ambiguous)).toMatchObject({ ok: false, error: { reason: "ambiguous-format" } });
+    expect(readTestRunSummary(ambiguous, "vitest-json")).toEqual({ ok: true, value: { total: 2, failed: 0, source: "vitest-json" } });
+    expect(readTestRunSummary(ambiguous, "junit-xml")).toEqual({
+      ok: false, error: { kind: "other-format", expected: "junit-xml", found: "vitest-json" },
+    });
+  });
+
+  it("describes every refusal distinctly, naming the counts that disagree", () => {
+    const refusals: readonly TestRunSummaryRefusal[] = [
+      { kind: "unreadable", reason: "resource-limit" },
+      { kind: "unreadable", reason: "invalid-utf8" },
+      { kind: "unrecognized" },
+      { kind: "other-format", expected: "junit-xml", found: "vitest-json" },
+      { kind: "malformed-counts" },
+      { kind: "executed-count-disagreement", declared: 0, executed: 2 },
+    ];
+    const described = refusals.map(describeTestRunSummaryRefusal);
+    expect(new Set(described).size).toBe(refusals.length);
+    expect(describeTestRunSummaryRefusal({ kind: "other-format", expected: "junit-xml", found: "vitest-json" }))
+      .toBe("is vitest-json, not the junit-xml report it must be");
+    expect(describeTestRunSummaryRefusal({ kind: "executed-count-disagreement", declared: 0, executed: 2 }))
+      .toBe("lists 0 executed test(s) in its per-file results, but its counts say 2 ran");
   });
 });

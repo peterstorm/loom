@@ -6,10 +6,9 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createEscalationRemediationReceipt,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
@@ -33,7 +32,6 @@ function driftReceipt(): ImplementationAttemptSettlementReceipt {
     taskId: TASK, wave: 1, semanticAttempt: 1, reservationId: "status-attempt-1", headSha: "a".repeat(40),
     reservedAt: "2026-09-01T00:00:01.000Z", taskScopeBaseline: [], dirtySetBaseline: [],
   }));
-  const suite = labelledValue("drift settlement", createTaskCompletionSuiteAuthority(authority));
   const result = settleImplementationAttempt({
     id: TASK, status: "pending", proof: attestedProof(),
     active_implementation_attempt: authority, implementation_attempt_history: [],
@@ -46,11 +44,7 @@ function driftReceipt(): ImplementationAttemptSettlementReceipt {
       newTestsWritten: false, newTestEvidence: "waived",
     }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-  }, {
-    schemaVersion: 1, kind: "task-completion-suite-result",
-    implementationAuthorityDigest: suite.implementationAuthorityDigest, suiteDigest: suite.suiteDigest,
-    checks: [{ checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [FILE] } }],
-  });
+  }, observedByteScope([]));
   if (!result.ok || result.value.kind === "ignored") throw new Error("drift settlement fixture failed");
   return result.value.receipt;
 }

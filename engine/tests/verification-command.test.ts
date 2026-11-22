@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { execFile, type ExecFileException } from "node:child_process";
 import vitestConfig from "../vitest.config";
 import { freezeVerificationManifest } from "../src/core/verification-manifest";
-import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../src/core/structured-test-report";
+import { MAX_STRUCTURED_REPORT_BYTES, readTestReport, reportCounts } from "../src/core/structured-test-report";
 import { ENGINE, REPOSITORY as repository } from "./fixtures/repository-roots";
 
 const rootPackage = JSON.parse(readFileSync(join(repository, "package.json"), "utf8"));
@@ -22,8 +22,6 @@ afterEach(() => temporaryDirectories.splice(0).forEach((path) => rmSync(path, { 
 
 const smokeFiles = [
   ["scripts/smoke-panel-mode.sh", "panel"],
-  ["scripts/smoke-review-panel.sh", "review"],
-  ["scripts/smoke-standalone-review.sh", "standalone"],
   ["scripts/smoke-orchestration-facades.ts", "orchestration"],
   ["scripts/smoke-pi-resources.sh", "pi"],
   ["artifacts/tests/test-validate-task-graph.sh", "graph"],
@@ -255,7 +253,7 @@ describe('enrollment', () => {
     const bytes = readFileSync(join(directory, ".loom/completion-reports/verify.junit.xml"));
     expect(bytes.byteLength).toBeGreaterThan(0);
     expect(bytes.byteLength).toBeLessThan(MAX_STRUCTURED_REPORT_BYTES);
-    const parsed = parseStructuredTestReportBytes(bytes);
+    const parsed = reportCounts(readTestReport(bytes));
     expect(parsed).toEqual({ ok: true, value: { total: 2, failed, source: "junit-xml" } });
     if (!parsed.ok) throw new Error(parsed.error.message);
     expect(Number.isSafeInteger(parsed.value.total)).toBe(true);

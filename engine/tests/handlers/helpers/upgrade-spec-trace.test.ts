@@ -15,6 +15,7 @@ import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority
 import { capturedSpecCheck } from "../../../src/core/spec-check";
 import { findingId } from "../../fixtures/finding-id";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
@@ -55,6 +56,7 @@ const terminalBlockedTombstone = (() => {
 function legacyGraph(): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],

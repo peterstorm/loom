@@ -133,7 +133,7 @@ describe("findReport — Bun JUnit artifacts", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it("parses an explicit fresh Bun JUnit artifact via parseJunitXml", () => {
+  it("parses an explicit fresh Bun JUnit artifact via testRunSummary", () => {
     writeFileSync(join(cwd, "report.xml"), '<testsuites><testsuite tests="7" failures="1" errors="1"/></testsuites>');
 
     expect(findReport(
@@ -293,6 +293,55 @@ describe("findReport", () => {
     writeFileSync(join(cwd, "out.json"), JSON.stringify({ numTotalTests: 3, numFailedTests: 0 }));
     const report = findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, NO_RUN, { nowMs: Date.now(), callStartMs: callStart });
     expect(report).toEqual({ total: 3, failed: 0, source: "vitest-json" });
+  });
+
+  describe("a refused --outputFile report is named with why it cannot vouch", () => {
+    const refusedOutputFile = (content: string): Readonly<{ report: unknown; text: string; path: string }> => {
+      const path = join(cwd, "out.json");
+      writeFileSync(path, content);
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const report = findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, NO_RUN, { nowMs: Date.now(), callStartMs: callStart });
+        return { report, text: stderrSpy.mock.calls.map((c) => String(c[0])).join(""), path };
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    };
+
+    it("a JUnit report where Vitest JSON must be: the other format, not 'malformed'", () => {
+      const { report, text, path } = refusedOutputFile('<testsuite tests="1" failures="0"><testcase classname="a" name="x"/></testsuite>');
+      expect(report).toBeNull();
+      expect(text).toContain(`findReport: --outputFile report '${path}' is junit-xml, not the vitest-json report it must be`);
+      expect(text).not.toContain("malformed");
+    });
+
+    it("per-file results that skip the tests its counts say ran: the executed-count disagreement (ADR-0100)", () => {
+      const { report, text, path } = refusedOutputFile(JSON.stringify({
+        numTotalTests: 2, numPassedTests: 2, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0,
+        testResults: [{ name: "/repo/a.test.ts", status: "passed", assertionResults: [{ status: "skipped" }, { status: "skipped" }] }],
+      }));
+      expect(report).toBeNull();
+      expect(text).toContain(
+        `findReport: --outputFile report '${path}' lists 0 executed test(s) in its per-file results, but its counts say 2 ran`,
+      );
+    });
+
+    it("impossible counts keep the 'malformed' wording", () => {
+      const { report, text, path } = refusedOutputFile(JSON.stringify({ numTotalTests: 1, numFailedTests: 2 }));
+      expect(report).toBeNull();
+      expect(text).toContain(`findReport: malformed --outputFile report '${path}' has missing, inconsistent or unsafe counts`);
+    });
+  });
+
+  it("names why stdout carried no summary when a JSON reporter was requested", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport("npx vitest run --reporter=json", cwd, { output: "5 passing", exit: 0 }, { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join(""))
+        .toContain("stdout carried no parseable summary: what it printed is neither Vitest JSON nor JUnit XML");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("parses JSON from stdout when a JSON reporter was requested", () => {

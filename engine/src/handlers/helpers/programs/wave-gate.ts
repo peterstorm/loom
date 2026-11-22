@@ -9,15 +9,16 @@ import { canonicalStructuralEquals } from '../../../core/orchestration-contract'
 import { isRecord } from '../../../core/plain-record';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH } from '../../../config';
-import { StateManager } from '../../../state-manager';
+import { commitActiveWaveGateCompletion, StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveReadiness } from '../../../core/wave-gate-machine';
 import { reanchorVerifiedClaims } from '../../../core/verified-claim-hashes';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
 import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
-import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
+import { inspectFilePresence, loadPlanModelsSource } from '../wave-gate-observers';
 import { runFullTierWaveLint } from '../lint-wave-gate';
 import { ensureWaveCompletionSuite, observeWaveCompletionWorkspace } from '../wave-completion-suite';
+import { parseManifestedTaskGraph } from '../../../core/manifested-task-graph';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-check-documents';
 import type { TaskGraph } from '../../../types';
@@ -52,12 +53,9 @@ const waveGateDeps = Object.freeze({
   reviewedWorkspace: observeReviewedWorkspace,
 });
 
-/** A legacy graph has no suite receipt, so it observes neither the workspace
- *  nor the frozen paths a receipt would stamp from. */
+/** The gate deps plus the current workspace and frozen paths the suite receipt is judged against. */
 function currentWaveGateDeps(graph: TaskGraph, authorityStartPath: string) {
-  return graph.verification_manifest === undefined
-    ? waveGateDeps
-    : Object.freeze({ ...waveGateDeps, ...observeWaveCompletionWorkspace(graph, authorityStartPath) });
+  return Object.freeze({ ...waveGateDeps, ...observeWaveCompletionWorkspace(graph, authorityStartPath) });
 }
 
 /** Canonical structural equality to a typed witness proves the raw value carries the witness's type. */
@@ -179,20 +177,20 @@ async function resumeWaveGateAfter(
     const startReadiness = deriveWaveStartReadiness(graph, graph.tasks.filter((task) => task.wave === registration.input.wave));
     if (startReadiness.kind === "not-ready") return waveBlocked(handle, startReadiness.failures.join("; "));
 
-    if (graph.verification_manifest !== undefined) {
-      const ensured = await ensureWaveCompletionSuite({ handle, manager, graph, registration });
-      if (!ensured.ok) {
-        return {
-          ok: true,
-          action: {
-            kind: "blocked",
-            runId: handle.runId,
-            diagnostic: ensured.error.diagnostic,
-          },
-        };
-      }
-      if (ensured.value.disposition === "installed") return rederiveNext();
+    const manifested = parseManifestedTaskGraph(graph);
+    if (!manifested.ok) return waveBlocked(handle, manifested.error);
+    const ensured = await ensureWaveCompletionSuite({ handle, manager, graph: manifested.value, registration });
+    if (!ensured.ok) {
+      return {
+        ok: true,
+        action: {
+          kind: "blocked",
+          runId: handle.runId,
+          diagnostic: ensured.error.diagnostic,
+        },
+      };
     }
+    if (ensured.value.disposition === "installed") return rederiveNext();
 
     const issued = handle.readIssuedRequests();
     const captured = handle.readCapturedAttempts();
@@ -241,7 +239,7 @@ async function resumeWaveGateAfter(
       projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
     });
     const completionDocuments = completionObservation.authority;
-    const committed = await manager.commitActiveWaveGateCompletion((locked) => {
+    const committed = await commitActiveWaveGateCompletion(manager, (locked) => {
       if (locked.spec_file !== refreshed.spec_file || locked.plan_file !== refreshed.plan_file ||
           !waveSpecCheckDocumentsMatch(locked.wave_review_epoch?.specCheckDocuments, completionDocuments)) {
         return {

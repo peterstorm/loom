@@ -29,11 +29,10 @@ import type { ReopenedTaskIds, Task, TaskGraph } from "../types";
  * and review authority are void and fresh Proof is required. Retained Findings
  * and test evidence remain active remediation/audit inputs wherever gate and
  * status projections read them; only a fresh implementation settlement clears
- * the revalidation marker. A legacy Task without Proof gets its pending Proof
- * derived from its policy, its declared artifacts and its TaskGraph's I6 era
+ * the revalidation marker. A Proof that is re-derived (below) is derived from
+ * the Task's policy, its declared artifacts and its TaskGraph's I6 era
  * (`redThenGreenEra` of the graph's frozen `verificationManifest`, INV-6).
- * `verificationManifest` is required so every caller states its graph's era;
- * `undefined` means the graph has no manifest, which is the legacy era.
+ * `verificationManifest` is required so every caller states its graph's era.
  *
  * The cleared acceptance is kept as the Task's Review Basis (`review_basis`,
  * ADR-0094), so its next Wave Gate can choose reviewers by what changed.
@@ -63,14 +62,15 @@ export function returnToRevalidation(
   // and a tests-only Task Reopening (task-reopening) enter.
   const { implementation_attestation: attested, reopen_scope: scoped, reopen_baseline: _baseline, ...unscoped } = task;
   const rederive = testsOnly !== undefined || attested === true || scoped !== undefined ||
-    (task.proof !== undefined && isTestsOnlyProof(task.proof.obligations));
-  const kept = rederive ? undefined : task.proof;
-  const proof = kept ?? derivePendingTaskProof({
-    verificationPolicy: taskVerificationPolicy(task),
-    declaredArtifacts: task.file_list ?? [],
-    ...(testsOnly === undefined ? { declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }) } : { testsOnly }),
-    redThenGreen: redThenGreenEra(verificationManifest),
-  });
+    isTestsOnlyProof(task.proof.obligations);
+  const proof = rederive
+    ? derivePendingTaskProof({
+        verificationPolicy: taskVerificationPolicy(task),
+        declaredArtifacts: task.file_list ?? [],
+        ...(testsOnly === undefined ? { declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }) } : { testsOnly }),
+        redThenGreen: redThenGreenEra(verificationManifest),
+      })
+    : task.proof;
   return {
     ...unscoped,
     ...(testsOnly === undefined ? {} : { reopen_scope: testsOnly }),
@@ -79,7 +79,6 @@ export function returnToRevalidation(
     status: "pending",
     proof,
     revalidation_required: true,
-    legacy_missing_proof: undefined,
     review_status: "pending",
     review_generation: (task.review_generation ?? 0) + 1,
     review_run: undefined,

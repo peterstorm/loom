@@ -27,7 +27,7 @@ The immutable prompt appendix derived from one first-attempt settlement that req
 _Avoid_: Failure reason, retry prompt, retry count, attempt token
 
 **Implementation Completion Oracle**:
-The pure aggregate command that combines attempt authority, the normalized observation, Proof Obligations, Verification Policy and a Completion Suite Result into exactly one transition: implemented, retry required, escalation required, infrastructure blocked, or ignored stale or duplicate evidence. Both harnesses adapt into it; neither is a separate completion authority.
+The pure aggregate command that combines attempt authority, the normalized observation, Proof Obligations, Verification Policy and the attempt's **Byte Scope Outcome** into exactly one transition: implemented, retry required, escalation required, infrastructure blocked, or ignored stale or duplicate evidence. Both harnesses adapt into it; neither is a separate completion authority.
 _Avoid_: SubagentStop hook, Wave Gate check, test runner, completion service
 _Mechanics_: One transition applier consumes its output, appends the settlement receipt, releases only matching authority, and invalidates review, spec-check and Wave state atomically.
 
@@ -40,6 +40,10 @@ _Mechanics_: Receipt identity makes duplicate delivery idempotent; matching the 
 The exact path set an attempt is judged on: the Task's declared paths plus those previously attributed to it. Changes there are the Task's; changes to a same-Wave sibling's paths are inert; a change to any other path is out-of-scope evidence against the attempt, whether or not the transcript mentions it.
 _Avoid_: Repository dirty set, transcript file list, Task test command
 _Mechanics_: Every settlement retires the attempt's boundary, so repository movement between attempts is never attributed to the Task; only an attempt that ends without settlement leaves its boundary for the next registration.
+
+**Byte Scope Outcome**:
+What the engine observed of one attempt's bytes against its **Task-local Byte Scope**: accepted, out-of-scope writes naming every offending path, or observation unavailable with its reason. The shell mints it in process and the **Implementation Completion Oracle** settles it as given: out-of-scope writes are a semantic failure, an unavailable observation is an infrastructure failure. It is never persisted; only its failure kind reaches the settlement receipt.
+_Avoid_: Task suite, Task Completion Suite, task-byte-scope check
 
 **Proof Boundary Observation**:
 The immutable record of whether TaskGraph Population captured every Task's declared-artifact proof boundary from Git at one revision, or why it could not. Explanatory provenance, not settlement authority.
@@ -56,12 +60,16 @@ One engine-observed deterministic check outcome carrying independent exit-code, 
 _Avoid_: Test evidence, command output, exit status
 
 **Completion Suite Result**:
-A non-empty exact set of Completion Check Results bound either to one Implementation Attempt or to one quiescent Wave workspace. Missing, surplus, duplicate, stale, or wrong-scope results cannot settle completion.
+A non-empty exact set of Completion Check Results bound to one quiescent Wave workspace. Missing, surplus, duplicate, stale, or wrong-scope results cannot settle completion.
 _Avoid_: Test run, CI result, lint result
 
 **Project Verification Coverage**:
 A read-only statement of which project checks are configured, independent of whether any passed. A Wave with only reserved checks may advance, but cannot claim that project verification passed.
 _Avoid_: Test coverage, project-check pass, verification waiver, persisted coverage flag
+
+**Test Report Read**:
+The one read of a structured test report's bytes (`readTestReport`), from which every reader projects what it needs: the TestRun summary a TestRun fact carries (the declared count, every declared testcase with skipped ones included and per-file results, held to the executed count wherever that rule reads the report, so it never proves a test ran that did not); the executed count (only testcases that ran) a Completion Check Result's counts carry; and a JUnit report's testcases. The two counting rules accept different reports, so neither is derived from the other.
+_Avoid_: Legacy parser, strict parser, report summary (alone — that is the TestRun summary projection)
 
 ### Test-first proof
 
@@ -142,7 +150,7 @@ _Avoid_: using it for new work
 - A dependent Task's brief shows one **Predecessor Output** per direct dependency
 - A Task has exactly one **Verification Policy** and exactly one **Task Role**
 - A **Completion Suite Result** holds one or more **Completion Check Results**
-- A Task-scoped suite holds only the **Task-local Byte Scope** check
+- An **Implementation Attempt** is settled on exactly one **Byte Scope Outcome**; a Task has no completion suite
 - A TaskGraph has at most one **Test-File Classification**
 - The **Evidence Minting Rule** is the only source of Evidence Ledger facts on either harness
 - **Changed Files** feed only the **Affected-Test Stop Check** and the **Stop-Check Plan**

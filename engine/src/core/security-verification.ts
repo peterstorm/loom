@@ -21,6 +21,7 @@
  */
 
 import { match } from "ts-pattern";
+import { z } from "zod/v4";
 import { sha256Hex } from "./digest";
 import { compareStrings } from "./ordering";
 import type { LoomCommands } from "./loom-cli-command";
@@ -49,12 +50,12 @@ import {
   SECURITY_VERIFIER_ROLE,
   catalogVerifierProfileProblem,
   parseVerificationVerdicts,
-  parseVote,
+  verifierVoteShape,
   type VerdictViolation,
   type VerificationVerdict,
   type VerifierVote,
 } from "./security-adjudication";
-import { isSecurityFingerprint, isWireRecord, unknownFieldViolations } from "./security-audit-contract";
+import { expecting, isSecurityFingerprint, isWireRecord, parseWire } from "./security-audit-contract";
 import type { ConfirmedFinding, SecurityFinding } from "./security-findings";
 import { quoteShellArgument } from "./shell-quoting";
 import { ballotsAttested, type AttestationLookup } from "./capture-attestation";
@@ -74,10 +75,27 @@ export const VERIFICATION_PUBLISHED_KIND = "security-verification-published" as 
 /** The Context Packet section a verifier reads its brief from. */
 export const VERIFICATION_BRIEF_SECTION = "security-verification-brief";
 
-/** The keys of the verifier's result envelope and of one vote in it. Exported
- *  so the agent-doc test pins the verifier document to THESE lists. */
-export const VERIFICATION_RESULT_KEYS: readonly string[] = ["schemaVersion", "kind", "verdicts"];
-export const VERIFIER_VOTE_KEYS: readonly string[] = ["fingerprint", "vote", "reason", "missingFact"];
+/** One vote as the verifier writes it: the four fields it decides, nothing
+ *  else — identity keys (`agent`, `profile`, `wave`) are unknown fields. */
+const verifierVoteSchema = z.strictObject(verifierVoteShape);
+
+/** The verifier's result envelope (D2): exact keys, the result kind, and every
+ *  vote in the vote grammar adjudication reads. */
+const verificationResultSchema = z.strictObject(
+  {
+    schemaVersion: z.literal(1, expecting("expected 1")),
+    kind: z.literal(VERIFICATION_RESULT_KIND, expecting(`expected ${VERIFICATION_RESULT_KIND}`)),
+    verdicts: z.array(verifierVoteSchema.readonly(), expecting("expected an array")).readonly(),
+  },
+  { error: (issue) => (issue.code === "invalid_type" ? "expected one JSON object" : undefined) },
+);
+
+/** The keys of the verifier's result envelope and of one vote in it, in wire
+ *  order — the brief embeds the vote keys, so their order is part of its bytes.
+ *  Derived from the schemas; exported so the agent-doc test pins the verifier
+ *  document to THESE lists. */
+export const VERIFICATION_RESULT_KEYS: readonly string[] = verificationResultSchema.keyof().options;
+export const VERIFIER_VOTE_KEYS: readonly string[] = verifierVoteSchema.keyof().options;
 
 // --- The audit a verification run is issued against ---
 
@@ -568,35 +586,10 @@ export function verificationBriefText(input: Readonly<{
 const describeViolations = (violations: readonly VerdictViolation[]): string =>
   violations.map((violation) => `${violation.path}: ${violation.message}`).join("; ");
 
-/** Parse the D2 envelope: exact keys, the result kind, and every vote's four
- *  fields. Identity keys (`agent`, `profile`, `wave`) are unknown fields. */
+/** Parse the D2 envelope into its votes, or every violation it carries. */
 export function parseVerificationResultWire(raw: unknown): DomainResult<readonly VerifierVote[], readonly VerdictViolation[]> {
-  if (!isWireRecord(raw)) return failure([{ path: "$", message: "expected one JSON object" }]);
-  const violations = unknownFieldViolations(raw, VERIFICATION_RESULT_KEYS, "$");
-  if (raw.schemaVersion !== 1) violations.push({ path: "$.schemaVersion", message: "expected 1" });
-  if (raw.kind !== VERIFICATION_RESULT_KIND) violations.push({ path: "$.kind", message: `expected ${VERIFICATION_RESULT_KIND}` });
-  if (!Array.isArray(raw.verdicts)) {
-    violations.push({ path: "$.verdicts", message: "expected an array" });
-    return failure(violations);
-  }
-  const votes: VerifierVote[] = [];
-  raw.verdicts.forEach((entry: unknown, index: number) => {
-    const base = `$.verdicts[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push({ path: base, message: "expected an object" });
-      return;
-    }
-    const local = unknownFieldViolations(entry, VERIFIER_VOTE_KEYS, base);
-    const vote = parseVote(entry, base);
-    if (!vote.ok) local.push(...vote.error);
-    if (!Object.hasOwn(entry, "missingFact")) local.push({ path: `${base}.missingFact`, message: "required (null when none)" });
-    if (local.length > 0 || !vote.ok) {
-      violations.push(...local);
-      return;
-    }
-    votes.push(vote.value);
-  });
-  return violations.length > 0 ? failure(violations) : success(votes);
+  const parsed = parseWire(verificationResultSchema, raw);
+  return parsed.ok ? success(parsed.value.verdicts) : parsed;
 }
 
 /**

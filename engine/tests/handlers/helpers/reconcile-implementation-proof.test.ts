@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
@@ -28,6 +28,19 @@ import type { Task } from "../../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../../src/types";
 import { taskFixture, observedEvidence } from "../../fixtures/task-lifecycle";
 import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { MANIFEST_ABSENT_REFUSAL } from "../../../src/core/manifested-task-graph";
+
+/**
+ * The failed Proof of a no-new-tests Task over `fileList` whose attempt
+ * completed and passed its tests, but whose poisoned baseline hid the
+ * declared artifacts' change: the shape historical recovery repairs.
+ */
+const unresolvedProof = (fileList: readonly string[]): Task["proof"] => evaluateTaskProof(
+  { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: fileList },
+  observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
+  PI_STRUCTURED_EVIDENCE_POLICY,
+);
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -59,8 +72,7 @@ function failedTask(taskCompleted = true): Task {
     file_list: ["src/a.ts"],
     files_modified: ["src/a.ts"],
     new_tests_required: true,
-    new_tests_written: true,
-    new_test_evidence: "1 new test method, 2 assertions",
+    new_test_observation: parseNewTestEvidence(true, "1 new test method, 2 assertions"),
     test_result: testResult,
     test_evidence: "bun: 25 pass",
     proof,
@@ -102,32 +114,94 @@ describe("recovery arguments", () => {
   });
 });
 
+/**
+ * A repository whose Wave 2 commit `poisonedStart` sits on `historical`,
+ * with `artifact` implemented in it and T5's Review Packet issued over
+ * `declared`; the State File directory is created, the file is not.
+ */
+function poisonedRecoveryRepository(label: string, artifact: string, declared: string) {
+  const root = canonicalTempDir(label);
+  cleanup.push(root);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf-8" }).trim();
+  git("init", "--quiet");
+  git("config", "user.email", "loom@example.invalid");
+  git("config", "user.name", "Loom Test");
+  git("commit", "--quiet", "--allow-empty", "-m", "before wave 2");
+  const historical = git("rev-parse", "HEAD");
+  mkdirSync(dirname(join(root, artifact)), { recursive: true });
+  const implemented = "export const implemented = true;\n";
+  writeFileSync(join(root, artifact), implemented);
+  git("add", ".");
+  git("commit", "--quiet", "-m", "wave 2 implementation");
+  const poisonedStart = git("rev-parse", "HEAD");
+  const packet = createReviewPacket({
+    task: { id: "T5", description: "implementation" },
+    baseSha: base(historical),
+    headSha: head(poisonedStart),
+    declaredPaths: [declared],
+    modifiedPaths: [declared],
+    artifacts: [{ path: artifact, diff: "+implemented\n", postimage: Buffer.from(implemented) }],
+    planContext: "",
+    proofObligations: [],
+  });
+  if (!packet.ok) throw new Error(packet.errors.join("; "));
+  const packetRelative = ".claude/reviews/T5.json";
+  mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
+  writeFileSync(join(root, packetRelative), serializeReviewPacket(packet.value));
+  const statePath = join(root, ".claude", "state", "active_task_graph.json");
+  mkdirSync(join(root, ".claude", "state"), { recursive: true });
+  return { root, historical, poisonedStart, implemented, packet, packetRelative, statePath };
+}
+
+/**
+ * Wave 2 executing under the pre-I6 manifest, with T5 pending on an
+ * unresolved Proof over `src/a.ts`; `task` adds or overrides T5's fields.
+ */
+function wave2RecoveryGraph(task: Record<string, unknown>) {
+  return {
+    current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
+    spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
+    wave_gates: {},
+    tasks: [{
+      id: "T5", description: "implementation", agent: "code-implementer-agent",
+      wave: 2, status: "pending", proof: unresolvedProof(["src/a.ts"]), depends_on: [], new_tests_required: false,
+      file_list: ["src/a.ts"], files_modified: ["latest-only.ts"],
+      ...task,
+    }],
+  };
+}
+
+/**
+ * Wave 2 after its spec-check passed and its gate completed, with T5 pending
+ * on an unresolved Proof after a failed review evidence capture; `task`
+ * adds or overrides T5's fields.
+ */
+function gatedRecoveryGraph(task: Record<string, unknown>) {
+  return {
+    ...wave2RecoveryGraph({
+      review_status: "evidence_capture_failed",
+      review_error: "review transcript missing evidence",
+      review_evidence_failures: ["code-reviewer"],
+      ...task,
+    }),
+    spec_check: {
+      wave: 2, run_at: "before recovery", verdict: "PASSED",
+      critical_count: 0, high_count: 0,
+      critical_findings: [], high_findings: [], medium_findings: [],
+    },
+    wave_gates: {
+      "2": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+    },
+  };
+}
+
 describe("historical baseline recovery CLI", () => {
   it("refuses a non-Git State File with its exact refusal message and a byte-identical State File", () => {
     const root = canonicalTempDir("loom-proof-nongit-");
     cleanup.push(root);
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     mkdirSync(join(root, ".claude", "state"), { recursive: true });
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
-      spec_check: {
-        wave: 2, run_at: "before recovery", verdict: "PASSED",
-        critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
-      wave_gates: {
-        "2": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
-      },
-      tasks: [{
-        id: "T5", description: "implementation", agent: "code-implementer-agent",
-        wave: 2, status: "implemented", legacy_missing_proof: true, depends_on: [], new_tests_required: false,
-        review_status: "evidence_capture_failed",
-        review_error: "review transcript missing evidence",
-        review_evidence_failures: ["code-reviewer"],
-        file_list: ["src/a.ts"], files_modified: ["latest-only.ts"],
-      }],
-    }, null, 2));
+    writeFileSync(statePath, JSON.stringify(gatedRecoveryGraph({}), null, 2));
     const before = readFileSync(statePath);
 
     const refusal = spawnSync("bun", [CLI, "helper", "reconcile-implementation-proof", "--wave", "2"], {
@@ -138,64 +212,33 @@ describe("historical baseline recovery CLI", () => {
     expect(readFileSync(statePath).equals(before)).toBe(true);
   });
 
-  it("atomically replaces poisoned boundaries with an audited ancestor commit", () => {
-    const root = canonicalTempDir("loom-proof-recovery-");
-    cleanup.push(root);
-    execFileSync("git", ["init", "--quiet"], { cwd: root });
-    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
-    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
-    execFileSync("git", ["commit", "--quiet", "--allow-empty", "-m", "before wave 2"], { cwd: root });
-    const historical = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
-    mkdirSync(join(root, "src"));
-    const implemented = "export const implemented = true;\n";
-    writeFileSync(join(root, "src", "a.ts"), implemented);
-    execFileSync("git", ["add", "."], { cwd: root });
-    execFileSync("git", ["commit", "--quiet", "-m", "wave 2 implementation"], { cwd: root });
-    const poisonedStart = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
-    const packet = createReviewPacket({
-      task: { id: "T5", description: "implementation" },
-      baseSha: base(historical),
-      headSha: head(poisonedStart),
-      declaredPaths: ["src/a.ts"],
-      modifiedPaths: ["src/a.ts"],
-      artifacts: [{ path: "src/a.ts", diff: "+implemented\n", postimage: Buffer.from(implemented) }],
-      planContext: "",
-      proofObligations: [],
+  it("refuses a graph with no frozen Verification Manifest by name, leaving the State File byte-identical", () => {
+    const { root, statePath } = poisonedRecoveryRepository("loom-proof-unfrozen-", "src/a.ts", "src/a.ts");
+    const { verification_manifest: _frozen, ...unfrozen } = wave2RecoveryGraph({});
+    writeFileSync(statePath, JSON.stringify({ ...unfrozen, current_phase: "decompose" }, null, 2));
+    const before = readFileSync(statePath);
+
+    const refusal = spawnSync("bun", [CLI, "helper", "reconcile-implementation-proof", "--wave", "2"], {
+      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
-    if (!packet.ok) throw new Error(packet.errors.join("; "));
-    const packetRelative = ".claude/reviews/T5.json";
-    mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
-    writeFileSync(join(root, packetRelative), serializeReviewPacket(packet.value));
-    const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    mkdirSync(join(root, ".claude", "state"), { recursive: true });
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
-      spec_check: {
-        wave: 2, run_at: "before recovery", verdict: "PASSED",
-        critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
-      wave_gates: {
-        "2": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
-      },
-      tasks: [{
-        id: "T5", description: "implementation", agent: "code-implementer-agent",
-        wave: 2, status: "implemented", legacy_missing_proof: true, depends_on: [], new_tests_required: false,
-        review_status: "evidence_capture_failed",
-        review_error: "review transcript missing evidence",
-        review_evidence_failures: ["code-reviewer"],
-        file_list: ["src/a.ts"], files_modified: ["latest-only.ts"],
-        start_sha: poisonedStart,
-        artifact_baseline: [{
-          artifact: "src/a.ts",
-          snapshot: {
-            kind: "sha256",
-            digest: createHash("sha256").update(implemented).digest("hex"),
-          },
-        }],
+    expect(refusal.status).not.toBe(0);
+    expect(refusal.stderr).toContain(`cannot reconcile: ${MANIFEST_ABSENT_REFUSAL}`);
+    expect(readFileSync(statePath).equals(before)).toBe(true);
+  });
+
+  it("atomically replaces poisoned boundaries with an audited ancestor commit", () => {
+    const { root, historical, poisonedStart, implemented, packet, packetRelative, statePath } =
+      poisonedRecoveryRepository("loom-proof-recovery-", "src/a.ts", "src/a.ts");
+    writeFileSync(statePath, JSON.stringify(gatedRecoveryGraph({
+      start_sha: poisonedStart,
+      artifact_baseline: [{
+        artifact: "src/a.ts",
+        snapshot: {
+          kind: "sha256",
+          digest: createHash("sha256").update(implemented).digest("hex"),
+        },
       }],
-    }, null, 2));
+    }), null, 2));
 
     const withoutOverride = spawnSync("bun", [CLI, "helper", "reconcile-implementation-proof", "--wave", "2"], {
       cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
@@ -296,7 +339,7 @@ describe("historical baseline recovery CLI", () => {
     expect(readFileSync(join(root, "src", "a.ts"), "utf-8")).toBe(laterBytes);
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.tasks[0]).toMatchObject({
-      status: "implemented",
+      status: "pending", revalidation_required: true,
       start_sha: historical,
       artifact_baseline_recovered_from: historical,
       proof: { state: "satisfied" },
@@ -313,63 +356,31 @@ describe("historical baseline recovery CLI", () => {
     expect(state.tasks[0].review_error).toBeUndefined();
     expect(state.tasks[0].review_evidence_failures).toBeUndefined();
     expect(state.spec_check).toBeUndefined();
+    // The recovered Proof is satisfied but awaits revalidation, so the Wave is not yet implemented.
     expect(state.wave_gates["2"]).toMatchObject({
-      impl_complete: true, tests_passed: null, reviews_complete: false,
+      impl_complete: false, tests_passed: null, reviews_complete: false,
     });
   });
 });
 
 describe("directory artifact packet recovery", () => {
   it("recovers a declared directory from the packet leaves below it", () => {
-    const root = canonicalTempDir("loom-proof-directory-recovery-");
-    cleanup.push(root);
-    execFileSync("git", ["init", "--quiet"], { cwd: root });
-    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
-    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
-    execFileSync("git", ["commit", "--quiet", "--allow-empty", "-m", "before wave 2"], { cwd: root });
-    const historical = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
-    mkdirSync(join(root, "src", "feature"), { recursive: true });
-    const implemented = "export const implemented = true;\n";
-    writeFileSync(join(root, "src", "feature", "a.ts"), implemented);
-    execFileSync("git", ["add", "."], { cwd: root });
-    execFileSync("git", ["commit", "--quiet", "-m", "wave 2 implementation"], { cwd: root });
-    const poisonedStart = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
-    const packet = createReviewPacket({
-      task: { id: "T5", description: "implementation" },
-      baseSha: base(historical),
-      headSha: head(poisonedStart),
-      declaredPaths: ["src/feature"],
-      modifiedPaths: ["src/feature"],
-      artifacts: [{ path: "src/feature/a.ts", diff: "+implemented\n", postimage: Buffer.from(implemented) }],
-      planContext: "",
-      proofObligations: [],
-    });
-    if (!packet.ok) throw new Error(packet.errors.join("; "));
-    const packetRelative = ".claude/reviews/T5.json";
-    mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
-    writeFileSync(join(root, packetRelative), serializeReviewPacket(packet.value));
-    const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    mkdirSync(join(root, ".claude", "state"), { recursive: true });
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
-      wave_gates: {},
-      tasks: [{
-        id: "T5", description: "implementation", agent: "code-implementer-agent",
-        wave: 2, status: "implemented", legacy_missing_proof: true, depends_on: [], new_tests_required: false,
-        file_list: ["src/feature"], files_modified: ["latest-only.ts"],
-        start_sha: poisonedStart,
-        artifact_baseline: [{ artifact: "src/feature", snapshot: { kind: "missing" } }],
-        issued_review_packets: [{
-          task_id: "T5",
-          packet_id: packet.value.packetId,
-          packet_path: packetRelative,
-          base_sha: historical,
-          head_sha: poisonedStart,
-          scope: ["src/feature"],
-        }],
+    const { root, historical, poisonedStart, packet, packetRelative, statePath } =
+      poisonedRecoveryRepository("loom-proof-directory-recovery-", "src/feature/a.ts", "src/feature");
+    writeFileSync(statePath, JSON.stringify(wave2RecoveryGraph({
+      proof: unresolvedProof(["src/feature"]),
+      file_list: ["src/feature"],
+      start_sha: poisonedStart,
+      artifact_baseline: [{ artifact: "src/feature", snapshot: { kind: "missing" } }],
+      issued_review_packets: [{
+        task_id: "T5",
+        packet_id: packet.value.packetId,
+        packet_path: packetRelative,
+        base_sha: historical,
+        head_sha: poisonedStart,
+        scope: ["src/feature"],
       }],
-    }, null, 2));
+    }), null, 2));
 
     const recovered = spawnSync("bun", [
       CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
@@ -381,7 +392,7 @@ describe("directory artifact packet recovery", () => {
     expect(recovered.status, recovered.stderr).toBe(0);
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.tasks[0]).toMatchObject({
-      status: "implemented",
+      status: "pending", revalidation_required: true,
       proof: { state: "satisfied" },
       files_modified: ["latest-only.ts", "src/feature"],
       recovered_artifact_writes: [{ packet_id: packet.value.packetId, modified_paths: ["src/feature"] }],
@@ -395,8 +406,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       failedTask(),
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
-      false,
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
 
@@ -430,15 +440,13 @@ describe("reconcileTaskFromStoredEvidence", () => {
       status: "implemented",
       proof: satisfiedProof,
       revalidation_required: undefined,
-      legacy_missing_proof: undefined,
     };
 
     const reconciled = reconcileTaskFromStoredEvidence(
       withProof,
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
-      false,
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
 
@@ -461,8 +469,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       },
       ["src/a.ts"],
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
-      false,
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
     const newTestsWaived = reconcileTaskFromStoredEvidence(
@@ -476,8 +483,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       },
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
-      false,
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
 
@@ -499,37 +505,12 @@ describe("reconcileTaskFromStoredEvidence", () => {
     ]);
   });
 
-  it("permits positive settlement only for explicit legacy_missing_proof migration", () => {
-    const legacy = taskFixture({
-      id: "T5",
-      description: "legacy migration",
-      agent: "code-implementer-agent",
-      wave: 1,
-      status: "implemented",
-      depends_on: [],
-      new_tests_required: false,
-      file_list: ["src/a.ts"],
-      files_modified: ["src/a.ts"],
-    });
-    const migrated = reconcileTaskFromStoredEvidence(
-      legacy,
-      ["src/a.ts"],
-      parseNewTestEvidence(false, "verification waived"),
-      true,
-      undefined,
-      CONFORMANCE_NOT_OWED,
-    );
-    expect(migrated).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
-    expect(migrated.legacy_missing_proof).toBeUndefined();
-  });
-
   it("never invents completion when the prior proof did not observe it", () => {
     const reconciled = reconcileTaskFromStoredEvidence(
       failedTask(false),
       ["src/a.ts"],
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
-      false,
-      undefined,
+      preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
     );
 

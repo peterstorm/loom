@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  mergeSummaries, parseJunitXml, parseReportCounts, parseReportSummary, parseStructuredTestReportBytes, parseVitestJson,
+  mergeSummaries, parseReportCounts, parseReportSummary,
 } from "../../src/core/structured-test-report";
-import { reportSummary } from "./report-summary";
+import { countedReport, reportSummary, summarizedReport } from "./report-summary";
 
-const parse = (xml: string) => parseStructuredTestReportBytes(new TextEncoder().encode(xml));
 const nodeCounts = (tests = 1, pass = 1, fail = 0, cancelled = 0, skipped = 0, todo = 0) =>
   `<!-- tests ${tests} --><!-- pass ${pass} --><!-- fail ${fail} --><!-- cancelled ${cancelled} --><!-- skipped ${skipped} --><!-- todo ${todo} -->`;
 const suite = '<testsuite tests="1" failures="0"><testcase name="real"/></testsuite>';
@@ -44,7 +43,7 @@ describe("structural JUnit authorization", () => {
     ["summary disagrees with real skipped case", `<testsuites><testcase><skipped/></testcase>${nodeCounts()}</testsuites>`],
     ["hidden testcase", `<testsuites><system-out><testcase/></system-out>${nodeCounts()}</testsuites>`],
   ])("%s cannot authorize positive execution", (_name, xml) => {
-    const result = parse(xml);
+    const result = countedReport(xml);
     expect(result.ok && result.value.total > 0).toBe(false);
   });
 
@@ -58,47 +57,47 @@ describe("structural JUnit authorization", () => {
     '<!DOCTYPE testsuite [<!ENTITY safe "text">]><testsuite tests="0"/>',
     `${suite}junk`,
   ])("strict XML rejection also applies to zero-count reports: %s", (xml) => {
-    expect(parse(xml).ok).toBe(false);
-    expect(parseJunitXml(xml)).toBeNull();
+    expect(countedReport(xml).ok).toBe(false);
+    expect(summarizedReport(xml, "junit-xml")).toBeNull();
   });
 
   it.each([
     `<!-- ${suite} -->`, '<testsuite tests="1">', `<!DOCTYPE testsuite>${suite}`,
   ])("legacy JUnit API also rejects non-report XML: %s", (xml) => {
-    expect(parseJunitXml(xml)).toBeNull();
+    expect(summarizedReport(xml, "junit-xml")).toBeNull();
   });
 
-  it("preserves declared-count legacy APIs without using them for executed P3 totals", () => {
+  it("a TestRun summary without per-file results takes the executed-count rule's counts (ADR-0100)", () => {
     const xml = '<testsuite tests="3" skipped="2"/>';
-    expect(parseJunitXml(xml)).toEqual({ total: 3, failed: 0, source: "junit-xml" });
-    expect(parse(xml)).toEqual({ ok: true, value: { total: 1, failed: 0, source: "junit-xml" } });
+    expect(summarizedReport(xml, "junit-xml")).toEqual({ total: 1, failed: 0, source: "junit-xml" });
+    expect(countedReport(xml)).toEqual({ ok: true, value: { total: 1, failed: 0, source: "junit-xml" } });
     const json = JSON.stringify({ numTotalTests: 3, numPassedTests: 1, numFailedTests: 0, numPendingTests: 2, numTodoTests: 0 });
-    expect(parseVitestJson(json)).toEqual({ total: 3, failed: 0, source: "vitest-json" });
-    expect(parse(json)).toEqual({ ok: true, value: { total: 1, failed: 0, source: "vitest-json" } });
+    expect(summarizedReport(json, "vitest-json")).toEqual({ total: 1, failed: 0, source: "vitest-json" });
+    expect(countedReport(json)).toEqual({ ok: true, value: { total: 1, failed: 0, source: "vitest-json" } });
   });
 
   it("ignores fake diagnostic elements but preserves actual failures", () => {
     const xml = `<testsuite tests="1" failures="1"><testcase><failure><![CDATA[<skipped/>]]><!-- <testcase/> --></failure></testcase></testsuite>`;
-    expect(parse(xml)).toEqual({ ok: true, value: { total: 1, failed: 1, source: "junit-xml" } });
+    expect(countedReport(xml)).toEqual({ ok: true, value: { total: 1, failed: 1, source: "junit-xml" } });
   });
 
   it("accepts safe XML entities, single quotes, and diagnostic CDATA", () => {
     const xml = `<testsuite tests='&#49;' failures='0' name='&amp;&lt;&gt;&quot;&apos;&#x1F600;'><testcase name='safe'><system-out><![CDATA[<testsuite tests="99"/>]]></system-out></testcase></testsuite>`;
-    expect(parse(xml)).toEqual({ ok: true, value: { total: 1, failed: 0, source: "junit-xml" } });
+    expect(countedReport(xml)).toEqual({ ok: true, value: { total: 1, failed: 0, source: "junit-xml" } });
   });
 
   it("counts Node leaf cases across nested suites without double counting their attributes", () => {
     const xml = `<testsuites><testsuite tests="2" failures="1" skipped="1"><testsuite tests="2" failures="1" skipped="1"><testcase><failure/></testcase><testcase><skipped/></testcase></testsuite><testcase/></testsuite>${nodeCounts(3, 1, 1, 0, 1)}</testsuites>`;
-    expect(parse(xml)).toEqual({ ok: true, value: { total: 2, failed: 1, source: "junit-xml" } });
+    expect(countedReport(xml)).toEqual({ ok: true, value: { total: 2, failed: 1, source: "junit-xml" } });
   });
 
   it("includes Node cancellations as failed executions", () => {
     const xml = `<testsuites><testcase><failure type="cancelledByParent"/></testcase>${nodeCounts(1, 0, 0, 1)}</testsuites>`;
-    expect(parse(xml)).toEqual({ ok: true, value: { total: 1, failed: 1, source: "junit-xml" } });
+    expect(countedReport(xml)).toEqual({ ok: true, value: { total: 1, failed: 1, source: "junit-xml" } });
   });
 
   it("does not double count nested traditional JUnit suite totals", () => {
-    expect(parse(`<testsuites tests="1"><testsuite tests="1">${suite}</testsuite></testsuites>`))
+    expect(countedReport(`<testsuites tests="1"><testsuite tests="1">${suite}</testsuite></testsuites>`))
       .toEqual({ ok: true, value: { total: 1, failed: 0, source: "junit-xml" } });
   });
 
@@ -109,14 +108,14 @@ describe("structural JUnit authorization", () => {
     '<testsuites tests="2"><testsuite tests="1"/></testsuites>',
     `<testsuites><testcase/>${nodeCounts()}<!-- pass 1 --></testsuites>`,
   ])("rejects inconsistent or malformed count claims: %s", (xml) => {
-    expect(parse(xml).ok).toBe(false);
+    expect(countedReport(xml).ok).toBe(false);
   });
 });
 
 describe("summary minting invariants", () => {
   it("freezes every public summary producer at runtime", () => {
     const summary = reportSummary(1, 0, "junit-xml");
-    for (const value of [summary, parseReportCounts(1, 0, "junit-xml")!, parseJunitXml(suite)!, parseVitestJson('{"numTotalTests":1,"numFailedTests":0}')!, mergeSummaries([summary])!]) {
+    for (const value of [summary, parseReportCounts(1, 0, "junit-xml")!, summarizedReport(suite, "junit-xml")!, summarizedReport('{"numTotalTests":1,"numFailedTests":0}', "vitest-json")!, mergeSummaries([summary])!]) {
       expect(Object.isFrozen(value)).toBe(true);
       expect(Reflect.set(value, "total", 99)).toBe(false);
       expect(Reflect.set(value, "failed", 99)).toBe(false);
@@ -135,7 +134,7 @@ describe("summary minting invariants", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 1000000 }), (count) => {
       const fake = `<testsuite tests="${count}" failures="0"/>`;
       for (const inert of [`<!-- ${fake} -->`, `<![CDATA[${fake}]]>`]) {
-        const result = parse(`<testsuites>${inert}<testsuite tests="0"/></testsuites>`);
+        const result = countedReport(`<testsuites>${inert}<testsuite tests="0"/></testsuites>`);
         expect(result.ok && result.value.total > 0).toBe(false);
       }
     }), { numRuns: 100 });
@@ -143,7 +142,7 @@ describe("summary minting invariants", () => {
 
   it("arbitrary input never throws or returns unsafe mutable summaries", () => {
     fc.assert(fc.property(fc.string({ maxLength: 500 }), (content) => {
-      const result = parse(content);
+      const result = countedReport(content);
       if (result.ok) {
         expect(Object.isFrozen(result.value)).toBe(true);
         expect(Number.isSafeInteger(result.value.total)).toBe(true);
@@ -158,7 +157,7 @@ describe("summary minting invariants", () => {
       const failed = outcomes.filter((o) => o === "failed").length;
       const skipped = outcomes.filter((o) => o === "skipped").length;
       const cases = outcomes.map((o) => `<testcase>${o === "failed" ? "<failure/>" : o === "skipped" ? "<skipped/>" : ""}</testcase>`).join("");
-      const result = parse(`<testsuite tests="${outcomes.length}" failures="${failed}" skipped="${skipped}">${cases}</testsuite>`);
+      const result = countedReport(`<testsuite tests="${outcomes.length}" failures="${failed}" skipped="${skipped}">${cases}</testsuite>`);
       expect(result).toEqual({ ok: true, value: { total: outcomes.length - skipped, failed, source: "junit-xml" } });
       if (result.ok) expect(Object.isFrozen(result.value)).toBe(true);
     }), { numRuns: 100 });

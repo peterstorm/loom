@@ -5,73 +5,44 @@
  * Task's pass, and the same failure stands once that sibling has settled.
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { readFileSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { failing, passing, report } from "../../fixtures/red-then-green-status-fixtures";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
-import { SUBAGENT_DIR } from "../../../src/config";
-import { parseEpoch, type EvidenceRecord } from "../../../src/machine";
+import type { EvidenceRecord } from "../../../src/machine";
 import { AGENT_COMMAND_ORIGIN } from "../../../src/machine/types";
-import type { TaskStatus } from "../../../src/types";
+import {
+  ARMED_EPOCH,
+  REGRESSION_ONLY,
+  armedClaudeImplementation,
+  writesTranscript,
+} from "../../fixtures/claude-implementation-attempt";
+import { taskFixture } from "../../fixtures/task-lifecycle";
 
 const OWN_TEST = "tests/own.test.ts";
 const SIBLING_TEST = "tests/sibling.test.ts";
-const run = `regression-scope-${process.pid}-${Date.now()}`;
-const originalCwd = process.cwd();
-let cleanup: string[] = [];
-
-beforeEach(() => {
-  const cwd = canonicalTempDir("loom-regression-scope-");
-  cleanup.push(cwd);
-  process.chdir(cwd);
-  vi.stubEnv("LOOM_STATE_PATH", join(cwd, "active_task_graph.json"));
-  vi.stubEnv("CLAUDE_PROJECT_DIR", cwd);
-  vi.stubEnv("CLAUDE_CONFIG_DIR", join(cwd, "claude-config"));
-  vi.stubEnv("LOOM_ORCHESTRATION_RUNS_ROOT", undefined);
-  vi.stubEnv("LOOM_ORCHESTRATION_RUN_DIR", undefined);
-});
+const disposals: (() => void)[] = [];
 
 afterEach(() => {
-  process.chdir(originalCwd);
-  vi.unstubAllEnvs();
   vi.restoreAllMocks();
-  for (const path of cleanup) rmSync(path, { recursive: true, force: true });
-  cleanup = [];
+  for (const dispose of disposals.splice(0)) dispose();
 });
 
-/** T1 settles; T2 is its Wave sibling declaring the failing test file. */
-function writeState(session: string, siblingStatus: TaskStatus): string {
-  const dir = process.cwd();
-  const statePath = join(dir, "active_task_graph.json");
-  const task = (id: string, status: TaskStatus, file_list: readonly string[]) => ({
-    id, description: "impl", agent: "code-implementer-agent", wave: 1, status, depends_on: [],
-    new_tests_required: false, file_list,
+/** T1 settles its exact attempt; T2 is its Wave sibling declaring the failing test file. */
+async function settle(siblingStatus: "pending" | "implemented") {
+  const armed = await armedClaudeImplementation({
+    label: `regression-scope-${siblingStatus}`,
+    verificationPolicy: REGRESSION_ONLY,
+    fileList: [OWN_TEST],
+    siblings: [taskFixture({
+      id: "T2", description: "impl", agent: "code-implementer-agent", wave: 1, status: siblingStatus,
+      depends_on: [], new_tests_required: false, file_list: [SIBLING_TEST],
+    })],
   });
-  writeFileSync(statePath, JSON.stringify({
-    current_phase: "execute",
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    current_wave: 1,
-    executing_tasks: ["T1"],
-    tasks: [task("T1", "implemented", [OWN_TEST]), task("T2", siblingStatus, [SIBLING_TEST])],
-    wave_gates: { "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false } },
-  }));
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-  const pointer = `${SUBAGENT_DIR}/${session}.task_graph`;
-  writeFileSync(pointer, statePath);
-  cleanup.push(pointer);
-  return statePath;
-}
-
-async function settle(siblingStatus: TaskStatus) {
-  const session = `${run}-${siblingStatus}`;
-  const statePath = writeState(session, siblingStatus);
+  disposals.push(armed.dispose);
+  writeFileSync(armed.transcript, writesTranscript("Ran the suite.", []));
   const snapshot: readonly EvidenceRecord[] = [{
-    epoch: parseEpoch("a-1:code-implementer-agent")!,
+    epoch: ARMED_EPOCH,
     event: {
       kind: "TestRun",
       origin: AGENT_COMMAND_ORIGIN,
@@ -81,13 +52,9 @@ async function settle(siblingStatus: TaskStatus) {
     },
   }];
   vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-  const result = await runUpdateTaskStatus(
-    JSON.stringify({ session_id: session, agent_id: "a-1", agent_type: "code-implementer-agent" }),
-    [],
-    { kind: "snapshot", events: snapshot },
-  );
-  expect(result.kind).toBe("passthrough");
-  return JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+  const result = await runUpdateTaskStatus(armed.stopInput, [], { kind: "snapshot", events: snapshot }, armed.observation);
+  expect(result.kind, JSON.stringify(result)).toBe("passthrough");
+  return JSON.parse(readFileSync(armed.statePath, "utf-8")).tasks[0];
 }
 
 describe("SubagentStop regression scope", () => {

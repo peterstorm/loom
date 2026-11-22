@@ -93,7 +93,7 @@ import type { ArtifactDigest } from "../../src/core/orchestration-contract";
 import {
   authorizeWaveCompletionSuite,
   freezeVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
@@ -105,7 +105,7 @@ import { ensureWaveCompletionSuite } from "../../src/handlers/helpers/wave-compl
 import { runOwnerVerification, type OwnerVerificationInput } from "../../src/orchestration/owner-verification-runner";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { parseAuthoredTaskRoster, populateTaskGraph } from "../../src/core/task-graph-population";
-import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
+import { graphFixture, manifestedGraphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { briefOwnership, ownerObligation } from "../fixtures/owner-obligation";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 import { loomCommandsAt } from "../fixtures/loom-package-root";
@@ -238,7 +238,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     mkdirSync(join(root, ".claude", "plans"), { recursive: true });
     writeFileSync(join(root, PLAN_FILE), "# Plan: matrix\n");
     const parsed = parseTaskGraph({
-      spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_trace_version: 2, current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: PLAN_FILE, wave_gates: {},
       ...(stamp === undefined ? {} : { owner_obligations: stamp }),
       tasks: [taskFixture({
@@ -321,7 +321,7 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
 
   /** The owner check the sibling `suite-authority.ts` authorizes for the graph's Wave, or null for none. */
   function gateOwnerCheck(value: TaskGraph) {
-    const suite = labelledValue("gate suite", authorizeGraphCompletionSuite(value, WORKSPACE));
+    const suite = labelledValue("gate suite", authorizeGraphCompletionSuite(manifestedGraphFixture(value), WORKSPACE));
     return suite.checks.find((check) => check.kind === "engine-owner-verification") ?? null;
   }
 
@@ -355,7 +355,7 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
 
   const readiness = (value: TaskGraph, owner: OwnerCheckAuthority | null) =>
     deriveWaveCompletionSuiteReadiness(
-      { ...value, active_wave_completion_suite: receiptUnder(owner) },
+      manifestedGraphFixture({ ...value, active_wave_completion_suite: receiptUnder(owner) }),
       1,
       { kind: "observed", workspaceDigest: WORKSPACE },
     ).kind;
@@ -392,12 +392,15 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
    * Whether the sibling `state-file-wire.ts` loads the graph, written as JSON,
    * with a receipt minted under `owner`. The wire re-derives the authority from
    * the stamp on purpose instead of trusting the receipt's roster: a receipt
-   * never certifies itself. The graph carries no frozen manifest, so the wire
-   * holds the receipt to the legacy engine default.
+   * never certifies itself. The graph is written under the pre-I6 default its
+   * Tasks were derived for, and the receipt is minted under that same manifest.
    */
   const loads = (value: TaskGraph, owner: OwnerCheckAuthority | null): boolean => {
-    const { verification_manifest: _frozen, ...legacy } = value;
-    const written = { ...legacy, active_wave_completion_suite: receiptUnder(owner, legacyDefaultVerificationManifest()) };
+    const written = {
+      ...value,
+      verification_manifest: preI6DefaultVerificationManifest(),
+      active_wave_completion_suite: receiptUnder(owner, preI6DefaultVerificationManifest()),
+    };
     return parseTaskGraph(JSON.parse(JSON.stringify(written))).ok;
   };
 
@@ -482,7 +485,7 @@ describe("INV-3 sibling rows — the gate runs owner verification for the Wave d
       const repo = buildOwnerVerificationRepo({ waveChanges, matrixTest: "discriminating" });
       const seen: OwnerVerificationInput[] = [];
       await ensureWaveCompletionSuite({
-        handle: repo.handle, manager: repo.manager, graph: repo.manager.load(), registration: repo.registration,
+        handle: repo.handle, manager: repo.manager, graph: manifestedGraphFixture(repo.manager.load()), registration: repo.registration,
         runOwnerVerification: async (input) => {
           seen.push(input);
           return { kind: "unavailable", failure: { kind: "unexpected-error", detail: "matrix row: the run is only observed" } };

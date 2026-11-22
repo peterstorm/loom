@@ -5,12 +5,14 @@ import { taskFixture as makeTaskFixture } from "../fixtures/task-lifecycle";
 import {
   applyFindingOutcomes,
   deduplicateFindingIds,
+  evidenceFailureError,
   findingsLockstepError,
   findingsUnionError,
   mergeFindings,
   recoverViewOnlyClaims,
-  refutationsUnionError,
-  resolutionsUnionError,
+  parseStoredFindingsField,
+  parseStoredRefutationsField,
+  parseStoredResolutionsField,
   reviewRunError,
   type AdjudicatedFinding,
 } from "../../src/core/findings";
@@ -520,10 +522,10 @@ describe("the load boundary proves what the Task type asserts", () => {
   it("accepts an absent field and a well-formed array", () => {
     expect(findingsUnionError(undefined, "findings")).toBeNull();
     expect(findingsUnionError([wellFormed], "findings")).toBeNull();
-    expect(refutationsUnionError(undefined, "refuted_findings")).toBeNull();
+    expect(parseStoredRefutationsField(undefined, "refuted_findings")).toEqual({ ok: true, value: undefined });
     expect(
-      refutationsUnionError([{ finding: wellFormed, refutations: [{ lens: "intent", reason: "y" }] }], "r"),
-    ).toBeNull();
+      parseStoredRefutationsField([{ finding: wellFormed, refutations: [{ lens: "intent", reason: "y" }] }], "r").ok,
+    ).toBe(true);
   });
 
   it.each([
@@ -548,7 +550,7 @@ describe("the load boundary proves what the Task type asserts", () => {
       prior_finding_ids: [],
       evidence: [],
     }, Number.MAX_SAFE_INTEGER + 1, [], "run")).toContain("safe integer");
-    expect(resolutionsUnionError([{
+    expect(parseStoredResolutionsField([{
       finding: wellFormed,
       resolution: {
         kind: "resolved_by_remediation",
@@ -563,7 +565,7 @@ describe("the load boundary proves what the Task type asserts", () => {
           agent: "code-reviewer",
         }],
       },
-    }], "resolved")).toContain("not a well-formed resolution");
+    }], "resolved")).toEqual({ ok: false, error: expect.stringContaining("not a well-formed resolution") });
   });
 
   it("preserves exact retired-container malformed and duplicate diagnostics", () => {
@@ -588,18 +590,41 @@ describe("the load boundary proves what the Task type asserts", () => {
       },
     };
 
-    expect(refutationsUnionError([{}], "refuted")).toBe(
-      "refuted[0] is not a well-formed refutation record (repair and install atomically with: helper repair-task-graph)",
-    );
-    expect(refutationsUnionError([refuted, refuted], "refuted")).toBe(
-      "refuted[1] repeats refuted finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
-    );
-    expect(resolutionsUnionError([{}], "resolved")).toBe(
-      "resolved[0] is not a well-formed resolution record (repair and install atomically with: helper repair-task-graph)",
-    );
-    expect(resolutionsUnionError([resolved, resolved], "resolved")).toBe(
-      "resolved[1] repeats resolved finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
-    );
+    expect(parseStoredRefutationsField([{}], "refuted")).toEqual({
+      ok: false,
+      error: "refuted[0] is not a well-formed refutation record (repair and install atomically with: helper repair-task-graph)",
+    });
+    expect(parseStoredRefutationsField([refuted, refuted], "refuted")).toEqual({
+      ok: false,
+      error: "refuted[1] repeats refuted finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
+    });
+    expect(parseStoredResolutionsField([{}], "resolved")).toEqual({
+      ok: false,
+      error: "resolved[0] is not a well-formed resolution record (repair and install atomically with: helper repair-task-graph)",
+    });
+    expect(parseStoredResolutionsField([resolved, resolved], "resolved")).toEqual({
+      ok: false,
+      error: "resolved[1] repeats resolved finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
+    });
+  });
+
+  it("parses stored findings into the frozen, parsed list the State File load consumes", () => {
+    const other = { ...wellFormed, id: "silent-failure-hunter-1", agent: "silent-failure-hunter", severity: "advisory" };
+    const parsed = parseStoredFindingsField([wellFormed, other], "findings");
+
+    expect(parsed).toEqual({ ok: true, value: parseStoredFindings([wellFormed, other]) });
+    expect(parsed.ok && parsed.value).toHaveLength(2);
+    expect(parsed.ok && Object.isFrozen(parsed.value)).toBe(true);
+    expect(parseStoredFindingsField(undefined, "findings")).toEqual({ ok: true, value: undefined });
+    expect(parseStoredFindingsField({}, "findings")).toEqual({ ok: false, error: "findings must be an array when present" });
+    expect(parseStoredFindingsField([wellFormed, {}], "findings")).toEqual({
+      ok: false,
+      error: "findings[1] is not a well-formed finding (repair and install atomically with: helper repair-task-graph)",
+    });
+    expect(parseStoredFindingsField([wellFormed, { ...wellFormed, claim: "y" }], "findings")).toEqual({
+      ok: false,
+      error: "findings[1] repeats finding id 'code-reviewer-1' (repair and install atomically with: helper repair-task-graph)",
+    });
   });
 
   it("points at the repair command rather than leaving the operator stuck", () => {
@@ -732,7 +757,7 @@ describe("applyFindingOutcomes refuses to adjudicate what it cannot find", () =>
     mergeFindings(taskFixture({ review_status: "pending" }), makeParsed(["a blocker"]), "code-reviewer");
 
   it("throws on an outcome naming a finding the task no longer holds", () => {
-    // Silently skipping it wrote no audit record while serializeOutcomes and
+    // Silently skipping it wrote no audit record while the serialized tally and
     // the operator line both still reported the finding as refuted — and
     // dropping the wave's last critical that way promotes blocked → passed.
     // Reachable when a store-review-findings override lands between brief and
@@ -826,5 +851,15 @@ describe("recoverViewOnlyClaims", () => {
 
   it("recovers nothing when the views are already in step", () => {
     expect(recoverViewOnlyClaims([], [], { critical: [], advisory: [] })).toEqual([]);
+  });
+});
+
+describe("evidenceFailureError — distinct failed reviewers", () => {
+  it("names the first reviewer the failure list repeats", () => {
+    expect(evidenceFailureError(
+      { review_evidence_failures: ["code-reviewer", "type-design-analyzer", "code-reviewer", "type-design-analyzer"] },
+      "tasks[0]",
+      new Set(["code-reviewer", "type-design-analyzer"]),
+    )).toBe("tasks[0]: review_evidence_failures repeats 'code-reviewer'");
   });
 });

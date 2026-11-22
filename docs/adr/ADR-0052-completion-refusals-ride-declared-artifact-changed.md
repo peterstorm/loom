@@ -6,6 +6,10 @@ Accepted (2026-11-07). Records AD-5 of the G2 skeletons plan
 FR-012 through FR-021, interview Q10a). Shipped on branch `feat/g2-skeletons` by T12, building on the
 conformance judge of T8 (ADR-0058) and the skeleton records of T10 and T11 (ADR-0051).
 
+Amended by [ADR-0098](ADR-0098-legacy-state-file-shapes-are-refused-at-load.md) (2026-11-20): the
+authority-free Pi untrusted stop and its LEGACY_STOP_CONFORMANCE constant are deleted, so exact settlement
+and reconcile are the only paths that observe conformance.
+
 ## Context
 
 G2 has the engine write a deterministic skeleton at every not-yet-existing bound path of an
@@ -105,8 +109,8 @@ observation explicitly, and engine-written bytes are subtracted before the chang
     attempt and never passes.
   - `reconcile-implementation-proof.ts` observes conformance over the Task's current bytes. A read
     failure aborts the reconcile without changing state.
-  - The authority-free Pi untrusted stop (`applyUntrustedStopResolution` in
-    `core/implementation-application.ts`) passes the named constant `LEGACY_STOP_CONFORMANCE`
+  - The authority-free Pi untrusted stop (applyUntrustedStopResolution in
+    `core/implementation-application.ts`, deleted by ADR-0098) passed the named constant LEGACY_STOP_CONFORMANCE
     (`not-owed`). That path always leaves the Task `pending` with `revalidation_required`, so the
     exact settlement or reconcile that follows judges it.
 - **Engine bytes subtracted (FR-012).** `buildTaskLocalByteObservation`
@@ -135,7 +139,7 @@ observation explicitly, and engine-written bytes are subtracted before the chang
 As AD-5 specified, `contractConformance` is a required field of `ObservedProofEvidence`, of
 `IncomingImplementationEvidence` and of the `reconcileTaskFromStoredEvidence` parameter. Every
 settlement path must decide it: an observed verdict from `observeContractConformance`, or the named
-`not-owed` constant `LEGACY_STOP_CONFORMANCE` on the Pi untrusted stop. A new settlement path that
+`not-owed` constant LEGACY_STOP_CONFORMANCE on the Pi untrusted stop (deleted by ADR-0098). A new settlement path that
 forgets to observe conformance fails to compile, so the risk Option 3 was rejected for cannot arise.
 Callers outside settlement, such as test fixtures, pass the shared `CONFORMANCE_NOT_OWED` constant
 (`core/skeleton/conformance-verdict.ts`) explicitly, and `parseObservedProofEvidence` refuses an

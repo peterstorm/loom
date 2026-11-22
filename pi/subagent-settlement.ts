@@ -12,9 +12,8 @@
  * port its caller injects.
  */
 
-import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
-import { readPersistedOutput } from "../engine/src/utils/persisted-output";
-import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
+import type { TestEvidence } from "../engine/src/core/test-evidence";
+import type { ResolvedTestEvidence } from "../engine/src/core/implementation-evidence";
 import { match } from "ts-pattern";
 import {
   decidePhaseResult,
@@ -42,22 +41,13 @@ import {
   describeSettlement,
   type ImplementationSettlementApplicationResult,
 } from "../engine/src/core/implementation-application";
-import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
 import { parseAgentType, type SessionId, type SessionRegistry } from "../engine/src/machine";
 import { piChildEvidence } from "./evidence-recorder";
 import {
-  inferSoleExecutingTask,
-  unprovenAttributionReason,
-  type TaskAttribution,
-} from "../engine/src/core/task-attribution";
-import {
-  messagesToClaudeJsonl,
-  parsePiMessages,
-  piStructuredTestDiagnostics,
-  piStructuredTestResult,
+  piTranscriptEvidence,
   type PiMessage,
-  type PiTranscriptResult,
+  type PiStructuredTestDiagnostics,
 } from "./transcript-adapter";
 import {
   decidePiSpecCheckAuthority,
@@ -93,7 +83,7 @@ export const outcome = (
 /** A failure that is both logged and reported to Pi as a processing error. */
 export const processingFailure = (message: string): PiResultOutcome => outcome([message], [message]);
 
-/** Text of the parent's own tool-call content, the last task-id fallback. */
+/** Text of the parent's own tool-call content, a reviewer's last task-id fallback. */
 export type ParentPromptText = string;
 
 /** The assistant and tool-result text a reviewer or spec-check transcript carries, in order. */
@@ -102,16 +92,6 @@ export const transcriptTextOf = (messages: readonly PiMessage[]): string =>
     .filter((message) => message.role === "assistant" || message.role === "toolResult")
     .flatMap((message) => message.content.flatMap((block) => block.type === "text" ? [block.text] : []))
     .join("\n");
-
-/** The errors of the FIRST failed result, or none when all succeeded. */
-function firstFailureErrors(
-  ...results: readonly PiTranscriptResult<unknown>[]
-): readonly string[] {
-  for (const result of results) {
-    if (!result.ok) return result.errors;
-  }
-  return [];
-}
 
 // ---------------------------------------------------------------------------
 // Phase agents
@@ -263,89 +243,24 @@ export function reduceLockedPiPhaseResult(
 // Implementation agents
 // ---------------------------------------------------------------------------
 
-/**
- * Which task an implementation result belongs to, or why it cannot be told.
- *
- * Pure: the reservation, the two prompt texts, and the currently-executing set
- * are all the inputs, and the answer is the only output — this function mutates
- * nothing. An unextractable id must not vanish silently: exactly one executing
- * task infers it, while ambiguous or empty is reported as `unbound`. The
- * caller (`applyImplementationPiResult`) reports an unbound failure and keeps
- * execution authority: without attribution it cannot safely release one Task.
- * Exact Oracle settlement releases matching modern authority for every proven
- * terminal transition. Compatibility settlement releases only a legacy
- * reservation (never a modern attempt), and reports it as unproven unless the
- * result named the Task; both ordinary terminal paths and completed/missing
- * cleanup therefore release the reservation they can identify.
- *
- * `attribution` says how the Task was found. Only `named` is the result's own
- * identity (its reservation or its own prompt). `parent-prompt` and
- * `sole-executing` are guesses: a parent's spawn call carries every brief of a
- * batch, so its first Task id may belong to a sibling, and the executing set
- * proves nothing about who ran. Both are reported as unproven.
- */
-export type BoundImplementationTask = Readonly<{ kind: "bound"; taskId: string; attribution: TaskAttribution }>;
-
-export type ImplementationTaskBinding =
-  | BoundImplementationTask
-  | Readonly<{ kind: "unbound"; reason: string }>;
-
-export function resolveImplementationTaskId(args: Readonly<{
-  agentType: string;
-  reservedTaskId: string | null;
-  reservedAuthority: ImplementationAttemptAuthority | null;
-  resultPrompt: string;
-  parentPrompt: ParentPromptText;
-  executingTasks: readonly string[];
-}>): ImplementationTaskBinding {
-  const bound = (taskId: string, attribution: TaskAttribution): BoundImplementationTask =>
-    Object.freeze({ kind: "bound", taskId, attribution });
-  const named = args.reservedAuthority?.taskId ?? args.reservedTaskId ?? extractTaskId(args.resultPrompt);
-  if (named) return bound(named, "named");
-  const fromParent = extractTaskId(args.parentPrompt);
-  if (fromParent) return bound(fromParent, "parent-prompt");
-  const inference = inferSoleExecutingTask(args.executingTasks);
-  if (inference.kind === "inferred") return bound(inference.taskId, "sole-executing");
-  return Object.freeze({
-    kind: "unbound" as const,
-    reason: inference.executingCount > 0
-      ? `WARNING: ${args.agentType} completed without task ID, ${inference.executingCount} tasks executing (ambiguous)`
-      : `WARNING: ${args.agentType} completed without task ID and executing_tasks is empty — task status was NOT recorded`,
-  });
-}
-
-/** Why a bound Task is a guess, or null when the result named it itself. */
-export function unprovenAttribution(agentType: string, binding: BoundImplementationTask): string | null {
-  return unprovenAttributionReason(agentType, binding.taskId, binding.attribution);
-}
-
-/**
- * Whether the reserved implementation authority is still the Task's current
- * attempt: an exact digest match for a modern reservation, and "no modern
- * attempt exists" for a legacy one (`expected === null`).
- */
+/** Whether the reserved implementation authority is still its Task's current attempt (exact digest match). */
 export function reservedAuthorityIsCurrent(
   state: TaskGraph,
-  taskId: string,
-  expected: ImplementationAttemptAuthority | null,
+  authority: ImplementationAttemptAuthority,
 ): boolean {
-  const task = state.tasks.find((candidate) => candidate.id === taskId);
-  return expected === null
-    ? task?.active_implementation_attempt === undefined
-    : task?.active_implementation_attempt?.authorityDigest === expected.authorityDigest;
+  const task = state.tasks.find((candidate) => candidate.id === authority.taskId);
+  return task?.active_implementation_attempt?.authorityDigest === authority.authorityDigest;
 }
 
-/** Release the Task's attempt state, only when it still carries exactly the reserved authority. */
+/** Release the authority's Task's attempt state, only when it still carries exactly that authority. */
 export function clearCurrentReservedAuthority(
   state: TaskGraph,
-  taskId: string,
-  expected: ImplementationAttemptAuthority | null,
+  authority: ImplementationAttemptAuthority,
 ): TaskGraph {
-  if (expected === null) return state;
   return {
     ...state,
     tasks: state.tasks.map((task) =>
-      task.id === taskId && task.active_implementation_attempt?.authorityDigest === expected.authorityDigest
+      task.id === authority.taskId && task.active_implementation_attempt?.authorityDigest === authority.authorityDigest
         ? {
             ...task,
             active_implementation_attempt: undefined,
@@ -359,141 +274,121 @@ export function clearCurrentReservedAuthority(
 }
 
 /**
- * Retire a reservation whose Task is already completed or gone. Takes only the
- * slot's implementation authority (`null`: a legacy reservation holding none).
+ * Retire a reservation whose Task is already completed, under the slot's exact
+ * authority: release the attempt and executing membership, and drop the
+ * completed Task's repository baseline. The authority names its own Task, so
+ * no second Task id can disagree with it.
  */
-export function retireCompletedOrMissingImplementation(
+export function retireCompletedImplementation(
   state: TaskGraph,
-  taskId: string,
-  expected: ImplementationAttemptAuthority | null,
+  authority: ImplementationAttemptAuthority,
 ): Readonly<{ state: TaskGraph; retired: boolean }> {
-  if (!reservedAuthorityIsCurrent(state, taskId, expected)) return { state, retired: false };
+  const { taskId } = authority;
   const task = state.tasks.find((candidate) => candidate.id === taskId);
-  if (task !== undefined && task.status !== "completed") return { state, retired: false };
+  if (task?.status !== "completed" || !reservedAuthorityIsCurrent(state, authority)) {
+    return { state, retired: false };
+  }
   const cleared = clearCurrentReservedAuthority({
     ...state,
     executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
-  }, taskId, expected);
+  }, authority);
   return {
     state: {
       ...cleared,
       tasks: cleared.tasks.map((candidate) =>
-        candidate.id === taskId && candidate.status === "completed"
-          ? { ...candidate, repository_baseline: undefined }
-          : candidate),
+        candidate.id === taskId ? { ...candidate, repository_baseline: undefined } : candidate),
     },
     retired: true,
   };
 }
 
-/** A malformed transcript with no byte change: release the attempt and record why the Task stays pending. */
-export function pendingMalformedTranscriptState(args: Readonly<{
-  state: TaskGraph;
-  taskId: string;
-  expected: ImplementationAttemptAuthority | null;
-  failureReason: string;
-}>): TaskGraph {
-  return clearCurrentReservedAuthority({
-    ...args.state,
-    executing_tasks: (args.state.executing_tasks ?? []).filter((id) => id !== args.taskId),
-    tasks: args.state.tasks.map((candidate) =>
-      candidate.id === args.taskId && candidate.status === "pending"
-        ? { ...candidate, failure_reason: args.failureReason }
-        : candidate
-    ),
-  }, args.taskId, args.expected);
-}
-
+/**
+ * What an implementation transcript proves about its tests: a structured
+ * verdict from a paired, attributable test run, or nothing. There is no
+ * third, weaker reading: transcript text that merely looks like a runner
+ * summary is not evidence, so a transcript without a structured verdict
+ * records no test result and the regression proof fails as
+ * `test-result-missing`.
+ */
 export type ImplementationTestObservation =
   | Readonly<{ kind: "structured"; evidence: TestEvidence }>
-  | Readonly<{ kind: "fallback"; evidence: TestEvidence }>;
+  | Readonly<{ kind: "missing" }>;
 
 export type ImplementationTranscriptObservation =
-  | Readonly<{ kind: "malformed"; failureReason: string; log: readonly string[] }>
+  | Readonly<{ kind: "malformed"; failureReason: string }>
   | Readonly<{
       kind: "accepted";
-      resultMessages: readonly PiMessage[];
+      /** Every path the transcript's file-tool calls targeted (`piWriteTargets`). */
+      writeTargets: readonly string[];
       test: ImplementationTestObservation;
       log: readonly string[];
     }>;
 
-function missingStructuredEvidenceLog(taskId: string, messages: unknown):
-  | Readonly<{ ok: true; value: string }>
-  | Readonly<{ ok: false; errors: readonly string[] }> {
-  const trace = piStructuredTestDiagnostics(messages);
-  if (!trace.ok) return trace;
-  const summary = trace.value.classifiedCommands.length === 0
+function missingStructuredEvidenceLog(taskId: string, trace: PiStructuredTestDiagnostics): string {
+  const summary = trace.classifiedCommands.length === 0
     ? "no Bash call was classified as a test run"
-    : `verdict=${trace.value.verdict}, classified=[${trace.value.classifiedCommands.join(" | ")}]`;
-  return {
-    ok: true,
-    value: `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; ` +
-      `the wave gate will reject it`,
-  };
+    : `verdict=${trace.verdict}, classified=[${trace.classifiedCommands.join(" | ")}]`;
+  return `loom(pi): ${taskId} produced no structured test evidence (${summary}) — no test result recorded ` +
+    `(test-result-missing); the wave gate will reject it`;
 }
 
-/** Parse an implementation transcript into accepted test evidence, or the reason it is malformed. */
-export function observeImplementationTranscript(messages: unknown, taskId: string): ImplementationTranscriptObservation {
-  const log: string[] = [];
-  const parsedMessages = parsePiMessages(messages);
-  if (!parsedMessages.ok) {
-    return {
-      kind: "malformed",
-      failureReason: `Pi transcript evidence capture failed: ${parsedMessages.errors.join("; ")}`,
-      log,
-    };
+/**
+ * Read an implementation transcript through `piTranscriptEvidence` (parse
+ * once, project, fold) into the write targets and test evidence settlement
+ * reads, or name why it is malformed. `cwd` is the directory its relative
+ * paths are read against.
+ */
+export function observeImplementationTranscript(
+  messages: unknown,
+  taskId: string,
+  cwd: string,
+): ImplementationTranscriptObservation {
+  const evidence = piTranscriptEvidence(messages, cwd);
+  if (!evidence.ok) {
+    return { kind: "malformed", failureReason: `Pi transcript evidence capture failed: ${evidence.errors.join("; ")}` };
   }
-
-  const adaptedTranscript = messagesToClaudeJsonl(parsedMessages.value);
-  const structuredEvidence = piStructuredTestResult(parsedMessages.value);
-  const diagnostics = structuredEvidence.ok && structuredEvidence.value === null
-    ? missingStructuredEvidenceLog(taskId, messages)
-    : null;
-  if (diagnostics?.ok) log.push(diagnostics.value);
-  if (!adaptedTranscript.ok || !structuredEvidence.ok || diagnostics?.ok === false) {
-    const errors = firstFailureErrors(
-      adaptedTranscript,
-      structuredEvidence,
-      ...(diagnostics === null ? [] : [diagnostics]),
-    );
-    return {
-      kind: "malformed",
-      failureReason: `Pi transcript evidence capture failed: ${errors.join("; ")}`,
-      log,
-    };
-  }
-
-  const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value, readPersistedOutput));
-  const test: ImplementationTestObservation = structuredEvidence.value === null
-    ? { kind: "fallback", evidence: transcriptEvidence }
-    : {
-        kind: "structured",
-        evidence: testEvidenceOf(structuredEvidence.value.passed, structuredEvidence.value.evidence),
-      };
+  const { writeTargets, unprovableWriteCalls, testResult, testDiagnostics } = evidence.value;
   return {
     kind: "accepted",
-    resultMessages: parsedMessages.value,
-    test,
-    log,
+    writeTargets,
+    test: testResult === null ? { kind: "missing" } : { kind: "structured", evidence: testResult },
+    log: [
+      ...(testResult === null ? [missingStructuredEvidenceLog(taskId, testDiagnostics)] : []),
+      ...unprovableWriteCallLog(taskId, unprovableWriteCalls, "files_modified"),
+    ],
   };
 }
 
-/** The untrusted test result an implementation observation contributes, labelled by provenance. */
-export function implementationTestResult(test: ImplementationTestObservation) {
-  const { evidence } = test;
-  return test.kind === "structured"
-    ? {
-        verdict: "untrusted" as const,
+/**
+ * One log line per transcript write call that names no provable target
+ * (`piUnprovableWriteCalls`): the path such a call may have written is absent
+ * from what `subject`'s settlement attributes (`attributedTo`), so the gap is
+ * named rather than silent.
+ */
+export function unprovableWriteCallLog(
+  subject: string,
+  unprovableWriteCalls: readonly string[],
+  attributedTo: string,
+): readonly string[] {
+  return unprovableWriteCalls.map((refusal) =>
+    `loom(pi): ${subject} transcript write call names no provable target (${refusal}) — not attributed to ${attributedTo}`);
+}
+
+/** The untrusted, provenance-labelled test result an implementation
+ *  observation contributes, or `null` when it proves none. */
+export function implementationTestResult(test: ImplementationTestObservation): ResolvedTestEvidence | null {
+  return match(test)
+    .with({ kind: "structured" }, ({ evidence }): ResolvedTestEvidence => ({
+      result: {
+        verdict: "untrusted",
         passed: evidence.passed,
         label: `pi-structured: ${evidence.evidence || "test tool result"}`,
-        provenance: "pi-structured" as const,
-      }
-    : {
-        verdict: "untrusted" as const,
-        passed: evidence.passed,
-        label: "transcript-regex (fallback)",
-        provenance: "unverified" as const,
-      };
+        provenance: "pi-structured",
+      },
+      evidence: evidence.evidence,
+    }))
+    .with({ kind: "missing" }, () => null)
+    .exhaustive();
 }
 
 /**

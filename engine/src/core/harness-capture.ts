@@ -33,8 +33,6 @@ import { sha256Bytes, sha256Hex } from "./digest";
 import {
   canonicalRecord,
   parseArtifactByteLength,
-  parseRequestId,
-  parseSlotId,
   type AgentRequestAuthority,
   type ArtifactDigest,
   type ArtifactRef,
@@ -303,13 +301,11 @@ export function recoverNativeCaptureArtifact(input: Readonly<{
 /**
  * The journal record kind written beside a terminalised capture rejection.
  *
- * Named once, here, because more than one adapter writes it AND the legacy panel
- * translator has to recognise it. It deliberately carries no `type` field: it is
- * durable evidence of a refusal, not a machine transition, and no program
- * reducer has a rule for it. Feeding it to a reducer instead is what wedged a
- * registered panel run at every later `resume` — a record no machine can fold is
- * exactly the corruption risk that keeps `RunAbandonment` out of this journal
- * too.
+ * Named once, here, because more than one adapter writes it. It deliberately
+ * carries no `type` field: it is durable evidence of a refusal, not a machine
+ * transition, and no program reducer has a rule for it — a record no machine
+ * can fold is exactly the corruption risk that keeps `RunAbandonment` out of
+ * this journal too.
  */
 export const CAPTURE_REJECTION_EVENT_KIND = "request-capture-rejected";
 
@@ -344,35 +340,4 @@ export function captureRejectionAuditRecord(
     attempt: request.attempt,
     diagnostic,
   });
-}
-
-/**
- * True only for a record shaped EXACTLY like this module's audit record.
- *
- * The panel translator uses this to carry an audit record past the reducer, so a
- * loose test here would quietly swallow real journal corruption: every field and
- * the exact key set are checked, and anything else stays the error it was.
- */
-export function isCaptureRejectionAuditRecord(raw: unknown): raw is CaptureRejectionAuditRecord {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
-  const record = raw as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  if (keys.length !== 5 || keys.join(",") !== "attempt,diagnostic,kind,requestId,slotId" ||
-      record["kind"] !== CAPTURE_REJECTION_EVENT_KIND ||
-      (record["attempt"] !== 1 && record["attempt"] !== 2) ||
-      typeof record["diagnostic"] !== "string") return false;
-  return parseRequestId(record["requestId"]).ok && parseSlotId(record["slotId"]).ok;
-}
-
-/**
- * Two receipts describe the same accepted result. Used by the acceptance suite
- * to prove Pi and Claude reach byte-identical outcomes: the harness and native
- * correlator differ by construction, so everything else must match exactly.
- */
-export function capturesAgree(left: CaptureReceipt, right: CaptureReceipt): boolean {
-  return left.requestId === right.requestId &&
-    left.slotId === right.slotId &&
-    left.attempt === right.attempt &&
-    left.byteLength === right.byteLength &&
-    left.digest === right.digest;
 }

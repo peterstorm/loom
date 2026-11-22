@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   panelRequestIdentity,
-  parseRefutationPanelCheckpoint,
+  parseRefutationPanelCheckpointRecord,
   refutationPanelCheckpoint,
   replayPersistentRefutationPanel,
   startPersistentRefutationPanel,
@@ -51,7 +51,7 @@ function persistPrefix(authority: RefutationPanelAuthority, prefix: readonly unk
   const events: readonly PersistentRefutationPanelEvent[] = JSON.parse(JSON.stringify(prefix));
   const replayed = value(replayPersistentRefutationPanel(authority, events, resolver));
   const checkpoint = value(refutationPanelCheckpoint(replayed.state, events, resolver));
-  const reloaded = value(parseRefutationPanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), resolver));
+  const reloaded = value(parseRefutationPanelCheckpointRecord(JSON.parse(JSON.stringify(checkpoint)), resolver)).step;
   expect(json(reloaded.state)).toBe(json(replayed.state));
   return json(replayed.state);
 }

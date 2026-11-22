@@ -16,7 +16,7 @@ import {
   type MachineDef,
   type PhaseDef,
   type Requirement,
-  type ParseResult,
+  type LineParseResult,
   parseOk,
   parseErr,
 } from "./types";
@@ -44,7 +44,7 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((s) => typeof s === "string" && s.trim() !== "");
 }
 
-function parseRequirement(v: unknown, ctx: string): ParseResult<Requirement> {
+function parseRequirement(v: unknown, ctx: string): LineParseResult<Requirement> {
   if (!isRecord(v)) return parseErr(`${ctx}: requirement must be an object`);
   const event = v.event;
   if (typeof event !== "string" || !(EVENT_TOKENS as readonly string[]).includes(event)) {
@@ -57,7 +57,7 @@ function parseRequirement(v: unknown, ctx: string): ParseResult<Requirement> {
   return parseOk({ event: event as EventToken, min });
 }
 
-function parsePhase(v: unknown, index: number, isLast: boolean): ParseResult<RawPhaseDef> {
+function parsePhase(v: unknown, index: number, isLast: boolean): LineParseResult<RawPhaseDef> {
   const ctx = `phases[${index}]`;
   if (!isRecord(v)) return parseErr(`${ctx}: must be an object`);
 
@@ -98,7 +98,7 @@ function parsePhase(v: unknown, index: number, isLast: boolean): ParseResult<Raw
   return parseOk({ terminal: false, id, allowedTools, advance: advance.value });
 }
 
-function parseEnforcedTools(raw: unknown): ParseResult<readonly string[]> {
+function parseEnforcedTools(raw: unknown): LineParseResult<readonly string[]> {
   if (!isStringArray(raw) || raw.length === 0) {
     return parseErr("machine: enforcedTools must be a non-empty array of tool names");
   }
@@ -114,7 +114,7 @@ function parseEnforcedTools(raw: unknown): ParseResult<readonly string[]> {
   return parseOk(raw);
 }
 
-function parsePhases(raw: unknown): ParseResult<readonly RawPhaseDef[]> {
+function parsePhases(raw: unknown): LineParseResult<readonly RawPhaseDef[]> {
   if (!Array.isArray(raw) || raw.length < 2) {
     return parseErr("machine: phases must be an array with at least 2 phases (one working, one terminal)");
   }
@@ -144,7 +144,7 @@ function unenforcedAllowedToolError(phases: readonly RawPhaseDef[], enforcedTool
   return null;
 }
 
-export function parseMachine(raw: unknown): ParseResult<MachineDef> {
+export function parseMachine(raw: unknown): LineParseResult<MachineDef> {
   if (!isRecord(raw)) return parseErr("machine: must be a JSON object");
 
   const agentRaw = raw.agent;
@@ -185,7 +185,7 @@ export function parseMachine(raw: unknown): ParseResult<MachineDef> {
   return parseOk({ agent, enforcedTools: wiredEnforced, phases: wiredPhases } as unknown as MachineDef);
 }
 
-export function parseMachineJson(json: string): ParseResult<MachineDef> {
+export function parseMachineJson(json: string): LineParseResult<MachineDef> {
   let raw: unknown;
   try {
     raw = JSON.parse(json);

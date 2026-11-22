@@ -19,42 +19,54 @@
  * - unassigned units that a budget cut short are `deferred` with a reason, not
  *   invisible.
  *
+ * The status-dependent rules are not checks: `CoverageUnit` is a union on
+ * `status`, so a planned unit with an owner, a covered unit without evidence or
+ * a candidate without fingerprints cannot be written down. What a type cannot
+ * say — path ownership, fresh owners, canonical identity, ledger placement — is
+ * ONE refinement per shape, attached to the schema the type is derived from.
+ *
  * Provenance: this is a port of the coverage-ledger contract vendored from
  * `cloudflare/security-audit-skill@c1c8a8c` (`validate-coverage-ledger.cjs`).
- * The differential test in `engine/tests/security/security-oracle.test.ts`
+ * The differential test in `engine/tests/security/security-coverage.test.ts`
  * pins agreement with that validator, so an intentional divergence has to be
  * a failing test rather than a silent drift.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import { match } from "ts-pattern";
+import { z } from "zod/v4";
 import { compareStrings } from "./ordering";
 import { catalogProfileOfAgent } from "./model-profiles";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
-import { parseSecurityFindings, type SecurityFinding } from "./security-findings";
+import { securityFindingsSchema, type SecurityFinding } from "./security-findings";
 import {
   SECURITY_AUDIT_LIMITS,
   SECURITY_INCOMPLETE_REASONS,
   PRIOR_STATUSES,
+  agentIdSchema,
   canonicalCoverageId,
+  coverageRefsSchema,
   coverageSemanticKey,
-  deepFrozenCopy,
   derivePriorStatus,
-  isPositiveInteger,
+  emptyList,
+  expecting,
+  fingerprintSchema,
+  isOneOf,
   isSafeSourcePath,
   isSecurityAgentId,
-  isSecurityFingerprint,
-  isOneOf,
   isVisibleText,
   isWireRecord,
-  parseCoverageRefs,
-  parsePriorRecordFacts,
-  unknownFieldViolations,
-  wireStringList,
+  itself,
+  listOf,
+  nonEmptyListOf,
+  parseWire,
+  positiveIntegerSchema,
+  priorRecordFactsSchema,
+  sourcePathSchema,
+  stringListSchema,
+  visibleTextSchema,
+  wirePath,
   wireViolation,
-  type CoverageRefs,
-  type PriorStatus,
   type SecurityAgentId,
   type SecurityIncompleteReason,
   type WireViolation,
@@ -74,19 +86,11 @@ export const COVERAGE_STATUSES = [
 ] as const;
 export type CoverageStatus = (typeof COVERAGE_STATUSES)[number];
 
-/** The runtime membership guard. A wire document can carry any string, and
- *  `match(...).exhaustive()` THROWS on an unknown tag — so a validator checks
- *  membership first and ends its state analysis there, rather than crashing on
- *  the document it was asked to judge. */
-export const isCoverageStatus = (value: unknown): value is CoverageStatus => isOneOf(COVERAGE_STATUSES, value);
-
 /** The three dispositions a hunter may settle an assigned unit with — the end
  *  of a HUNT, each with evidence. Not the end of a unit's lifecycle: a
  *  `blocked` unit still awaits a decision (see `COVERAGE_PHASES`). */
 export const TERMINAL_DISPOSITIONS = ["covered", "candidate", "blocked"] as const;
 export type TerminalDisposition = (typeof TERMINAL_DISPOSITIONS)[number];
-
-const isTerminalDisposition = (value: unknown): value is TerminalDisposition => isOneOf(TERMINAL_DISPOSITIONS, value);
 
 /** Where a unit stands in the run's completeness claim. */
 type CoveragePhase =
@@ -118,216 +122,7 @@ const COVERAGE_PHASES: Readonly<Record<CoverageStatus, CoveragePhase>> = {
   deferred: "disclosed-gap",
 };
 
-const phaseOf = (unit: CoverageUnit): CoveragePhase => COVERAGE_PHASES[unit.status];
-
-export type LocalCheck = Readonly<{
-  agent_id: SecurityAgentId;
-  reviewed_paths: readonly string[];
-  invariant: string;
-  method: "source" | "local";
-  result: string;
-  /** `null` for a source check; an `agents/<agent_id>/artifacts/...` path for a
-   *  local one, promoted by trusted parent-side code. */
-  artifact: string | null;
-}>;
-
-export type ExcludedBlock = Readonly<{ block: string; reason: string }>;
-
-export type CoverageAttempt = Readonly<{
-  wave: number;
-  status: TerminalDisposition;
-  agent_id: SecurityAgentId;
-  reviewed_paths: readonly string[];
-  local_checks: readonly LocalCheck[];
-  result_fingerprints: readonly string[];
-  unresolved: readonly string[];
-  reassignment_reason: string;
-}>;
-
-export type CoverageUnit = Readonly<{
-  coverage_id: string;
-  canonical_refs: CoverageRefs;
-  surface: string;
-  boundary: string;
-  subsystem: string;
-  attack_class: string;
-  lifecycle?: string;
-  starting_paths: readonly string[];
-  ordinary_attack_class_block: string | null;
-  selected_companion_blocks: readonly string[];
-  excluded_blocks: readonly ExcludedBlock[];
-  prior_status: PriorStatus;
-  attempts: readonly CoverageAttempt[];
-  wave: number;
-  status: CoverageStatus;
-  /** Every owner id the ledger records, here, on an attempt and on a check, is
-   *  one the agent-id grammar proved (`validateLedger` checks each), so it
-   *  rides bare in a printed command and names a scratch root. */
-  agent_id: SecurityAgentId | null;
-  reviewed_paths: readonly string[];
-  local_checks: readonly LocalCheck[];
-  result_fingerprints: readonly string[];
-  unresolved: readonly string[];
-}>;
-
-export type CoverageLedger = readonly CoverageUnit[];
-
-/** The ledger's name for the shared wire diagnostic. */
-export type CoverageViolation = WireViolation;
-
-export type CoverageError = Readonly<{
-  kind: "invalid-coverage-operation";
-  violations: readonly CoverageViolation[];
-}>;
-
-/** A ledger arrives as `JSON.parse` output, so every field below can be any
- *  JSON value. `entriesOf` is the one shape guard: a non-array becomes a named
- *  violation and an empty list, so validation stays total instead of throwing
- *  on the document it was asked to judge. */
-const entriesOf = (value: unknown, path: string, violations: CoverageViolation[]): readonly unknown[] => {
-  if (Array.isArray(value)) return value;
-  violations.push(wireViolation(path, "expected an array"));
-  return [];
-};
-
-const invalid = (violations: readonly CoverageViolation[]): CoverageError => ({
-  kind: "invalid-coverage-operation",
-  violations,
-});
-
-// --- Seeding ---
-
-export type CoverageSeed = Readonly<{
-  refs: CoverageRefs;
-  starting_paths: readonly string[];
-  ordinary_attack_class_block: string | null;
-  selected_companion_blocks: readonly string[];
-  excluded_blocks: readonly ExcludedBlock[];
-  /** Prior-run facts; the carry status is derived, never caller-supplied. */
-  prior: Parameters<typeof derivePriorStatus>[0];
-  lifecycle?: string;
-  wave?: number;
-  status?: CoverageStatus;
-  unresolved?: readonly string[];
-}>;
-
-/**
- * A seeded unit is `planned` (or explicitly `out_of_scope`/`deferred` for a
- * scoped or budget-cut run) with no owner and no evidence. The identity is
- * derived from the refs, so two seeds with the same semantics cannot both
- * enter a ledger by accident. Every violation is reported at once, so a seed
- * with three defects is repaired in one pass rather than three.
- */
-export function seedCoverageUnit(seed: CoverageSeed): DomainResult<CoverageUnit, CoverageError> {
-  const violations: CoverageViolation[] = [];
-  const refs = parseCoverageRefs(seed.refs);
-  if (!refs.ok) {
-    violations.push(wireViolation("canonical_refs", refs.error.message));
-    return failure(invalid(violations));
-  }
-  const value = refs.value;
-  // A seed that names a lifecycle its refs do not carry (or carry differently)
-  // would seed the lifecycle-less cell — a different cell than it named.
-  if (seed.lifecycle !== undefined && value.lifecycle !== seed.lifecycle) {
-    violations.push(wireViolation("lifecycle", "lifecycle and canonical_refs.lifecycle disagree"));
-  }
-  checkSeedEvidence(seed, violations);
-  const status = seed.status ?? "planned";
-  const unresolved = seed.unresolved ?? [];
-  checkSeedState(status, unresolved, violations);
-  const wave = seed.wave ?? 1;
-  if (!isPositiveInteger(wave)) violations.push(wireViolation("wave", "expected a positive integer"));
-  if (violations.length > 0) return failure(invalid(violations));
-
-  return success({
-    coverage_id: canonicalCoverageId(value),
-    canonical_refs: value,
-    surface: value.surface,
-    boundary: value.boundary,
-    subsystem: value.subsystem,
-    attack_class: value.attack_class,
-    ...(value.lifecycle === undefined ? {} : { lifecycle: value.lifecycle }),
-    starting_paths: [...seed.starting_paths],
-    ordinary_attack_class_block: seed.ordinary_attack_class_block,
-    selected_companion_blocks: [...seed.selected_companion_blocks],
-    excluded_blocks: seed.excluded_blocks.map((entry) => ({ block: entry.block, reason: entry.reason })),
-    prior_status: derivePriorStatus(seed.prior),
-    attempts: [],
-    wave,
-    status,
-    agent_id: null,
-    reviewed_paths: [],
-    local_checks: [],
-    result_fingerprints: [],
-    unresolved: [...unresolved],
-  });
-}
-
-/** The seed's hunting material: safe starting paths, visible block references,
- *  and exclusions that never name a selected block. */
-function checkSeedEvidence(seed: CoverageSeed, violations: CoverageViolation[]): void {
-  if (seed.starting_paths.length === 0) {
-    violations.push(wireViolation("starting_paths", "at least one starting path is required"));
-  }
-  for (const path of seed.starting_paths) {
-    if (!isSafeSourcePath(path)) violations.push(wireViolation("starting_paths", `unsafe source path ${JSON.stringify(path)}`));
-  }
-  if (seed.ordinary_attack_class_block !== null && !isVisibleText(seed.ordinary_attack_class_block)) {
-    violations.push(wireViolation("ordinary_attack_class_block", "expected null or visible text"));
-  }
-  for (const block of seed.selected_companion_blocks) {
-    if (!isVisibleText(block)) violations.push(wireViolation("selected_companion_blocks", "invalid block reference"));
-  }
-  for (const entry of seed.excluded_blocks) {
-    if (!isVisibleText(entry.block) || !isVisibleText(entry.reason)) {
-      violations.push(wireViolation("excluded_blocks", "block and reason must be visible text"));
-    }
-  }
-  const selected = new Set(seed.selected_companion_blocks);
-  for (const entry of seed.excluded_blocks) {
-    if (selected.has(entry.block)) violations.push(wireViolation("excluded_blocks", `block ${entry.block} is also selected`));
-  }
-}
-
-/** The state rule `validateLedger` enforces, applied at CONSTRUCTION: a seeded
- *  unit that is already settled as a gap names why, and a planned one has
- *  nothing unresolved yet. Checked here so the refusal names the seed field,
- *  not a ledger index the caller never wrote. */
-function checkSeedState(status: CoverageStatus, unresolved: readonly string[], violations: CoverageViolation[]): void {
-  if (status !== "planned" && status !== "out_of_scope" && status !== "deferred" && status !== "not_applicable") {
-    violations.push(wireViolation("status", "a seeded unit may only start planned, not_applicable, out_of_scope or deferred"));
-  } else if (status === "planned" && unresolved.length > 0) {
-    violations.push(wireViolation("unresolved", "a planned unit has nothing unresolved yet"));
-  } else if (status !== "planned" && unresolved.length === 0) {
-    violations.push(wireViolation("unresolved", `status ${status} requires the reason it is not hunted`));
-  }
-  checkEntryArray(unresolved, "unresolved", violations, "text", { allowEmpty: true });
-}
-
-// --- Sorting ---
-
-/** Canonical order: lexicographic by canonical id. Every returned ledger is
- *  sorted, so two runs that produce the same units produce the same bytes. */
-export const sortLedger = (ledger: CoverageLedger): CoverageLedger =>
-  [...ledger].sort((left, right) => compareStrings(left.coverage_id, right.coverage_id));
-
-// --- Fingerprint ownership ---
-
-/**
- * The unit that filed a fingerprint: the one whose live result lists it, else
- * the one whose ARCHIVED attempt does — a reassignment moves a unit's
- * `result_fingerprints` into `attempts` and clears the live list, and the
- * finding it filed is still that unit's. `null` when no unit ever filed it.
- * The ledger's one answer to "who filed this", so a report cannot lose a
- * finding's boundary because its unit was reassigned and re-hunted.
- */
-export function unitOfFingerprint(ledger: CoverageLedger, fingerprint: string): CoverageUnit | null {
-  return ledger.find((unit) => unit.result_fingerprints.includes(fingerprint)) ??
-    ledger.find((unit) => unit.attempts.some((attempt) => attempt.result_fingerprints.includes(fingerprint))) ??
-    null;
-}
-
-// --- Validation ---
+// --- Owned artifacts ---
 
 /** An artifact path under one owner's own artifacts root, parsed: the run-relative
  *  `agents/<owner>/artifacts/<file…>` and the owner id it names. */
@@ -345,449 +140,272 @@ export function parseOwnedArtifactPath(value: unknown): OwnedArtifactPath | null
     : null;
 }
 
-const isSafeOwnedArtifactPath = (value: unknown, agentId: unknown): boolean =>
-  parseOwnedArtifactPath(value)?.owner === agentId;
+// --- Local checks ---
 
-/** The per-kind entry guard and the violation it reports. */
-const ENTRY_RULES: Readonly<Record<"path" | "fingerprint" | "text", Readonly<{ valid: (entry: unknown) => boolean; message: string }>>> = {
-  path: { valid: isSafeSourcePath, message: "unsafe source path" },
-  fingerprint: { valid: isSecurityFingerprint, message: "invalid fingerprint" },
-  text: { valid: isVisibleText, message: "invalid text" },
-};
+/** One check's shape for one `method`, in the ledger's own key order. A
+ *  `source` check cites no artifact; a `local` check claims something OBSERVED,
+ *  so it names its receipt. */
+const checkShape = <const Method extends string, Artifact extends z.ZodType>(method: Method, artifact: Artifact) =>
+  z.strictObject({
+    agent_id: agentIdSchema,
+    reviewed_paths: nonEmptyListOf(sourcePathSchema, itself, "a check must review at least one path"),
+    invariant: visibleTextSchema,
+    method: z.literal(method),
+    result: visibleTextSchema,
+    artifact,
+  });
 
-/**
- * One array rule for every per-unit collection, matching the vendored
- * validator: entries are unique, and each entry is a visible bounded string or
- * a safe repository-relative path. Duplicates matter beyond tidiness — a
- * repeated path inflates the reviewed-path count a coverage claim rests on.
- */
-function checkEntryArray(
-  value: unknown,
-  path: string,
-  violations: CoverageViolation[],
-  kind: "path" | "fingerprint" | "text",
-  options: Readonly<{ allowEmpty?: boolean }> = {},
-): void {
-  if (!Array.isArray(value)) {
-    violations.push(wireViolation(path, "expected an array"));
-    return;
-  }
-  if (value.length > SECURITY_AUDIT_LIMITS.collectionItems) {
-    violations.push(wireViolation(path, "too many entries"));
-    return;
-  }
-  if (!options.allowEmpty && value.length === 0) violations.push(wireViolation(path, "requires at least one entry"));
-  const seen = new Set<string>();
-  const rule = ENTRY_RULES[kind];
-  for (const entry of value) {
-    if (!rule.valid(entry)) violations.push(wireViolation(path, rule.message));
-    if (typeof entry === "string") {
-      if (seen.has(entry)) violations.push(wireViolation(path, "duplicate entry"));
-      seen.add(entry);
-    }
-  }
-}
+const sourceCheckShape = checkShape("source", z.null(expecting("a source check must use null")));
+const localCheckVariants = z.discriminatedUnion(
+  "method",
+  [sourceCheckShape, checkShape("local", z.string(expecting("a local check must name its receipt")))],
+  { error: (issue) => (isWireRecord(issue.input) ? "expected source or local" : "expected an object") },
+);
 
 /** The keys one local check may carry: the ledger's own shape, which the
- *  hunter's unit result uses verbatim. */
-export const CHECK_KEYS: readonly string[] = ["agent_id", "reviewed_paths", "invariant", "method", "result", "artifact"];
+ *  hunter's unit result uses verbatim. Derived from the schema. */
+export const CHECK_KEYS: readonly string[] = sourceCheckShape.keyof().options;
 
 /**
- * THE local-check parser: one check, wherever it arrives — a hunter's unit
- * result (`submit`) or a stored ledger (`parseLedger`/`validateLedger`) — read
- * against one contract, so a malformed check is refused at the wire with the
- * message the ledger would give. Every violation is recorded at `path`; the
- * check comes back only when it holds none:
- *
- * - exactly `CHECK_KEYS`; a canonical owner id; at least one safe reviewed path;
- *   visible invariant and result;
- * - `method` is `source` or `local` — a check that claims neither source review
- *   nor a receipt is not evidence;
- * - a `source` check cites no artifact; a `local` check claims something
- *   OBSERVED, so it names its receipt, under that check owner's own
- *   `agents/<agent_id>/artifacts/` root.
+ * THE local-check schema: one check, wherever it arrives — a hunter's unit
+ * result (`submit`) or a stored ledger (`parseLedger`) — read against one
+ * contract, so a malformed check is refused at the wire with the message the
+ * ledger would give. A local check's receipt lies under that check owner's own
+ * `agents/<agent_id>/artifacts/` root.
  */
-function parseLocalCheck(raw: unknown, path: string, violations: CoverageViolation[]): LocalCheck | null {
-  if (!isWireRecord(raw)) {
-    violations.push(wireViolation(path, "expected an object"));
-    return null;
-  }
-  const local: CoverageViolation[] = unknownFieldViolations(raw, CHECK_KEYS, path);
-  const owner = isSecurityAgentId(raw.agent_id) ? raw.agent_id : null;
-  if (owner === null) local.push(wireViolation(`${path}.agent_id`, "expected a canonical lowercase agent ID"));
-  const reviewedPaths = parseStringArray(raw.reviewed_paths);
-  if (!Array.isArray(raw.reviewed_paths)) {
-    local.push(wireViolation(`${path}.reviewed_paths`, "expected an array of source paths"));
-  } else if (raw.reviewed_paths.length === 0) {
-    local.push(wireViolation(`${path}.reviewed_paths`, "a check must review at least one path"));
-  }
-  const entries: readonly unknown[] = Array.isArray(raw.reviewed_paths) ? raw.reviewed_paths : [];
-  for (const reviewed of entries) {
-    if (!isSafeSourcePath(reviewed)) local.push(wireViolation(`${path}.reviewed_paths`, `unsafe source path ${JSON.stringify(reviewed)}`));
-  }
-  const invariant = isVisibleText(raw.invariant) ? raw.invariant : null;
-  if (invariant === null) local.push(wireViolation(`${path}.invariant`, "invalid text"));
-  const result = isVisibleText(raw.result) ? raw.result : null;
-  if (result === null) local.push(wireViolation(`${path}.result`, "invalid text"));
-  const method = parseCheckMethod(raw.method);
-  if (method === null) local.push(wireViolation(`${path}.method`, "expected source or local"));
-  const artifact = nullableString(raw.artifact);
-  if (artifact === undefined) local.push(wireViolation(`${path}.artifact`, "expected null or an artifacts path"));
-  if (method === "source" && raw.artifact !== null) local.push(wireViolation(`${path}.artifact`, "a source check must use null"));
-  if (method === "local" && typeof raw.artifact !== "string") {
-    local.push(wireViolation(`${path}.artifact`, "a local check must name its receipt"));
-  } else if (method === "local" && !isSafeOwnedArtifactPath(raw.artifact, raw.agent_id)) {
-    local.push(wireViolation(`${path}.artifact`, "a local check cites an artifact under its own agent's artifacts root"));
-  }
-  violations.push(...local);
-  if (local.length > 0 || owner === null || reviewedPaths === null || invariant === null || method === null ||
-      result === null || artifact === undefined) {
-    return null;
-  }
-  return { agent_id: owner, reviewed_paths: reviewedPaths, invariant, method, result, artifact };
-}
-
-/** A list of checks at `path`: an array within the collection limit, each
- *  read by `parseLocalCheck`. The ledger's and the hunter wire's one reader. */
-function parseLocalChecks(raw: unknown, path: string, violations: CoverageViolation[]): readonly LocalCheck[] {
-  if (!Array.isArray(raw)) {
-    violations.push(wireViolation(path, "expected an array of checks"));
-    return [];
-  }
-  const checks: readonly unknown[] = raw;
-  if (checks.length > SECURITY_AUDIT_LIMITS.collectionItems) {
-    violations.push(wireViolation(path, "too many checks"));
-    return [];
-  }
-  return checks.flatMap((check, index) => {
-    const parsed = parseLocalCheck(check, `${path}[${index}]`, violations);
-    return parsed === null ? [] : [parsed];
-  });
-}
-
-/** The unit's reviewed paths are exactly the union of its checks' owned paths:
- *  a claimed path without a check is an unreviewed claim. */
-function validatePathOwnership(
-  unit: Readonly<{ reviewed_paths?: unknown; local_checks?: unknown }>,
-  path: string,
-  violations: CoverageViolation[],
-): void {
-  const checks: readonly unknown[] = Array.isArray(unit.local_checks) ? unit.local_checks : [];
-  const owned = new Set(checks.flatMap((check) => (isWireRecord(check) && Array.isArray(check.reviewed_paths) ? check.reviewed_paths : [])));
-  const claimed = new Set(Array.isArray(unit.reviewed_paths) ? unit.reviewed_paths : []);
-  for (const reviewed of claimed) {
-    if (!owned.has(reviewed)) violations.push(wireViolation(`${path}.reviewed_paths`, `${JSON.stringify(reviewed)} has no check owner`));
-  }
-  for (const reviewed of owned) {
-    if (!claimed.has(reviewed)) violations.push(wireViolation(`${path}.local_checks`, `owned path ${JSON.stringify(reviewed)} is absent from reviewed_paths`));
-  }
-}
-
-function validateStateInvariants(
-  unit: Readonly<{ status?: unknown; agent_id?: unknown; reviewed_paths?: unknown; local_checks?: unknown; result_fingerprints?: unknown; unresolved?: unknown }>,
-  path: string,
-  violations: CoverageViolation[],
-): void {
-  const count = (value: unknown): number => (Array.isArray(value) ? value.length : 0);
-  const requireOwner = (): void => {
-    if (!isSecurityAgentId(unit.agent_id)) violations.push(wireViolation(`${path}.agent_id`, `status ${unit.status} requires an owner`));
-  };
-  const requireUnassigned = (): void => {
-    if (unit.agent_id !== null) violations.push(wireViolation(`${path}.agent_id`, `status ${unit.status} must be unassigned`));
-  };
-  const requireEmptyEvidence = (): void => {
-    if (count(unit.reviewed_paths) > 0) violations.push(wireViolation(`${path}.reviewed_paths`, `status ${unit.status} keeps this empty`));
-    if (count(unit.local_checks) > 0) violations.push(wireViolation(`${path}.local_checks`, `status ${unit.status} keeps this empty`));
-  };
-  const requireEvidence = (): void => {
-    if (count(unit.reviewed_paths) === 0) violations.push(wireViolation(`${path}.reviewed_paths`, `status ${unit.status} requires entries`));
-    if (count(unit.local_checks) === 0) violations.push(wireViolation(`${path}.local_checks`, `status ${unit.status} requires entries`));
-  };
-  const requireUnresolved = (present: boolean): void => {
-    if (present && count(unit.unresolved) === 0) violations.push(wireViolation(`${path}.unresolved`, `status ${unit.status} requires unresolved facts`));
-    if (!present && count(unit.unresolved) > 0) violations.push(wireViolation(`${path}.unresolved`, `status ${unit.status} keeps this empty`));
-  };
-
-  if (unit.status !== "candidate" && count(unit.result_fingerprints) > 0) {
-    violations.push(wireViolation(`${path}.result_fingerprints`, `status ${unit.status} keeps this empty`));
-  }
-  // Membership was reported by the caller; an unknown wire value would make the
-  // exhaustive match below throw, so the state analysis ends here.
-  if (!isCoverageStatus(unit.status)) return;
-
-  match(unit.status)
-    .with("planned", () => {
-      requireUnassigned();
-      requireEmptyEvidence();
-      requireUnresolved(false);
-    })
-    .with("not_applicable", "out_of_scope", "deferred", () => {
-      requireUnassigned();
-      requireEmptyEvidence();
-      requireUnresolved(true);
-    })
-    .with("in_progress", () => {
-      requireOwner();
-      requireEmptyEvidence();
-      requireUnresolved(false);
-    })
-    .with("covered", () => {
-      requireOwner();
-      requireEvidence();
-      requireUnresolved(false);
-    })
-    .with("candidate", () => {
-      requireOwner();
-      requireEvidence();
-      if (count(unit.result_fingerprints) === 0) violations.push(wireViolation(`${path}.result_fingerprints`, "candidate requires fingerprints"));
-    })
-    .with("blocked", () => {
-      requireOwner();
-      requireEvidence();
-      requireUnresolved(true);
-    })
-    .exhaustive();
-}
-
-/**
- * Full ledger validation. Deterministic and total: every check runs, and the
- * violations come back in a stable order so a failing run prints the same
- * diagnostics twice.
- */
-export function validateLedger(ledger: CoverageLedger): readonly CoverageViolation[] {
-  const violations: CoverageViolation[] = [];
-  if (!Array.isArray(ledger as unknown)) {
-    violations.push(wireViolation("$", "expected a top-level array"));
-    return violations;
-  }
-  if (ledger.length > SECURITY_AUDIT_LIMITS.units) {
-    violations.push(wireViolation("$", `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`));
-    return violations;
-  }
-
-  const placement: LedgerPlacement = { byId: new Map(), bySemantics: new Map(), previousId: null };
-  ledger.forEach((unit, index) => {
-    const base = `$[${index}]`;
-    if (!isWireRecord(unit)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return;
+const localCheckSchema = localCheckVariants
+  .superRefine((check, ctx) => {
+    if (check.method === "local" && parseOwnedArtifactPath(check.artifact)?.owner !== check.agent_id) {
+      ctx.addIssue({ code: "custom", path: ["artifact"], message: "a local check cites an artifact under its own agent's artifacts root" });
     }
-    const semanticKey = checkUnitIdentity(unit, base, violations);
-    checkUnitFields(unit, base, violations);
-    parseLocalChecks(unit.local_checks, `${base}.local_checks`, violations);
-    validatePathOwnership(unit, base, violations);
-    validateStateInvariants(unit, base, violations);
-    validateAttempts(unit, base, violations);
-    checkUnitPlacement(placement, { unit, index, semanticKey }, violations);
-  });
+  })
+  .readonly();
+export type LocalCheck = z.output<typeof localCheckSchema>;
 
-  return violations;
-}
+const localChecksSchema = z.array(localCheckSchema).max(SECURITY_AUDIT_LIMITS.collectionItems).readonly();
 
-/** The unit's identity against its canonical refs. Returns the semantic key, or
- *  null when the refs did not parse: the key is derived from PARSED refs, and
- *  asking an unparsed unit for one is how totality leaked a throw. */
-function checkUnitIdentity(unit: CoverageUnit, base: string, violations: CoverageViolation[]): string | null {
-  const parsed = parseCoverageRefs(unit.canonical_refs);
-  if (!parsed.ok) {
-    violations.push(wireViolation(`${base}.canonical_refs`, parsed.error.message));
-    return null;
-  }
-  const expected = canonicalCoverageId(parsed.value);
-  if (unit.coverage_id !== expected) {
-    violations.push(wireViolation(`${base}.coverage_id`, `expected canonical ID ${JSON.stringify(expected)}`));
-  }
-  if (unit.surface !== parsed.value.surface || unit.boundary !== parsed.value.boundary ||
-      unit.subsystem !== parsed.value.subsystem || unit.attack_class !== parsed.value.attack_class ||
-      unit.lifecycle !== parsed.value.lifecycle) {
-    violations.push(wireViolation(`${base}`, "semantic fields must equal canonical_refs"));
-  }
-  return coverageSemanticKey(parsed.value);
-}
+// --- The unit, one variant per status ---
 
-/** Every per-unit scalar and collection field, checked as wire data. */
-function checkUnitFields(unit: CoverageUnit, base: string, violations: CoverageViolation[]): void {
-  if (!isSecurityAgentId(unit.agent_id) && unit.agent_id !== null) {
-    violations.push(wireViolation(`${base}.agent_id`, "expected null or a canonical lowercase agent ID"));
-  }
-  if (!isPositiveInteger(unit.wave)) violations.push(wireViolation(`${base}.wave`, "expected a positive integer"));
-  if (!isOneOf(PRIOR_STATUSES, unit.prior_status)) {
-    violations.push(wireViolation(`${base}.prior_status`, `invalid value ${JSON.stringify(unit.prior_status)}`));
-  }
-  if (!isCoverageStatus(unit.status)) {
-    violations.push(wireViolation(`${base}.status`, `invalid value ${JSON.stringify(unit.status)}`));
-  }
-  checkEntryArray(unit.starting_paths, `${base}.starting_paths`, violations, "path");
-  if (unit.ordinary_attack_class_block !== null && !isVisibleText(unit.ordinary_attack_class_block)) {
-    violations.push(wireViolation(`${base}.ordinary_attack_class_block`, "expected null or visible text"));
-  }
-  checkEntryArray(unit.selected_companion_blocks, `${base}.selected_companion_blocks`, violations, "text", { allowEmpty: true });
-  checkExcludedBlocks(unit, base, violations);
-  checkEntryArray(unit.reviewed_paths, `${base}.reviewed_paths`, violations, "path", { allowEmpty: true });
-  checkEntryArray(unit.result_fingerprints, `${base}.result_fingerprints`, violations, "fingerprint", { allowEmpty: true });
-  checkEntryArray(unit.unresolved, `${base}.unresolved`, violations, "text", { allowEmpty: true });
-}
+const excludedBlockSchema = z.strictObject({ block: visibleTextSchema, reason: visibleTextSchema }).readonly();
 
-/** Exclusions: visible, unique, and never also selected. Read as wire data, so
- *  the comparisons are over whatever the document holds. */
-function checkExcludedBlocks(unit: CoverageUnit, base: string, violations: CoverageViolation[]): void {
-  const seen = new Set<unknown>();
-  const selected: readonly unknown[] = Array.isArray(unit.selected_companion_blocks) ? unit.selected_companion_blocks : [];
-  entriesOf(unit.excluded_blocks, `${base}.excluded_blocks`, violations).forEach((entry, index) => {
-    const path = `${base}.excluded_blocks[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push(wireViolation(path, "expected an object"));
-      return;
-    }
-    if (!isVisibleText(entry.block) || !isVisibleText(entry.reason)) {
-      violations.push(wireViolation(path, "block and reason must be visible text"));
-    }
-    if (seen.has(entry.block)) violations.push(wireViolation(`${path}.block`, "duplicate block"));
-    seen.add(entry.block);
-    if (selected.includes(entry.block)) violations.push(wireViolation(`${path}.block`, "block is also selected"));
-  });
-}
+const owner = (status: CoverageStatus) =>
+  z.custom<SecurityAgentId>(isSecurityAgentId, expecting(`status ${status} requires an owner (a canonical lowercase agent ID)`));
+const unassigned = (status: CoverageStatus) => z.null(expecting(`status ${status} must be unassigned`));
+const keptEmpty = (status: CoverageStatus) => emptyList(`status ${status} keeps this empty`);
+const reviewedPaths = (status: CoverageStatus) => nonEmptyListOf(sourcePathSchema, itself, `status ${status} requires entries`);
+const settledChecks = (status: CoverageStatus) =>
+  localChecksSchema.refine((checks) => checks.length > 0, `status ${status} requires entries`);
+const unresolvedFacts = (status: CoverageStatus) =>
+  nonEmptyListOf(visibleTextSchema, itself, `status ${status} requires unresolved facts`);
 
-/** What one `validateLedger` pass has seen so far: ids, semantic tuples, and the
- *  previous id for the sort check. Never escapes the call that owns it. */
-type LedgerPlacement = {
-  byId: Map<string, number>;
-  bySemantics: Map<string, Readonly<{ id: string; index: number }>>;
-  previousId: string | null;
+/** What a hunt leaves behind, per terminal disposition: an owner and owned
+ *  evidence always; fingerprints exactly when a candidate was filed; unresolved
+ *  facts exactly when the hunt was blocked (a candidate MAY carry some). The
+ *  live unit and its archived attempts share these shapes. */
+const settledEvidence = {
+  covered: {
+    status: z.literal("covered"),
+    agent_id: owner("covered"),
+    reviewed_paths: reviewedPaths("covered"),
+    local_checks: settledChecks("covered"),
+    result_fingerprints: keptEmpty("covered"),
+    unresolved: keptEmpty("covered"),
+  },
+  candidate: {
+    status: z.literal("candidate"),
+    agent_id: owner("candidate"),
+    reviewed_paths: reviewedPaths("candidate"),
+    local_checks: settledChecks("candidate"),
+    result_fingerprints: nonEmptyListOf(fingerprintSchema, itself, "candidate requires fingerprints"),
+    unresolved: listOf(visibleTextSchema, itself),
+  },
+  blocked: {
+    status: z.literal("blocked"),
+    agent_id: owner("blocked"),
+    reviewed_paths: reviewedPaths("blocked"),
+    local_checks: settledChecks("blocked"),
+    result_fingerprints: keptEmpty("blocked"),
+    unresolved: unresolvedFacts("blocked"),
+  },
+} as const;
+
+/** A unit nobody holds: no owner, no evidence; a gap names why it is not hunted. */
+const unhunted = <const Status extends "planned" | "not_applicable" | "out_of_scope" | "deferred">(status: Status) => ({
+  status: z.literal(status),
+  agent_id: unassigned(status),
+  reviewed_paths: keptEmpty(status),
+  local_checks: keptEmpty(status),
+  result_fingerprints: keptEmpty(status),
+});
+
+const attemptVariant = <const Shape extends z.ZodRawShape>(evidence: Shape) =>
+  z.strictObject({ wave: positiveIntegerSchema, ...evidence, reassignment_reason: visibleTextSchema });
+
+/** One archived attempt: a settled hunt and the critic's reason for redoing it. */
+const coverageAttemptSchema = z
+  .discriminatedUnion(
+    "status",
+    [attemptVariant(settledEvidence.covered), attemptVariant(settledEvidence.candidate), attemptVariant(settledEvidence.blocked)],
+    { error: (issue) => (isWireRecord(issue.input) ? "archived attempts settle as covered, candidate or blocked" : "expected an object") },
+  )
+  .superRefine((attempt, ctx) => checkPathOwnership(attempt, ctx))
+  .readonly();
+export type CoverageAttempt = z.output<typeof coverageAttemptSchema>;
+
+/** What every unit carries whatever its status: its cell, its hunting material,
+ *  its history and its wave. */
+const unitCellShape = {
+  coverage_id: z.string(expecting("expected the canonical coverage ID")),
+  canonical_refs: coverageRefsSchema,
+  surface: z.string(expecting("expected a string")),
+  boundary: z.string(expecting("expected a string")),
+  subsystem: z.string(expecting("expected a string")),
+  attack_class: z.string(expecting("expected a string")),
+  lifecycle: z.string(expecting("expected a string")).optional(),
+  starting_paths: nonEmptyListOf(sourcePathSchema, itself),
+  ordinary_attack_class_block: visibleTextSchema.nullable(),
+  selected_companion_blocks: listOf(visibleTextSchema, itself),
+  excluded_blocks: z.array(excludedBlockSchema).max(SECURITY_AUDIT_LIMITS.collectionItems).readonly(),
+  prior_status: z.enum(PRIOR_STATUSES, expecting(`expected one of ${PRIOR_STATUSES.join(", ")}`)),
+  attempts: z.array(coverageAttemptSchema).max(SECURITY_AUDIT_LIMITS.attemptsPerUnit, "too many archived attempts").readonly(),
+  wave: positiveIntegerSchema,
 };
 
-/** One unit's place in the ledger: its semantic tuple and id are unique, and
- *  ids are sorted. */
-function checkUnitPlacement(
-  placement: LedgerPlacement,
-  at: Readonly<{ unit: CoverageUnit; index: number; semanticKey: string | null }>,
-  violations: CoverageViolation[],
-): void {
-  const { unit, index, semanticKey } = at;
-  const base = `$[${index}]`;
-  const previous = semanticKey === null ? undefined : placement.bySemantics.get(semanticKey);
-  if (previous !== undefined && previous.id !== unit.coverage_id) {
-    violations.push(wireViolation(`${base}.canonical_refs`, `semantic tuple already uses ${JSON.stringify(previous.id)} at $[${previous.index}]`));
-  } else if (previous === undefined && semanticKey !== null) {
-    placement.bySemantics.set(semanticKey, { id: unit.coverage_id, index });
-  }
-  if (placement.byId.has(unit.coverage_id)) {
-    violations.push(wireViolation(`${base}.coverage_id`, `duplicate coverage ID at $[${placement.byId.get(unit.coverage_id)}]`));
-  } else {
-    placement.byId.set(unit.coverage_id, index);
-  }
-  if (placement.previousId !== null && compareStrings(placement.previousId, unit.coverage_id) > 0) {
-    violations.push(wireViolation(`${base}.coverage_id`, "units must be sorted lexicographically"));
-  }
-  placement.previousId = unit.coverage_id;
-}
+const unitVariant = <const Shape extends z.ZodRawShape>(state: Shape) => z.strictObject({ ...unitCellShape, ...state });
 
 /**
- * Parse a stored ledger document. The read path's one parser: a top-level
- * array, at least one unit (an empty ledger would make `every(...)` claim
- * complete coverage of nothing — the seed path refuses it, so the read path
- * must too), and every rule `validateLedger` enforces.
- *
- * `validateLedger` reads every field as wire data — it is total over any JSON.
- * It judges a deep, frozen COPY of the document and returns that copy, never
- * the caller's array: a caller that kept the raw JSON and mutated it later
- * would otherwise silently rewrite a ledger this parser reported as proven
- * (`parseSecurityFindings` gives the same guarantee for the same reason).
+ * One coverage unit. A union on `status`: each status names exactly which
+ * owner and evidence it holds (`planned` holds nothing, `deferred` holds the
+ * reason, `covered` holds owned evidence, …), so no transition has to re-check
+ * a status-dependent rule — the state it would guard cannot be built.
  */
-export function parseLedger(raw: unknown): DomainResult<CoverageLedger, CoverageError> {
-  const copy = deepFrozenCopy(raw);
-  if (!Array.isArray(copy)) return failure(invalid([wireViolation("ledger", "expected a top-level array")]));
-  if (copy.length === 0) return failure(invalid([wireViolation("ledger", "a run always seeds at least one unit")]));
-  // Narrowed only once `validateLedger` holds no violation: it checks every
-  // field the type claims. The owner-id test derives every SecurityAgentId
-  // path of `CoverageLedger` and proves each refused: a new owner field fails
-  // to compile there until a case proves this check refuses it.
-  const candidate: CoverageLedger = copy;
-  const violations = validateLedger(candidate);
-  return violations.length === 0 ? success(candidate) : failure(invalid(violations));
+const coverageUnitSchema = z
+  .discriminatedUnion(
+    "status",
+    [
+      unitVariant({ ...unhunted("planned"), unresolved: keptEmpty("planned") }),
+      unitVariant({ ...unhunted("not_applicable"), unresolved: unresolvedFacts("not_applicable") }),
+      unitVariant({ ...unhunted("out_of_scope"), unresolved: unresolvedFacts("out_of_scope") }),
+      unitVariant({ ...unhunted("deferred"), unresolved: unresolvedFacts("deferred") }),
+      unitVariant({
+        status: z.literal("in_progress"),
+        agent_id: owner("in_progress"),
+        reviewed_paths: keptEmpty("in_progress"),
+        local_checks: keptEmpty("in_progress"),
+        result_fingerprints: keptEmpty("in_progress"),
+        unresolved: keptEmpty("in_progress"),
+      }),
+      unitVariant(settledEvidence.covered),
+      unitVariant(settledEvidence.candidate),
+      unitVariant(settledEvidence.blocked),
+    ],
+    { error: (issue) => (isWireRecord(issue.input) ? `expected one of ${COVERAGE_STATUSES.join(", ")}` : "expected an object") },
+  )
+  .superRefine((unit, ctx) => {
+    checkCanonicalIdentity(unit, ctx);
+    checkPathOwnership(unit, ctx);
+    checkExclusions(unit, ctx);
+    checkAttemptHistory(unit, ctx);
+  })
+  .readonly();
+
+export type CoverageUnit = z.output<typeof coverageUnitSchema>;
+/** A unit a hunt settled: the three terminal dispositions. */
+type SettledUnit = Extract<CoverageUnit, Readonly<{ status: TerminalDisposition }>>;
+type PlannedUnit = Extract<CoverageUnit, Readonly<{ status: "planned" }>>;
+
+const isSettledUnit = (unit: CoverageUnit): unit is SettledUnit => isOneOf(TERMINAL_DISPOSITIONS, unit.status);
+
+const phaseOf = (unit: CoverageUnit): CoveragePhase => COVERAGE_PHASES[unit.status];
+
+/** The ledger's name for the shared wire diagnostic. */
+export type CoverageViolation = WireViolation;
+
+type Ctx = z.core.$RefinementCtx;
+
+/** The id is the canonical derivation of the refs, and the semantic fields are
+ *  the refs' own: a unit whose id says one cell and whose `surface` says
+ *  another names two cells at once. */
+function checkCanonicalIdentity(
+  unit: Readonly<Pick<CoverageUnit, "coverage_id" | "canonical_refs" | "surface" | "boundary" | "subsystem" | "attack_class" | "lifecycle">>,
+  ctx: Ctx,
+): void {
+  const refs = unit.canonical_refs;
+  const expected = canonicalCoverageId(refs);
+  if (unit.coverage_id !== expected) {
+    ctx.addIssue({ code: "custom", path: ["coverage_id"], message: `expected canonical ID ${JSON.stringify(expected)}` });
+  }
+  if (unit.surface !== refs.surface || unit.boundary !== refs.boundary || unit.subsystem !== refs.subsystem ||
+      unit.attack_class !== refs.attack_class || unit.lifecycle !== refs.lifecycle) {
+    ctx.addIssue({ code: "custom", message: "semantic fields must equal canonical_refs" });
+  }
 }
 
-function validateAttempts(unit: CoverageUnit, base: string, violations: CoverageViolation[]): void {
-  const attempts = entriesOf(unit.attempts, `${base}.attempts`, violations);
-  if (attempts.length > SECURITY_AUDIT_LIMITS.attemptsPerUnit) {
-    violations.push(wireViolation(`${base}.attempts`, "too many archived attempts"));
-    return;
+/** The reviewed paths are exactly the union of the checks' owned paths: a
+ *  claimed path without a check is an unreviewed claim. */
+function checkPathOwnership(
+  holder: Readonly<{ reviewed_paths: readonly string[]; local_checks: readonly LocalCheck[] }>,
+  ctx: Ctx,
+): void {
+  const owned = new Set(holder.local_checks.flatMap((check) => check.reviewed_paths));
+  const claimed = new Set(holder.reviewed_paths);
+  for (const reviewed of claimed) {
+    if (!owned.has(reviewed)) ctx.addIssue({ code: "custom", path: ["reviewed_paths"], message: `${JSON.stringify(reviewed)} has no check owner` });
   }
-  const history: AttemptHistory = { owners: new Set(), artifacts: new Set(), previousWave: 0 };
-  attempts.forEach((attempt, index) => {
-    const path = `${base}.attempts[${index}]`;
-    if (!isWireRecord(attempt)) {
-      violations.push(wireViolation(path, "expected an object"));
-      return;
+  for (const reviewed of owned) {
+    if (!claimed.has(reviewed)) {
+      ctx.addIssue({ code: "custom", path: ["local_checks"], message: `owned path ${JSON.stringify(reviewed)} is absent from reviewed_paths` });
     }
-    checkArchivedAttempt(attempt, { currentWave: unit.wave, path, history }, violations);
-  });
+  }
+}
 
-  if (!Array.isArray(unit.attempts)) return;
-  checkLiveEvidenceIsFresh(unit, base, history, violations);
+/** Exclusions are unique, and never name a selected block. */
+function checkExclusions(unit: Readonly<Pick<CoverageUnit, "excluded_blocks" | "selected_companion_blocks">>, ctx: Ctx): void {
+  const seen = new Set<string>();
+  unit.excluded_blocks.forEach((entry, index) => {
+    if (seen.has(entry.block)) ctx.addIssue({ code: "custom", path: ["excluded_blocks", index, "block"], message: "duplicate block" });
+    seen.add(entry.block);
+    if (unit.selected_companion_blocks.includes(entry.block)) {
+      ctx.addIssue({ code: "custom", path: ["excluded_blocks", index, "block"], message: "block is also selected" });
+    }
+  });
 }
 
 /** What a unit's archived attempts have spent so far: their owners and their
- *  local artifacts, and the last archived wave. Local to one `validateAttempts`. */
-type AttemptHistory = { owners: Set<string>; artifacts: Set<string>; previousWave: number };
+ *  local artifacts. Local to one `checkAttemptHistory`. */
+type AttemptHistory = Readonly<{ owners: Set<string>; artifacts: Set<string> }>;
 
-/** One archived attempt: a settled record with a fresh owner, earlier than the
- *  unit's current wave, whose evidence reuses nothing a prior attempt spent. */
-function checkArchivedAttempt(
-  attempt: Readonly<Record<string, unknown>>,
-  at: Readonly<{ currentWave: number; path: string; history: AttemptHistory }>,
-  violations: CoverageViolation[],
+/**
+ * Archived waves strictly increase and precede the current wave; each archived
+ * attempt runs under a fresh owner and reuses no artifact an earlier attempt
+ * spent. The live attempt then starts fresh: its owner and its checks belong to
+ * no archived attempt, and it cites no archived artifact.
+ */
+function checkAttemptHistory(
+  unit: Readonly<Pick<CoverageUnit, "attempts" | "wave" | "agent_id" | "local_checks">>,
+  ctx: Ctx,
 ): void {
-  const { currentWave, path, history } = at;
-  const wave = attempt.wave;
-  if (!isPositiveInteger(wave)) {
-    violations.push(wireViolation(`${path}.wave`, "expected a positive integer"));
-  } else {
-    if (wave <= history.previousWave) violations.push(wireViolation(`${path}.wave`, "archived waves must strictly increase"));
-    if (wave >= currentWave) violations.push(wireViolation(`${path}.wave`, `archived wave must precede current wave ${currentWave}`));
-    history.previousWave = wave;
+  const history: AttemptHistory = { owners: new Set(), artifacts: new Set() };
+  unit.attempts.forEach((attempt, index) => {
+    const at = ["attempts", index] as const;
+    const previous = unit.attempts[index - 1];
+    if (previous !== undefined && attempt.wave <= previous.wave) {
+      ctx.addIssue({ code: "custom", path: [...at, "wave"], message: "archived waves must strictly increase" });
+    }
+    if (attempt.wave >= unit.wave) {
+      ctx.addIssue({ code: "custom", path: [...at, "wave"], message: `archived wave must precede current wave ${unit.wave}` });
+    }
+    const fresh = !history.owners.has(attempt.agent_id);
+    if (!fresh) ctx.addIssue({ code: "custom", path: [...at, "agent_id"], message: "assignment owner must be fresh for each attempt" });
+    checkEvidenceIsFresh(attempt.local_checks, { at, priorOwnerMessage: "prior owner evidence belongs in its earlier attempt", spend: true }, history, ctx);
+    // The attempt's own owner joins the prior set only AFTER its checks are read:
+    // an attempt's evidence is its own, not a prior owner's.
+    if (fresh) history.owners.add(attempt.agent_id);
+  });
+  if (unit.agent_id !== null && history.owners.has(unit.agent_id)) {
+    ctx.addIssue({ code: "custom", path: ["agent_id"], message: "the current owner must be fresh after a reassignment" });
   }
-  if (!isTerminalDisposition(attempt.status)) {
-    violations.push(wireViolation(`${path}.status`, "archived attempts settle as covered, candidate or blocked"));
-  }
-  const freshOwner = checkAttemptOwner(attempt.agent_id, path, history, violations);
-  checkAttemptEvidence(attempt, path, violations);
-  checkEvidenceIsFresh(attempt.local_checks, { path, priorOwnerMessage: "prior owner evidence belongs in its earlier attempt", spend: true }, history, violations);
-  // The attempt's own owner joins the prior set only AFTER its checks are read:
-  // an attempt's evidence is its own, not a prior owner's.
-  if (freshOwner !== null) history.owners.add(freshOwner);
-}
-
-/** The archived owner, when it is canonical and fresh; null otherwise (and the
- *  violation is recorded). */
-function checkAttemptOwner(
-  agentId: unknown,
-  path: string,
-  history: AttemptHistory,
-  violations: CoverageViolation[],
-): string | null {
-  if (!isSecurityAgentId(agentId)) {
-    violations.push(wireViolation(`${path}.agent_id`, "archived attempt requires a canonical lowercase agent ID"));
-    return null;
-  }
-  if (history.owners.has(agentId)) {
-    violations.push(wireViolation(`${path}.agent_id`, "assignment owner must be fresh for each attempt"));
-    return null;
-  }
-  return agentId;
-}
-
-/** The archived attempt's evidence, held to the same rules as a live unit's. */
-function checkAttemptEvidence(attempt: Readonly<Record<string, unknown>>, path: string, violations: CoverageViolation[]): void {
-  // One rule per collection, exactly as a live unit's: `checkEntryArray` reports
-  // a non-array, an unsafe path and a duplicate once each.
-  checkEntryArray(attempt.reviewed_paths, `${path}.reviewed_paths`, violations, "path", { allowEmpty: true });
-  parseLocalChecks(attempt.local_checks, `${path}.local_checks`, violations);
-  validatePathOwnership(attempt, path, violations);
-  checkEntryArray(attempt.result_fingerprints, `${path}.result_fingerprints`, violations, "fingerprint", { allowEmpty: true });
-  checkEntryArray(attempt.unresolved, `${path}.unresolved`, violations, "text", { allowEmpty: true });
-  if (!isVisibleText(attempt.reassignment_reason)) violations.push(wireViolation(`${path}.reassignment_reason`, "invalid text"));
-  validateStateInvariants(attempt, path, violations);
+  checkEvidenceIsFresh(unit.local_checks, { at: [], priorOwnerMessage: "prior owner evidence must stay archived", spend: false }, history, ctx);
 }
 
 /**
@@ -799,37 +417,237 @@ function checkAttemptEvidence(attempt: Readonly<Record<string, unknown>>, path: 
  * attempt spends nothing.
  */
 function checkEvidenceIsFresh(
-  checks: unknown,
-  at: Readonly<{ path: string; priorOwnerMessage: string; spend: boolean }>,
+  checks: readonly LocalCheck[],
+  rule: Readonly<{ at: readonly PropertyKey[]; priorOwnerMessage: string; spend: boolean }>,
   history: AttemptHistory,
-  violations: CoverageViolation[],
+  ctx: Ctx,
 ): void {
-  const entries: readonly unknown[] = Array.isArray(checks) ? checks : [];
-  entries.forEach((rawCheck, index) => {
-    if (!isWireRecord(rawCheck)) return;
-    if (isSecurityAgentId(rawCheck.agent_id) && history.owners.has(rawCheck.agent_id)) {
-      violations.push(wireViolation(`${at.path}.local_checks[${index}].agent_id`, at.priorOwnerMessage));
+  checks.forEach((check, index) => {
+    const at = [...rule.at, "local_checks", index];
+    if (history.owners.has(check.agent_id)) ctx.addIssue({ code: "custom", path: [...at, "agent_id"], message: rule.priorOwnerMessage });
+    if (check.artifact !== null && history.artifacts.has(check.artifact)) {
+      ctx.addIssue({ code: "custom", path: [...at, "artifact"], message: "an archived artifact cannot be reused" });
     }
-    if (typeof rawCheck.artifact === "string" && history.artifacts.has(rawCheck.artifact)) {
-      violations.push(wireViolation(`${at.path}.local_checks[${index}].artifact`, "an archived artifact cannot be reused"));
-    }
-    if (at.spend && rawCheck.method === "local" && typeof rawCheck.artifact === "string") history.artifacts.add(rawCheck.artifact);
+    if (rule.spend && check.method === "local") history.artifacts.add(check.artifact);
   });
 }
 
-/** The live attempt starts fresh: its owner and its checks belong to no
- *  archived attempt, and it cites no archived artifact. */
-function checkLiveEvidenceIsFresh(
-  unit: CoverageUnit,
-  base: string,
-  history: AttemptHistory,
-  violations: CoverageViolation[],
-): void {
-  if (isSecurityAgentId(unit.agent_id) && history.owners.has(unit.agent_id)) {
-    violations.push(wireViolation(`${base}.agent_id`, "the current owner must be fresh after a reassignment"));
-  }
-  checkEvidenceIsFresh(unit.local_checks, { path: base, priorOwnerMessage: "prior owner evidence must stay archived", spend: false }, history, violations);
+// --- The ledger ---
+
+/** One ledger's placement: every semantic tuple and every id once, ids sorted. */
+function checkPlacement(units: readonly CoverageUnit[], ctx: Ctx): void {
+  const byId = new Map<string, number>();
+  const bySemantics = new Map<string, Readonly<{ id: string; index: number }>>();
+  units.forEach((unit, index) => {
+    const semanticKey = coverageSemanticKey(unit.canonical_refs);
+    const sameCell = bySemantics.get(semanticKey);
+    if (sameCell === undefined) bySemantics.set(semanticKey, { id: unit.coverage_id, index });
+    else if (sameCell.id !== unit.coverage_id) {
+      ctx.addIssue({ code: "custom", path: [index, "canonical_refs"], message: `semantic tuple already uses ${JSON.stringify(sameCell.id)} at index ${sameCell.index}` });
+    }
+    const sameId = byId.get(unit.coverage_id);
+    if (sameId === undefined) byId.set(unit.coverage_id, index);
+    else ctx.addIssue({ code: "custom", path: [index, "coverage_id"], message: `duplicate coverage ID at index ${sameId}` });
+    const before = units[index - 1];
+    if (before !== undefined && compareStrings(before.coverage_id, unit.coverage_id) > 0) {
+      ctx.addIssue({ code: "custom", path: [index, "coverage_id"], message: "units must be sorted lexicographically" });
+    }
+  });
 }
+
+/** The ceiling's one refusal message: the seed, ledger and merge paths all name it. */
+const UNIT_CEILING = `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`;
+
+/**
+ * A stored ledger: a top-level array of at least one unit (an empty ledger
+ * would make `every(...)` claim complete coverage of nothing — the seed path
+ * refuses it, so the read path must too), each unit valid in its own right and
+ * placed once, in canonical order.
+ */
+const coverageLedgerSchema = z
+  .array(coverageUnitSchema, expecting("expected a top-level array"))
+  .min(1, "a run always seeds at least one unit")
+  .max(SECURITY_AUDIT_LIMITS.units, UNIT_CEILING)
+  .superRefine(checkPlacement)
+  .readonly();
+
+export type CoverageLedger = z.output<typeof coverageLedgerSchema>;
+
+export type CoverageError = Readonly<{
+  kind: "invalid-coverage-operation";
+  violations: readonly CoverageViolation[];
+}>;
+
+const invalid = (violations: readonly CoverageViolation[]): CoverageError => ({
+  kind: "invalid-coverage-operation",
+  violations,
+});
+
+const unitCeilingViolation = (path: string): CoverageViolation => wireViolation(path, UNIT_CEILING);
+
+/**
+ * Parse a stored ledger document — the read path's one parser, and the only
+ * place a ledger the engine did not just build is admitted. Deterministic and
+ * total over any JSON: every violation comes back, in a stable order. The
+ * ledger returned is the parser's own deep-frozen copy, never the caller's
+ * array, so a caller that mutates the raw document later cannot rewrite a
+ * ledger this parser reported as proven.
+ */
+export function parseLedger(raw: unknown): DomainResult<CoverageLedger, CoverageError> {
+  const parsed = parseWire(coverageLedgerSchema, raw);
+  return parsed.ok ? parsed : failure(invalid(parsed.error));
+}
+
+/** A unit a transition rebuilt, parsed as the unit it claims to be and named
+ *  at its place in `ledger`. Only the rules the unit's type does not carry can
+ *  refuse it — the wave order its history implies, the paths its checks own.
+ *  The unit's place is looked up only for a refusal: the parse is pure, so the
+ *  re-parse that paths its violations names exactly what the first one found,
+ *  and a transition over many units (deferral) scans the ledger for none. */
+function rebuiltUnit(ledger: CoverageLedger, candidate: unknown, coverageId: string): DomainResult<CoverageUnit, readonly CoverageViolation[]> {
+  const parsed = parseWire(coverageUnitSchema, candidate);
+  return parsed.ok
+    ? parsed
+    : parseWire(coverageUnitSchema, candidate, `$[${ledger.findIndex((unit) => unit.coverage_id === coverageId)}]`);
+}
+
+/** Canonical order: lexicographic by canonical id. Every returned ledger is
+ *  sorted, so two runs that produce the same units produce the same bytes. */
+export const sortLedger = (ledger: CoverageLedger): CoverageLedger =>
+  [...ledger].sort((left, right) => compareStrings(left.coverage_id, right.coverage_id));
+
+const replaceUnit = (ledger: CoverageLedger, next: CoverageUnit): CoverageLedger =>
+  ledger.map((unit) => (unit.coverage_id === next.coverage_id ? next : unit));
+
+// --- Seeding ---
+
+/** The coverage seed a run starts from, as `start`'s `units` payload carries it.
+ *  Closed on purpose: a misspelled optional field (`lifeCycle`) would be dropped
+ *  while the seed still parsed, seeding a different cell. Absent lists are
+ *  empty, an absent block is none, an absent prior is no prior record; the
+ *  entries themselves are judged by the unit the seed builds. */
+const coverageSeedSchema = z.strictObject({
+  refs: coverageRefsSchema,
+  starting_paths: stringListSchema.default([]),
+  ordinary_attack_class_block: visibleTextSchema.nullable().default(null),
+  selected_companion_blocks: stringListSchema.default([]),
+  excluded_blocks: z.array(excludedBlockSchema).readonly().default([]),
+  /** Prior-run facts; the carry status is derived, never caller-supplied. */
+  prior: priorRecordFactsSchema.nullable().default(null),
+  lifecycle: z.string(expecting("expected a string")).optional(),
+  wave: z.number(expecting("expected a number")).optional(),
+  status: z.enum(COVERAGE_STATUSES, expecting(`expected one of ${COVERAGE_STATUSES.join(", ")}`)).optional(),
+  unresolved: stringListSchema.optional(),
+}).readonly();
+export type CoverageSeed = z.output<typeof coverageSeedSchema>;
+
+const coverageSeedsSchema = z
+  .array(coverageSeedSchema, expecting("expected a top-level array"))
+  .min(1, "a run must seed at least one unit")
+  .max(SECURITY_AUDIT_LIMITS.units, UNIT_CEILING);
+
+/** The statuses a unit may START in: nothing is in flight or hunted yet. */
+const SEEDABLE_STATUSES = ["planned", "not_applicable", "out_of_scope", "deferred"] as const;
+
+/**
+ * A seeded unit is `planned` (or explicitly `not_applicable`/`out_of_scope`/
+ * `deferred` with the reason it is not hunted) with no owner and no evidence.
+ * The identity is derived from the refs, so two seeds with the same semantics
+ * cannot both enter a ledger by accident. The unit is parsed by the ledger's own
+ * unit schema, so construction and validation are one rule, and every violation
+ * is reported at once — named by the seed field it came from.
+ */
+export function seedCoverageUnit(seed: CoverageSeed): DomainResult<CoverageUnit, CoverageError> {
+  return seedUnitAt(seed, "");
+}
+
+function seedUnitAt(seed: CoverageSeed, root: string): DomainResult<CoverageUnit, CoverageError> {
+  const status = seed.status ?? "planned";
+  if (!isOneOf(SEEDABLE_STATUSES, status)) {
+    return failure(invalid([wireViolation(wirePath(root, ["status"]), `a seeded unit may only start ${SEEDABLE_STATUSES.join(", ")}`)]));
+  }
+  const { refs } = seed;
+  // A seed that names a lifecycle its refs do not carry (or carry differently)
+  // would seed the lifecycle-less cell — a different cell than it named.
+  const lifecycleViolations = seed.lifecycle !== undefined && refs.lifecycle !== seed.lifecycle
+    ? [wireViolation(wirePath(root, ["lifecycle"]), "lifecycle and canonical_refs.lifecycle disagree")]
+    : [];
+  const unit = parseWire(coverageUnitSchema, {
+    coverage_id: canonicalCoverageId(refs),
+    canonical_refs: refs,
+    surface: refs.surface,
+    boundary: refs.boundary,
+    subsystem: refs.subsystem,
+    attack_class: refs.attack_class,
+    ...(refs.lifecycle === undefined ? {} : { lifecycle: refs.lifecycle }),
+    starting_paths: seed.starting_paths,
+    ordinary_attack_class_block: seed.ordinary_attack_class_block,
+    selected_companion_blocks: seed.selected_companion_blocks,
+    excluded_blocks: seed.excluded_blocks,
+    prior_status: derivePriorStatus(seed.prior),
+    attempts: [],
+    wave: seed.wave ?? 1,
+    status,
+    agent_id: null,
+    reviewed_paths: [],
+    local_checks: [],
+    result_fingerprints: [],
+    unresolved: seed.unresolved ?? [],
+  }, root);
+  const violations = [...lifecycleViolations, ...(unit.ok ? [] : unit.error)];
+  return unit.ok && violations.length === 0 ? unit : failure(invalid(violations));
+}
+
+/**
+ * Parse the coverage units a run is seeded with.
+ *
+ * The seeding payload arrives from the parent — a lens pass or an operator —
+ * as JSON, so it is parsed here rather than trusted: every field is checked,
+ * each violation names its index, and a seed list that names the same
+ * semantic tuple twice is refused instead of silently deduped (a duplicate
+ * seed means the enumeration produced the same cell twice, which is worth
+ * seeing). Each seeded unit is already a parsed unit, so the ledger needs no
+ * second pass beyond the duplicate-cell rule and the canonical sort.
+ */
+export function parseCoverageSeeds(raw: unknown): DomainResult<CoverageLedger, CoverageError> {
+  const seeds = parseWire(coverageSeedsSchema, raw, "units");
+  if (!seeds.ok) return failure(invalid(seeds.error));
+  const units: CoverageUnit[] = [];
+  const violations: CoverageViolation[] = [];
+  seeds.value.forEach((seed, index) => {
+    const seeded = seedUnitAt(seed, `units[${index}]`);
+    if (seeded.ok) units.push(seeded.value);
+    else violations.push(...seeded.error.violations);
+  });
+  const seen = new Set<string>();
+  for (const unit of units) {
+    const key = coverageSemanticKey(unit.canonical_refs);
+    if (seen.has(key)) violations.push(wireViolation("units", `duplicate coverage cell ${JSON.stringify(unit.coverage_id)}`));
+    seen.add(key);
+  }
+  return violations.length === 0 ? success(sortLedger(units)) : failure(invalid(violations));
+}
+
+// --- Fingerprint ownership ---
+
+/**
+ * The unit that filed a fingerprint: the one whose live result lists it, else
+ * the one whose ARCHIVED attempt does — a reassignment moves a unit's
+ * `result_fingerprints` into `attempts` and clears the live list, and the
+ * finding it filed is still that unit's. `null` when no unit ever filed it.
+ * The ledger's one answer to "who filed this", so a report cannot lose a
+ * finding's boundary because its unit was reassigned and re-hunted.
+ */
+export function unitOfFingerprint(ledger: CoverageLedger, fingerprint: string): CoverageUnit | null {
+  return ledger.find((unit) => hasEntry(unit.result_fingerprints, fingerprint)) ??
+    ledger.find((unit) => unit.attempts.some((attempt) => hasEntry(attempt.result_fingerprints, fingerprint))) ??
+    null;
+}
+
+/** Plain membership. A list a status keeps empty is typed `readonly []`, whose
+ *  own `includes` accepts nothing, so a status-dependent list is widened to
+ *  the string list it is before it is searched. */
+const hasEntry = (values: readonly string[], value: string): boolean => values.includes(value);
 
 // --- Owner identity ---
 
@@ -885,9 +703,6 @@ export type AssignedUnit = Readonly<{ coverageId: string; ownerId: SecurityAgent
 
 export type AssignmentResult = Readonly<{ ledger: CoverageLedger; assigned: readonly AssignedUnit[] }>;
 
-const replaceUnit = (ledger: CoverageLedger, next: CoverageUnit): CoverageLedger =>
-  sortLedger(ledger.map((unit) => (unit.coverage_id === next.coverage_id ? next : unit)));
-
 /**
  * Assign planned units to a wave's hunters. A unit that is not `planned` cannot
  * be assigned — reassignment goes through `mergeCritic`, which archives the
@@ -899,7 +714,8 @@ const replaceUnit = (ledger: CoverageLedger, next: CoverageUnit): CoverageLedger
  *
  * `wave` is optional: an assignment that names none keeps the unit's current
  * wave. The default lives HERE, with the transition it describes, so no caller
- * has to look the unit up to supply it.
+ * has to look the unit up to supply it. A wave the unit's history forbids (one
+ * no later than an archived attempt's) is refused by the unit's own schema.
  */
 export function assignUnits(
   ledger: CoverageLedger,
@@ -923,25 +739,52 @@ export function assignUnits(
       return failure(invalid([wireViolation("agent_id", `the next owner of ${unit.coverage_id}, ${JSON.stringify(ownerId)}, is not a canonical agent ID`)]));
     }
     const wave = assignment.wave ?? unit.wave;
-    next = replaceUnit(next, { ...unit, status: "in_progress", agent_id: ownerId, wave });
+    const inFlight = rebuiltUnit(next, { ...unit, status: "in_progress", agent_id: ownerId, wave }, unit.coverage_id);
+    if (!inFlight.ok) return failure(invalid(inFlight.error));
+    next = replaceUnit(next, inFlight.value);
     assigned.push({ coverageId: unit.coverage_id, ownerId, wave });
   }
-  const violations = validateLedger(next);
-  return violations.length === 0 ? success({ ledger: next, assigned }) : failure(invalid(violations));
+  return success({ ledger: next, assigned });
 }
 
 // --- Settlement ---
 
-export type UnitResult = Readonly<{
-  coverageId: string;
-  agentId: SecurityAgentId;
-  wave: number;
-  status: TerminalDisposition;
-  reviewedPaths: readonly string[];
-  checks: readonly LocalCheck[];
-  fingerprints?: readonly string[];
-  unresolved?: readonly string[];
-}>;
+/** The keys a hunter's unit result may carry. Closed on purpose: an invented
+ *  spelling (`unitStatus`, `localChecks`) would otherwise be IGNORED while the
+ *  required fields happen to be present, and the run would record a status the
+ *  hunter never wrote. The entries of each list are judged when the unit is
+ *  settled, by the ledger's own unit schema. */
+const unitResultShape = z.strictObject({
+  coverageId: z.custom<string>((value) => isVisibleText(value), expecting("expected the canonical coverage ID")),
+  agentId: z.custom<SecurityAgentId>(isSecurityAgentId, expecting("expected a catalog agent id")),
+  wave: positiveIntegerSchema,
+  status: z.enum(TERMINAL_DISPOSITIONS, expecting("expected covered, candidate or blocked")),
+  reviewedPaths: stringListSchema,
+  checks: localChecksSchema,
+  fingerprints: stringListSchema.optional(),
+  unresolved: stringListSchema.optional(),
+});
+const unitResultSchema = unitResultShape.readonly();
+export type UnitResult = z.output<typeof unitResultSchema>;
+
+/** Exported so the docs test pins the docs to THIS list rather than to a
+ *  hand-copied one. Derived from the schema. */
+export const UNIT_RESULT_KEYS: readonly string[] = unitResultShape.keyof().options;
+
+/**
+ * Parse the settlement payload a hunter's parent submits.
+ *
+ * `recordUnitResult` checks the SETTLEMENT (owner, wave, resulting unit); this
+ * checks the SHAPE, because a missing `checks` array would otherwise surface
+ * deep inside the unit builder rather than naming the field. The optional
+ * `fingerprints` and `unresolved` lists are absent or well-formed: a
+ * present-but-malformed one is a violation, because dropping a candidate's
+ * fingerprints silently turns a filed claim into a settlement with none.
+ */
+export function parseUnitResults(raw: unknown): DomainResult<readonly UnitResult[], CoverageError> {
+  const parsed = parseWire(z.array(unitResultSchema, expecting("expected a top-level array")).readonly(), raw, "units");
+  return parsed.ok ? parsed : failure(invalid(parsed.error));
+}
 
 export type SettlementError =
   | CoverageError
@@ -959,6 +802,10 @@ export type SettlementError =
  * overwrite the first, because silently replacing a `blocked` disposition with
  * a `covered` one is how an incomplete run becomes a complete claim. A
  * reassignment goes through `mergeCritic`, which archives the prior attempt.
+ *
+ * The settled unit is PARSED as the disposition it claims: a `covered` result
+ * with no checks, a candidate with no fingerprints or a path no check owns is
+ * refused here, naming the unit's own fields.
  */
 export function recordUnitResult(
   ledger: CoverageLedger,
@@ -975,39 +822,92 @@ export function recordUnitResult(
   if (unit.wave !== result.wave) {
     return failure({ kind: "wrong-wave" as const, coverageId: unit.coverage_id, expected: unit.wave, actual: result.wave });
   }
-
-  const settled: CoverageUnit = {
+  const settled = rebuiltUnit(ledger, {
     ...unit,
     status: result.status,
-    reviewed_paths: [...result.reviewedPaths],
-    local_checks: result.checks.map((check) => ({ ...check, reviewed_paths: [...check.reviewed_paths] })),
-    result_fingerprints: [...(result.fingerprints ?? [])],
-    unresolved: [...(result.unresolved ?? [])],
-  };
-  const next = replaceUnit(ledger, settled);
-  const violations = validateLedger(next);
-  if (violations.length > 0) {
-    return failure({ kind: "settlement-invalid" as const, coverageId: unit.coverage_id, violations });
-  }
-  return success(next);
+    reviewed_paths: result.reviewedPaths,
+    local_checks: result.checks,
+    result_fingerprints: result.fingerprints ?? [],
+    unresolved: result.unresolved ?? [],
+  }, unit.coverage_id);
+  if (!settled.ok) return failure({ kind: "settlement-invalid" as const, coverageId: unit.coverage_id, violations: settled.error });
+  return success(replaceUnit(ledger, settled.value));
 }
 
 // --- Critics ---
 
-export type CoverageProposal = Readonly<{
-  refs: CoverageRefs;
-  startingPaths: readonly string[];
-  ordinaryAttackClassBlock: string | null;
-  selectedCompanionBlocks: readonly string[];
-  excludedBlocks: readonly ExcludedBlock[];
-}>;
+/** One cell the critic says the ledger is missing, with the evidence a hunter
+ *  needs to hunt it. Its paths and blocks are judged when it is seeded. */
+const coverageProposalShape = z.strictObject({
+  refs: coverageRefsSchema,
+  startingPaths: stringListSchema.default([]),
+  ordinaryAttackClassBlock: visibleTextSchema.nullable().default(null),
+  selectedCompanionBlocks: stringListSchema.default([]),
+  excludedBlocks: z.array(excludedBlockSchema).readonly().default([]),
+});
+const coverageProposalSchema = coverageProposalShape.readonly();
+export type CoverageProposal = z.output<typeof coverageProposalSchema>;
 
-export type CoverageCriticResult = Readonly<{
-  missingUnits: readonly CoverageProposal[];
-  reassignIds: readonly string[];
-  resolvedPriorLeads: readonly string[];
-  stop: boolean;
-}>;
+/** The keys one proposed unit may carry. Exported for the same reason as
+ *  `UNIT_RESULT_KEYS`: a doc that names a key this list omits is an agent whose
+ *  output the engine refuses. */
+export const CRITIC_PROPOSAL_KEYS: readonly string[] = coverageProposalShape.keyof().options;
+
+/** A coverage critic's document. Fail-closed: every key is allowlisted, the
+ *  identity is required (a document the run cannot prove came from the critic
+ *  cannot license `publish` to call a run complete), and the three collections
+ *  are required — a critic that sends `{}` has not said "nothing to report", it
+ *  has said nothing. */
+const coverageCriticShape = z.strictObject({
+  schemaVersion: z.literal(1, expecting("expected 1")),
+  kind: z.literal("security-coverage-critic", expecting("expected security-coverage-critic")),
+  missingUnits: z.array(coverageProposalSchema, expecting("expected an array of proposals")).readonly(),
+  reassignIds: stringListSchema,
+  resolvedPriorLeads: stringListSchema,
+  stop: z.boolean(expecting("expected a boolean")).default(false),
+});
+
+export const CRITIC_KEYS: readonly string[] = coverageCriticShape.keyof().options;
+
+const coverageCriticSchema = coverageCriticShape.transform(({ missingUnits, reassignIds, resolvedPriorLeads, stop }) =>
+  ({ missingUnits, reassignIds, resolvedPriorLeads, stop }));
+export type CoverageCriticResult = z.output<typeof coverageCriticSchema>;
+
+/**
+ * Parse a coverage critic's proposal set. `mergeCritic` decides what each
+ * proposal MEANS; this decides whether the payload is a critic result at all,
+ * so a typo in `missingUnits` is a named violation rather than an empty merge
+ * that looks like "the critic found nothing".
+ */
+export function parseCriticResult(raw: unknown): DomainResult<CoverageCriticResult, CoverageError> {
+  const parsed = parseWire(coverageCriticSchema, raw, "critic");
+  return parsed.ok ? parsed : failure(invalid(parsed.error));
+}
+
+/** One `string → string` map. Absent is `{}`; anything else that is not an
+ *  object of strings is refused — dropping a malformed map would leave a
+ *  reassignment without its reason (which `mergeCritic` then refuses, naming
+ *  the unit) or make a resolution unplaceable, while the payload still parsed. */
+const stringMapSchema = z
+  .record(z.string(), z.string(expecting("expected a string")), expecting("expected an object of string values"))
+  .readonly()
+  .default({});
+
+/** The two maps a critic merge is given beside the critic's own document. Read
+ *  from the wrapper the critic arrived in, whose own keys the shell closes. */
+const criticMergeMapsSchema = z.object({
+  /** coverage id → why the critic reassigned it (archived on the attempt). */
+  reassignmentReasons: stringMapSchema,
+  /** lead fingerprint → the coverage id of the unit that carries it. */
+  priorLeadOwners: stringMapSchema,
+}).readonly();
+export type CriticMergeMaps = z.output<typeof criticMergeMapsSchema>;
+
+/** Parse the merge maps that travel beside a critic document. */
+export function parseCriticMergeMaps(raw: unknown): DomainResult<CriticMergeMaps, CoverageError> {
+  const parsed = parseWire(criticMergeMapsSchema, raw, "");
+  return parsed.ok ? parsed : failure(invalid(parsed.error));
+}
 
 export type CriticMerge = Readonly<{
   ledger: CoverageLedger;
@@ -1022,10 +922,6 @@ export type CriticError =
   /** Every reassignment is archived with the critic's own reason: an attempt
    *  archived under a generic sentence is a history nobody can read back. */
   | Readonly<{ kind: "missing-reassignment-reason"; coverageId: string }>
-  /** A settled unit with no recorded owner cannot be archived: an attempt needs
-   *  the owner that ran it, and an invented one would enter the freshness
-   *  history and the hunting-profile set as if it had hunted. */
-  | Readonly<{ kind: "terminal-unit-has-no-owner"; coverageId: string; status: TerminalDisposition }>
   /** A resolution the engine cannot place is not a resolution: silently dropping
    *  it would let the run keep reporting a lead the critic considered settled. */
   | Readonly<{ kind: "unplaceable-resolution"; fingerprint: string; reason: string }>;
@@ -1036,13 +932,22 @@ export type CriticError =
  *
  * - `acceptProposals`: a proposal enters as `planned` unless its semantic tuple
  *   is already present (dedupe). The canonical id is an injective encoding of
- *   that same tuple, so "same tuple, different id" cannot occur in a ledger
- *   `validateLedger` accepts — there is no collision to report;
+ *   that same tuple, so "same tuple, different id" cannot occur — there is no
+ *   collision to report;
  * - `reassignUnits`: a reassigned unit archives its live evidence into
  *   `attempts` with the critic's reason (required per reassigned id), increments
  *   its wave, and clears the live evidence, so the next hunter starts fresh by
  *   construction;
  * - `resolveLeads`: a resolved prior lead is recorded on the unit that owns it.
+ *
+ * Every unit a phase builds is parsed by the unit schema. The ledger-wide
+ * invariants have no single enforcement point; each phase upholds them for
+ * what it changes: `acceptProposals` sorts what it adds and holds the unit
+ * ceiling, and `replaceUnit` keeps every id and position. So the merged ledger
+ * is one `parseLedger` accepts with no second pass. Their guard is the
+ * generative test "every ledger a run of transitions produces is one
+ * parseLedger accepts" (tests/security/security-coverage.test.ts): a phase that
+ * reorders, renames or outgrows the ledger fails it.
  */
 export function mergeCritic(
   ledger: CoverageLedger,
@@ -1055,11 +960,8 @@ export function mergeCritic(
   if (!reassignment.ok) return reassignment;
   const resolution = resolveLeads(reassignment.value.ledger, critic.resolvedPriorLeads, options.priorLeadOwners ?? {});
   if (!resolution.ok) return resolution;
-  const next = resolution.value.ledger;
-  const violations = validateLedger(next);
-  if (violations.length > 0) return failure(invalid(violations));
   return success({
-    ledger: next,
+    ledger: resolution.value.ledger,
     accepted: proposals.value.accepted,
     reassigned: reassignment.value.reassigned,
     resolved: resolution.value.resolved,
@@ -1067,7 +969,9 @@ export function mergeCritic(
 }
 
 /** Phase 1: each missing unit the critic proposes, seeded `planned` at `wave`
- *  unless its cell is already in the ledger. */
+ *  unless its cell is already in the ledger. A ledger holds at most
+ *  `SECURITY_AUDIT_LIMITS.units` units: a proposal past the ceiling is refused
+ *  here, as `parseLedger` would refuse the merged ledger on its next read. */
 function acceptProposals(
   ledger: CoverageLedger,
   proposals: readonly CoverageProposal[],
@@ -1077,12 +981,11 @@ function acceptProposals(
   const accepted: string[] = [];
   const present = new Set(ledger.map((unit) => coverageSemanticKey(unit.canonical_refs)));
   for (const proposal of proposals) {
-    const refs = parseCoverageRefs(proposal.refs);
-    if (!refs.ok) return failure(invalid([wireViolation("missingUnits", refs.error.message)]));
-    const key = coverageSemanticKey(refs.value);
+    const key = coverageSemanticKey(proposal.refs);
     if (present.has(key)) continue;
+    if (next.length >= SECURITY_AUDIT_LIMITS.units) return failure(invalid([unitCeilingViolation("missingUnits")]));
     const seeded = seedCoverageUnit({
-      refs: refs.value,
+      refs: proposal.refs,
       starting_paths: proposal.startingPaths,
       ordinary_attack_class_block: proposal.ordinaryAttackClassBlock,
       selected_companion_blocks: proposal.selectedCompanionBlocks,
@@ -1090,7 +993,7 @@ function acceptProposals(
       prior: null,
       wave,
     });
-    if (!seeded.ok) return failure(invalid(seeded.error.violations));
+    if (!seeded.ok) return seeded;
     next = sortLedger([...next, seeded.value]);
     present.add(key);
     accepted.push(seeded.value.coverage_id);
@@ -1098,10 +1001,37 @@ function acceptProposals(
   return success({ ledger: next, accepted });
 }
 
+/** A settled unit's hunt as an archived attempt, and the unit planned again one
+ *  wave on: nothing live is kept, so the next hunter starts fresh. Parsed as
+ *  the unit it claims to be, like every other rebuilt unit: a history already
+ *  at `attemptsPerUnit` cannot grow past it into a ledger `parseLedger`
+ *  refuses. */
+function archived(ledger: CoverageLedger, unit: SettledUnit, reason: string): DomainResult<CoverageUnit, readonly CoverageViolation[]> {
+  const {
+    coverage_id, canonical_refs, surface, boundary, subsystem, attack_class, lifecycle, starting_paths,
+    ordinary_attack_class_block, selected_companion_blocks, excluded_blocks, prior_status, attempts, wave, ...hunt
+  } = unit;
+  const replanned: PlannedUnit = {
+    coverage_id, canonical_refs, surface, boundary, subsystem, attack_class,
+    ...(lifecycle === undefined ? {} : { lifecycle }),
+    starting_paths, ordinary_attack_class_block, selected_companion_blocks, excluded_blocks, prior_status,
+    attempts: [...attempts, { ...hunt, wave, reassignment_reason: reason }],
+    wave: wave + 1,
+    status: "planned",
+    agent_id: null,
+    reviewed_paths: [],
+    local_checks: [],
+    result_fingerprints: [],
+    unresolved: [],
+  };
+  return rebuiltUnit(ledger, replanned, coverage_id);
+}
+
 /** Phase 2: each unit the critic reassigns, its settled attempt archived with
  *  the critic's reason and the unit planned again one wave on. A reassigned id
- *  with no visible reason, or a settled unit with no owner, is refused: the
- *  archive records only what the run can name. */
+ *  with no visible reason is refused: the archive records only what the run
+ *  can name. A settled unit always has the owner its attempt is archived
+ *  under — its type says so. */
 function reassignUnits(
   ledger: CoverageLedger,
   coverageIds: readonly string[],
@@ -1112,40 +1042,21 @@ function reassignUnits(
   for (const coverageId of coverageIds) {
     const unit = next.find((candidate) => candidate.coverage_id === coverageId);
     if (unit === undefined) return failure(invalid([wireViolation("reassignIds", `unknown coverage ID ${coverageId}`)]));
-    if (!isTerminalDisposition(unit.status)) {
-      return failure({ kind: "reassign-unit-has-no-evidence" as const, coverageId, status: unit.status });
-    }
+    if (!isSettledUnit(unit)) return failure({ kind: "reassign-unit-has-no-evidence" as const, coverageId, status: unit.status });
     const reason = options.reassignmentReasons[coverageId];
     if (!isVisibleText(reason)) return failure({ kind: "missing-reassignment-reason" as const, coverageId });
-    if (unit.agent_id === null) return failure({ kind: "terminal-unit-has-no-owner" as const, coverageId, status: unit.status });
-    const archived: CoverageAttempt = {
-      wave: unit.wave,
-      status: unit.status,
-      agent_id: unit.agent_id,
-      reviewed_paths: unit.reviewed_paths,
-      local_checks: unit.local_checks,
-      result_fingerprints: unit.result_fingerprints,
-      unresolved: unit.unresolved,
-      reassignment_reason: reason,
-    };
-    next = replaceUnit(next, {
-      ...unit,
-      attempts: [...unit.attempts, archived],
-      wave: unit.wave + 1,
-      status: "planned",
-      agent_id: null,
-      reviewed_paths: [],
-      local_checks: [],
-      result_fingerprints: [],
-      unresolved: [],
-    });
+    const replanned = archived(next, unit, reason);
+    if (!replanned.ok) return failure(invalid(replanned.error));
+    next = replaceUnit(next, replanned.value);
     reassigned.push(coverageId);
   }
   return success({ ledger: next, reassigned });
 }
 
 /** Phase 3: each prior lead the critic resolved, removed from the unit that
- *  carries it. A resolution the engine cannot place is a refusal. */
+ *  carries it. A resolution the engine cannot place is a refusal, and so is one
+ *  that would leave a unit without the facts its status requires (a blocked
+ *  unit's last unresolved fact). */
 function resolveLeads(
   ledger: CoverageLedger,
   fingerprints: readonly string[],
@@ -1162,25 +1073,24 @@ function resolveLeads(
     if (unit === undefined) {
       return failure({ kind: "unplaceable-resolution" as const, fingerprint, reason: `unknown coverage ID ${ownerId}` });
     }
-    if (!unit.unresolved.includes(fingerprint)) {
+    if (!hasEntry(unit.unresolved, fingerprint)) {
       return failure({ kind: "unplaceable-resolution" as const, fingerprint, reason: `${ownerId} does not carry this lead` });
     }
-    next = replaceUnit(next, { ...unit, unresolved: unit.unresolved.filter((entry) => entry !== fingerprint) });
+    const rest = rebuiltUnit(next, { ...unit, unresolved: unit.unresolved.filter((entry) => entry !== fingerprint) }, ownerId);
+    if (!rest.ok) return failure(invalid(rest.error));
+    next = replaceUnit(next, rest.value);
     resolved.push(fingerprint);
   }
   return success({ ledger: next, resolved });
 }
 
-/** A ledger a transition produced, returned only once `validateLedger` holds
- *  no violation against it. */
-const checkedLedger = (next: CoverageLedger): DomainResult<CoverageLedger, CoverageError> => {
-  const violations = validateLedger(next);
-  return violations.length === 0 ? success(next) : failure(invalid(violations));
-};
+/** One planned unit deferred: unassigned, with the reason as its one
+ *  unresolved fact, parsed as the unit it claims to be like every other
+ *  rebuilt unit. */
+const asDeferred = (ledger: CoverageLedger, unit: PlannedUnit, reason: string): DomainResult<CoverageUnit, readonly CoverageViolation[]> =>
+  rebuiltUnit(ledger, { ...unit, status: "deferred", unresolved: [reason] }, unit.coverage_id);
 
-/** One unit deferred: unassigned, with the reason as its one unresolved fact. */
-const asDeferred = (unit: CoverageUnit, reason: string): CoverageUnit =>
-  ({ ...unit, status: "deferred" as const, agent_id: null, unresolved: [reason] });
+const deferralReasonRefused = (): CoverageError => invalid([wireViolation("reason", "a deferred unit requires a visible reason")]);
 
 /** Units a budget could not reach become explicitly `deferred`. The reason is
  *  mandatory: a deferred unit without one is a silent gap wearing a label.
@@ -1190,8 +1100,19 @@ export function deferPlannedUnits(
   ledger: CoverageLedger,
   reason: string,
 ): DomainResult<CoverageLedger, CoverageError> {
-  if (!isVisibleText(reason)) return failure(invalid([wireViolation("reason", "a deferred unit requires a visible reason")]));
-  return checkedLedger(sortLedger(ledger.map((unit) => (unit.status === "planned" ? asDeferred(unit, reason) : unit))));
+  if (!isVisibleText(reason)) return failure(deferralReasonRefused());
+  const deferred: CoverageUnit[] = [];
+  const violations: CoverageViolation[] = [];
+  for (const unit of ledger) {
+    if (unit.status !== "planned") {
+      deferred.push(unit);
+      continue;
+    }
+    const rebuilt = asDeferred(ledger, unit, reason);
+    if (rebuilt.ok) deferred.push(rebuilt.value);
+    else violations.push(...rebuilt.error);
+  }
+  return violations.length === 0 ? success(deferred) : failure(invalid(violations));
 }
 
 export type DeferralError =
@@ -1213,125 +1134,12 @@ export function deferUnit(
   coverageId: string,
   reason: string,
 ): DomainResult<CoverageLedger, DeferralError> {
-  if (!isVisibleText(reason)) {
-    return failure(invalid([wireViolation("reason", "a deferred unit requires a visible reason")]));
-  }
+  if (!isVisibleText(reason)) return failure(deferralReasonRefused());
   const unit = ledger.find((candidate) => candidate.coverage_id === coverageId);
   if (unit === undefined) return failure({ kind: "unknown-coverage-id" as const, coverageId });
-  if (unit.status !== "planned") {
-    return failure({ kind: "unit-not-planned" as const, coverageId, status: unit.status });
-  }
-  return checkedLedger(sortLedger(ledger.map((candidate) =>
-    (candidate.coverage_id === coverageId ? asDeferred(candidate, reason) : candidate))));
-}
-
-// --- Wire parsing ---
-
-/** The keys a seed may carry: exactly `CoverageSeed`'s fields. Keyed by the
- *  type, so a seed field added there is a compile error here until the wire
- *  admits it — and a key the type does not name is an "unknown field". */
-const SEED_FIELDS: Readonly<Record<keyof CoverageSeed, true>> = {
-  refs: true,
-  starting_paths: true,
-  ordinary_attack_class_block: true,
-  selected_companion_blocks: true,
-  excluded_blocks: true,
-  prior: true,
-  lifecycle: true,
-  wave: true,
-  status: true,
-  unresolved: true,
-};
-const SEED_KEYS: readonly string[] = Object.keys(SEED_FIELDS);
-
-/**
- * Parse the coverage units a run is seeded with.
- *
- * The seeding payload arrives from the parent — a lens pass or an operator —
- * as JSON, so it is parsed here rather than trusted: every field is checked,
- * the first violation names its index, and a seed list that names the same
- * semantic tuple twice is refused instead of silently deduped (a duplicate
- * seed means the enumeration produced the same cell twice, which is worth
- * seeing).
- */
-export function parseCoverageSeeds(
-  raw: unknown,
-): DomainResult<readonly CoverageUnit[], CoverageError> {
-  if (!Array.isArray(raw)) {
-    return failure(invalid([wireViolation("units", "expected a top-level array")]));
-  }
-  const entries: readonly unknown[] = raw;
-  if (entries.length === 0) return failure(invalid([wireViolation("units", "a run must seed at least one unit")]));
-  if (entries.length > SECURITY_AUDIT_LIMITS.units) {
-    return failure(invalid([wireViolation("units", `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`)]));
-  }
-
-  const units: CoverageUnit[] = [];
-  const violations: CoverageViolation[] = [];
-  entries.forEach((entry, index) => {
-    const base = `units[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return;
-    }
-    // Closed on purpose: a misspelled optional field (`lifeCycle`) would be
-    // dropped while the seed still parsed, seeding a different cell.
-    violations.push(...unknownFieldViolations(entry, SEED_KEYS, base));
-    // Parsed, not cast: a seed whose refs are not a canonical tuple has no
-    // identity, so nothing else about it can be checked against a cell.
-    const refs = parseCoverageRefs(entry.refs);
-    if (!refs.ok) {
-      violations.push(wireViolation(`${base}.canonical_refs`, refs.error.message));
-      return;
-    }
-    // A present-but-malformed optional field is a violation, never an omission:
-    // a dropped `wave` or `lifecycle` would seed a different cell than the one
-    // the enumeration wrote, and the document would still parse.
-    const local: CoverageViolation[] = [];
-    const ordinaryBlock = optionalVisibleText(entry.ordinary_attack_class_block);
-    if (ordinaryBlock === undefined) {
-      local.push(wireViolation(`${base}.ordinary_attack_class_block`, "expected null or visible text"));
-    }
-    if (entry.status !== undefined && !isCoverageStatus(entry.status)) {
-      local.push(wireViolation(`${base}.status`, `invalid value ${JSON.stringify(entry.status)}`));
-    }
-    if (entry.lifecycle !== undefined && typeof entry.lifecycle !== "string") {
-      local.push(wireViolation(`${base}.lifecycle`, "expected a string"));
-    }
-    if (entry.wave !== undefined && typeof entry.wave !== "number") {
-      local.push(wireViolation(`${base}.wave`, "expected a positive integer"));
-    }
-    // Parsed, not cast: `derivePriorStatus` matches the verdict exhaustively and
-    // `.exhaustive()` throws on an unknown tag, so an unchecked `prior` aborted
-    // `start` with a pattern-match error instead of a named violation.
-    const prior = parsePriorRecordFacts(entry.prior);
-    if (!prior.ok) local.push(wireViolation(`${base}.${prior.error.path}`, prior.error.message));
-    const seeded = seedCoverageUnit({
-      refs: refs.value,
-      starting_paths: wireStringList(entry.starting_paths, `${base}.starting_paths`, local),
-      ordinary_attack_class_block: ordinaryBlock ?? null,
-      selected_companion_blocks: wireStringList(entry.selected_companion_blocks, `${base}.selected_companion_blocks`, local),
-      excluded_blocks: parseExcludedBlocks(entry.excluded_blocks, `${base}.excluded_blocks`, local),
-      prior: prior.ok ? prior.value : null,
-      unresolved: wireStringList(entry.unresolved, `${base}.unresolved`, local),
-      ...(typeof entry.lifecycle === "string" ? { lifecycle: entry.lifecycle } : {}),
-      ...(typeof entry.wave === "number" ? { wave: entry.wave } : {}),
-      ...(isCoverageStatus(entry.status) ? { status: entry.status } : {}),
-    });
-    violations.push(...local);
-    if (seeded.ok) units.push(seeded.value);
-    else violations.push(...seeded.error.violations.map((entry) => wireViolation(`${base}.${entry.path}`, entry.message)));
-  });
-
-  const seen = new Set<string>();
-  for (const unit of units) {
-    const key = coverageSemanticKey(unit.canonical_refs);
-    if (seen.has(key)) violations.push(wireViolation("units", `duplicate coverage cell ${JSON.stringify(unit.coverage_id)}`));
-    seen.add(key);
-  }
-  if (violations.length > 0) return failure(invalid(violations));
-
-  return checkedLedger(sortLedger(units));
+  if (unit.status !== "planned") return failure({ kind: "unit-not-planned" as const, coverageId, status: unit.status });
+  const deferred = asDeferred(ledger, unit, reason);
+  return deferred.ok ? success(replaceUnit(ledger, deferred.value)) : failure(invalid(deferred.error));
 }
 
 // --- Reporting ---
@@ -1384,7 +1192,7 @@ export type IncompleteReasonSource = "recorded" | "inferred";
 /** The upstream token a deferred unit recorded as its reason, if any. */
 const recordedIncompleteReason = (ledger: CoverageLedger): SecurityIncompleteReason | undefined =>
   ledger
-    .flatMap((unit) => (unit.status === "deferred" ? unit.unresolved : []))
+    .flatMap((unit): readonly string[] => (unit.status === "deferred" ? unit.unresolved : []))
     .find((reason): reason is SecurityIncompleteReason => isOneOf(SECURITY_INCOMPLETE_REASONS, reason));
 
 /**
@@ -1427,100 +1235,6 @@ export function coverageSettled(ledger: CoverageLedger): boolean {
   return ledger.length > 0 && ledger.every((unit) => phaseOf(unit) === "settled" || phaseOf(unit) === "disclosed-gap");
 }
 
-// --- Field parsers: each one narrows, so a parsed record holds no cast ---
-
-/** A list of strings, or null. */
-const parseStringArray = (value: unknown): readonly string[] | null =>
-  Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string") ? [...value] : null;
-
-/** A check method, or null. */
-const parseCheckMethod = (value: unknown): LocalCheck["method"] | null =>
-  value === "source" || value === "local" ? value : null;
-
-/** `null`, a string, or `undefined` for any other value. */
-function nullableString(value: unknown): string | null | undefined {
-  if (value === null) return null;
-  return typeof value === "string" ? value : undefined;
-}
-
-/** An optional prose field: absent or `null` is `null`, visible prose is
- *  itself, and anything else is `undefined` — malformed, for the caller to name. */
-function optionalVisibleText(value: unknown): string | null | undefined {
-  if (value === undefined || value === null) return null;
-  return isVisibleText(value) ? value : undefined;
-}
-
-/** The keys a hunter's unit result may carry. Closed on purpose: an invented
- *  spelling (`unitStatus`, `localChecks`) would otherwise be IGNORED while the
- *  required fields happen to be present, and the run would record a status the
- *  hunter never wrote. Exported so the docs test pins the docs to THIS list
- *  rather than to a hand-copied one. */
-export const UNIT_RESULT_KEYS: readonly string[] = [
-  "coverageId", "agentId", "wave", "status", "reviewedPaths", "checks", "fingerprints", "unresolved",
-];
-
-/** One unit result, every field produced by a parser that narrows. */
-function parseUnitResult(record: Readonly<Record<string, unknown>>, base: string, violations: CoverageViolation[]): UnitResult | null {
-  const local: CoverageViolation[] = [...unknownFieldViolations(record, UNIT_RESULT_KEYS, base)];
-  const coverageId = isVisibleText(record.coverageId) ? record.coverageId : null;
-  if (coverageId === null) local.push(wireViolation(`${base}.coverageId`, "expected the canonical coverage ID"));
-  const owner = isSecurityAgentId(record.agentId) ? record.agentId : null;
-  if (owner === null) local.push(wireViolation(`${base}.agentId`, "expected a catalog agent id"));
-  const wave = isPositiveInteger(record.wave) ? record.wave : null;
-  if (wave === null) local.push(wireViolation(`${base}.wave`, "expected a positive integer"));
-  const status = isTerminalDisposition(record.status) ? record.status : null;
-  if (status === null) local.push(wireViolation(`${base}.status`, "expected covered, candidate or blocked"));
-  const reviewedPaths = parseStringArray(record.reviewedPaths);
-  if (reviewedPaths === null) local.push(wireViolation(`${base}.reviewedPaths`, "expected an array of source paths"));
-  const checks = parseLocalChecks(record.checks, `${base}.checks`, local);
-  const fingerprints = wireStringList(record.fingerprints, `${base}.fingerprints`, local);
-  const unresolved = wireStringList(record.unresolved, `${base}.unresolved`, local);
-  violations.push(...local);
-  if (local.length > 0 || coverageId === null || owner === null || wave === null || status === null || reviewedPaths === null) {
-    return null;
-  }
-  return {
-    coverageId,
-    agentId: owner,
-    wave,
-    status,
-    reviewedPaths,
-    checks,
-    ...(record.fingerprints === undefined ? {} : { fingerprints }),
-    ...(record.unresolved === undefined ? {} : { unresolved }),
-  };
-}
-
-/**
- * Parse the settlement payload a hunter's parent submits.
- *
- * `recordUnitResult` checks the SETTLEMENT (owner, wave, resulting ledger); this
- * checks the SHAPE, because a missing `checks` array would otherwise throw on
- * `.map` deep inside the ledger builder rather than naming the field. The two
- * are deliberately separate: the state machine is about one unit's transition,
- * this is about the wire.
- *
- * The optional `fingerprints` and `unresolved` lists are absent or well-formed:
- * a present-but-malformed one is a violation, because dropping a candidate's
- * fingerprints silently turns a filed claim into a settlement with none.
- */
-export function parseUnitResults(raw: unknown): DomainResult<readonly UnitResult[], CoverageError> {
-  if (!Array.isArray(raw)) {
-    return failure(invalid([wireViolation("units", "expected a top-level array")]));
-  }
-  const violations: CoverageViolation[] = [];
-  const results = raw.flatMap((entry: unknown, index) => {
-    const base = `units[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return [];
-    }
-    const parsed = parseUnitResult(entry, base, violations);
-    return parsed === null ? [] : [parsed];
-  });
-  return violations.length === 0 ? success(results) : failure(invalid(violations));
-}
-
 // --- The hunter's envelope ---
 
 /** The hunter result's own identity. It is NOT a reviewer payload: it carries
@@ -1528,14 +1242,6 @@ export function parseUnitResults(raw: unknown): DomainResult<readonly UnitResult
  *  reviewer wire claimed a conformance it never had (ADR-0066 D2, amended). */
 export const HUNTER_RESULT_KIND = "security-hunter-result";
 export const HUNTER_RESULT_SCHEMA_VERSION = 1;
-
-/** The keys a hunter result may carry. Exported so the docs test pins the
- *  hunter doc's block to THIS list. */
-export const HUNTER_RESULT_KEYS: readonly string[] = ["schemaVersion", "kind", "units", "findings"];
-
-export type HunterResult = Readonly<{ units: readonly UnitResult[]; findings: readonly SecurityFinding[] }>;
-
-export type HunterResultError = Readonly<{ kind: "invalid-hunter-result"; violations: readonly WireViolation[] }>;
 
 /** Sort a hunter's RAW findings list into fingerprint order before it is parsed,
  *  so a hunter is not refused for its filing order. Same order as
@@ -1553,46 +1259,46 @@ function sortWireByFingerprint(raw: unknown): unknown {
   });
 }
 
-/** The envelope's identity and closed key set, checked before its body: a
- *  document that is not a hunter result is refused for being the wrong document,
- *  naming the kind the run expects. */
-function hunterEnvelopeViolations(record: Readonly<Record<string, unknown>>): readonly WireViolation[] {
-  const violations = [...unknownFieldViolations(record, HUNTER_RESULT_KEYS, "$")];
-  if (record.schemaVersion !== HUNTER_RESULT_SCHEMA_VERSION) {
-    violations.push(wireViolation("schemaVersion", `expected ${HUNTER_RESULT_SCHEMA_VERSION}`));
-  }
-  if (record.kind !== HUNTER_RESULT_KIND) {
-    violations.push(wireViolation("kind", `expected ${JSON.stringify(HUNTER_RESULT_KIND)}, got ${JSON.stringify(record.kind)} — ` +
-      "a hunter returns its own envelope, not a reviewer payload"));
-  }
-  if (!Array.isArray(record.units)) violations.push(wireViolation("units", "required: an array of unit results (empty when only filing findings)"));
-  return violations;
-}
+const hunterResultShape = z.strictObject(
+  {
+    schemaVersion: z.literal(HUNTER_RESULT_SCHEMA_VERSION, expecting(`expected ${HUNTER_RESULT_SCHEMA_VERSION}`)),
+    kind: z.literal(HUNTER_RESULT_KIND, {
+      error: (issue) => `expected ${JSON.stringify(HUNTER_RESULT_KIND)}, got ${JSON.stringify(issue.input) ?? "nothing"} — ` +
+        "a hunter returns its own envelope, not a reviewer payload",
+    }),
+    units: z.array(unitResultSchema, expecting("expected an array of unit results (empty when only filing findings)")).readonly(),
+    findings: z.preprocess(sortWireByFingerprint, securityFindingsSchema).optional(),
+  },
+  { error: (issue) => (issue.code === "invalid_type" ? `expected a ${HUNTER_RESULT_KIND} object` : undefined) },
+);
+
+/** The keys a hunter result may carry. Exported so the docs test pins the
+ *  hunter doc's block to THIS list. */
+export const HUNTER_RESULT_KEYS: readonly string[] = hunterResultShape.keyof().options;
 
 /**
- * Parse what `submit` reads: `{ schemaVersion: 1, kind: "security-hunter-result",
+ * What `submit` reads: `{ schemaVersion: 1, kind: "security-hunter-result",
  * units: [...], findings?: [...] }`. Strict on purpose — an unknown top-level key
  * is refused rather than ignored, and a payload in another program's envelope is
  * refused by its kind. `findings` are the upstream report records, sorted by
  * fingerprint before the parse (filing order is not a defect; a duplicate still
  * is). A result that carries neither a unit nor a finding says nothing.
  */
+const hunterResultSchema = hunterResultShape
+  .superRefine((result, ctx) => {
+    if (result.units.length === 0 && (result.findings ?? []).length === 0) {
+      ctx.addIssue({ code: "custom", message: "the hunter result carries neither unit results nor findings" });
+    }
+  })
+  .transform(({ units, findings }) => ({ units, findings: findings ?? ([] satisfies readonly SecurityFinding[]) }));
+
+export type HunterResult = z.output<typeof hunterResultSchema>;
+
+export type HunterResultError = Readonly<{ kind: "invalid-hunter-result"; violations: readonly WireViolation[] }>;
+
 export function parseHunterResult(raw: unknown): DomainResult<HunterResult, HunterResultError> {
-  const refuse = (violations: readonly WireViolation[]) => failure({ kind: "invalid-hunter-result" as const, violations });
-  if (!isWireRecord(raw)) return refuse([wireViolation("$", `expected a ${HUNTER_RESULT_KIND} object`)]);
-  const envelope = hunterEnvelopeViolations(raw);
-  if (envelope.length > 0) return refuse(envelope);
-  const units = parseUnitResults(raw.units);
-  const findings = raw.findings === undefined ? success([]) : parseSecurityFindings(sortWireByFingerprint(raw.findings));
-  const violations = [
-    ...(units.ok ? [] : units.error.violations),
-    ...(findings.ok ? [] : findings.error.violations.map((entry) => wireViolation(entry.path.replace(/^\$/, "findings"), entry.message))),
-  ];
-  if (!units.ok || !findings.ok) return refuse(violations);
-  if (units.value.length === 0 && findings.value.length === 0) {
-    return refuse([wireViolation("$", "the hunter result carries neither unit results nor findings")]);
-  }
-  return success({ units: units.value, findings: findings.value });
+  const parsed = parseWire(hunterResultSchema, raw, "");
+  return parsed.ok ? parsed : failure({ kind: "invalid-hunter-result", violations: parsed.error });
 }
 
 // --- Nonce admission ---
@@ -1639,160 +1345,15 @@ export function admitArtifactNonce(
       message: `no in_progress unit is owned by ${owned.owner} — a nonce is issued only to the current owner of a unit in flight (the owner id \`assign\` printed)`,
     });
   }
-  const archived = ledger.find((unit) =>
+  const archivedBy = ledger.find((unit) =>
     unit.attempts.some((attempt) => attempt.local_checks.some((check) => check.artifact === artifact)));
-  if (archived !== undefined) {
+  if (archivedBy !== undefined) {
     return failure({
       kind: "archived-artifact" as const,
       artifact,
-      coverageId: archived.coverage_id,
-      message: `${artifact} is already cited by an archived attempt of ${archived.coverage_id} — an archived artifact cannot be reused; name a new file`,
+      coverageId: archivedBy.coverage_id,
+      message: `${artifact} is already cited by an archived attempt of ${archivedBy.coverage_id} — an archived artifact cannot be reused; name a new file`,
     });
   }
   return success({ artifact: owned, coverageIds });
-}
-
-/**
- * Parse a coverage critic's proposal set. `mergeCritic` decides what each
- * proposal MEANS; this decides whether the payload is a critic result at all,
- * so a typo in `missingUnits` is a named violation rather than an empty merge
- * that looks like "the critic found nothing".
- *
- * Fail-closed on purpose: every key is allowlisted, the three collections are
- * required (a critic that sends `{}` has not said "nothing to report", it has
- * said nothing), and every element is checked before it is kept.
- */
-export function parseCriticResult(raw: unknown): DomainResult<CoverageCriticResult, CoverageError> {
-  if (!isWireRecord(raw)) {
-    return failure(invalid([wireViolation("critic", "expected an object")]));
-  }
-  const violations: CoverageViolation[] = unknownFieldViolations(raw, CRITIC_KEYS, "critic");
-  // Identity first: a document with no `kind` is a document the run cannot
-  // prove came from the critic, and the critic's verdict is what licenses
-  // `publish` to call a run complete.
-  if (raw.schemaVersion !== 1) violations.push(wireViolation("critic.schemaVersion", "expected 1"));
-  if (raw.kind !== "security-coverage-critic") {
-    violations.push(wireViolation("critic.kind", "expected security-coverage-critic"));
-  }
-  // Required here; SHAPED by each collection's own parser below. A present
-  // non-array is that parser's to report, so it is reported once.
-  for (const key of CRITIC_COLLECTIONS) {
-    if (raw[key] === undefined) violations.push(wireViolation(`critic.${key}`, "required: expected an array"));
-  }
-  const proposals = parseProposals(raw.missingUnits, violations);
-  if (raw.stop !== undefined && typeof raw.stop !== "boolean") {
-    violations.push(wireViolation("critic.stop", "expected a boolean"));
-  }
-  const reassignIds = wireStringList(raw.reassignIds, "critic.reassignIds", violations);
-  const resolvedPriorLeads = wireStringList(raw.resolvedPriorLeads, "critic.resolvedPriorLeads", violations);
-  if (violations.length > 0) return failure(invalid(violations));
-  return success({
-    missingUnits: proposals,
-    reassignIds,
-    resolvedPriorLeads,
-    stop: raw.stop === true,
-  });
-}
-
-/** The critic's proposed units: a cell the ledger is missing, with the evidence
- *  a hunter needs to hunt it. */
-function parseProposals(raw: unknown, violations: CoverageViolation[]): readonly CoverageProposal[] {
-  if (raw === undefined) return [];
-  if (!Array.isArray(raw)) {
-    violations.push(wireViolation("critic.missingUnits", "expected an array of proposals"));
-    return [];
-  }
-  return raw.flatMap((entry: unknown, index) => {
-    const base = `critic.missingUnits[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return [];
-    }
-    violations.push(...unknownFieldViolations(entry, CRITIC_PROPOSAL_KEYS, base));
-    // Parsed, not cast: a proposal whose refs are not a canonical tuple names no
-    // cell, so it is refused here with its own path rather than at the merge.
-    const refs = parseCoverageRefs(entry.refs);
-    if (!refs.ok) violations.push(wireViolation(`${base}.refs`, refs.error.message));
-    const startingPaths = wireStringList(entry.startingPaths, `${base}.startingPaths`, violations);
-    const selectedCompanionBlocks = wireStringList(entry.selectedCompanionBlocks, `${base}.selectedCompanionBlocks`, violations);
-    const excludedBlocks = parseExcludedBlocks(entry.excludedBlocks, `${base}.excludedBlocks`, violations);
-    // A present-but-malformed block is a violation, never a silent `null`: a
-    // dropped block would seed the cell with no ordinary class behind it.
-    const ordinaryAttackClassBlock = optionalVisibleText(entry.ordinaryAttackClassBlock);
-    if (ordinaryAttackClassBlock === undefined) {
-      violations.push(wireViolation(`${base}.ordinaryAttackClassBlock`, "expected null or visible text"));
-    }
-    if (!refs.ok || ordinaryAttackClassBlock === undefined) return [];
-    return [{ refs: refs.value, startingPaths, ordinaryAttackClassBlock, selectedCompanionBlocks, excludedBlocks }];
-  });
-}
-
-/** The two maps a critic merge is given beside the critic's own document. */
-export type CriticMergeMaps = Readonly<{
-  /** coverage id → why the critic reassigned it (archived on the attempt). */
-  reassignmentReasons: Readonly<Record<string, string>>;
-  /** lead fingerprint → the coverage id of the unit that carries it. */
-  priorLeadOwners: Readonly<Record<string, string>>;
-}>;
-
-/** One `string → string` map, or a named violation. Absent is `{}`; anything
- *  else that is not an object of strings is refused — dropping a malformed map
- *  would leave a reassignment without its reason (which `mergeCritic` then
- *  refuses, naming the unit) or make a resolution unplaceable, while the
- *  payload itself still parsed. */
-function parseStringMap(raw: unknown, path: string, violations: CoverageViolation[]): Readonly<Record<string, string>> {
-  if (raw === undefined) return {};
-  if (!isWireRecord(raw)) {
-    violations.push(wireViolation(path, "expected an object of string values"));
-    return {};
-  }
-  const entries = Object.entries(raw);
-  const malformed = entries.filter(([, value]) => typeof value !== "string").map(([key]) => key).sort(compareStrings);
-  for (const key of malformed) violations.push(wireViolation(`${path}.${key}`, "expected a string"));
-  return Object.fromEntries(entries.flatMap(([key, value]) => (typeof value === "string" ? [[key, value]] : [])));
-}
-
-/** Parse the merge maps that travel beside a critic document. */
-export function parseCriticMergeMaps(
-  raw: Readonly<{ reassignmentReasons?: unknown; priorLeadOwners?: unknown }>,
-): DomainResult<CriticMergeMaps, CoverageError> {
-  const violations: CoverageViolation[] = [];
-  const reassignmentReasons = parseStringMap(raw.reassignmentReasons, "reassignmentReasons", violations);
-  const priorLeadOwners = parseStringMap(raw.priorLeadOwners, "priorLeadOwners", violations);
-  return violations.length === 0 ? success({ reassignmentReasons, priorLeadOwners }) : failure(invalid(violations));
-}
-
-export const CRITIC_KEYS: readonly string[] = ["schemaVersion", "kind", "missingUnits", "reassignIds", "resolvedPriorLeads", "stop"];
-const CRITIC_COLLECTIONS: readonly string[] = ["missingUnits", "reassignIds", "resolvedPriorLeads"];
-
-/** The keys one proposed unit may carry. Exported for the same reason as
- *  `UNIT_RESULT_KEYS`: a doc that names a key this list omits is an agent whose
- *  output the engine refuses. */
-export const CRITIC_PROPOSAL_KEYS: readonly string[] = [
-  "refs", "startingPaths", "ordinaryAttackClassBlock", "selectedCompanionBlocks", "excludedBlocks",
-];
-
-/** Exclusions are evidence, so a malformed entry is a violation rather than an
- *  entry that quietly never happened. The one exclusion parser: seeds and
- *  critic proposals both read their exclusions here. */
-function parseExcludedBlocks(raw: unknown, path: string, violations: CoverageViolation[]): readonly ExcludedBlock[] {
-  if (raw === undefined) return [];
-  if (!Array.isArray(raw)) {
-    violations.push(wireViolation(path, "expected an array of blocks"));
-    return [];
-  }
-  const kept: ExcludedBlock[] = [];
-  raw.forEach((item: unknown, index) => {
-    if (!isWireRecord(item)) {
-      violations.push(wireViolation(`${path}[${index}]`, "expected an object with a block and a reason"));
-      return;
-    }
-    const { block, reason } = item;
-    if (!isVisibleText(block) || !isVisibleText(reason)) {
-      violations.push(wireViolation(`${path}[${index}]`, "block and reason must be visible text"));
-      return;
-    }
-    kept.push({ block, reason });
-  });
-  return kept;
 }

@@ -55,6 +55,20 @@ export function write(root: string, path: string, contents: string): void {
 }
 
 /**
+ * The fixture repository's in-repository runs root, `<root>/runs`, created and
+ * ignored. A Run Directory is engine output, never Wave workspace: the Wave
+ * completion suite digests the repository's workspace, so a runs root Git can
+ * see would change that digest as the run writes, read as unexplained drift.
+ * Call it before the initial commit and stage the `.gitignore` it writes.
+ */
+export function ignoredRunsRoot(root: string): string {
+  const runsRoot = join(root, "runs");
+  mkdirSync(runsRoot, { recursive: true });
+  writeFileSync(join(root, ".gitignore"), "runs/\n");
+  return runsRoot;
+}
+
+/**
  * A pathspec contract over `paths`, with placeholder digests.
  *
  * The digests are deliberately not real: these suites exercise the STAGING

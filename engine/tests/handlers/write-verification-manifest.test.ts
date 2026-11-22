@@ -13,6 +13,7 @@ import writeVerificationManifest from "../../src/handlers/helpers/write-verifica
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../src/types";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const originalCwd = process.cwd();
 const directories: string[] = [];
@@ -31,6 +32,7 @@ function project(): { readonly root: string; readonly statePath: string } {
   mkdirSync(dirname(statePath), { recursive: true });
   const graph: TaskGraph = {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,

@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import {
   acquireLock,
   acquireLockSync,
-  isStaleLock,
   observeStaleLock,
   releaseLock,
   retireObservedStaleLock,
@@ -97,7 +96,7 @@ describe("lock", () => {
     writeFileSync(`${lockDir}/pid`, "1");
 
     // Should NOT be stale — process exists, we just can't signal it
-    expect(isStaleLock(lockDir)).toBe(false);
+    expect(observeStaleLock(lockDir)).toBeNull();
   });
 
   it("treats an inaccessible pid path as live instead of reaping its lock", () => {
@@ -106,7 +105,7 @@ describe("lock", () => {
     mkdirSync(lockDir);
     symlinkSync("pid", join(lockDir, "pid"));
 
-    expect(isStaleLock(lockDir)).toBe(false);
+    expect(observeStaleLock(lockDir)).toBeNull();
   });
 
   it("preserves a foreign-owned lock on release", () => {

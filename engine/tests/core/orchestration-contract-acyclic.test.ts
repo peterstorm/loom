@@ -180,21 +180,6 @@ describe("orchestration-contract volume graph", () => {
     expect(scan.edgeVisits).toBeLessThanOrEqual(graph.size * edgeCount);
   });
 
-  it("keeps historical compatibility imports one-way", () => {
-    const names = ["legacy-archive", "standalone-review", "review-panel"] as const;
-    const graph = new Map(names.map((name) => [
-      name,
-      siblingImports(readFileSync(join(CORE_DIR, `${name}.ts`), "utf-8"))
-        .filter((dependency) => names.includes(dependency as typeof names[number])),
-    ]));
-    const cycles = [...graph.keys()]
-      .flatMap((volume) => cyclesFrom(volume, graph))
-      .map((cycle) => cycle.join(" -> "));
-
-    expect([...new Set(cycles)]).toEqual([]);
-    expect(graph.get("standalone-review")).not.toContain("legacy-archive");
-  });
-
   it("keeps the shared error vocabulary beneath every volume that raises it", () => {
     const graph = volumeGraph();
     // errors.ts is the leaf that broke the three original cycles. If it ever

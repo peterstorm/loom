@@ -11,13 +11,15 @@
  * invoking it, so nothing notices until someone tries to call it.
  *
  * This asserts the two sets are equal per hook type, read from the filesystem
- * the dynamic import actually resolves against.
+ * the dynamic import actually resolves against. It also asserts the Pi runtime
+ * handshake list names only routed handlers, so a retired route cannot linger
+ * there after its handler is gone.
  */
 import { describe, expect, it } from "vitest";
 import { readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { KNOWN_HANDLERS } from "../../src/handler-routes";
+import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES } from "../../src/handler-routes";
 
 const ENGINE = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HANDLERS = join(ENGINE, "src", "handlers");
@@ -59,5 +61,22 @@ describe("every hook-type route set matches the handler files it routes to", () 
       .map((hookType) => hookType === "helper" ? "helpers" : hookType)
       .sort();
     expect(routed).toEqual(directories);
+  });
+});
+
+describe("the Pi runtime handshake list names only routed handlers", () => {
+  it("every Pi runtime handshake route names a routed handler", () => {
+    const unrouted = [...PI_RUNTIME_HANDSHAKE_ROUTES].filter((route) => {
+      const [hookType, handler, ...rest] = route.split("/");
+      return rest.length > 0 || hookType === undefined || handler === undefined || KNOWN_HANDLERS[hookType]?.has(handler) !== true;
+    });
+    expect(unrouted).toEqual([]);
+  });
+
+  it("routes none of the retired helpers", () => {
+    for (const retired of ["complete-wave-gate", "review-panel", "standalone-review"]) {
+      expect(KNOWN_HANDLERS["helper"]?.has(retired), retired).toBe(false);
+      expect(PI_RUNTIME_HANDSHAKE_ROUTES.has(`helper/${retired}`), retired).toBe(false);
+    }
   });
 });

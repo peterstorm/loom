@@ -17,16 +17,19 @@
 import fc from "fast-check";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { match } from "ts-pattern";
 import { describe, expect, it } from "vitest";
 import {
   COVERAGE_STATUSES,
   HUNTER_RESULT_KIND,
+  TERMINAL_DISPOSITIONS,
   admitArtifactNonce,
   assignUnits,
   catalogAgentOfOwner,
   coverageComplete,
   coverageSettled,
   deferPlannedUnits,
+  deferUnit,
   incompleteReasonSource,
   mergeCritic,
   parseCoverageSeeds,
@@ -40,19 +43,22 @@ import {
   seedCoverageUnit,
   sortLedger,
   summarizeCoverage,
-  validateLedger,
   type Assignment,
   type CoverageCriticResult,
   type CoverageError,
   type CoverageLedger,
   type CoverageSeed,
+  type CoverageAttempt,
   type CoverageUnit,
   type CriticError,
+  type LocalCheck,
+  type TerminalDisposition,
+  type UnitResult,
 } from "../../src/core/security-coverage";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import { AGENT_POLICIES } from "../../src/core/model-profiles";
 import { isSecurityAgentId, SECURITY_AUDIT_LIMITS, type SecurityAgentId } from "../../src/core/security-audit-contract";
-import { HUNTER_AGENT as HUNTER, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
+import { HUNTER_AGENT as HUNTER, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ledgerViolations, nSeeds, ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const FIXTURES = join(import.meta.dirname, "..", "fixtures", "security", "upstream");
@@ -63,7 +69,7 @@ type UpstreamLedgerValidator = {
 
 const upstream = require(join(FIXTURES, "validate-coverage-ledger.cjs")) as UpstreamLedgerValidator;
 const upstreamValid = (ledger: unknown): boolean => upstream.validateDocument(ledger).length === 0;
-const oursValid = (ledger: unknown): boolean => validateLedger(ledger as CoverageLedger).length === 0;
+const oursValid = (ledger: unknown): boolean => ledgerViolations(ledger).length === 0;
 
 /** Mutations of a valid ledger that the vendored validator ACCEPTS and this port
  *  rejects — the places this port is deliberately stricter. Enumerated by name,
@@ -95,7 +101,7 @@ const seed = (overrides: Partial<Parameters<typeof seedCoverageUnit>[0]> = {}) =
     ...overrides,
   }));
 
-const evidence = (agentId: SecurityAgentId, fingerprint: string) => ({
+const evidence = (agentId: SecurityAgentId, fingerprint: string): Omit<UnitResult, "coverageId" | "wave"> => ({
   agentId,
   status: "candidate" as const,
   reviewedPaths: ["src/reports/controller.ts"],
@@ -196,7 +202,7 @@ describe("coverage ledger: TS port vs upstream validator", () => {
       }
       if (upstreamAnswer) acceptedByUpstream.push(mutation.name);
     }
-    // Every mutation in the table is a defect `validateLedger` must name. This
+    // Every mutation in the table is a defect `parseLedger` must name. This
     // is the assertion the previous loop only appeared to make: its second
     // expectation compared `upstreamAnswer` against `ourAnswer || upstreamAnswer`,
     // which fails only when `ourAnswer && !upstreamAnswer` — the exact condition
@@ -271,18 +277,18 @@ describe("coverage ledger: state machine", () => {
     const stale = recordUnitResult(reassigned.ledger, { coverageId: unit.coverage_id, ...evidence(HUNTER, "tenant-scope/cache-key"), wave: 2 });
     expect(stale.ok).toBe(false);
     const rehunted = settled(reassigned.ledger, unit.coverage_id, HUNTER_2, "tenant-scope/cache-key", 2);
-    expect(validateLedger(rehunted)).toEqual([]);
+    expect(ledgerViolations(rehunted)).toEqual([]);
     expect(upstreamValid(rehunted)).toBe(true);
   });
 
   it("mints the lowest owner id no archived attempt has spent", () => {
     const unit = seed();
-    const archived = (wave: number, agent_id: SecurityAgentId) => ({
+    const archived = (wave: number, agent_id: SecurityAgentId): CoverageAttempt => ({
       wave,
       status: "covered" as const,
       agent_id,
       reviewed_paths: ["src/reports/controller.ts"],
-      local_checks: [{ ...evidence(agent_id, "x").checks[0] }],
+      local_checks: evidence(agent_id, "x").checks,
       result_fingerprints: [],
       unresolved: [],
       reassignment_reason: "critic: walk it again",
@@ -290,7 +296,7 @@ describe("coverage ledger: state machine", () => {
     // Attempts spent the bare name and `--3` (an operator-chosen gap): the next
     // fresh owner is `--4`, never a name an attempt already used.
     const third = { ...unit, wave: 3, attempts: [archived(1, HUNTER), archived(2, anAgentId(`${HUNTER}--3`))] };
-    expect(validateLedger([third])).toEqual([]);
+    expect(ledgerViolations([third])).toEqual([]);
     const result = ok(assignUnits([third], [{ coverageId: unit.coverage_id, agentId: HUNTER }]));
     expect(result.assigned[0].ownerId).toBe(`${HUNTER}--4`);
   });
@@ -362,7 +368,7 @@ describe("coverage ledger: state machine", () => {
     expect(coverageSettled(deferred)).toBe(true);
     expect(coverageComplete(deferred)).toBe(false);
     expect(summarizeCoverage(deferred).deferred).toHaveLength(2);
-    expect(validateLedger(deferred)).toEqual([]);
+    expect(ledgerViolations(deferred)).toEqual([]);
     expect(upstreamValid(deferred)).toBe(true);
   });
 
@@ -370,7 +376,7 @@ describe("coverage ledger: state machine", () => {
     const a = seed({ refs: aRefs({ surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" }) });
     const b = seed({ refs: aRefs({ surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" }) });
     expect(sortLedger([b, a]).map((unit) => unit.coverage_id)).toEqual(sortLedger([a, b]).map((unit) => unit.coverage_id));
-    expect(validateLedger(sortLedger([b, a]))).toEqual([]);
+    expect(ledgerViolations(sortLedger([b, a]))).toEqual([]);
   });
 });
 
@@ -412,12 +418,29 @@ describe("mergeCritic fails closed rather than dropping a lead or erasing an att
       { kind: "missing-reassignment-reason", coverageId: unit.coverage_id }],
     ["a reassignment whose reason is blank", candidate, critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: { [unit.coverage_id]: "  " } },
       { kind: "missing-reassignment-reason", coverageId: unit.coverage_id }],
-    ["a settled unit with no recorded owner", () => [{ ...candidate()[0]!, agent_id: null }], critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: REASON },
-      { kind: "terminal-unit-has-no-owner", coverageId: unit.coverage_id, status: "candidate" }],
   ])("refuses %s, naming it", (_case, ledger, result, maps, expected) => {
     const refused = mergeCritic(ledger(), result, { wave: 2, ...maps });
     expect(refused.ok).toBe(false);
     expect(refused.ok ? null : refused.error).toEqual(expected);
+  });
+
+  it("cannot be handed a settled unit with no owner: the type refuses to build one, and the parser to read one", () => {
+    const [settledUnit] = candidate();
+    // @ts-expect-error — a candidate unit's owner is a SecurityAgentId, never null.
+    const ownerless: CoverageLedger = [{ ...settledUnit!, agent_id: null }];
+    expect(refusedPaths(parseLedger(JSON.parse(JSON.stringify(ownerless))))).toEqual(["$[0].agent_id"]);
+  });
+
+  it("refuses a resolution that would leave a blocked unit without the fact its status requires", () => {
+    const blockedOnLead = ok(recordUnitResult(assigned([unit], unit.coverage_id, HUNTER), {
+      coverageId: unit.coverage_id, ...evidence(HUNTER, "unused"), status: "blocked", fingerprints: [], unresolved: ["prior/lead-1"], wave: 1,
+    }));
+    const refused = mergeCritic(blockedOnLead, critic({ resolvedPriorLeads: ["prior/lead-1"] }),
+      { wave: 2, reassignmentReasons: {}, priorLeadOwners: { "prior/lead-1": unit.coverage_id } });
+    expect(refused.ok ? null : refused.error).toEqual({
+      kind: "invalid-coverage-operation",
+      violations: [{ path: "$[0].unresolved", message: "status blocked requires unresolved facts" }],
+    });
   });
 
   it("refuses a reassignment of an unknown coverage id as a named violation", () => {
@@ -459,11 +482,11 @@ describe("parseLedger returns its own proof, never the caller's array", () => {
     const unit = seed();
     const parsed = ok(parseLedger(JSON.parse(JSON.stringify([unit]))));
     const inFlight = assigned(parsed, unit.coverage_id, HUNTER);
-    expect(validateLedger(settled(inFlight, unit.coverage_id, HUNTER, "tenant-scope/cache-key"))).toEqual([]);
+    expect(ledgerViolations(settled(inFlight, unit.coverage_id, HUNTER, "tenant-scope/cache-key"))).toEqual([]);
   });
 
   it("returns only branded owner ids: a stored owner the grammar refuses is named, at every owner site the ledger type declares", () => {
-    // `parseLedger` narrows to `CoverageLedger` once `validateLedger` is silent.
+    // `parseLedger` narrows to `CoverageLedger` only when it reports no violations.
     // `OWNER_SITES` is keyed by every path whose type is a SecurityAgentId, so
     // a new owner field fails to compile here until it is proved refused.
     const unit = seed();
@@ -484,9 +507,10 @@ describe("parseLedger returns its own proof, never the caller's array", () => {
 });
 
 /** Every path of `T` whose value the type claims is a SecurityAgentId (null
- *  allowed), spelled as `validateLedger` names it: `[0]` for an element. */
+ *  allowed), spelled as `parseLedger` names it: `[0]` for an element. */
 type OwnerPaths<T, At extends string> =
-  [NonNullable<T>] extends [SecurityAgentId] ? At
+  [NonNullable<T>] extends [never] ? never
+    : [NonNullable<T>] extends [SecurityAgentId] ? At
     : T extends readonly (infer Element)[] ? OwnerPaths<Element, `${At}[0]`>
       : T extends object ? { [Key in keyof T & string]-?: OwnerPaths<T[Key], `${At}.${Key}`> }[keyof T & string]
         : never;
@@ -518,8 +542,8 @@ describe("coverage ledger: construction enforces the ledger's own state rule", (
       ["out of scope without a reason", { status: "out_of_scope", unresolved: [] }, "unresolved"],
       ["not applicable without a reason", { status: "not_applicable" }, "unresolved"],
       ["planned with something unresolved", { unresolved: ["why"] }, "unresolved"],
-      ["an invisible reason", { status: "deferred", unresolved: ["​"] }, "unresolved"],
-      ["a duplicated reason", { status: "deferred", unresolved: ["why", "why"] }, "unresolved"],
+      ["an invisible reason", { status: "deferred", unresolved: ["​"] }, "unresolved[0]"],
+      ["a duplicated reason", { status: "deferred", unresolved: ["why", "why"] }, "unresolved[1]"],
       ["wave zero", { wave: 0 }, "wave"],
       ["a fractional wave", { wave: 1.5 }, "wave"],
       ["a negative wave", { wave: -2 }, "wave"],
@@ -530,7 +554,7 @@ describe("coverage ledger: construction enforces the ledger's own state rule", (
     }
   });
 
-  it("builds only units `validateLedger` accepts, for every start it admits", () => {
+  it("builds only units `parseLedger` accepts, for every start it admits", () => {
     const starts = fc.record({
       status: fc.constantFrom(...COVERAGE_STATUSES),
       unresolved: fc.array(fc.constantFrom("budget_cannot_reserve_critics_and_validation", "no browser surface", " ", "​"), { maxLength: 3 }),
@@ -542,7 +566,7 @@ describe("coverage ledger: construction enforces the ledger's own state rule", (
         // Construction and validation are ONE rule: whatever the constructor
         // admits is a legal ledger, so no caller can seed a unit `start` would
         // later refuse as a ledger.
-        if (built.ok) expect(validateLedger([built.value])).toEqual([]);
+        if (built.ok) expect(ledgerViolations([built.value])).toEqual([]);
       }),
       { numRuns: 300 },
     );
@@ -563,10 +587,11 @@ describe("coverage ledger: present-but-malformed wire fields are named, never dr
       ["a numeric lifecycle", { lifecycle: 5 }, "units[0].lifecycle"],
       ["a string wave", { wave: "2" }, "units[0].wave"],
       ["a scalar unresolved", { status: "deferred", unresolved: "budget" }, "units[0].unresolved"],
-      ["a non-string companion block", { selected_companion_blocks: [7] }, "units[0].selected_companion_blocks"],
+      ["a non-string companion block", { selected_companion_blocks: [7] }, "units[0].selected_companion_blocks[0]"],
       ["an object for excluded blocks", { excluded_blocks: {} }, "units[0].excluded_blocks"],
-      ["an exclusion with no reason", { excluded_blocks: [{ block: "CLIENT-SIDE.md#dom" }] }, "units[0].excluded_blocks[0]"],
-      ["refs that are not a canonical tuple", { refs: { surface: "s" } }, "units[0].canonical_refs"],
+      ["an exclusion with no reason", { excluded_blocks: [{ block: "CLIENT-SIDE.md#dom" }] }, "units[0].excluded_blocks[0].reason"],
+      ["refs that are not a canonical tuple", { refs: { surface: "s" } }, "units[0].refs"],
+      ["an unsafe starting path", { starting_paths: ["/etc/passwd"] }, "units[0].starting_paths[0]"],
     ];
     for (const [name, overrides, path] of cases) {
       expect(refusedPaths(parseCoverageSeeds([{ ...aSeed(), ...overrides }])), name).toContain(path);
@@ -575,7 +600,7 @@ describe("coverage ledger: present-but-malformed wire fields are named, never dr
 
   it("refuses a unit result whose optional lists are malformed, and keeps well-formed ones", () => {
     expect(refusedPaths(parseUnitResults([aUnitResult({ fingerprints: "api/login:sqli-email" })]))).toContain("units[0].fingerprints");
-    expect(refusedPaths(parseUnitResults([aUnitResult({ fingerprints: [42] })]))).toContain("units[0].fingerprints");
+    expect(refusedPaths(parseUnitResults([aUnitResult({ fingerprints: [42] })]))).toContain("units[0].fingerprints[0]");
     expect(refusedPaths(parseUnitResults([aUnitResult({ unresolved: { why: "x" } })]))).toContain("units[0].unresolved");
 
     const absent = ok(parseUnitResults([aUnitResult()]))[0];
@@ -596,8 +621,8 @@ describe("coverage ledger: present-but-malformed wire fields are named, never dr
       reassignIds: [],
       resolvedPriorLeads: [],
     }));
-    expect(fromSeed).toContain("units[0].excluded_blocks[0]");
-    expect(fromCritic).toContain("critic.missingUnits[0].excludedBlocks[0]");
+    expect(fromSeed).toEqual(["units[0].excluded_blocks[0].reason"]);
+    expect(fromCritic).toEqual(["critic.missingUnits[0].excludedBlocks[0].reason"]);
   });
 });
 
@@ -650,7 +675,7 @@ describe("admitArtifactNonce", () => {
 
   it("refuses an artifact an archived attempt already cited, even for a live owner", () => {
     const [first, second] = [seed(), other()];
-    const localCheck = {
+    const localCheck: LocalCheck = {
       agent_id: HUNTER,
       reviewed_paths: ["src/reports/controller.ts"],
       invariant: "the cache key includes the tenant",
@@ -697,7 +722,7 @@ describe("parseHunterResult", () => {
 
   it.each([
     ["the borrowed reviewer label", { schemaVersion: 2, kind: "standalone-review", units: [aUnitResult()] }, ["kind", "schemaVersion"]],
-    ["an unknown top-level key", { ...HUNTER_ENVELOPE, units: [aUnitResult()], extra: true }, ["$.extra"]],
+    ["an unknown top-level key", { ...HUNTER_ENVELOPE, units: [aUnitResult()], extra: true }, ["extra"]],
     ["a missing units list", { ...HUNTER_ENVELOPE, findings: [] }, ["units"]],
     ["units that are not a list", { ...HUNTER_ENVELOPE, units: "all" }, ["units"]],
     ["a non-object", "units", ["$"]],
@@ -757,10 +782,11 @@ describe("a defect is reported once, wherever it sits", () => {
         reassignment_reason: "critic: walk it again",
       }],
     };
-    const liveViolations = violationsAt(validateLedger([live]), "$[0].reviewed_paths");
-    const archivedViolations = violationsAt(validateLedger([archived]), "$[0].attempts[0].reviewed_paths");
-    expect(liveViolations).toEqual([{ path: "$[0].reviewed_paths", message: "unsafe source path" }]);
-    expect(archivedViolations).toEqual([{ path: "$[0].attempts[0].reviewed_paths", message: "unsafe source path" }]);
+    const unsafe = "expected a repository-relative source path";
+    const liveViolations = violationsAt(ledgerViolations([live]), "$[0].reviewed_paths[0]");
+    const archivedViolations = violationsAt(ledgerViolations([archived]), "$[0].attempts[0].reviewed_paths[0]");
+    expect(liveViolations).toEqual([{ path: "$[0].reviewed_paths[0]", message: unsafe }]);
+    expect(archivedViolations).toEqual([{ path: "$[0].attempts[0].reviewed_paths[0]", message: unsafe }]);
   });
 
   const CRITIC: Readonly<Record<string, unknown>> = { schemaVersion: 1, kind: "security-coverage-critic", missingUnits: [], reassignIds: [], resolvedPriorLeads: [] };
@@ -777,7 +803,7 @@ describe("a defect is reported once, wherever it sits", () => {
   it.each(["missingUnits", "reassignIds", "resolvedPriorLeads"])("names a missing critic %s once, as required", (key) => {
     const { [key]: _omitted, ...rest } = CRITIC;
     const refused = parseCriticResult(rest);
-    expect(refused.ok ? [] : refused.error.violations).toEqual([{ path: `critic.${key}`, message: "required: expected an array" }]);
+    expect(refused.ok ? [] : refused.error.violations).toEqual([{ path: `critic.${key}`, message: "required" }]);
   });
 });
 
@@ -792,7 +818,7 @@ describe("a local check is parsed by one contract, on the hunter wire and in a s
     return [{ ...settledUnit!, local_checks: [localCheck] }];
   };
   const ledgerMessages = (localCheck: Record<string, unknown>) =>
-    validateLedger(settledWith(localCheck) as CoverageLedger).filter((entry) => entry.path.startsWith("$[0].local_checks[0]"));
+    ledgerViolations(settledWith(localCheck)).filter((entry) => entry.path.startsWith("$[0].local_checks[0]"));
   const wireMessages = (localCheck: Record<string, unknown>) => {
     const parsed = parseUnitResults([aUnitResult({ checks: [localCheck] })]);
     return parsed.ok ? [] : parsed.error.violations.filter((entry) => entry.path.startsWith("units[0].checks[0]"));
@@ -885,7 +911,221 @@ describe("an archived attempt's local artifacts are spent as they are read", () 
       wave: 1, status: "covered" as const, agent_id: HUNTER, reviewed_paths: ["src/reports/controller.ts"],
       local_checks: [local, local], result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
     };
-    const violations = validateLedger([{ ...unit, wave: 2, attempts: [attempt] }]);
+    const violations = ledgerViolations([{ ...unit, wave: 2, attempts: [attempt] }]);
     expect(violations).toContainEqual({ path: "$[0].attempts[0].local_checks[1].artifact", message: "an archived artifact cannot be reused" });
+  });
+});
+
+/**
+ * Every transition parses the unit it rebuilds and the ledger it grows, so a
+ * transition can never hand back a ledger the next `parseLedger` refuses.
+ */
+describe("transitions refuse what the next read would refuse", () => {
+  /** An archived covered attempt at `wave`, run by `agent`. */
+  const attemptAt = (wave: number, agent: SecurityAgentId): CoverageAttempt => ({
+    wave,
+    status: "covered" as const,
+    agent_id: agent,
+    reviewed_paths: ["src/reports/controller.ts"],
+    local_checks: evidence(agent, "x").checks,
+    result_fingerprints: [],
+    unresolved: [],
+    reassignment_reason: "critic: walk it again",
+  });
+  /** The owner of a unit's `n`th attempt, as `assignUnits` mints it. */
+  const ownerOf = (n: number): SecurityAgentId => (n === 1 ? HUNTER : anAgentId(`${HUNTER}--${n}`));
+  const reassign = (ledger: CoverageLedger, coverageId: string) =>
+    mergeCritic(ledger, { missingUnits: [], reassignIds: [coverageId], resolvedPriorLeads: [], stop: false },
+      { wave: 2, reassignmentReasons: { [coverageId]: "critic: again" } });
+
+  it("assign refuses a wave that does not follow the unit's archived attempts", () => {
+    const unit = seed();
+    const reworked: CoverageLedger = [{ ...unit, wave: 3, attempts: [attemptAt(2, HUNTER)] }];
+    expect(ledgerViolations(reworked)).toEqual([]);
+    for (const wave of [1, 2]) {
+      const refused = assignUnits(reworked, [{ coverageId: unit.coverage_id, agentId: HUNTER, wave }]);
+      expect(refused.ok ? null : refused.error, `wave ${wave}`).toEqual({
+        kind: "invalid-coverage-operation",
+        violations: [{ path: "$[0].attempts[0].wave", message: `archived wave must precede current wave ${wave}` }],
+      });
+    }
+    // The wave the unit already holds is the one that follows its history.
+    expect(ok(assignUnits(reworked, [{ coverageId: unit.coverage_id, agentId: HUNTER }])).assigned[0]?.wave).toBe(3);
+  });
+
+  it("assign refuses the whole batch when one assignment's wave is refused, leaving the ledger as it was", () => {
+    const a = seed({ refs: aRefs({ surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" }) });
+    const b = { ...seed({ refs: aRefs({ surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" }) }), wave: 3, attempts: [attemptAt(2, HUNTER)] };
+    const ledger = sortLedger([a, b]);
+    const before = JSON.stringify(ledger);
+    const refused = assignUnits(ledger, [
+      { coverageId: a.coverage_id, agentId: HUNTER, wave: 1 },
+      { coverageId: b.coverage_id, agentId: HUNTER, wave: 2 },
+    ]);
+    expect(refused.ok).toBe(false);
+    expect(refusedPaths(refused as DomainResult<unknown, CoverageError>)).toEqual([`$[${ledger.indexOf(b)}].attempts[0].wave`]);
+    expect(JSON.stringify(ledger)).toBe(before);
+  });
+
+  it("merge refuses a proposal past the unit ceiling, and accepts the one that reaches it", () => {
+    const full = ok(parseCoverageSeeds(nSeeds(SECURITY_AUDIT_LIMITS.units - 1)));
+    const proposal = (subsystem: string) => ({
+      refs: aRefs({ subsystem }), startingPaths: ["src/extra.ts"], ordinaryAttackClassBlock: null,
+      selectedCompanionBlocks: ["WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes"], excludedBlocks: [],
+    });
+    const critic = (subsystems: readonly string[]): CoverageCriticResult =>
+      ({ missingUnits: subsystems.map(proposal), reassignIds: [], resolvedPriorLeads: [], stop: false });
+
+    const reached = ok(mergeCritic(full, critic(["extra-1"]), { wave: 1, reassignmentReasons: {} }));
+    expect(reached.ledger).toHaveLength(SECURITY_AUDIT_LIMITS.units);
+    expect(parseLedger(JSON.parse(JSON.stringify(reached.ledger))).ok).toBe(true);
+
+    const refused = mergeCritic(full, critic(["extra-1", "extra-2"]), { wave: 1, reassignmentReasons: {} });
+    expect(refused.ok ? null : refused.error).toEqual({
+      kind: "invalid-coverage-operation",
+      violations: [{ path: "missingUnits", message: `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units` }],
+    });
+  });
+
+  it("merge refuses a reassignment that would archive past the attempts ceiling", () => {
+    const unit = seed();
+    const limit = SECURITY_AUDIT_LIMITS.attemptsPerUnit;
+    const history = Array.from({ length: limit }, (_unused, k) => attemptAt(k + 1, ownerOf(k + 1)));
+    const atCeiling: CoverageLedger = [{ ...unit, wave: limit + 1, attempts: history }];
+    expect(ledgerViolations(atCeiling)).toEqual([]);
+    const hunted = settled(assigned(atCeiling, unit.coverage_id, HUNTER, limit + 1), unit.coverage_id, ownerOf(limit + 1), "tenant-scope/cache-key", limit + 1);
+
+    const refused = reassign(hunted, unit.coverage_id);
+    expect(refused.ok ? null : refused.error).toEqual({
+      kind: "invalid-coverage-operation",
+      violations: [{ path: "$[0].attempts", message: "too many archived attempts" }],
+    });
+  });
+
+  it("merge refuses to archive a hand-built unit its schema refuses, rather than carry it forward", () => {
+    const unit = seed();
+    const [hunted] = settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key");
+    const drifted: CoverageLedger = [{ ...hunted!, surface: "something else" }];
+    // The semantic fields disagree with the refs the id is derived from: the unit is named.
+    expect(refusedPaths(reassign(drifted, unit.coverage_id) as DomainResult<unknown, CoverageError>)).toEqual(["$[0]"]);
+  });
+
+  it("deferral refuses a hand-built planned unit its schema refuses, rather than carry it forward", () => {
+    const unit = seed();
+    const drifted: CoverageLedger = [{ ...unit, surface: "something else" }];
+    expect(refusedPaths(deferPlannedUnits(drifted, "critic_budget_exhausted"))).toEqual(["$[0]"]);
+    expect(refusedPaths(deferUnit(drifted, unit.coverage_id, "critic_budget_exhausted") as DomainResult<unknown, CoverageError>))
+      .toEqual(["$[0]"]);
+    // The unit as seeded defers, through the same parse.
+    expect(ledgerViolations(ok(deferUnit([unit], unit.coverage_id, "critic_budget_exhausted")))).toEqual([]);
+  });
+
+  /**
+   * The ledger-wide invariants (sorted, each cell and id once, the unit
+   * ceiling) have no single enforcement point: each transition upholds them for
+   * what it changes. This is their guard: any run of transitions hands back only
+   * ledgers `parseLedger` accepts, whichever of them a step refuses.
+   */
+  describe("every ledger a run of transitions produces is one parseLedger accepts", () => {
+    type InFlightUnit = Extract<CoverageUnit, Readonly<{ status: "in_progress" }>>;
+    /** One step of a run. Its choices are indices, read modulo what the ledger
+     *  holds when the step runs, so every step names something it can act on. */
+    type Step =
+      | Readonly<{ kind: "assign"; pick: number }>
+      | Readonly<{ kind: "settle"; pick: number; status: TerminalDisposition; tag: number }>
+      | Readonly<{ kind: "merge"; wave: number; cells: readonly number[]; reassign: readonly number[]; resolve: readonly number[] }>
+      | Readonly<{ kind: "defer" }>;
+
+    const step: fc.Arbitrary<Step> = fc.oneof(
+      fc.record({ kind: fc.constant("assign" as const), pick: fc.nat() }),
+      fc.record({ kind: fc.constant("settle" as const), pick: fc.nat(), status: fc.constantFrom(...TERMINAL_DISPOSITIONS), tag: fc.nat({ max: 3 }) }),
+      fc.record({
+        kind: fc.constant("merge" as const),
+        wave: fc.integer({ min: 1, max: 4 }),
+        // `nSeeds` fills subsystem-0..k-1: a low index proposes a cell the
+        // ledger already holds (deduped), a high one a new cell.
+        cells: fc.array(fc.nat({ max: 7 }), { maxLength: 3 }),
+        reassign: fc.array(fc.nat(), { maxLength: 2 }),
+        resolve: fc.array(fc.nat(), { maxLength: 2 }),
+      }),
+      fc.constant({ kind: "defer" as const }),
+    );
+
+    const pickOf = <T,>(items: readonly T[], pick: number): T | undefined => items[pick % Math.max(items.length, 1)];
+    const isInFlight = (unit: CoverageUnit): unit is InFlightUnit => unit.status === "in_progress";
+    const isSettled = (unit: CoverageUnit): boolean => TERMINAL_DISPOSITIONS.some((status) => status === unit.status);
+    const accepted = (result: DomainResult<CoverageLedger, unknown>): CoverageLedger | null => (result.ok ? result.value : null);
+
+    /** The ledger a step hands back, or null when it refused or had nothing to act on. */
+    const applied = (ledger: CoverageLedger, next: Step): CoverageLedger | null =>
+      match(next)
+        .with({ kind: "assign" }, ({ pick }) => {
+          const unit = pickOf(ledger.filter((candidate) => candidate.status === "planned"), pick);
+          if (unit === undefined) return null;
+          const result = assignUnits(ledger, [{ coverageId: unit.coverage_id, agentId: HUNTER }]);
+          return result.ok ? result.value.ledger : null;
+        })
+        .with({ kind: "settle" }, ({ pick, status, tag }) => {
+          const unit = pickOf(ledger.filter(isInFlight), pick);
+          if (unit === undefined) return null;
+          const fingerprint = `cell-${tag}/finding`;
+          return accepted(recordUnitResult(ledger, {
+            coverageId: unit.coverage_id,
+            wave: unit.wave,
+            ...evidence(unit.agent_id, fingerprint),
+            status,
+            fingerprints: status === "candidate" ? [fingerprint] : [],
+            // An even tag leaves a second fact behind, so resolving the lead can
+            // succeed; an odd one makes the lead the blocked unit's last fact.
+            unresolved: status === "blocked"
+              ? [`prior/lead-${tag}`, ...(tag % 2 === 0 ? ["the cache configuration is not in the repository"] : [])]
+              : [],
+          }));
+        })
+        .with({ kind: "merge" }, ({ wave, cells, reassign, resolve }) => {
+          const settledIds = ledger.filter(isSettled).map((unit) => unit.coverage_id);
+          const reassignIds = reassign.flatMap((pick) => pickOf(settledIds, pick) ?? []);
+          const leads = ledger.flatMap((unit) =>
+            unit.unresolved.filter((fact) => fact.startsWith("prior/")).map((fact) => ({ fact, owner: unit.coverage_id })));
+          const resolved = resolve.flatMap((pick) => pickOf(leads, pick) ?? []);
+          const result = mergeCritic(ledger, {
+            missingUnits: cells.map((cell) => ({
+              refs: aRefs({ subsystem: `subsystem-${cell}` }),
+              startingPaths: [`src/subsystem-${cell}/entry.ts`],
+              ordinaryAttackClassBlock: null,
+              selectedCompanionBlocks: ["WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes"],
+              excludedBlocks: [],
+            })),
+            reassignIds,
+            resolvedPriorLeads: resolved.map(({ fact }) => fact),
+            stop: false,
+          }, {
+            wave,
+            reassignmentReasons: Object.fromEntries(reassignIds.map((id) => [id, "critic: walk it again"])),
+            priorLeadOwners: Object.fromEntries(resolved.map(({ fact, owner }) => [fact, owner])),
+          });
+          return result.ok ? result.value.ledger : null;
+        })
+        .with({ kind: "defer" }, () => accepted(deferPlannedUnits(ledger, "critic_budget_exhausted")))
+        .exhaustive();
+
+    it("holds for any run of assign, settle, critic merge and deferral steps", () => {
+      const landed = new Set<Step["kind"]>();
+      fc.assert(
+        fc.property(fc.integer({ min: 1, max: 4 }), fc.array(step, { maxLength: 12 }), (units, steps) => {
+          let ledger = ok(parseCoverageSeeds(nSeeds(units)));
+          for (const next of steps) {
+            const result = applied(ledger, next);
+            if (result === null) continue;
+            expect(ledgerViolations(JSON.parse(JSON.stringify(result))), next.kind).toEqual([]);
+            landed.add(next.kind);
+            ledger = result;
+          }
+        }),
+        { numRuns: 300 },
+      );
+      // Not vacuous: every kind of transition landed at least once.
+      expect([...landed].sort()).toEqual(["assign", "defer", "merge", "settle"]);
+    });
   });
 });

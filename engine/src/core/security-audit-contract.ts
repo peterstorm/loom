@@ -20,8 +20,7 @@
 
 import { z } from "zod/v4";
 import { match } from "ts-pattern";
-import { compareStrings } from "./ordering";
-import { failure, success, type DomainResult } from "./orchestration-contract/identity";
+import { failure, isNonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
 import { isRecord } from "./plain-record";
 
 // --- Wire parsing kit ---
@@ -45,47 +44,118 @@ export const isOneOf = <T extends string>(values: readonly T[], value: unknown):
   typeof value === "string" && (values as readonly string[]).includes(value);
 
 /**
- * Every key `record` carries that `allowed` does not name, as an "unknown
- * field" violation at `base.<key>`. `order` keeps each caller's observable
- * diagnostics: `as-written` reports in the document's key order, `sorted` in
- * code-point order. The one unknown-key reporter of the security volumes.
+ * A zod error parameter: an ABSENT field is `required`, any other refusal is
+ * `message`. Every security schema states its domain message through this, so
+ * "the field is missing" and "the field is wrong" never read alike.
  */
-export const unknownFieldViolations = (
-  record: Readonly<Record<string, unknown>>,
-  allowed: readonly string[],
-  base: string,
-  order: "as-written" | "sorted" = "as-written",
-): WireViolation[] => {
-  const unknown = Object.keys(record).filter((key) => !allowed.includes(key));
-  return (order === "sorted" ? unknown.sort(compareStrings) : unknown).map((key) => wireViolation(`${base}.${key}`, "unknown field"));
-};
+export const expecting = (message: string) => ({
+  error: (issue: Readonly<{ input?: unknown }>): string => (issue.input === undefined ? "required" : message),
+});
 
-/** A deep, frozen copy of a JSON value. A wire parser returns THIS, never the
- *  caller's input: handing back `raw` meant a later mutation of the document
- *  the caller still holds silently rewrote the value the parser proved. The
- *  ledger and findings parsers both read through it. */
-export function deepFrozenCopy(value: unknown): unknown {
-  if (Array.isArray(value)) return Object.freeze(value.map(deepFrozenCopy));
-  if (isWireRecord(value)) {
-    return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, deepFrozenCopy(entry)])));
-  }
-  return value;
-}
+/** The fallback wording for an issue a schema did not word itself: one table,
+ *  so every security document reads the same whichever volume refused it. */
+const defaultWireMessage = (issue: z.core.$ZodRawIssue): string | undefined =>
+  match(issue)
+    .with({ code: "invalid_type" }, ({ expected, input }) =>
+      input === undefined ? "required" : `expected ${/^[aeiou]/.test(expected) ? "an" : "a"} ${expected}`)
+    .with({ code: "unrecognized_keys" }, () => "unknown field")
+    .with({ code: "too_small", origin: "array" }, ({ minimum }) =>
+      `requires at least ${String(minimum)} ${minimum === 1 ? "entry" : "entries"}`)
+    .with({ code: "too_big", origin: "array" }, ({ maximum }) => `too many entries (at most ${String(maximum)})`)
+    .with({ code: "too_big", origin: "string" }, ({ maximum }) => `longer than ${String(maximum)} characters`)
+    .with({ code: "invalid_value" }, ({ values }) => `expected ${values.map((value) => JSON.stringify(value)).join(" or ")}`)
+    .otherwise(() => undefined);
+
+/** A zod path as the security volumes print it: `root.key[index]`. An empty
+ *  `root` makes the first key the head (`kind`, `units[0].status`); an empty
+ *  path is the root itself, `$` when there is none. */
+export const wirePath = (root: string, path: readonly PropertyKey[]): string =>
+  path.reduce<string>((at, key) =>
+    (typeof key === "number" ? `${at}[${key}]` : at === "" ? String(key) : `${at}.${String(key)}`), root) || "$";
 
 /**
- * An optional list of strings. Absent is an empty list; present-but-malformed
- * (`"a"`, `[1]`, `{}`) is a named violation and an empty list — never a silent
- * empty list, because a dropped exclusion or fingerprint shrinks the truth the
- * record claims while the document still parses.
+ * The one adapter from zod issues to `WireViolation`s, in zod's own traversal
+ * order (deterministic: the schema's field order, then the document's). An
+ * unknown-key issue names each key at its own path, so a document with two
+ * strays reads as two defects.
  */
-export function wireStringList(value: unknown, path: string, violations: WireViolation[]): readonly string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || !value.every((item): item is string => typeof item === "string")) {
-    violations.push(wireViolation(path, "expected an array of strings"));
-    return [];
-  }
-  return [...value];
-}
+const wireViolationsOf = (issues: readonly z.core.$ZodIssue[], root: string): readonly WireViolation[] =>
+  issues.flatMap((issue) =>
+    issue.code === "unrecognized_keys"
+      ? issue.keys.map((key) => wireViolation(wirePath(root, [...issue.path, key]), issue.message))
+      : [wireViolation(wirePath(root, issue.path), issue.message)]);
+
+/**
+ * Parse `raw` with `schema`: the parsed value, or every violation at once,
+ * pathed from `root`. The one boundary where zod's `{ success, data }` becomes a
+ * `DomainResult` for the security volumes.
+ */
+export const parseWire = <Schema extends z.ZodType>(
+  schema: Schema,
+  raw: unknown,
+  root = "$",
+): DomainResult<z.output<Schema>, readonly WireViolation[]> => {
+  const parsed = schema.safeParse(raw, { error: defaultWireMessage });
+  return parsed.success ? success(parsed.data) : failure(wireViolationsOf(parsed.error.issues, root));
+};
+
+/** A schema whose value is whatever `parse` proves — the bridge from an
+ *  existing smart constructor (branded ids, canonical refs) into a zod shape, so
+ *  the constructor stays the one owner of its rule. A refusal reports
+ *  `message` when given, else the constructor's own error message. */
+export const parsedBy = <T>(
+  parse: (raw: unknown) => DomainResult<T, Readonly<{ message: string }>>,
+  message?: string,
+) =>
+  z.unknown().transform((raw, ctx): T => {
+    const parsed = parse(raw);
+    if (parsed.ok) return parsed.value;
+    ctx.addIssue({ code: "custom", message: raw === undefined ? "required" : message ?? parsed.error.message });
+    return z.NEVER;
+  });
+
+/** A refinement over a list: every entry whose `keyOf` repeats an earlier one is
+ *  a `duplicate entry`, named at its own index. Duplicates matter beyond
+ *  tidiness — a repeated path inflates the reviewed-path count a coverage claim
+ *  rests on, and a repeated trace step pads a finding. */
+const distinctEntries = <T>(keyOf: (entry: T) => string) =>
+  (entries: readonly T[], ctx: z.core.$RefinementCtx<readonly T[]>): void => {
+    const seen = new Set<string>();
+    entries.forEach((entry, index) => {
+      const key = keyOf(entry);
+      if (seen.has(key)) ctx.addIssue({ code: "custom", path: [index], message: "duplicate entry" });
+      seen.add(key);
+    });
+  };
+
+/** A list of at most `collectionItems` entries, no two with the same `keyOf`. */
+export const listOf = <Entry extends z.ZodType>(entry: Entry, keyOf: (entry: z.output<Entry>) => string) =>
+  z.array(entry).max(SECURITY_AUDIT_LIMITS.collectionItems).superRefine(distinctEntries(keyOf)).readonly();
+
+/** `listOf`, and never empty: the type is `NonEmpty`, so a reader of the parsed
+ *  value never re-checks the emptiness `message` already refused. */
+export const nonEmptyListOf = <Entry extends z.ZodType>(
+  entry: Entry,
+  keyOf: (entry: z.output<Entry>) => string,
+  message = "requires at least one entry",
+) =>
+  z
+    .array(entry)
+    .max(SECURITY_AUDIT_LIMITS.collectionItems)
+    .transform((values, ctx): NonEmpty<z.output<Entry>> => {
+      if (isNonEmpty(values)) return values;
+      ctx.addIssue({ code: "custom", message });
+      return z.NEVER;
+    })
+    .superRefine(distinctEntries(keyOf))
+    .readonly();
+
+/** A list that holds nothing: the state a status keeps empty, as a type. */
+export const emptyList = (message: string) =>
+  z.tuple([], { error: (issue) => (issue.code === "too_big" ? message : undefined) }).readonly();
+
+/** Identity, as a `keyOf` for lists of strings. */
+export const itself = (value: string): string => value;
 
 // --- Limits ---
 
@@ -212,6 +282,17 @@ export const isSecurityAgentId = (value: unknown): value is SecurityAgentId =>
   SECURITY_AGENT_ID_PATTERN.test(value) &&
   !WINDOWS_RESERVED_AGENT_ID.test(value);
 
+// --- Field schemas: the grammar above, as zod shapes ---
+
+/** Bounded, trimmed visible text (`isVisibleText`): the coverage volume's prose. */
+export const visibleTextSchema = z.custom<string>((value) => isVisibleText(value), expecting("expected visible text"));
+export const sourcePathSchema = z.custom<string>(isSafeSourcePath, expecting("expected a repository-relative source path"));
+export const fingerprintSchema = z.custom<string>(isSecurityFingerprint, expecting("expected a stable source-derived fingerprint"));
+export const agentIdSchema = z.custom<SecurityAgentId>(isSecurityAgentId, expecting("expected a canonical lowercase agent ID"));
+export const positiveIntegerSchema = z.custom<number>(isPositiveInteger, expecting("expected a positive integer"));
+/** A JSON list of strings, entries unchecked beyond their type. */
+export const stringListSchema = z.array(z.string(expecting("expected a string")), expecting("expected an array of strings")).readonly();
+
 /**
  * A repository-relative source path the engine may cite. Absolute, traversal,
  * Windows-reserved and non-NFC-suspicious forms all fail: a record that cites
@@ -325,9 +406,13 @@ export const parseCoverageRefs = (raw: unknown): DomainResult<CoverageRefs, Cove
   if (malformed !== undefined) return refuse(`canonical_refs.${malformed} is not a canonical reference`);
   // A fresh record in the fixed field order, so the caller never holds the
   // document it passed in; the guard re-proves it rather than a cast asserting it.
-  const refs: unknown = Object.fromEntries(expected.map((field) => [field, raw[field]]));
+  const refs: unknown = Object.freeze(Object.fromEntries(expected.map((field) => [field, raw[field]])));
   return isCanonicalCoverageRefs(refs) ? success(refs) : refuse("canonical_refs is not a canonical tuple");
 };
+
+/** A canonical refs tuple as a field schema: `parseCoverageRefs` stays the one
+ *  proof of the brand. */
+export const coverageRefsSchema = parsedBy(parseCoverageRefs);
 
 /** The tuple that must be unique across a ledger: two units with different IDs
  *  but the same semantics are one unit, and a run that assigns both double-counts
@@ -342,7 +427,10 @@ const bounded = (max: number) => z.string().min(1).max(max);
 const safePathSchema = bounded(4_096).refine(isSafeSourcePath, "expected a repository-relative source path");
 /** A commit a diff scope names: a 40- (SHA-1) or 64-hex (SHA-256) object id. */
 export const SCOPE_REF_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
-const digestSchema = z.string().regex(SCOPE_REF_PATTERN);
+/** A commit object id, branded by the one parse that proves the pattern, so a
+ *  diff scope's refs carry the rule in their type. */
+export const commitIdSchema = z.string().regex(SCOPE_REF_PATTERN).brand<"CommitId">();
+export type CommitId = z.output<typeof commitIdSchema>;
 
 const scopePathsSchema = z.array(safePathSchema).min(1).max(SECURITY_AUDIT_LIMITS.units).readonly();
 
@@ -354,7 +442,7 @@ const scopePathsSchema = z.array(safePathSchema).min(1).max(SECURITY_AUDIT_LIMIT
 export const securityScopeSchema = z
   .discriminatedUnion("kind", [
     z.strictObject({ paths: scopePathsSchema, kind: z.literal("tree"), baseRef: z.null(), headRef: z.null() }),
-    z.strictObject({ paths: scopePathsSchema, kind: z.literal("diff"), baseRef: digestSchema, headRef: digestSchema }),
+    z.strictObject({ paths: scopePathsSchema, kind: z.literal("diff"), baseRef: commitIdSchema, headRef: commitIdSchema }),
   ])
   .readonly();
 export type SecurityScope = z.infer<typeof securityScopeSchema>;
@@ -546,46 +634,22 @@ export const PRIOR_RECORD_VERDICTS = [
 ] as const;
 export type PriorRecordVerdict = (typeof PRIOR_RECORD_VERDICTS)[number];
 
-/** What a prior record was, and whether its relevant source is still current. */
-export type PriorRecordFacts = Readonly<{
-  verdict: PriorRecordVerdict;
-  /** `true`/`false` when the current source was compared; `unknown` when it was not. */
-  sourceUnchanged: boolean | null;
-}>;
-const PRIOR_FACTS_KEYS: readonly string[] = ["verdict", "sourceUnchanged"];
-
 /**
- * Parse prior-run facts from the wire. `derivePriorStatus` matches the verdict
- * exhaustively — that proves the CLOSED union total, but a wire document can
- * carry any string and `.exhaustive()` THROWS on an unknown tag. A seed naming
- * a carry-status token from an earlier ledger row (`prior_confirmed_same_source`)
- * or a `prior` object with no `verdict` aborted `start` with an unnamed
- * pattern-match error instead of the violation this returns.
- *
- * `undefined`/`null` parses to `null`: "no prior record" is a real seed value.
+ * Prior-run facts as the wire carries them: what a prior record was, and
+ * whether its relevant source is still current (`true`/`false` when the current
+ * source was compared, `null` when it was not). `derivePriorStatus` matches the
+ * verdict exhaustively — that proves the CLOSED union total, but a wire
+ * document can carry any string and `.exhaustive()` THROWS on an unknown tag, so
+ * the verdict is parsed here first. A seed naming a carry-status token from an
+ * earlier ledger row (`prior_confirmed_same_source`) is a named violation.
  */
-export function parsePriorRecordFacts(
-  raw: unknown,
-): DomainResult<PriorRecordFacts | null, Readonly<{ path: string; message: string }>> {
-  if (raw === undefined || raw === null) return success(null);
-  if (!isWireRecord(raw)) {
-    return failure({ path: "prior", message: "expected null or prior-run facts" });
-  }
-  const record = raw;
-  const unexpected = Object.keys(record).filter((key) => !PRIOR_FACTS_KEYS.includes(key)).sort(compareStrings);
-  if (unexpected.length > 0) {
-    return failure({ path: "prior", message: `unexpected field(s): ${unexpected.join(", ")}` });
-  }
-  const verdict = record.verdict;
-  if (!isOneOf(PRIOR_RECORD_VERDICTS, verdict)) {
-    return failure({ path: "prior.verdict", message: `expected one of ${PRIOR_RECORD_VERDICTS.join(", ")}` });
-  }
-  const unchanged = record.sourceUnchanged;
-  if (unchanged !== null && typeof unchanged !== "boolean") {
-    return failure({ path: "prior.sourceUnchanged", message: "expected true, false or null" });
-  }
-  return success({ verdict, sourceUnchanged: unchanged });
-}
+export const priorRecordFactsSchema = z
+  .strictObject({
+    verdict: z.enum(PRIOR_RECORD_VERDICTS, expecting(`expected one of ${PRIOR_RECORD_VERDICTS.join(", ")}`)),
+    sourceUnchanged: z.boolean(expecting("expected true, false or null")).nullable(),
+  })
+  .readonly();
+export type PriorRecordFacts = z.output<typeof priorRecordFactsSchema>;
 
 /**
  * The carry table. `unknown` is not `unchanged`: an unchecked source is current
@@ -603,38 +667,5 @@ export function derivePriorStatus(prior: PriorRecordFacts | null): PriorStatus {
     .with("blocked", () => "prior_blocked")
     .with("out_of_scope", () => "prior_out_of_scope")
     .with("rejected", () => "prior_rejected_claim_changed")
-    .exhaustive();
-}
-
-export type CarryAction =
-  /** Seed a planned unit, exclude the root cause from hunters, and re-verify it. */
-  | Readonly<{ kind: "carry-confirmed" }>
-  /** Current planned work: the prior confirmation is only valid for its own source. */
-  | Readonly<{ kind: "revalidate" }>
-  /** Suppress only the unchanged failed claim, never coverage of the unit. */
-  | Readonly<{ kind: "suppress-rejected-claim" }>
-  /** Current planned work with the prior record's state as context, not evidence. */
-  | Readonly<{ kind: "current-work" }>;
-
-export function carryAction(priorStatus: PriorStatus): CarryAction {
-  return match(priorStatus)
-    .returnType<CarryAction>()
-    .with("prior_confirmed_same_source", () => ({ kind: "carry-confirmed" }))
-    .with(
-      "prior_confirmed_changed_source",
-      "prior_covered_changed_source",
-      "prior_needs_validation",
-      () => ({ kind: "revalidate" }),
-    )
-    .with("prior_rejected_claim_changed", () => ({ kind: "suppress-rejected-claim" }))
-    .with(
-      "prior_covered_same_source",
-      "prior_deferred",
-      "prior_blocked",
-      "prior_out_of_scope",
-      "new",
-      "none",
-      () => ({ kind: "current-work" }),
-    )
     .exhaustive();
 }

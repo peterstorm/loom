@@ -1,12 +1,14 @@
 import { describe, it, expect } from "vitest";
+import fc from "fast-check";
+import { shellText } from "../fixtures/shell-text-arbitrary";
 import {
   splitCommandSegments,
   splitCommandSegmentsWithOps,
   stripComment,
   stripEnvPrefix,
-  classifyFdDupWord,
   hasUnbalancedQuotes,
-  shellOperatorAt,
+  OPERATOR_WALK_START,
+  readShellOperator,
 } from "../../src/core/shell-command";
 
 /**
@@ -17,7 +19,7 @@ import {
  * regression in the splitter would have surfaced as a misclassified test
  * verdict, not a parser failure. These tests pin the parser's own contract:
  * quote-aware segment splitting, the operator each segment was preceded by,
- * comment/env stripping, fd-dup classification, and the fail-closed
+ * comment/env stripping, and the fail-closed
  * unbalanced-quote refusal.
  */
 
@@ -160,25 +162,6 @@ describe("stripEnvPrefix", () => {
   });
 });
 
-describe("classifyFdDupWord", () => {
-  it("classifies a digit word as fd duplication (2>&1)", () => {
-    // start points just past the &; the word is "1", end one past it.
-    expect(classifyFdDupWord("2>&1 rest", 3)).toEqual({ isFdDup: true, end: 4 });
-  });
-
-  it("classifies the close form >&- as fd duplication", () => {
-    expect(classifyFdDupWord(">&-", 2)).toEqual({ isFdDup: true, end: 3 });
-  });
-
-  it("classifies multi-digit fds as duplication (>&10)", () => {
-    expect(classifyFdDupWord(">&10 x", 2)).toEqual({ isFdDup: true, end: 4 });
-  });
-
-  it("classifies a digit-starting path as a FILE redirect, not a dup (>&2/../r.json)", () => {
-    expect(classifyFdDupWord(">&2/../r.json", 2)).toEqual({ isFdDup: false, end: 13 });
-  });
-});
-
 describe("hasUnbalancedQuotes", () => {
   it("flags an unterminated double quote", () => {
     expect(hasUnbalancedQuotes('echo "abc')).toBe(true);
@@ -214,26 +197,63 @@ describe("hasUnbalancedQuotes", () => {
   });
 });
 
+/** The operator at `index` as a walk that has read nothing before it sees it. */
+const operatorAt = (text: string, index: number) => readShellOperator(text, index, OPERATOR_WALK_START).operator;
+
+/** The operator at `index` as a walk that has just read the `>` before it unquoted. */
+const operatorAfterUnquotedGt = (text: string, index: number) => {
+  expect(text[index - 1]).toBe(">");
+  return readShellOperator(text, index, readShellOperator(text, index - 1, OPERATOR_WALK_START).walk).operator;
+};
+
 /**
- * shellOperatorAt is the ONE operator table: the segment splitter and the
- * heredoc opener-line group walk both consume it, so this pins what each
- * operator does in both (the group walk cuts on every separator but `|`).
+ * readShellOperator is the ONE operator table and the one walk that reads it:
+ * the segment splitter and the heredoc opener-line group walk both consume it,
+ * so this pins what each operator does in both (the group walk cuts on every
+ * separator but `|`).
  */
-describe("shellOperatorAt", () => {
+describe("readShellOperator", () => {
   it.each([
     ["&&", "a && b", 2, { separator: "&&", width: 2 }],
     ["||", "a || b", 2, { separator: "||", width: 2 }],
     ["background &", "a & b", 2, { separator: "&", width: 1 }],
     ["&> redirect binds", "a &>f", 2, { separator: null, width: 2 }],
     ["&>> redirect binds over its &>", "a &>>f", 2, { separator: null, width: 2 }],
-    [">& fd dup binds its &", "a 2>&1", 4, { separator: null, width: 1 }],
     ["pipe", "a | b", 2, { separator: "|", width: 1 }],
     ["|& pipes stderr too", "a |& b", 2, { separator: "|", width: 2 }],
     [";", "a; b", 1, { separator: ";", width: 1 }],
     ["each ; of ;; is its own separator", "a;; b", 2, { separator: ";", width: 1 }],
     ["newline", "a\nb", 1, { separator: ";", width: 1 }],
   ] as const)("%s", (_name, text, index, operator) => {
-    expect(shellOperatorAt(text, index)).toEqual(operator);
+    expect(operatorAt(text, index)).toEqual(operator);
+  });
+
+  it.each([
+    [">& fd dup binds its &", "a 2>&1", 4, { separator: null, width: 1 }],
+    [">| clobber binds its |", "a >|f", 3, { separator: null, width: 1 }],
+    ["n>| clobber binds its | after a digit", "a 2>|f", 4, { separator: null, width: 1 }],
+    ["&& still separates", "a >&& b", 3, { separator: "&&", width: 2 }],
+    ["|| still separates", "a >|| b", 3, { separator: "||", width: 2 }],
+    ["a | after >> is a pipe (a syntax error bash runs nothing for)", "a >>| b", 4, { separator: "|", width: 1 }],
+    ["a | after &> is a pipe", "a &>| b", 4, { separator: "|", width: 1 }],
+    ["a | after <> is a pipe", "a <>| b", 4, { separator: "|", width: 1 }],
+  ] as const)("after an unquoted >: %s", (_name, text, index, operator) => {
+    expect(operatorAfterUnquotedGt(text, index)).toEqual(operator);
+  });
+
+  it("binds only right after a > the walk itself read: a skipped or earlier > arms nothing", () => {
+    // The walk read `>` at 2, then the space at 3: the `&` at 4 is background.
+    const pastSpace = readShellOperator("a > & b", 3, readShellOperator("a > & b", 2, OPERATOR_WALK_START).walk).walk;
+    expect(readShellOperator("a > & b", 4, pastSpace).operator).toEqual({ separator: "&", width: 1 });
+    // A walk that never read the `>` before the `&` (a skipped span) does not bind it.
+    expect(readShellOperator("a 2>&1", 4, readShellOperator("a 2>&1", 2, OPERATOR_WALK_START).walk).operator)
+      .toEqual({ separator: "&", width: 1 });
+  });
+
+  it("arms the walk past an operator that ends in >: the & after &> binds", () => {
+    const pastRedirect = readShellOperator("a &>&2", 2, OPERATOR_WALK_START);
+    expect(pastRedirect.operator).toEqual({ separator: null, width: 2 });
+    expect(readShellOperator("a &>&2", 4, pastRedirect.walk).operator).toEqual({ separator: null, width: 1 });
   });
 
   it.each([
@@ -241,10 +261,64 @@ describe("shellOperatorAt", () => {
     ["a redirect", "a > f", 2],
     ["past the end", "a", 5],
   ])("is null at %s", (_name, text, index) => {
-    expect(shellOperatorAt(text, index)).toBeNull();
+    expect(operatorAt(text, index)).toBeNull();
   });
 
   it("keeps a binding operator's characters in the segment it belongs to", () => {
     expect(splitCommandSegments("cat a &>log; b 2>&1")).toEqual(["cat a &>log", " b 2>&1"]);
+    expect(splitCommandSegments("echo x >| out | wc")).toEqual(["echo x >| out ", " wc"]);
+  });
+
+  it("binds only after a > the lexer reads unquoted: an escaped or quoted > is a word, and its & separates", () => {
+    expect(splitCommandSegments("echo \\>& rm f")).toEqual(["echo \\>", " rm f"]);
+    expect(splitCommandSegments("echo '>'& rm f")).toEqual(["echo '>'", " rm f"]);
+    expect(splitCommandSegments("echo \\>| rm f")).toEqual(["echo \\>", " rm f"]);
+  });
+});
+
+describe("the splitter and env-prefix strip read the one quote lexer", () => {
+  it("segments and the separators between them rebuild the command exactly", () => {
+    fc.assert(fc.property(shellText, (command) => {
+      const segments = splitCommandSegmentsWithOps(command);
+      let at = 0;
+      segments.forEach(({ text, opBefore }, k) => {
+        if (k > 0) {
+          // A separator never follows an unquoted `>` it would bind to.
+          const operator = operatorAt(command, at);
+          expect(operator?.separator).toBe(opBefore);
+          at += operator!.width;
+        } else {
+          expect(opBefore).toBeNull();
+        }
+        expect(command.startsWith(text, at)).toBe(true);
+        at += text.length;
+      });
+      expect(at).toBe(command.length);
+    }), { numRuns: 3000 });
+  });
+
+  it("a segment holds no separator of its own: re-splitting it yields itself", () => {
+    fc.assert(fc.property(shellText, (command) => {
+      for (const { text } of splitCommandSegmentsWithOps(command)) {
+        expect(splitCommandSegments(text)).toEqual([text]);
+      }
+    }), { numRuns: 3000 });
+  });
+
+  it("stripEnvPrefix returns an idempotent suffix that starts with no assignment, stripping exactly the prefix", () => {
+    const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+    fc.assert(fc.property(fc.tuple(fc.constantFrom("", "A=", "A=1 ", "B='x y' ", "C=a\\ b "), shellText), ([prefix, rest]) => {
+      const segment = prefix + rest;
+      const stripped = stripEnvPrefix(segment);
+      expect(segment.endsWith(stripped)).toBe(true);
+      expect(stripped).not.toMatch(ASSIGNMENT);
+      expect(stripEnvPrefix(stripped)).toBe(stripped);
+      // The oracle: every prefix but a bare `A=` closes its value at its own
+      // unquoted, unescaped trailing space, so what is left is `rest` itself —
+      // trimmed after a stripped assignment, untouched when there was none.
+      // (A bare `A=`'s value runs on into `rest`.)
+      const expected = prefix === "" ? rest : rest.trimStart();
+      if (prefix !== "A=" && !ASSIGNMENT.test(expected)) expect(stripped).toBe(expected);
+    }), { numRuns: 3000 });
   });
 });

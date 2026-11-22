@@ -128,7 +128,7 @@ approval stage predicates inline.
   outside the State File must checkpoint; one whose evidence is already durable
   may project.
 - `loom status` reports a pending advisory decision instead of "resume the
-  engine". Three tests in `tests/handlers/complete-wave-gate.test.ts` pin this
+  engine". Three tests in `tests/core/wave-gate.test.ts` pin this
   through the real entry point, `deriveLoomStatusFromParsedGraph`; all three
   fail if the projection call is removed.
 - The façade's post-review drive path now uses the same LC-1 projection as

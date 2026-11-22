@@ -57,20 +57,20 @@ import {
   type AcceptanceExpectation,
 } from "../../src/core/acceptance-contract";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
-import { parseJunitTestcases, type JunitTestcasesResult } from "../../src/core/structured-test-report";
+import { readTestReport, reportTestcases, type JunitTestcasesResult } from "../../src/core/structured-test-report";
 import { digest } from "../fixtures/acceptance-fixtures";
 import { contract, frozenPaths, surface, task } from "../fixtures/contract-status-fixtures";
 
 type Case = Readonly<{ file: string; name: string; outcome: "passed" | "failed" | "skipped" }>;
 
-const junit = (cases: readonly Case[]): JunitTestcasesResult => parseJunitTestcases(new TextEncoder().encode(
+const junit = (cases: readonly Case[]): JunitTestcasesResult => reportTestcases(readTestReport(new TextEncoder().encode(
   `<?xml version="1.0"?><testsuites tests="${cases.length}"><testsuite name="suite" tests="${cases.length}">` +
   cases.map(({ file, name, outcome }) =>
     `<testcase classname="${file}" name="${name}">` +
     (outcome === "failed" ? `<failure type="AssertionError" message="expected 1 to be 2"/>` : "") +
     (outcome === "skipped" ? "<skipped/>" : "") +
     "</testcase>").join("") +
-  "</testsuite></testsuites>"));
+  "</testsuite></testsuites>")));
 
 /** A gate that owes no contract anything: every failure blocks. */
 const NO_CONTRACTS = emptyAcceptanceExpectation(1);
@@ -116,7 +116,7 @@ const unreadable = (reason: string): StopCheckBlockCount => ({ kind: "unreadable
 
 describe("judgeAffectedRun", () => {
   it("is unobservable when the report could not be parsed, naming why", () => {
-    const verdict = judgeAffectedRun(parseJunitTestcases(new TextEncoder().encode("not a report")), NO_CONTRACTS);
+    const verdict = judgeAffectedRun(reportTestcases(readTestReport(new TextEncoder().encode("not a report"))), NO_CONTRACTS);
 
     expect(verdict.kind).toBe("unobservable");
     if (verdict.kind === "unobservable") expect(verdict.reason).toMatch(/report could not be read: .+/);
@@ -458,6 +458,25 @@ describe("blockAdmission", () => {
     expect(blockAdmission("acceptance", count(5), 5)).toEqual({ kind: "fails-open", note: "the acceptance stop check reached its 5-block cap" });
     expect(blockAdmission("acceptance", unreadable("EIO"), CAP))
       .toEqual({ kind: "fails-open", note: "the acceptance stop check's block counter is unreadable: EIO" });
+  });
+
+  it("pins every check's two fail-open notes verbatim, the affected check's equal to CT-2's note text", () => {
+    const notes = STOP_CHECK_NAMES.map((name) => [
+      blockAdmission(name, count(CAPS[name]), CAPS[name]),
+      blockAdmission(name, unreadable("EIO"), CAPS[name]),
+    ]);
+    expect(notes).toEqual([
+      [{ kind: "fails-open", note: `the acceptance stop check reached its ${CAPS.acceptance}-block cap` },
+        { kind: "fails-open", note: "the acceptance stop check's block counter is unreadable: EIO" }],
+      [{ kind: "fails-open", note: AFFECTED_NOTE_TEXT["cap-reached"] },
+        { kind: "fails-open", note: `${AFFECTED_NOTE_TEXT["counter-unreadable"]}: EIO` }],
+      [{ kind: "fails-open", note: "the Task mutation check reached its 2-block cap" },
+        { kind: "fails-open", note: "the Task mutation check's block counter is unreadable: EIO" }],
+      [{ kind: "fails-open", note: "the Task owner check reached its 2-block cap" },
+        { kind: "fails-open", note: "the Task owner check's block counter is unreadable: EIO" }],
+    ]);
+    expect(AFFECTED_NOTE_TEXT["cap-reached"]).toBe("the affected stop check reached its 3-block cap");
+    expect(AFFECTED_NOTE_TEXT["counter-unreadable"]).toBe("the affected stop check's block counter is unreadable");
   });
 
   it("is the gate the decision applies: a check failing alone blocks exactly when it is admitted, at the count it names", () => {

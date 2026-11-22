@@ -2,7 +2,9 @@
  * Pi tool-call payload adapters.
  *
  * The readers the `tool_call` guards apply to Pi's raw tool input (one spawn
- * item and its cwd, a bash command, every write target), the one writer that
+ * item and its cwd, a bash command; every write target is read by
+ * `piWriteTargetPaths`, beside the Pi tool vocabulary in
+ * `engine/src/core/harness-tool-call.ts`), the one writer that
  * replaces a spawn item's task in place, and the stable per-slot roster
  * identity shared by the spawn and result sides of a batch. Pi hands
  * extensions the live argument object it dispatches afterwards, so the writer
@@ -14,10 +16,6 @@ import type { AdmittedSpawnItem } from "../engine/src/core/spawn-admission";
 import { isRecord } from "../engine/src/core/plain-record";
 import { rosterAgentId } from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
-import {
-  WRITE_TARGET_KEYS,
-  writeTargetPathOf,
-} from "./transcript-adapter";
 import { spawnEntryAt } from "./spawn-graph";
 
 /** The raw batch entry at `index`, whichever spawn shape the caller used
@@ -54,45 +52,6 @@ export function piBashCommand(raw: unknown): string | null {
   if (!isRecord(raw)) return null;
   const command = raw.command;
   return typeof command === "string" ? command : null;
-}
-
-export type PiWriteTargetPathsResult =
-  | Readonly<{ ok: true; value: readonly [string, ...string[]] }>
-  | Readonly<{ ok: false; error: string }>;
-
-const writeTarget = (input: Record<string, unknown>, path: string): PiWriteTargetPathsResult => {
-  const target = writeTargetPathOf(input);
-  return target !== null
-    ? Object.freeze({ ok: true, value: Object.freeze([target]) as readonly [string] })
-    : Object.freeze({ ok: false, error: `${path} must name one non-empty path, file_path, or filePath target` });
-};
-
-const editTarget = (edit: unknown, index: number): PiWriteTargetPathsResult =>
-  isRecord(edit)
-    ? writeTarget(edit, `write input.edits[${index}]`)
-    : Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
-
-/** Parse every target before a scoped write can proceed; no partial batch exists. */
-export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
-  if (!isRecord(raw)) {
-    return Object.freeze({ ok: false, error: "write input must be a plain object" });
-  }
-  if (WRITE_TARGET_KEYS.some((key) => key in raw)) return writeTarget(raw, "write input");
-  if (!Array.isArray(raw.edits) || raw.edits.length === 0) {
-    return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
-  }
-  // Head first: the first edit's target makes the list non-empty by type.
-  const [firstEdit, ...restEdits] = raw.edits;
-  const first = editTarget(firstEdit, 0);
-  if (!first.ok) return first;
-  const paths: [string, ...string[]] = [first.value[0]];
-  for (const [offset, edit] of restEdits.entries()) {
-    const parsed = editTarget(edit, offset + 1);
-    if (!parsed.ok) return parsed;
-    const target = parsed.value[0];
-    if (!paths.includes(target)) paths.push(target);
-  }
-  return Object.freeze({ ok: true, value: Object.freeze(paths) });
 }
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {

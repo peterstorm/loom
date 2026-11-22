@@ -16,7 +16,7 @@ import type { Task, TaskGraph } from "../../src/types";
 import { isDistillTask } from "../../src/core/distill-task";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import { runningEngineIdentity, StateManager } from "../../src/state-manager";
-import { taskFixture } from "../fixtures/task-lifecycle";
+import { manifestedGraphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
@@ -34,6 +34,7 @@ import {
 } from "../../src/core/plan-design-review";
 import { fixFull, validateFull } from "../../src/handlers/helpers/validate-task-graph";
 import { value } from "../fixtures/parse-result";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 /** The authored roster as population wrote it, without the Distill Tasks it appends (ADR-0068). */
 const authoredTasksOf = (state: TaskGraph) => state.tasks.filter((task) => !isDistillTask(task));
@@ -88,6 +89,7 @@ function writeState(
     : join(dir, `.${layout}`, "state", "active_task_graph.json");
   const state: TaskGraph = {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -296,7 +298,7 @@ describe("populate-task-graph — protected verification manifest authority", ()
       const before = stateBytes(statePath);
       writeManifest(dir, { ...manifestDocument(), checks: source === "configured" ? [] : manifestDocument().checks });
       const loaded = StateManager.fromPath(statePath)!.load();
-      expect(deriveWaveCompletionSuiteReadiness(loaded, 1, undefined)).toMatchObject({
+      expect(deriveWaveCompletionSuiteReadiness(manifestedGraphFixture(loaded), 1, undefined)).toMatchObject({
         kind: "required", projectVerificationCoverage: coverage,
       });
       expect(stateBytes(statePath)).toBe(before);
@@ -507,7 +509,7 @@ describe("populate-task-graph — protected verification manifest authority", ()
     const plan = modelFreePlan(dir);
     const statePath = writeState(dir, plan, [existingTask("T1", "completed")], {
       current_wave: 1,
-      verification_manifest: defaultVerificationManifest(),
+      verification_manifest: preI6DefaultVerificationManifest(),
       active_wave_gate: {
         schemaVersion: 1,
         kind: "active-wave-gate",
@@ -534,7 +536,8 @@ describe("populate-task-graph — protected verification manifest authority", ()
     const expected = freezeVerificationManifest(readFileSync(manifestPath));
     if (!expected.ok) throw new Error("fixture manifest failed");
 
-    expect((await populate(decomposeJson(plan), ["--force"])).kind).toBe("passthrough");
+    const forced = await populate(decomposeJson(plan), ["--force"]);
+    expect(forced.kind, JSON.stringify(forced)).toBe("passthrough");
 
     const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
     expect(after.verification_manifest).toEqual(expected.value);
@@ -922,7 +925,7 @@ describe("populate-task-graph — asks the plan design gate on first population 
   it("does not gate re-population in execute: a plan may be amended once Tasks exist", async () => {
     const dir = tempDir();
     const plan = modelFreePlan(dir);
-    writeState(dir, plan, [existingTask("T1", "pending")], { current_phase: "execute", plan_design_review: PLAN_DESIGN_REVIEW_REQUIRED });
+    writeState(dir, plan, [existingTask("T1", "pending")], { current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), plan_design_review: PLAN_DESIGN_REVIEW_REQUIRED });
     expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
   });
 

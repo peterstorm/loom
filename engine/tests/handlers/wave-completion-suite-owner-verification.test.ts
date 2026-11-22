@@ -26,6 +26,7 @@ import {
   type OwnerVerificationRepo,
   type StampedGraph,
 } from "../fixtures/owner-verification-repo";
+import { manifestedGraphFixture } from "../fixtures/task-lifecycle";
 
 const OWNER_CHECK = "loom:owner-verification";
 const GATE_TIMEOUT_MS = 60_000;
@@ -36,7 +37,7 @@ const gate = (repo: OwnerVerificationRepo, runOwnerVerification?: RunOwnerVerifi
   ensureWaveCompletionSuite({
     handle: repo.handle,
     manager: repo.manager,
-    graph: repo.manager.load(),
+    graph: manifestedGraphFixture(repo.manager.load()),
     registration: repo.registration,
     ...(runOwnerVerification === undefined ? {} : { runOwnerVerification }),
   });
@@ -82,7 +83,7 @@ describe("FR-002: a stamped graph owing nothing still re-reads the plan the grap
 
   it("an agreeing plan passes with verdicts [] and no coverage or mutation run", async () => {
     const repo = build({ waveChanges: "unrelated", matrixTest: "discriminating" });
-    expect(await gate(repo)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+    expect(await gate(repo)).toMatchObject({ ok: true, value: { disposition: "installed" } });
     expect(observations(repo)).toEqual([expect.objectContaining({ kind: "verified", verdicts: [] })]);
     expect(repo.runnerLaunches()).toEqual([]);
   }, GATE_TIMEOUT_MS);
@@ -100,7 +101,7 @@ describe("FR-002: a stamped graph owing nothing still re-reads the plan the grap
 describe("FR-003: the checks run for exactly the owned Invariants whose family the Wave changed", () => {
   it("AS-004: an owned Invariant whose family the Wave did not change runs no sibling coverage or mutation", async () => {
     const repo = build({ waveChanges: "matrix-test", matrixTest: "sibling-omitting" });
-    expect(await gate(repo)).toMatchObject({ ok: true, value: { kind: "accepted" } });
+    expect(await gate(repo)).toMatchObject({ ok: true, value: { disposition: "installed" } });
     expect(observations(repo)).toEqual([expect.objectContaining({ kind: "verified", verdicts: [] })]);
     expect(repo.runnerLaunches()).toEqual([]);
   }, GATE_TIMEOUT_MS);
@@ -108,7 +109,7 @@ describe("FR-003: the checks run for exactly the owned Invariants whose family t
   it("AS-005: a plan declaring only unowned Invariants is re-read, and no sibling coverage or mutation runs", async () => {
     const repo = build({ waveChanges: "owner", matrixTest: "sibling-omitting" });
     await onlyUnowned(repo);
-    expect(await gate(repo)).toMatchObject({ ok: true, value: { kind: "accepted" } });
+    expect(await gate(repo)).toMatchObject({ ok: true, value: { disposition: "installed" } });
     expect(observations(repo)).toEqual([expect.objectContaining({ kind: "verified", verdicts: [] })]);
     expect(repo.runnerLaunches()).toEqual([]);
   }, GATE_TIMEOUT_MS);
@@ -129,7 +130,7 @@ describe("FR-004: a graph without the stamp is the pre-feature suite", () => {
       const { owner_obligations: _stamp, ...unstamped } = graph;
       return unstamped;
     });
-    expect(await gate(repo)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+    expect(await gate(repo)).toMatchObject({ ok: true, value: { disposition: "installed" } });
     const graph = repo.manager.load();
     const receipt = graph.active_wave_completion_suite!;
     expect(receipt.checks.map((check) => check.checkId)).toEqual(["loom:full-tier-lint"]);
@@ -146,7 +147,7 @@ describe("receipt reuse", () => {
     const repo = build({ waveChanges: "owner", matrixTest: "discriminating" });
     expect(await gate(repo)).toMatchObject({ ok: true, value: { disposition: "installed" } });
     const launches = repo.runnerLaunches().length;
-    expect(await gate(repo)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "reused" } });
+    expect(await gate(repo)).toMatchObject({ ok: true, value: { disposition: "reused" } });
     expect(repo.runnerLaunches()).toHaveLength(launches);
   }, GATE_TIMEOUT_MS);
 });
@@ -189,7 +190,7 @@ describe("AS-017: FR-016: the shell never lets owner verification throw past the
 describe("the owner run's verdicts reach the gate", () => {
   it("AS-007: the owed Invariant's baseline runs before any mutant, and the run is recorded on the receipt", async () => {
     const repo = build({ waveChanges: "owner", matrixTest: "discriminating" });
-    expect(await gate(repo)).toMatchObject({ ok: true, value: { kind: "accepted" } });
+    expect(await gate(repo)).toMatchObject({ ok: true, value: { disposition: "installed" } });
     const launches = repo.runnerLaunches();
     expect(launches[0]!.owner).toBe(repo.ownerDigest);
     expect(launches.slice(1).every((launch) => launch.owner !== repo.ownerDigest)).toBe(true);
@@ -219,7 +220,7 @@ describe("the owner run's verdicts reach the gate", () => {
 
   it("AS-018: an exempt Invariant's exemption and reason are on the receipt, and no mutant ran", async () => {
     const repo = build({ waveChanges: "owner", matrixTest: "vacuous", exemption: "generated lookup table" });
-    expect(await gate(repo)).toMatchObject({ ok: true, value: { kind: "accepted" } });
+    expect(await gate(repo)).toMatchObject({ ok: true, value: { disposition: "installed" } });
     expect(repo.manager.load().active_wave_completion_suite?.ownerVerification).toMatchObject({
       verdicts: [{ invariant: "INV-1", coverage: { kind: "covered" }, mutation: { kind: "exempt", reason: "generated lookup table" } }],
     });

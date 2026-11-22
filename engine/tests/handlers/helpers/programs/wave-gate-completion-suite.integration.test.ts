@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { collectedChild } from "../../../fixtures/collected-child";
-import { satisfiedProof } from "../../../fixtures/task-lifecycle";
+import { executingGraphFixture, satisfiedProof } from "../../../fixtures/task-lifecycle";
 import { afterEach, describe, expect, it } from "vitest";
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../../fixtures/pi-session";
 import { redThenGreenEra } from "../../../../src/core/proof-obligations";
@@ -53,11 +53,10 @@ function operatorManifest(roster: "empty" | "sentinel" = "sentinel") {
 }
 
 function repository(options: Readonly<{
-  modern: boolean;
   manifest?: FrozenVerificationManifest;
   executing?: boolean;
   suiteOutcome?: "accepted" | "nonzero" | "missing-report";
-}> = { modern: true }): string {
+}> = {}): string {
   const root = canonicalTempDir("loom-wave-facade-suite-");
   roots.push(root);
   git(root, "init", "-q");
@@ -88,9 +87,10 @@ if (outcome === "nonzero") process.exit(7);
   git(root, "add", "-A");
   git(root, "commit", "-qm", "fixture");
 
-  const manifest = options.modern ? options.manifest ?? operatorManifest() : undefined;
+  const manifest = options.manifest ?? operatorManifest();
   const graph: TaskGraph = {
     current_phase: "execute",
+    verification_manifest: manifest,
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],
@@ -114,12 +114,14 @@ if (outcome === "nonzero") process.exit(7);
       critical_findings: [],
       advisory_findings: [],
     }],
-    ...(options.executing ? { executing_tasks: ["T1"] } : {}),
     wave_gates: {},
-    ...(manifest === undefined ? {} : { verification_manifest: manifest }),
   };
   const statePath = join(root, ".claude/state/active_task_graph.json");
-  write(root, ".claude/state/active_task_graph.json", JSON.stringify(graph, null, 2));
+  write(root, ".claude/state/active_task_graph.json", JSON.stringify(
+    options.executing ? executingGraphFixture(graph, ["T1"]) : graph,
+    null,
+    2,
+  ));
   chmodSync(statePath, 0o444);
   mkdirSync(join(root, ".claude/reviews/wave-gate-runs"), { recursive: true });
   return root;
@@ -203,7 +205,7 @@ describe("Wave Gate façade completion-suite integration", () => {
     [operatorManifest("empty"), { kind: "not-configured", reason: "empty-operator-manifest" }, 0],
     [operatorManifest(), { kind: "configured", checkIds: ["project:sentinel"] }, 1],
   ] as const)("registered façade reports coverage, not inferred project success: %j", async (manifest, coverage, expectedCount) => {
-    const root = repository({ modern: true, manifest });
+    const root = repository({ manifest });
     const outside = canonicalTempDir("loom-coverage-status-outside-");
     roots.push(outside);
     const runId = "run.coverage";
@@ -259,7 +261,7 @@ describe("Wave Gate façade completion-suite integration", () => {
   });
 
   it("refuses to start, and so never executes a modern suite, while a current-Wave Task is active", async () => {
-    const root = repository({ modern: true, executing: true });
+    const root = repository({ executing: true });
     await expect(start(root, "run.active-task")).rejects.toThrow("still executing");
     expect(existsSync(join(root, ".claude/reviews/wave-gate-runs/run.active-task"))).toBe(false);
     expect(sentinelCount(root)).toBe(0);
@@ -267,7 +269,7 @@ describe("Wave Gate façade completion-suite integration", () => {
   });
 
   it("runs start, resume, and status from outside cwd against the authoritative target repository", async () => {
-    const root = repository({ modern: true });
+    const root = repository();
     const outside = canonicalTempDir("loom-wave-facade-outside-");
     roots.push(outside);
     const runId = "run.quiescent";
@@ -299,7 +301,7 @@ describe("Wave Gate façade completion-suite integration", () => {
     ["nonzero", "non-zero-exit", 1],
     ["missing-report", "missing-report", 0],
   ] as const)("status exposes persisted %s rejection without rerunning commands", async (suiteOutcome, failureKind, expectedCount) => {
-    const root = repository({ modern: true, suiteOutcome });
+    const root = repository({ suiteOutcome });
     const runId = `run.status-${suiteOutcome}`;
     const action = (await start(root, runId));
     expect(action).toMatchObject({
@@ -329,7 +331,7 @@ describe("Wave Gate façade completion-suite integration", () => {
   it.each(["corrupt", "stale"] as const)(
     "reports a %s persisted result as required/unavailable, never semantic rejection",
     async (artifactState) => {
-      const root = repository({ modern: true, suiteOutcome: "nonzero" });
+      const root = repository({ suiteOutcome: "nonzero" });
       const runId = `run.status-${artifactState}`;
       (await start(root, runId));
       const artifact = completionResultArtifact(root, runId);
@@ -353,16 +355,8 @@ describe("Wave Gate façade completion-suite integration", () => {
     },
   );
 
-  it("preserves the legacy façade path without executing or installing a suite", async () => {
-    const root = repository({ modern: false });
-    const action = (await start(root, "run.legacy"));
-    expect(action, JSON.stringify(action)).toMatchObject({ kind: "spawn-batch" });
-    expect(sentinelCount(root)).toBe(0);
-    expect(graph(root).active_wave_completion_suite).toBeUndefined();
-  });
-
   it("status observes accepted and stale target authority from outside cwd without rerunning commands", async () => {
-    const root = repository({ modern: true });
+    const root = repository();
     const outside = canonicalTempDir("loom-wave-status-outside-");
     roots.push(outside);
     const runId = "run.status-suite";
@@ -383,8 +377,8 @@ describe("Wave Gate façade completion-suite integration", () => {
   });
 
   it("fails closed for a foreign Run Directory repository or a State File outside Git", async () => {
-    const root = repository({ modern: true });
-    const foreign = repository({ modern: true });
+    const root = repository();
+    const foreign = repository();
     const outside = canonicalTempDir("loom-wave-authority-outside-");
     roots.push(outside);
 

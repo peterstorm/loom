@@ -11,11 +11,10 @@
  * its own roster.
  */
 
-import type { TaskGraph } from "../../types";
 import type { AuthorizedWaveCompletionSuite } from "../completion-suite";
+import type { ManifestedTaskGraph } from "../manifested-task-graph";
 import {
   authorizeWaveCompletionSuite,
-  legacyDefaultVerificationManifest,
   type VerificationManifestResult,
 } from "../verification-manifest";
 import { ownerCheckAuthorityOf, waveOwnerDuty } from "./obligations";
@@ -24,22 +23,29 @@ const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(
 
 /**
  * The completion suite the graph's active Wave owes at `workspaceDigest`:
- * the graph's frozen manifest (the legacy engine default when it has none),
- * its active registration, and the owner check exactly when the graph carries
- * the `owner_obligations` stamp. Refused when the graph has no active Wave
- * Gate registration to authorize for.
+ * the graph's frozen manifest, its active registration, and the owner check
+ * exactly when the graph carries the `owner_obligations` stamp. The graph is a
+ * `ManifestedTaskGraph`, so its manifest is proven before this is reached;
+ * refused only when the graph has no active Wave Gate registration.
  */
 export function authorizeGraphCompletionSuite(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   workspaceDigest: unknown,
 ): VerificationManifestResult<AuthorizedWaveCompletionSuite> {
   const active = graph.active_wave_gate;
   if (active === undefined) {
     return freeze({
       ok: false,
-      error: freeze({ kind: "invalid-verification-manifest", errors: freeze(["the TaskGraph has no active Wave Gate registration to authorize a completion suite for"] as const) }),
+      error: freeze({
+        kind: "invalid-verification-manifest",
+        errors: freeze(["the TaskGraph has no active Wave Gate registration to authorize a completion suite for"] as const),
+      }),
     });
   }
-  const manifest = graph.verification_manifest ?? legacyDefaultVerificationManifest();
-  return authorizeWaveCompletionSuite(manifest, active, workspaceDigest, ownerCheckAuthorityOf(waveOwnerDuty(graph, active.wave)));
+  return authorizeWaveCompletionSuite(
+    graph.verification_manifest,
+    active,
+    workspaceDigest,
+    ownerCheckAuthorityOf(waveOwnerDuty(graph, active.wave)),
+  );
 }

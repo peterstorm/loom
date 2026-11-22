@@ -11,10 +11,11 @@
  */
 
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { parseSecurityAuditStart, startMetadata } from "../../src/core/security-audit-start";
 import { parseCoverageSeeds } from "../../src/core/security-coverage";
-import { parseSecurityRunMetadata } from "../../src/core/security-audit-contract";
+import { parseSecurityRunMetadata, type CommitId } from "../../src/core/security-audit-contract";
+import { STACK_SIGNAL_NAMES, STACK_SIGNAL_SHAPES } from "../../src/core/security-lens-select";
 import { aSeed, aSignals, BOOLEAN_SIGNALS, ok } from "./fixtures";
 
 
@@ -51,14 +52,14 @@ describe("parseSecurityAuditStart", () => {
       error: {
         kind: "invalid-security-audit-start",
         violations: [
-          { path: "$.extra", message: "unknown field" },
           { path: "units", message: "start input requires a `units` array" },
-          { path: "scope.extra", message: "unknown field" },
           { path: "scope.kind", message: "expected tree or diff" },
           { path: "scope.baseRef", message: "expected a string or null" },
-          { path: "signals.servesHTTP", message: "unknown field" },
-          { path: "signals.manifests", message: "expected an array of strings" },
+          { path: "scope.extra", message: "unknown field" },
+          { path: "signals.manifests[0]", message: "expected a string" },
           { path: "signals.servesHttp", message: "expected a boolean" },
+          { path: "signals.servesHTTP", message: "unknown field" },
+          { path: "extra", message: "unknown field" },
         ],
       },
     });
@@ -91,6 +92,32 @@ describe("parseSecurityAuditStart", () => {
     ]);
     // A mistyped ref is named once, by its type, not again as missing.
     expect(violations({ kind: "diff", baseRef: 7, headRef: commit })).toEqual([{ path: "scope.baseRef", message: "expected a string or null" }]);
+  });
+
+  it("hands a diff's refs on as branded commit ids, and names every ref that is not one", () => {
+    const scope = ok(parseSecurityAuditStart({ units: [], scope: { kind: "diff", baseRef: "a".repeat(64), headRef: "b".repeat(40) } })).scope;
+    if (scope.kind !== "diff") throw new Error("expected a diff scope");
+    expectTypeOf(scope.baseRef).toEqualTypeOf<CommitId>();
+    expectTypeOf(scope.headRef).toEqualTypeOf<CommitId>();
+    // @ts-expect-error — a plain string is no commit id: only the parse brands one.
+    const forged: CommitId = "main";
+    void forged;
+    const refused = parseSecurityAuditStart({ units: [], scope: { kind: "diff", baseRef: "A".repeat(40), headRef: "b".repeat(41) } });
+    expect(refused.ok ? [] : refused.error.violations).toEqual([
+      { path: "scope.baseRef", message: "expected a 40- or 64-hex commit id" },
+      { path: "scope.headRef", message: "expected a 40- or 64-hex commit id" },
+    ]);
+  });
+
+  it("parses every signal the selector's table names, each by its own shape", () => {
+    for (const name of STACK_SIGNAL_NAMES) {
+      const mistyped = STACK_SIGNAL_SHAPES[name] === "boolean" ? "yes" : true;
+      const refused = parseSecurityAuditStart({ units: [], signals: { [name]: mistyped } });
+      expect(refused.ok ? [] : refused.error.violations, name).toEqual([{
+        path: `signals.${name}`,
+        message: STACK_SIGNAL_SHAPES[name] === "boolean" ? "expected a boolean" : "expected an array of strings",
+      }]);
+    }
   });
 
   it("refuses a null scope or null signals rather than reading them as absent", () => {

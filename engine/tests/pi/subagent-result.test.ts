@@ -7,17 +7,17 @@ import { capturedSpecCheck } from "../../src/core/spec-check";
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { describe, expect, it } from "vitest";
 import type { TaskGraph } from "../../src/types";
 import type { TaskGraphProjectBoundary } from "../../src/config";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
-import { applyCompletionInfrastructureFailure } from "../../src/core/implementation-application";
-import { taskFixture, observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { taskFixture, observedEvidence } from "../fixtures/task-lifecycle";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import {
   authorizeImplementationSpawn,
   createImplementationAttemptContext,
@@ -31,6 +31,7 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult as applySpecCheckPiResultWithBoundary,
+  unauthorizedImplementationOutcome,
   type TaskGraphStore,
 } from "../../../pi/subagent-result";
 import { parsePiSubagentResults, type PiSubagentResult } from "../../../pi/subagent-result-batch";
@@ -119,6 +120,7 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
     current_wave: 1,
     executing_tasks: [],
     wave_gates: {},
+    verification_manifest: preI6DefaultVerificationManifest(),
     tasks: [{
       id: "T1",
       description: "a task",
@@ -132,6 +134,29 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
     }],
     ...overrides,
   } as TaskGraph;
+}
+
+/** `graph()`'s T1 beside a T2 copy, each executing under its own exact attempt authority. */
+function parallelExecutingGraph(): TaskGraph {
+  const template = graph().tasks[0]!;
+  const tasks = ["T1", "T2"].map((id) => {
+    const baseline = (template.file_list ?? []).map((artifact) => ({ artifact, snapshot: { kind: "missing" as const } }));
+    const authority = createImplementationAttemptAuthority({
+      taskId: id, wave: 1, semanticAttempt: 1, reservationId: `pi-parallel-${id}`,
+      headSha: "1".repeat(40), reservedAt: "2026-08-24T00:00:00.000Z",
+      taskScopeBaseline: baseline, dirtySetBaseline: [],
+    });
+    if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    return {
+      ...template,
+      id,
+      active_implementation_attempt: authority.value,
+      attempt_artifact_baseline: baseline,
+      attempt_repository_baseline: [],
+      reserved_at: authority.value.reservedAt,
+    };
+  });
+  return graph({ executing_tasks: ["T1", "T2"], tasks });
 }
 
 function parsedGraph(graph: TaskGraph): ParsedTaskGraph {
@@ -412,6 +437,30 @@ describe("applyPhaseAgentPiResult", () => {
     expect(applied.log).toEqual([expect.stringContaining("exact Phase authority required")]);
     expect(store.current().current_phase).toBe("specify");
   });
+
+  it("names each write call with no provable target ahead of the settlement's own log", async () => {
+    const store = fakeStore(graph({ current_phase: "architecture" }));
+
+    const applied = await applyPhaseAgentPiResult({
+      store,
+      agentType: "specify-agent",
+      completedPhase: "specify",
+      result: result({
+        agent: "specify-agent",
+        messages: [{ role: "assistant", content: [{ type: "toolCall", id: "w-unprovable", name: "write", arguments: {} }] }],
+      }),
+      now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
+    });
+
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log).toEqual([
+      "loom(pi): specify-agent transcript write call names no provable target (Write call #1: write input must " +
+        "contain a target or a non-empty edits array) — not attributed to the phase artifacts",
+      expect.stringContaining("already past"),
+    ]);
+    expect(store.current().current_phase).toBe("architecture");
+  });
 });
 
 describe("PiReviewAttemptAuthority", () => {
@@ -685,30 +734,10 @@ describe("applyFailedPiResult", () => {
     ]);
   });
 
-  it("idempotently releases the reserved implementation task without replacing prior settlement", async () => {
-    const base = graph();
-    const store = fakeStore(graph({
-      executing_tasks: ["T1", "T2"],
-      tasks: [
-        { ...base.tasks[0]!, failure_reason: "already settled" },
-        { ...base.tasks[0]!, id: "T2" },
-      ],
-    }));
-    const applied = await applyFailedPiResult({
-      store,
-      agentType: "code-implementer-agent",
-      result: result({ agent: "code-implementer-agent", exitCode: 1 }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      now: NOW,
-    });
-
-    expect(store.current().executing_tasks).toEqual(["T2"]);
-    expect(store.current().tasks[0]!.failure_reason).toBe("already settled");
-    expect(applied.log.join("\n")).toContain("released T1");
-  });
-
-  it("releases the sole executing Task when an unreserved failure omitted its Task id", async () => {
-    const store = fakeStore(graph({ executing_tasks: ["T1"] }));
+  it("never guesses the Task of an unbound failed implementation, even when only one is executing", async () => {
+    const parallel = parallelExecutingGraph();
+    const sole = graph({ executing_tasks: ["T1"], tasks: [parallel.tasks[0]!] });
+    const store = fakeStore(sole);
     const applied = await applyFailedPiResult({
       store,
       agentType: "code-implementer-agent",
@@ -717,21 +746,14 @@ describe("applyFailedPiResult", () => {
       now: NOW,
     });
 
-    expect(store.current().executing_tasks).toEqual([]);
-    // The reservation WAS released, but the Task was guessed rather than named:
-    // an inference is reported to the harness and logged, never silently waved through.
+    expect(store.current()).toEqual(parsedGraph(sole));
     expect(applied.processingErrors).toEqual([
-      expect.stringContaining("executing_tasks holds exactly one Task"),
+      expect.stringContaining("without exact implementation attempt authority — 1 executing attempt(s) preserved"),
     ]);
-    expect(applied.log.join("\n")).toContain("executing_tasks holds exactly one Task");
   });
 
   it("preserves parallel execution and reports an unbound failed implementation", async () => {
-    const base = graph();
-    const store = fakeStore(graph({
-      executing_tasks: ["T1", "T2"],
-      tasks: [...base.tasks, { ...base.tasks[0]!, id: "T2" }],
-    }));
+    const store = fakeStore(parallelExecutingGraph());
     const applied = await applyFailedPiResult({
       store,
       agentType: "code-implementer-agent",
@@ -741,8 +763,34 @@ describe("applyFailedPiResult", () => {
     });
 
     expect(store.current().executing_tasks).toEqual(["T1", "T2"]);
-    expect(applied.processingErrors).toHaveLength(1);
-    expect(applied.processingErrors[0]).toContain("ambiguous");
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("without exact implementation attempt authority — 2 executing attempt(s) preserved"),
+    ]);
+  });
+
+  // Only a FAILED authority-less result stays log-only with nothing
+  // executing: it produced no work, so there is nothing left unrecorded.
+  it.each([
+    ["no reservation", undefined],
+    ["a reservation that carries no attempt authority", slot({ agentType: "code-implementer-agent", taskId: "T1" })],
+  ] as const)("logs, without a processing error, a failed implementation with %s when no Task is executing", async (_name, reservedSlot) => {
+    const idle = graph({ executing_tasks: [] });
+    const store = fakeStore(idle);
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 1 }),
+      reservedSlot,
+      now: NOW,
+    });
+
+    expect(store.current()).toEqual(parsedGraph(idle));
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log).toEqual([
+      expect.stringMatching(
+        /^loom\(pi\): code-implementer-agent failed before evidence capture completed \(.*\) without implementation attempt authority and no Task is executing — nothing settled$/,
+      ),
+    ]);
   });
 
   it("marks an exactly reserved failed spec-check as evidence_capture_failed and clears its obsolete block", async () => {
@@ -1377,9 +1425,61 @@ describe("applySpecCheckPiResult", () => {
   });
 });
 
+describe("unauthorizedImplementationOutcome — pure over the executing Tasks", () => {
+  const preserved = (count: number) =>
+    `loom(pi): the child ended without exact implementation attempt authority — ${count} executing attempt(s) preserved`;
+  const nothingSettled =
+    "loom(pi): the child ended without implementation attempt authority and no Task is executing — nothing settled";
+  const unrecorded = `${nothingSettled}; its Task status was NOT recorded`;
+
+  it.each([
+    ["failed", ["T1"], { processingErrors: [preserved(1)], log: [preserved(1)] }],
+    ["completed", ["T1"], { processingErrors: [preserved(1)], log: [preserved(1)] }],
+    ["completed", ["T1", "T2"], { processingErrors: [preserved(2)], log: [preserved(2)] }],
+    ["failed", [], { processingErrors: [], log: [nothingSettled] }],
+    ["completed", [], { processingErrors: [unrecorded], log: [unrecorded] }],
+  ] as const)("a %s result with executing %j", (end, executing, expected) => {
+    expect(unauthorizedImplementationOutcome(end, "the child ended", executing)).toEqual(expected);
+  });
+});
+
 describe("applyImplementationPiResult", () => {
   /** A repository probe pointed at a root, with `isRepo` under test control. */
   const repositoryAt = (root: string, isRepo = true) => ({ root: () => root, isRepo: () => isRepo });
+
+  /**
+   * Run `body` against a fresh Git repository whose one committed file is an
+   * empty test at `testPath`, as the project directory; the prior project
+   * directory is restored and the repository removed afterwards.
+   */
+  const withCommittedTestRepository = async (
+    prefix: string,
+    testPath: string,
+    body: (repositoryRoot: string) => Promise<void>,
+  ): Promise<void> => {
+    const repositoryRoot = canonicalTempDir(prefix);
+    const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    mkdirSync(join(repositoryRoot, dirname(testPath)), { recursive: true });
+    execFileSync("git", ["init"], { cwd: repositoryRoot, stdio: "ignore" });
+    writeFileSync(join(repositoryRoot, testPath), "export {};\n");
+    execFileSync("git", ["add", testPath], { cwd: repositoryRoot, stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
+      { cwd: repositoryRoot, stdio: "ignore" },
+    );
+    process.env.CLAUDE_PROJECT_DIR = repositoryRoot;
+    try {
+      await body(repositoryRoot);
+    } finally {
+      if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
+      rmSync(repositoryRoot, { recursive: true, force: true });
+    }
+  };
+
+  /** A test body the child wrote: one new test method with one assertion. */
+  const ONE_NEW_TEST = 'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n';
 
   const implementationGraph = (taskOverrides: Record<string, unknown> = {}): TaskGraph => {
     const base = graph({ executing_tasks: ["T1"] });
@@ -1467,54 +1567,8 @@ describe("applyImplementationPiResult", () => {
     };
   };
 
-  const regressionWaivedRecoveryGraph = (): TaskGraph => {
-    const verificationPolicy = {
-      regression: { kind: "waived" as const, reason: "documentation-only" as const },
-      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
-    };
-    const proof = evaluateTaskProof(
-      { declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] },
-      observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
-    );
-    if (proof.state !== "satisfied") throw new Error("waived recovery fixture must be satisfied");
-    const stale = implementationGraph({
-      status: "implemented",
-      proof,
-      new_tests_required: false,
-      verification_policy: {
-        regression: verificationPolicy.regression,
-        new_tests: verificationPolicy.newTests,
-      },
-      file_list: [],
-      attempt_artifact_baseline: [],
-    });
-    const recovered = applyCompletionInfrastructureFailure(stale, "T1", false);
-    return { ...recovered, executing_tasks: ["T1"] };
-  };
-
-  it("clears legacy reservation marker with infrastructure cleanup", () => {
-    const initial = implementationGraph();
-    const reserved: TaskGraph = {
-      ...initial,
-      executing_tasks: ["T1"],
-      tasks: initial.tasks.map((task) => taskFixture({
-        ...task,
-        legacy_execution_reservation: true,
-        reserved_at: "2020-01-01T00:00:00.000Z",
-      })),
-    };
-
-    const recovered = applyCompletionInfrastructureFailure(reserved, "T1", false);
-
-    expect(recovered.executing_tasks).toEqual([]);
-    expect(recovered.tasks[0]?.legacy_execution_reservation).toBeUndefined();
-    expect(recovered.tasks[0]?.reserved_at).toBeUndefined();
-  });
-
   it("preserves parallel execution authority and reports an unbound successful result", async () => {
-    const base = implementationGraph();
-    const second = { ...base.tasks[0]!, id: "T2" };
-    const store = fakeStore({ ...base, executing_tasks: ["T1", "T2"], tasks: [...base.tasks, second] });
+    const store = fakeStore(parallelExecutingGraph());
 
     const applied = await applyImplementationPiResult({
       store,
@@ -1522,60 +1576,55 @@ describe("applyImplementationPiResult", () => {
       agentType: "code-implementer-agent",
       result: result({ agent: "code-implementer-agent", task: "implementation result" }),
       reservedSlot: undefined,
-      parentPrompt: "",
     });
 
     expect(store.current().executing_tasks).toEqual(["T1", "T2"]);
     expect(applied.processingErrors).toEqual([
-      expect.stringContaining("2 tasks executing (ambiguous)"),
+      expect.stringContaining("without exact implementation attempt authority — 2 executing attempt(s) preserved"),
     ]);
   });
 
-  it("keeps an extracted legacy success pending with failed completion proof", async () => {
-    const store = fakeStore(regressionWaivedRecoveryGraph());
+  // A completed result with no authority is finished work no Task status
+  // records (a duplicate or late result after its slot was retired): it must
+  // reach Pi as a processing error, never pass as a clean result.
+  it.each([
+    ["no reservation", undefined],
+    ["a reservation that carries no attempt authority", slot({ agentType: "code-implementer-agent", taskId: "T1" })],
+  ] as const)("reports a completed result with %s as unrecorded when no Task is executing", async (_name, reservedSlot) => {
+    const idle = { ...implementationGraph(), executing_tasks: [] };
+    const store = fakeStore(idle);
 
-    await applyImplementationPiResult({
+    const applied = await applyImplementationPiResult({
       store,
       repository: repositoryAt(process.cwd()),
       agentType: "code-implementer-agent",
-      result: result({
-        agent: "code-implementer-agent",
-        messages: assistantText("Revalidation complete without an inapplicable regression run."),
-      }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: assistantText("Done.") }),
+      reservedSlot,
     });
 
-    expect(store.current().tasks[0]).toMatchObject({
-      status: "pending",
-      proof: { state: "failed" },
-      revalidation_required: true,
-    });
-    expect(store.current().executing_tasks).toEqual([]);
+    const unrecorded = "loom(pi): code-implementer-agent completed without implementation attempt authority and " +
+      "no Task is executing — nothing settled; its Task status was NOT recorded";
+    expect(store.current()).toEqual(parsedGraph(idle));
+    expect(applied).toEqual({ processingErrors: [unrecorded], log: [unrecorded] });
   });
 
-  it("keeps a sole-executing inferred legacy success pending with failed completion proof", async () => {
-    const store = fakeStore(regressionWaivedRecoveryGraph());
+  it("preserves an executing attempt a completed result's authority-less reservation does not hold", async () => {
+    const executing = parallelExecutingGraph();
+    const store = fakeStore(executing);
 
-    await applyImplementationPiResult({
+    const applied = await applyImplementationPiResult({
       store,
       repository: repositoryAt(process.cwd()),
       agentType: "code-implementer-agent",
-      result: result({
-        agent: "code-implementer-agent",
-        task: "implementation completed",
-        messages: assistantText("All requested work completed."),
-      }),
-      reservedSlot: undefined,
-      parentPrompt: "",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: assistantText("Done.") }),
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
     });
 
-    expect(store.current().tasks[0]).toMatchObject({
-      status: "pending",
-      proof: { state: "failed" },
-      revalidation_required: true,
-    });
-    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current()).toEqual(parsedGraph(executing));
+    expect(applied.processingErrors).toEqual([
+      "loom(pi): code-implementer-agent completed without exact implementation attempt authority — " +
+        "2 executing attempt(s) preserved",
+    ]);
   });
 
   it("retires an exact modern reservation from an already-completed Task", async () => {
@@ -1621,7 +1670,6 @@ describe("applyImplementationPiResult", () => {
       agentType: "code-implementer-agent",
       result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
       reservedSlot: modern.reservedSlot,
-      parentPrompt: "",
     });
 
     expect(applied.processingErrors).toEqual([]);
@@ -1651,376 +1699,15 @@ describe("applyImplementationPiResult", () => {
     expect(failedStore.current().tasks[0]).not.toHaveProperty("unresolved_repository_paths");
   });
 
-  it("keeps a concurrently reopened unreserved Task pending despite a stale completed pre-read", async () => {
-    const reopened = regressionWaivedRecoveryGraph();
-    const completedView: TaskGraph = {
-      ...reopened,
-      tasks: reopened.tasks.map((task) => taskFixture({
-        ...task,
-        status: "completed",
-        proof: task.proof,
-      })),
-    };
-    let current = parsedGraph(reopened);
-    const store: TaskGraphStore & { current(): TaskGraph } = {
-      load: () => parsedGraph(completedView),
-      update: async (mutate) => { current = parsedGraph(mutate(current)); },
-      updateAndReturn: async (mutate) => {
-        const applied = mutate(current);
-        current = parsedGraph(applied.state);
-        return applied.value;
-      },
-      current: () => current,
-    };
-
-    const applied = await applyImplementationPiResult({
-      store,
-      repository: repositoryAt(process.cwd()),
-      agentType: "code-implementer-agent",
-      result: result({
-        agent: "code-implementer-agent",
-        messages: assistantText("Applied the reopened Task result."),
-      }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
-    });
-
-    expect(store.current().tasks[0]).toMatchObject({
-      status: "pending",
-      proof: { state: "failed" },
-      revalidation_required: true,
-    });
-    expect(applied.log.join("\n")).not.toContain("preserved completed/missing state");
-  });
 
   /**
-   * The malformed-transcript branch has TWO exits keyed on whether bytes moved
-   * since the attempt started. Only the `true` exit (full invalidation through
-   * applyUntrustedStopResolution) was covered; this is the `false` one, where
-   * the task must stay pending with the failure stamped on it.
-   */
-  it("stamps failure_reason and preserves pending when a malformed transcript changed no bytes", async () => {
-    // A defined-but-empty attempt baseline compares clean, so nothing moved.
-    const store = fakeStore(implementationGraph({ attempt_artifact_baseline: [] }));
-    const outcome = await applyImplementationPiResult({
-      store,
-      repository: repositoryAt(process.cwd()),
-      agentType: "code-implementer-agent",
-      result: result({ agent: "code-implementer-agent", messages: "not a message array" }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
-    });
-
-    const task = store.current().tasks[0]!;
-    expect(task.status).toBe("pending");
-    expect(task.failure_reason).toContain("Pi transcript evidence capture failed");
-    // Not routed through the untrusted resolution: no verdict was minted.
-    expect(task.test_result).toBeUndefined();
-    expect(store.current().executing_tasks).toEqual([]);
-    // Malformed evidence is a processing failure, not a completed step: the
-    // transcript produced no evidence at all, and reporting success here is how
-    // the parent ends up believing a Task's evidence had been captured.
-    expect(outcome.processingErrors).toEqual([expect.stringContaining("evidence was not accepted")]);
-    expect(outcome.log.join("\n")).toContain("evidence was not accepted");
-  });
-
-  /**
-   * Attribution by inference is the one case where the engine could not tell
-   * which Task a result answers for. Crediting the sole executing Task may be
-   * the right guess, but a guess must never read as a clean processing.
-   */
-  it("reports an inferred Task attribution as a processing error even when the verdict applied", async () => {
-    const store = fakeStore(regressionWaivedRecoveryGraph());
-
-    const applied = await applyImplementationPiResult({
-      store,
-      repository: repositoryAt(process.cwd()),
-      agentType: "code-implementer-agent",
-      result: result({
-        agent: "code-implementer-agent",
-        task: "implementation completed",
-        messages: assistantText("All requested work completed."),
-      }),
-      reservedSlot: undefined,
-      parentPrompt: "",
-    });
-
-    expect(applied.processingErrors).toEqual([expect.stringContaining("credited on that guess")]);
-    expect(store.current().executing_tasks).toEqual([]);
-  });
-
-  // A batch's parent spawn call carries every brief, so the id it names first
-  // may be a sibling's: crediting it is a guess and must read as one.
-  it("reports a parent-prompt Task attribution as unproven, even when the verdict applied", async () => {
-    const store = fakeStore(regressionWaivedRecoveryGraph());
-
-    const applied = await applyImplementationPiResult({
-      store,
-      repository: repositoryAt(process.cwd()),
-      agentType: "code-implementer-agent",
-      result: result({
-        agent: "code-implementer-agent",
-        task: "implementation completed",
-        messages: assistantText("All requested work completed."),
-      }),
-      reservedSlot: undefined,
-      parentPrompt: "**Task ID:** T1\n...\n**Task ID:** T2",
-    });
-
-    expect(applied.processingErrors).toEqual([expect.stringContaining("parent's spawn prompt")]);
-    expect(applied.log.join("\n")).toContain("credited on that guess");
-  });
-
-  /**
-   * `compareAttemptBaseline` failing is a documented fail-closed contract, but
-   * nothing pinned the Pi bridge's WIRING to it — only the pure comparator was
-   * tested. A dropped `comparisonFailures.push` would have been invisible.
-   */
-  it("reports the baseline comparison failure on the malformed-transcript path", async () => {
-    const store = fakeStore(implementationGraph({
-      // A baseline naming an artifact under a root that does not exist makes
-      // the comparator throw, which it reports as a failure rather than "no
-      // change" — the fail-closed direction.
-      attempt_artifact_baseline: [{
-        artifact: "engine/src/x.ts",
-        snapshot: { kind: "sha256", digest: "a".repeat(64) },
-      }],
-    }));
-    const outcome = await applyImplementationPiResult({
-      store,
-      repository: repositoryAt("/nonexistent/loom-repo-root"),
-      agentType: "code-implementer-agent",
-      result: result({ agent: "code-implementer-agent", messages: "not a message array" }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
-    });
-
-    expect(outcome.log.join("\n")).toContain("cannot compare malformed-transcript attempt baseline for T1");
-    // Fail-closed: an uncomparable baseline is treated as "bytes moved", so the
-    // stale evidence is invalidated rather than preserved.
-    expect(store.current().tasks[0]!.status).not.toBe("completed");
-  });
-
-  it("invalidates stale authority and reports unsafe modified-path evidence", async () => {
-    const proof = evaluateTaskProof(
-      { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] },
-      observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
-    );
-    expect(proof.state).toBe("satisfied");
-    const initial = implementationGraph({
-      status: "implemented",
-      proof,
-      new_tests_required: false,
-      review_status: "passed",
-      file_list: [],
-      attempt_artifact_baseline: [],
-    });
-    const store = fakeStore({
-      ...initial,
-      spec_check: capturedSpecCheck({ wave: 1, runAt: NOW, criticalFindings: [] }),
-      wave_gates: {
-        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
-      },
-    });
-
-    const applied = await applyImplementationPiResult({
-      store,
-      repository: repositoryAt(process.cwd()),
-      agentType: "code-implementer-agent",
-      result: result({
-        agent: "code-implementer-agent",
-        messages: [writeCall("../outside.ts")],
-      }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
-    });
-
-    expect(applied.processingErrors).toEqual([
-      expect.stringContaining("unsafe modified-file evidence for T1"),
-    ]);
-    expect(store.current().tasks[0]).toMatchObject({
-      status: "pending",
-      revalidation_required: true,
-      review_status: "pending",
-    });
-    expect(store.current().executing_tasks).toEqual([]);
-    expect(store.current().spec_check).toBeUndefined();
-    expect(store.current().wave_gates["1"]).toMatchObject({
-      impl_complete: false,
-      tests_passed: null,
-      reviews_complete: false,
-    });
-  });
-
-  it("invalidates stale implemented/review authority when accepted baseline comparison fails", async () => {
-    const verificationPolicy = {
-      regression: { kind: "required" as const },
-      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
-    };
-    const staleProof = evaluateTaskProof(
-      { declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: ["engine/src/x.ts"] },
-      trustedPassEvidence(["engine/src/x.ts"], { newTestsWritten: false }),
-    );
-    expect(staleProof.state).toBe("satisfied");
-    const initial = implementationGraph({
-      status: "implemented",
-      proof: staleProof,
-      test_result: { verdict: "trusted-pass" },
-      review_status: "passed",
-      attempt_artifact_baseline: [{
-        artifact: "engine/src/x.ts",
-        snapshot: { kind: "sha256", digest: "a".repeat(64) },
-      }],
-      verification_policy: {
-        regression: verificationPolicy.regression,
-        new_tests: verificationPolicy.newTests,
-      },
-    });
-    const store = fakeStore({
-      ...initial,
-      spec_check: capturedSpecCheck({ wave: 1, runAt: NOW, criticalFindings: [] }),
-      wave_gates: {
-        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
-      },
-    });
-    const applied = await applyImplementationPiResult({
-      store,
-      repository: repositoryAt("/nonexistent/loom-repo-root"),
-      agentType: "code-implementer-agent",
-      result: result({
-        agent: "code-implementer-agent",
-        messages: [...structuredBashPass(), writeCall("engine/src/x.ts")],
-      }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
-    });
-
-    expect(store.current().tasks[0]).toMatchObject({
-      status: "pending",
-      revalidation_required: true,
-      review_status: "pending",
-      proof: { state: "satisfied" },
-      test_result: { verdict: "trusted-pass" },
-    });
-    expect(store.current().spec_check).toBeUndefined();
-    expect(store.current().wave_gates["1"]).toMatchObject({
-      impl_complete: false,
-      tests_passed: null,
-      reviews_complete: false,
-    });
-    expect(store.current().executing_tasks).toEqual([]);
-    expect(applied.processingErrors).toHaveLength(1);
-    expect(applied.log.join("\n")).toContain("completion evidence was not applied");
-  });
-
-  it("returns a processing error and releases the Task when new-test evidence collection fails", async () => {
-    const store = fakeStore(implementationGraph({
-      file_list: [],
-      start_sha: "not-a-git-revision",
-      attempt_artifact_baseline: [],
-      verification_policy: {
-        regression: { kind: "waived", reason: "documentation-only" },
-        new_tests: { kind: "required" },
-      },
-      review_status: "passed",
-    }));
-    const applied = await applyImplementationPiResult({
-      store,
-      repository: repositoryAt(process.cwd()),
-      agentType: "code-implementer-agent",
-      result: result({
-        agent: "code-implementer-agent",
-        messages: [writeCall("pi/subagent-result.ts")],
-      }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
-    });
-
-    expect(applied.processingErrors).toHaveLength(1);
-    expect(applied.processingErrors[0]).toContain("cannot collect new-test evidence for T1");
-    expect(applied.log).toContain(applied.processingErrors[0]);
-    expect(store.current().executing_tasks).toEqual([]);
-    expect(store.current().tasks[0]).toMatchObject({
-      status: "pending",
-      revalidation_required: true,
-      review_status: "pending",
-    });
-    expect(store.current().tasks[0]!.proof?.state).toBe("pending");
-  });
-
-  it("compares attempt bytes against the locked current Task, not the pre-lock snapshot", async () => {
-    const repositoryRoot = canonicalTempDir("loom-pi-locked-baseline-");
-    const artifact = "engine/src/x.ts";
-    mkdirSync(join(repositoryRoot, "engine", "src"), { recursive: true });
-    writeFileSync(join(repositoryRoot, artifact), "current bytes\n");
-    const digest = (text: string) => createHash("sha256").update(text).digest("hex");
-    const initial = implementationGraph({
-      file_list: [artifact],
-      artifact_baseline: [{ artifact, snapshot: { kind: "sha256", digest: digest("old bytes\n") } }],
-      attempt_artifact_baseline: [{ artifact, snapshot: { kind: "sha256", digest: digest("current bytes\n") } }],
-      verification_policy: {
-        regression: { kind: "required" },
-        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
-      },
-    });
-    let current = parsedGraph(initial);
-    let loads = 0;
-    const lockedState = parsedGraph({
-      ...initial,
-      tasks: initial.tasks.map((task) => task.id === "T1"
-        ? {
-            ...task,
-            attempt_artifact_baseline: [{
-              artifact,
-              snapshot: { kind: "sha256" as const, digest: digest("old bytes\n") },
-            }],
-          }
-        : task),
-    });
-    const store: TaskGraphStore & { current(): TaskGraph } = {
-      load: () => {
-        loads += 1;
-        return parsedGraph(initial);
-      },
-      update: async (mutate) => { current = parsedGraph(mutate(lockedState)); },
-      updateAndReturn: async (mutate) => {
-        const applied = mutate(lockedState);
-        current = parsedGraph(applied.state);
-        return applied.value;
-      },
-      current: () => current,
-    };
-
-    try {
-      await applyImplementationPiResult({
-        store,
-        repository: repositoryAt(repositoryRoot),
-        agentType: "code-implementer-agent",
-        result: result({
-          agent: "code-implementer-agent",
-          messages: assistantText("I changed the code but did not run tests."),
-        }),
-        reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-        parentPrompt: "",
-      });
-
-      expect(loads).toBeGreaterThan(0);
-      expect(store.current().tasks[0]).toMatchObject({
-        status: "pending",
-        review_status: "pending",
-        test_result: { verdict: "untrusted", passed: false },
-      });
-    } finally {
-      rmSync(repositoryRoot, { recursive: true, force: true });
-    }
-  });
-
-  /**
-   * The wave gate rejects the transcript fallback, so a null structured verdict
-   * is a latent blocker the operator should hear about at the point it happens.
+   * A Pi run with no structured test evidence records no test result, which
+   * the wave gate rejects, so a null structured verdict is a latent blocker
+   * the operator should hear about at the point it happens.
    */
   it("explains a well-formed transcript that produced no structured test evidence", async () => {
-    const store = fakeStore(implementationGraph({ attempt_artifact_baseline: [] }));
+    const modern = modernize(implementationGraph({ attempt_artifact_baseline: [] }), process.cwd(), "pi-no-structured");
+    const store = fakeStore(modern.graph);
     const outcome = await applyImplementationPiResult({
       store,
       repository: repositoryAt(process.cwd(), false),
@@ -2029,30 +1716,26 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: assistantText("I made the change but ran no tests."),
       }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
+      reservedSlot: modern.reservedSlot,
     });
 
     const logged = outcome.log.join("\n");
     expect(logged).toContain("produced no structured test evidence");
     expect(logged).toContain("no Bash call was classified as a test run");
     expect(logged).toContain("the wave gate will reject it");
-    expect(logged).toContain("repository probe reports a non-Git working directory");
-    expect(logged).toContain("new-test proof remains unsatisfied");
-    expect(outcome.processingErrors).toEqual([
-      expect.stringContaining("repository probe reports a non-Git working directory"),
-    ]);
+    expect(logged).toContain("repository probe for T1 reports a non-Git working directory");
   });
 
-  it("keeps transcript-regex fallback unverified and blocks regression-required completion", async () => {
-    const store = fakeStore(implementationGraph({
+  it("records no test result for a pass-looking non-test command and blocks regression-required completion", async () => {
+    const modern = modernize(implementationGraph({
       file_list: [],
       attempt_artifact_baseline: [],
       verification_policy: {
         regression: { kind: "required" },
         new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
       },
-    }));
+    }), process.cwd(), "pi-regex-fallback");
+    const store = fakeStore(modern.graph);
 
     await applyImplementationPiResult({
       store,
@@ -2076,22 +1759,20 @@ describe("applyImplementationPiResult", () => {
           content: [{ type: "text", text: "  1 passing\n" }],
         }],
       }),
-      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-      parentPrompt: "",
+      reservedSlot: modern.reservedSlot,
     });
 
     const task = store.current().tasks[0]!;
-    expect(task.test_result).toMatchObject({
-      verdict: "untrusted",
-      passed: false,
-      provenance: "unverified",
-    });
+    // Output that reads like a pass, from a command no classifier calls a test
+    // run, proves nothing: no result is recorded, not a degraded one.
+    expect(task.test_result).toBeUndefined();
+    expect(task.test_evidence).toBeUndefined();
     expect(task.status).toBe("pending");
     expect(task.proof).toMatchObject({ state: "failed" });
-    expect(task.proof?.state === "failed" ? task.proof.failures : []).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "task-not-completed" }),
-      expect.objectContaining({ kind: "untrusted-regression-tests-failed" }),
-    ]));
+    // Exact authority observes the completion; the missing result alone fails the regression duty.
+    expect(task.proof.state === "failed" ? task.proof.failures : []).toEqual([
+      { kind: "test-result-missing" },
+    ]);
   });
 
   it("accepts structured regression evidence while explicit policy waives only new tests", async () => {
@@ -2114,7 +1795,6 @@ describe("applyImplementationPiResult", () => {
         messages: structuredBashPass(),
       }),
       reservedSlot: modern.reservedSlot,
-      parentPrompt: "",
     });
 
     const task = store.current().tasks[0]!;
@@ -2169,7 +1849,6 @@ describe("applyImplementationPiResult", () => {
         agentType: "code-implementer-agent",
         result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
         reservedSlot: modern.reservedSlot,
-        parentPrompt: "",
       });
 
       expect(applied.processingErrors).toEqual([]);
@@ -2184,16 +1863,16 @@ describe("applyImplementationPiResult", () => {
   });
 
   it.each([
-    ["wrong", "Task ID: T2"],
-    ["missing", "implementation completed"],
-  ] as const)("infrastructure-settles an exact reserved slot when returned Task identity is %s", async (_label, returnedTask) => {
+    ["wrong", "Task ID: T2", "T2"],
+    ["missing", "implementation completed", "missing"],
+  ] as const)("infrastructure-settles an exact reserved slot when returned Task identity is %s", async (label, returnedTask, returnedId) => {
     const modern = modernize(implementationGraph({
       file_list: [],
       verification_policy: {
         regression: { kind: "waived", reason: "documentation-only" },
         new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
       },
-    }), process.cwd(), `pi-result-task-${_label}`);
+    }), process.cwd(), `pi-result-task-${label}`);
     const store = fakeStore(modern.graph);
 
     const applied = await applyImplementationPiResult({
@@ -2206,10 +1885,11 @@ describe("applyImplementationPiResult", () => {
         messages: structuredBashPass(),
       }),
       reservedSlot: modern.reservedSlot,
-      parentPrompt: "Task ID: T1",
     });
 
-    expect(applied.processingErrors).toEqual([expect.stringContaining("Task identity mismatch")]);
+    expect(applied.processingErrors).toEqual([
+      `Pi result Task identity mismatch: returned=${returnedId}, reserved=T1`,
+    ]);
     expect(store.current().executing_tasks).toEqual([]);
     expect(store.current().tasks[0]).toMatchObject({
       status: "pending",
@@ -2220,6 +1900,91 @@ describe("applyImplementationPiResult", () => {
       }],
     });
     expect(store.current().tasks[0]?.test_result).toBeUndefined();
+  });
+
+  // Both evidence exits under exact authority release the attempt as
+  // infrastructure-blocked and reach Pi as a processing error: a transcript
+  // that is not a Pi message array, and a write target outside the repository.
+  it.each([
+    ["malformed transcript", "not a message array", /^Pi transcript evidence capture failed: \S/],
+    ["unsafe modified path", [writeCall("../outside.ts")], /^unsafe modified-file evidence for T1: /],
+  ] as const)("infrastructure-settles an exact reserved slot on unusable evidence: %s", async (label, messages, pattern) => {
+    const modern = modernize(implementationGraph({
+      file_list: [],
+      verification_policy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    }), process.cwd(), `pi-infra-${label.replaceAll(" ", "-")}`);
+    const store = fakeStore(modern.graph);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages }),
+      reservedSlot: modern.reservedSlot,
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringMatching(pattern)]);
+    expect(applied.log).toContain(`loom(pi): ${applied.processingErrors[0]}`);
+    // The renderer adds the log prefix once; the reason carries none of its own.
+    expect(applied.log.filter((line) => line.includes("loom(pi): loom(pi)"))).toEqual([]);
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      implementation_attempt_history: [{
+        authorityDigest: implementationAuthorityOf(modern.reservedSlot)?.authorityDigest,
+        transition: "infrastructure-blocked",
+      }],
+    });
+    expect(store.current().tasks[0]?.test_result).toBeUndefined();
+  });
+
+  // A failed new-test collection is an observation the shell could not make:
+  // the exact settlement must report it to Pi as a processing error and
+  // release the attempt as infrastructure-blocked, never pass silently.
+  it("reports a new-test collection failure as a processing error and releases the exact attempt", async () => {
+    const testPath = "tests/uncollectable.test.ts";
+    await withCommittedTestRepository("loom-pi-new-tests-uncollectable-", testPath, async (repositoryRoot) => {
+      const modern = modernize(implementationGraph({
+        file_list: [testPath],
+        attempt_artifact_baseline: [],
+        // A revision Git cannot resolve: the new-test diff since it fails.
+        start_sha: "not-a-git-revision",
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+      }), repositoryRoot, "pi-new-tests-uncollectable");
+      const store = fakeStore(modern.graph);
+      writeFileSync(join(repositoryRoot, testPath), ONE_NEW_TEST);
+
+      const applied = await applyImplementationPiResult({
+        store,
+        repository: repositoryAt(repositoryRoot),
+        agentType: "code-implementer-agent",
+        result: result({ agent: "code-implementer-agent", messages: [writeCall(testPath)] }),
+        reservedSlot: modern.reservedSlot,
+      });
+
+      expect(applied.processingErrors).toEqual([
+        expect.stringMatching(/^Pi new-test observation unavailable: diff-since: .*not-a-git-revision/),
+      ]);
+      expect(applied.log).toContain(`loom(pi): ${applied.processingErrors[0]}`);
+      expect(store.current().executing_tasks).toEqual([]);
+      expect(store.current().tasks[0]).toMatchObject({
+        status: "pending",
+        revalidation_required: true,
+        implementation_attempt_history: [{
+          authorityDigest: implementationAuthorityOf(modern.reservedSlot)?.authorityDigest,
+          transition: "infrastructure-blocked",
+        }],
+      });
+      expect(store.current().tasks[0]?.active_implementation_attempt).toBeUndefined();
+      expect(store.current().tasks[0]?.new_test_observation).toBeUndefined();
+    });
   });
 
   it("preserves a replacement when a stale successful Pi authority arrives", async () => {
@@ -2233,7 +1998,6 @@ describe("applyImplementationPiResult", () => {
       agentType: "code-implementer-agent",
       result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: structuredBashPass() }),
       reservedSlot: first.reservedSlot,
-      parentPrompt: "",
     });
 
     expect(applied.log.join("\n")).toContain("result ignored (stale)");
@@ -2268,7 +2032,6 @@ describe("applyImplementationPiResult", () => {
       agentType: "code-implementer-agent",
       result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
       reservedSlot: modern.reservedSlot,
-      parentPrompt: "",
     });
 
     expect(store.current().tasks[0]).toMatchObject({ status: "implemented", review_status: "passed" });
@@ -2280,9 +2043,9 @@ describe("applyImplementationPiResult", () => {
     });
   });
 
-  it("collects legacy new-test evidence from the linked worktree rather than the Pi process checkout", async () => {
-    const ambient = canonicalTempDir("loom-pi-legacy-ambient-");
-    const worktree = canonicalTempDir("loom-pi-legacy-worktree-");
+  it("collects new-test evidence from the linked worktree rather than the Pi process checkout", async () => {
+    const ambient = canonicalTempDir("loom-pi-ambient-");
+    const worktree = canonicalTempDir("loom-pi-worktree-");
     const priorProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const testPath = "tests/linked-worktree.test.ts";
     try {
@@ -2293,18 +2056,15 @@ describe("applyImplementationPiResult", () => {
       execFileSync("git", ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "baseline"], { cwd: ambient });
       execFileSync("git", ["worktree", "add", "--detach", worktree, "HEAD"], { cwd: ambient });
       process.env.CLAUDE_PROJECT_DIR = ambient;
-      const baseline = captureDeclaredArtifactBaseline(worktree, [testPath]);
-      const store = fakeStore(implementationGraph({
+      const modern = modernize(implementationGraph({
         file_list: [testPath],
-        files_modified: [testPath],
-        artifact_baseline: baseline,
-        attempt_artifact_baseline: baseline,
-        start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree, encoding: "utf8" }).trim(),
+        attempt_artifact_baseline: [],
         verification_policy: {
           regression: { kind: "waived", reason: "documentation-only" },
           new_tests: { kind: "required" },
         },
-      }));
+      }), worktree, "pi-linked-worktree");
+      const store = fakeStore(modern.graph);
       writeFileSync(join(worktree, testPath), 'export {};\n\nit("observes the worktree", () => {\n  expect(true).toBe(true);\n});\n');
 
       const applied = await applyImplementationPiResult({
@@ -2312,15 +2072,14 @@ describe("applyImplementationPiResult", () => {
         repository: repositoryAt(worktree),
         agentType: "code-implementer-agent",
         result: result({ agent: "code-implementer-agent", messages: [writeCall(testPath)] }),
-        reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
-        parentPrompt: "",
+        reservedSlot: modern.reservedSlot,
       });
       expect(applied.processingErrors).toEqual([]);
       expect(store.current().tasks[0]?.new_test_observation).toMatchObject({
         kind: "written", written: true,
         evidence: expect.stringContaining("1 new test methods, 1 assertions"),
       });
-      expect(store.current().tasks[0]?.status).toBe("pending"); // legacy authority never certifies completion
+      expect(store.current().tasks[0]?.status).toBe("implemented");
       expect(readFileSync(join(ambient, testPath), "utf8")).toBe("export {};\n");
     } finally {
       if (priorProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
@@ -2331,21 +2090,8 @@ describe("applyImplementationPiResult", () => {
   });
 
   it("accepts attributed new-test evidence without regression evidence when explicit policy waives only regression", async () => {
-    const repositoryRoot = canonicalTempDir("loom-pi-inverse-policy-");
-    const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const testPath = "tests/inverse-policy.test.ts";
-    mkdirSync(join(repositoryRoot, "tests"), { recursive: true });
-    execFileSync("git", ["init"], { cwd: repositoryRoot, stdio: "ignore" });
-    writeFileSync(join(repositoryRoot, testPath), "export {};\n");
-    execFileSync("git", ["add", testPath], { cwd: repositoryRoot, stdio: "ignore" });
-    execFileSync(
-      "git",
-      ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
-      { cwd: repositoryRoot, stdio: "ignore" },
-    );
-    process.env.CLAUDE_PROJECT_DIR = repositoryRoot;
-
-    try {
+    await withCommittedTestRepository("loom-pi-inverse-policy-", testPath, async (repositoryRoot) => {
       const modern = modernize(implementationGraph({
         file_list: [testPath],
         attempt_artifact_baseline: [],
@@ -2355,10 +2101,7 @@ describe("applyImplementationPiResult", () => {
         },
       }), repositoryRoot, "pi-inverse-policy");
       const store = fakeStore(modern.graph);
-      writeFileSync(
-        join(repositoryRoot, testPath),
-        'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n',
-      );
+      writeFileSync(join(repositoryRoot, testPath), ONE_NEW_TEST);
 
       await applyImplementationPiResult({
         store,
@@ -2369,11 +2112,12 @@ describe("applyImplementationPiResult", () => {
           messages: [writeCall(testPath)],
         }),
         reservedSlot: modern.reservedSlot,
-        parentPrompt: "",
       });
 
       const task = store.current().tasks[0]!;
-      expect(task.test_result).toMatchObject({ verdict: "untrusted", passed: false });
+      // The child ran no test command: no test result is recorded, and the
+      // waived regression duty does not need one.
+      expect(task.test_result).toBeUndefined();
       expect(task.new_test_observation).toMatchObject({
         kind: "written",
         written: true,
@@ -2395,10 +2139,6 @@ describe("applyImplementationPiResult", () => {
           expect.objectContaining({ kind: "regression-test-pass" }),
         );
       }
-    } finally {
-      if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
-      else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
-      rmSync(repositoryRoot, { recursive: true, force: true });
-    }
+    });
   });
 });

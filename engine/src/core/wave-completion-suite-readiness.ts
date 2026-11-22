@@ -5,7 +5,8 @@
  * The gate renders it as a check and status reports it as a fact; both read
  * this one derivation, so they cannot disagree about suite state. Core
  * performs no I/O: the current workspace and persisted result arrive as shell
- * observations.
+ * observations. It is derived only for a `ManifestedTaskGraph`: a graph with
+ * no frozen Verification Manifest has no completion suite to be ready.
  *
  * INV-3: the roster a receipt or persisted result must match is authorized
  * by `authorizeGraphCompletionSuite`, the one function the gate also calls,
@@ -15,7 +16,6 @@
 
 import type {
   ActiveWaveGateRegistration,
-  CompletedWaveGateRegistration,
   TaskGraph,
   WaveCompletionResultObservation,
   WaveCompletionSuiteReadiness,
@@ -31,16 +31,17 @@ import {
   type CompletionInfrastructureFailure,
 } from "./completion-suite";
 import { compareStrings } from "./ordering";
-import { legacyDefaultVerificationManifest, deriveProjectVerificationCoverage } from "./verification-manifest";
+import { deriveProjectVerificationCoverage } from "./verification-manifest";
 import { canonicalRecord, canonicalStructuralEquals, isNonEmpty, type DomainResult, type NonEmpty } from "./orchestration-contract";
 import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "./acceptance-contract";
 import { authorizeGraphCompletionSuite } from "./owner-verification/suite-authority";
+import type { ManifestedTaskGraph } from "./manifested-task-graph";
 
 
 function exactCompletionSuiteError(
   registration: ActiveWaveGateRegistration,
   receipt: AcceptedWaveCompletionReceipt,
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
 ): string | null {
   const parsed = parseAcceptedWaveCompletionReceipt(receipt);
   if (!parsed.ok) return parsed.error.errors.join("; ");
@@ -51,8 +52,7 @@ function exactCompletionSuiteError(
   ) {
     return "accepted suite does not match the active Wave Gate run/Wave/revision/authority";
   }
-  const manifest = graph.verification_manifest ?? legacyDefaultVerificationManifest();
-  if (parsed.value.manifestDigest !== manifest.manifestDigest) {
+  if (parsed.value.manifestDigest !== graph.verification_manifest.manifestDigest) {
     return "accepted suite manifest digest does not match protected verification_manifest";
   }
   const authorized = authorizeGraphCompletionSuite(graph, parsed.value.workspaceDigest);
@@ -81,12 +81,15 @@ function exactCompletionSuiteError(
   return null;
 }
 
-type CompletionSuiteReadinessSource = Readonly<{
-  receipt: AcceptedWaveCompletionReceipt | undefined;
-  registration: ActiveWaveGateRegistration | CompletedWaveGateRegistration | undefined;
-  legacyHistory: boolean;
-  terminal: boolean;
-}>;
+/**
+ * Where a Wave's suite authority lives: nowhere, on the active registration
+ * (which may not hold a receipt yet), or on the completed registration in
+ * `wave_gate_history`, which always holds one.
+ */
+type CompletionSuiteReadinessSource =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "active"; registration: ActiveWaveGateRegistration; receipt: AcceptedWaveCompletionReceipt | undefined }>
+  | Readonly<{ kind: "terminal"; receipt: AcceptedWaveCompletionReceipt }>;
 
 function completionSuiteReadinessSource(
   graph: TaskGraph,
@@ -94,21 +97,15 @@ function completionSuiteReadinessSource(
 ): CompletionSuiteReadinessSource {
   if (graph.active_wave_gate !== undefined && (wave === null || graph.active_wave_gate.wave === wave)) {
     return canonicalRecord({
-      receipt: graph.active_wave_completion_suite,
+      kind: "active",
       registration: graph.active_wave_gate,
-      legacyHistory: false,
-      terminal: false,
+      receipt: graph.active_wave_completion_suite,
     });
   }
-  const terminal = wave === null ? undefined : (graph.wave_gate_history ?? []).find((entry) => entry.wave === wave);
-  return terminal?.schemaVersion === 2
-    ? canonicalRecord({ receipt: terminal.completionSuite, registration: terminal, legacyHistory: false, terminal: true })
-    : canonicalRecord({
-        receipt: undefined,
-        registration: terminal,
-        legacyHistory: terminal?.schemaVersion === 1,
-        terminal: terminal !== undefined,
-      });
+  const completed = wave === null ? undefined : (graph.wave_gate_history ?? []).find((entry) => entry.wave === wave);
+  return completed === undefined
+    ? canonicalRecord({ kind: "none" })
+    : canonicalRecord({ kind: "terminal", receipt: completed.completionSuite });
 }
 
 function sortedUniqueNonEmpty<T extends string>(head: T, tail: readonly T[]): NonEmpty<T> {
@@ -175,43 +172,33 @@ function parseWorkspaceObservation(
 }
 
 function deriveCompletionSuiteOutcome(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   source: CompletionSuiteReadinessSource,
   currentWorkspace: WaveWorkspaceObservation | undefined,
   currentResult: WaveCompletionResultObservation | undefined,
 ) {
-  const manifest = graph.verification_manifest;
-  const manifestDigest = manifest?.manifestDigest ?? null;
-  if (source.receipt === undefined) {
-    if ((manifestDigest === null && graph.active_wave_completion_suite === undefined) || source.legacyHistory) {
-      return canonicalRecord({ kind: "legacy-unavailable", verificationManifestDigest: null });
-    }
-    if (source.registration?.kind !== "active-wave-gate" || manifest === undefined) {
-      return requiredWaveCompletionSuite(
-        "accepted-suite-missing",
-        "an exact accepted Wave completion suite is required",
-        manifestDigest,
-      );
-    }
-    const workspace = parseWorkspaceObservation(currentWorkspace, manifestDigest);
-    if (!workspace.ok) return workspace.error;
-    if (currentResult === undefined || currentResult.kind === "absent") {
-      return requiredWaveCompletionSuite(
-        "accepted-suite-missing",
-        "an exact accepted Wave completion suite is required",
-        manifestDigest,
-      );
-    }
-    if (currentResult.kind === "unavailable") {
-      return requiredWaveCompletionSuite(
-        "completion-result-unavailable",
-        currentResult.reason,
-        manifestDigest,
-      );
-    }
-    return persistedResultOutcome(graph, source.registration, manifest, workspace.value.workspaceDigest, currentResult.result);
+  const manifestDigest = graph.verification_manifest.manifestDigest;
+  const suiteMissing = requiredWaveCompletionSuite(
+    "accepted-suite-missing",
+    "an exact accepted Wave completion suite is required",
+    manifestDigest,
+  );
+  if (source.kind === "none") return suiteMissing;
+  if (source.kind === "terminal") return terminalReceiptOutcome(source.receipt);
+  if (source.receipt !== undefined) {
+    return activeReceiptOutcome(graph, source.registration, source.receipt, currentWorkspace);
   }
-  return receiptOutcome(graph, source, source.receipt, currentWorkspace);
+  const workspace = parseWorkspaceObservation(currentWorkspace, manifestDigest);
+  if (!workspace.ok) return workspace.error;
+  if (currentResult === undefined || currentResult.kind === "absent") return suiteMissing;
+  if (currentResult.kind === "unavailable") {
+    return requiredWaveCompletionSuite(
+      "completion-result-unavailable",
+      currentResult.reason,
+      manifestDigest,
+    );
+  }
+  return persistedResultOutcome(graph, source.registration, workspace.value.workspaceDigest, currentResult.result);
 }
 
 /**
@@ -221,13 +208,12 @@ function deriveCompletionSuiteOutcome(
  * not decide, exactly as the gate replays it (the rejection's `cause`).
  */
 function persistedResultOutcome(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   registration: ActiveWaveGateRegistration,
-  manifest: NonNullable<TaskGraph["verification_manifest"]>,
   workspaceDigest: Extract<WaveWorkspaceObservation, { kind: "observed" }>["workspaceDigest"],
   result: Extract<WaveCompletionResultObservation, { kind: "observed" }>["result"],
 ) {
-  const manifestDigest = manifest.manifestDigest;
+  const manifestDigest = graph.verification_manifest.manifestDigest;
   const authorized = authorizeGraphCompletionSuite(graph, workspaceDigest);
   if (!authorized.ok) {
     return requiredWaveCompletionSuite("completion-result-invalid", authorized.error.errors.join("; "), manifestDigest);
@@ -263,33 +249,29 @@ function persistedResultOutcome(
   });
 }
 
-/** The outcome of a Wave whose receipt protected authority already holds. */
-function receiptOutcome(
-  graph: TaskGraph,
-  source: CompletionSuiteReadinessSource,
+/** A completed Wave's outcome: the receipt its completed registration froze, under the manifest it was judged by. */
+function terminalReceiptOutcome(receipt: AcceptedWaveCompletionReceipt) {
+  return canonicalRecord({
+    kind: "accepted",
+    verificationManifestDigest: receipt.manifestDigest,
+    suiteDigest: receipt.suiteDigest,
+    resultDigest: receipt.resultDigest,
+    workspaceDigest: receipt.workspaceDigest,
+    checkCount: receipt.checks.length,
+  });
+}
+
+/** The outcome of an active Wave whose receipt protected authority already holds. */
+function activeReceiptOutcome(
+  graph: ManifestedTaskGraph,
+  registration: ActiveWaveGateRegistration,
   receipt: AcceptedWaveCompletionReceipt,
   currentWorkspace: WaveWorkspaceObservation | undefined,
 ) {
-  const manifestDigest = graph.verification_manifest?.manifestDigest ?? null;
-  if (source.registration === undefined) {
-    const detail = "accepted Wave completion suite has no active or terminal registration authority";
-    return requiredWaveCompletionSuite("accepted-suite-invalid", detail, manifestDigest, receipt.resultDigest);
-  }
-  if (source.registration.kind === "active-wave-gate") {
-    const exactError = exactCompletionSuiteError(source.registration, receipt, graph);
-    if (exactError !== null) {
-      return requiredWaveCompletionSuite("accepted-suite-invalid", exactError, manifestDigest, receipt.resultDigest);
-    }
-  }
-  if (source.terminal) {
-    return canonicalRecord({
-      kind: "accepted",
-      verificationManifestDigest: receipt.manifestDigest,
-      suiteDigest: receipt.suiteDigest,
-      resultDigest: receipt.resultDigest,
-      workspaceDigest: receipt.workspaceDigest,
-      checkCount: receipt.checks.length,
-    });
+  const manifestDigest = graph.verification_manifest.manifestDigest;
+  const exactError = exactCompletionSuiteError(registration, receipt, graph);
+  if (exactError !== null) {
+    return requiredWaveCompletionSuite("accepted-suite-invalid", exactError, manifestDigest, receipt.resultDigest);
   }
   const workspace = parseWorkspaceObservation(currentWorkspace, manifestDigest, receipt.resultDigest);
   if (!workspace.ok) return workspace.error;
@@ -316,16 +298,13 @@ function receiptOutcome(
 
 /** Configuration coverage and suite outcome are independent projections of protected authority. */
 export function deriveWaveCompletionSuiteReadiness(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   wave: number | null,
   currentWorkspace: WaveWorkspaceObservation | undefined,
   currentResult: WaveCompletionResultObservation | undefined = undefined,
 ): WaveCompletionSuiteReadiness {
   const source = completionSuiteReadinessSource(graph, wave);
   const outcome = deriveCompletionSuiteOutcome(graph, source, currentWorkspace, currentResult);
-  if (outcome.kind === "legacy-unavailable") return outcome;
-  const authority = source.terminal && source.receipt !== undefined
-    ? source.receipt
-    : graph.verification_manifest ?? legacyDefaultVerificationManifest();
+  const authority = source.kind === "terminal" ? source.receipt : graph.verification_manifest;
   return canonicalRecord({ ...outcome, projectVerificationCoverage: deriveProjectVerificationCoverage(authority) });
 }

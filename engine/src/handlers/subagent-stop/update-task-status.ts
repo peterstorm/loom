@@ -12,23 +12,17 @@
 
 import { readFileSync, realpathSync } from "node:fs";
 import type { HookHandler, HookResult } from "../../types";
-import { NEW_TEST_EVIDENCE_NOT_WRITTEN, legacyTestsPassedNote } from "../../types";
 import { machineSource, observeTaskGraphProjectBoundary } from "../../config";
 import { IMPL_AGENTS } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
-import { extractTaskId } from "../../utils/extract-task-id";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { canonicalRepositoryPaths, partitionWriteEvidence } from "../../utils/repository-path";
 import { readSettledJsonl } from "../../utils/read-settled-jsonl";
-import {
-  compareAttemptBaseline,
-} from "../../utils/attempt-baseline";
-import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
 import { readPersistedOutput } from "../../utils/persisted-output";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 import {
   epochOf,
   eventsForEpoch,
@@ -44,10 +38,8 @@ import type { AgentId, AgentType, EvidenceRecord, LoadedMachine } from "../../ma
 import type { LedgerObservation } from "../../core/red-then-green-types";
 import { TRUSTED_LEDGER_ONLY_POLICY } from "../../core/proof-obligations";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
-import { taskVerificationPolicy } from "../../core/verification-policy";
 import type { ImplementationAuthorityObservation } from "../../implementation-attempt-sidecar";
 import { parseCompleteClaudeJsonl } from "../../core/claude-transcript-integrity";
-import { inferSoleExecutingTask, unprovenAttributionReason } from "../../core/task-attribution";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,
@@ -58,19 +50,10 @@ import {
   resolveTestEvidence,
 } from "../../core/implementation-evidence";
 import {
-  applyCompletionInfrastructureFailure,
-  applyUntrustedStopResolution,
-  cumulativeModifiedPaths,
   describeSettlement,
   isWaveComplete,
   settleUnavailableImplementation,
-  type NewTestEvidence,
 } from "../../core/implementation-application";
-import {
-  collectNewTestEvidence,
-  describeNewTestObservationError,
-  realDiffDepsAt,
-} from "../helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
   settleAndPersistExactImplementation,
@@ -137,16 +120,19 @@ export function claudeEpochLedger(
   return Object.freeze({ kind: "read", events: Object.freeze(eventsForEpoch(read.records, epochOf(agentId, agentType))) });
 }
 
-type LegacyUnreadableTranscriptSettlement =
-  | Readonly<{ kind: "quarantined"; taskId: string }>
-  | Readonly<{ kind: "preserved"; executingCount: number }>;
-
-async function settleModernTranscriptUnavailable(
+/**
+ * Settle the attempt `authority` names with an exact non-consuming
+ * infrastructure Oracle receipt under the State File lock: the one shell for
+ * every observation this stop cannot make (transcript, project boundary,
+ * modified-file evidence). A stale or duplicate delivery is ignored and named,
+ * never reported as settled.
+ */
+async function settleInfrastructureUnavailable(
   manager: StateManager,
   authority: ImplementationAttemptAuthority,
   reason: string,
 ): Promise<HookResult> {
-  const observedAt = parseIsoInstant(new Date().toISOString(), "Claude transcript failure instant");
+  const observedAt = parseIsoInstant(new Date().toISOString(), "Claude infrastructure failure instant");
   if (!observedAt.ok) {
     return { kind: "error", message: `update-task-status: ${observedAt.error.errors.join("; ")}` };
   }
@@ -157,13 +143,13 @@ async function settleModernTranscriptUnavailable(
   if (settlement.kind === "error") {
     return {
       kind: "error",
-      message: `update-task-status: Oracle transcript infrastructure settlement failed: ${JSON.stringify(settlement.error)}`,
+      message: `update-task-status: Oracle infrastructure settlement failed: ${JSON.stringify(settlement.error)}`,
     };
   }
   if (settlement.kind === "ignored") {
     return {
       kind: "error",
-      message: `update-task-status: unavailable Claude transcript delivery was ignored as ${settlement.reason}; current authority was preserved`,
+      message: `update-task-status: ${reason}; the unavailable Claude delivery was ignored as ${settlement.reason}; current authority was preserved`,
     };
   }
   return {
@@ -193,7 +179,7 @@ export const runUpdateTaskStatus = async (
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
   // where a bare JSON.parse throw would surface as an uncontextualized
   // "Hook error" (mirrors cleanup-subagent-flag).
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     return {
       kind: "error",
@@ -240,17 +226,23 @@ export const runUpdateTaskStatus = async (
     ? authorityObservation.sidecar.authority
     : null;
   const graphBeforeTranscript = mgr.load();
-  const modernAttempts = graphBeforeTranscript.tasks.filter((task) => task.active_implementation_attempt !== undefined);
-  if (authorityObservation?.kind === "authority-unavailable" && modernAttempts.length > 0) {
+  const executing = graphBeforeTranscript.tasks.some((task) => task.active_implementation_attempt !== undefined);
+  // A sidecar that exists but cannot be read is lost authority whether or not
+  // a Task still executes: its attempt may already have been released or
+  // reclaimed, so only an error keeps the lost settlement visible. An absent
+  // sidecar loses something only while a Task executes.
+  if (authorityObservation?.kind === "authority-unavailable" &&
+      (executing || authorityObservation.failure.kind !== "missing-sidecar")) {
     return {
       kind: "error",
-      message: `update-task-status: ${authorityObservation.failure.kind}: ${authorityObservation.failure.message}; modern implementation authority was preserved`,
+      message: `update-task-status: ${authorityObservation.failure.kind}: ${authorityObservation.failure.message}; ` +
+        (executing ? "implementation authority was preserved" : "no Task is executing and nothing was settled"),
     };
   }
-  if (authorityObservation === undefined && modernAttempts.length > 0) {
+  if (authorityObservation === undefined && executing) {
     return {
       kind: "error",
-      message: "update-task-status: modern implementation settlement requires a snapshotted Claude authority sidecar; execution authority was preserved",
+      message: "update-task-status: implementation settlement requires a snapshotted Claude authority sidecar; execution authority was preserved",
     };
   }
   if (authorityObservation?.kind === "authority-observed") {
@@ -285,116 +277,63 @@ export const runUpdateTaskStatus = async (
     }
   }
 
+  // Every executing Task carries an attempt (the State File refuses any other,
+  // ADR-0098), an attempt without this stop's sidecar and an unreadable sidecar
+  // were refused above. A stop with no authority therefore found no sidecar and
+  // nothing executing: nothing to settle, and the diagnostic names why.
+  if (authority === null) {
+    const absence = authorityObservation?.kind === "authority-unavailable" ? `: ${authorityObservation.failure.message}` : "";
+    return passthroughDiagnostic(
+      `update-task-status: ${agentType} stopped without implementation attempt authority and no Task is executing; nothing was settled${absence}\n`,
+    );
+  }
+
   // Parse transcript (read file content, then parse). The path is RESOLVED,
   // not read off the payload: an available supplied `agent_transcript_path`
   // wins; an unavailable or absent supplied path falls back to the derived
-  // on-disk location. Exact modern Claude settlement requires this transcript,
-  // so an unlocatable path becomes an infrastructure receipt. Legacy compatibility
-  // may continue with empty content only to infer and quarantine one exact
-  // executing Task — never to grant positive completion authority.
+  // on-disk location. Exact settlement requires this transcript, so an
+  // unlocatable or unreadable one becomes an infrastructure receipt.
   const transcriptPath = resolveAgentTranscriptPath(input);
-  if (authority !== null && transcriptPath === null) {
-    return settleModernTranscriptUnavailable(
+  if (transcriptPath === null) {
+    return settleInfrastructureUnavailable(
       mgr,
       authority,
       "Claude transcript unavailable: no resolvable transcript path",
     );
   }
-  let transcriptContent = "";
-  if (transcriptPath) {
-    try {
-      transcriptContent = await readSettledJsonl(() => readFileSync(transcriptPath, "utf-8"));
-    } catch (error) {
-      const cause = error instanceof Error ? error.message : String(error);
-      if (authority !== null) {
-        return settleModernTranscriptUnavailable(mgr, authority, `Claude transcript unreadable: ${cause}`);
-      }
-      const settlement = await mgr.updateAndReturn<LegacyUnreadableTranscriptSettlement>((state) => {
-        const executing = state.executing_tasks ?? [];
-        const inference = inferSoleExecutingTask(executing);
-        const preserved = { state, value: { kind: "preserved", executingCount: executing.length } as const };
-        if (inference.kind !== "inferred") return preserved;
-        // An inferred Task may only be quarantined, and never one carrying a
-        // modern attempt, whose settlement belongs to its exact authority.
-        const target = state.tasks.find((task) => task.id === inference.taskId);
-        return target?.active_implementation_attempt === undefined
-          ? {
-              state: applyCompletionInfrastructureFailure(state, inference.taskId, true),
-              value: { kind: "quarantined", taskId: inference.taskId } as const,
-            }
-          : preserved;
-      });
-      if (settlement.kind === "quarantined") {
-        return {
-          kind: "error",
-          message: `update-task-status: cannot read transcript at ${transcriptPath}: ${cause}; quarantined ${settlement.taskId} for fresh revalidation`,
-        };
-      }
-      return {
-        kind: "error",
-        message:
-          `update-task-status: cannot read transcript at ${transcriptPath}: ${cause}; ` +
-          `${settlement.executingCount} executing Tasks make cleanup attribution ${settlement.executingCount === 0 ? "unavailable" : "ambiguous"}, so execution authority was preserved`,
-      };
-    }
+  let rawTranscript: string;
+  try {
+    rawTranscript = await readSettledJsonl(() => readFileSync(transcriptPath, "utf-8"));
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    return settleInfrastructureUnavailable(mgr, authority, `Claude transcript unreadable: ${cause}`);
   }
-  // Exact modern settlement cannot consume partial JSONL. Parse the complete
-  // transcript before any identity, file, or test evidence extractor runs; a
+  // Exact settlement cannot consume partial JSONL. Parse the complete
+  // transcript before any file or test evidence extractor runs; a
   // malformed/truncated tail invalidates otherwise-valid earlier records.
-  if (authority !== null) {
-    const integrity = parseCompleteClaudeJsonl(transcriptContent);
-    if (integrity.kind === "malformed") {
-      return settleModernTranscriptUnavailable(mgr, authority, integrity.reason);
-    }
-    transcriptContent = integrity.transcript;
+  const integrity = parseCompleteClaudeJsonl(rawTranscript);
+  if (integrity.kind === "malformed") {
+    return settleInfrastructureUnavailable(mgr, authority, integrity.reason);
   }
-
-  const transcript = parseTranscript(transcriptContent);
-  const rawFilesModified = parseFilesModified(transcriptContent);
+  const transcriptContent = integrity.transcript;
+  // A Pi session handed to this Claude reader is refused, not read as an
+  // empty write set: a shrunken files_modified shrinks the Wave Gate lint set.
+  const writeEvidence = parseFilesModified(transcriptContent);
+  if (!writeEvidence.ok) {
+    return settleInfrastructureUnavailable(mgr, authority, `Claude transcript unusable: ${writeEvidence.error}`);
+  }
+  const rawFilesModified = writeEvidence.value;
   const bashTestOutput = parseBashTestOutput(transcriptContent, readPersistedOutput);
 
-  // Modern identity comes only from the snapshotted sidecar. Transcript and
-  // sole-executing inference remain compatibility-only for legacy graphs.
-  let taskId: string | null = authority?.taskId ?? extractTaskId(transcript);
-
-  // A legacy transcript that names no Task may still be attributed to the one
-  // Task executing — a guess, so it reaches only the quarantine path below
-  // (`applyUntrustedStopResolution`), which can never mint completion.
-  if (!taskId) {
-    const inference = inferSoleExecutingTask(mgr.load().executing_tasks ?? []);
-    if (inference.kind === "inferred") {
-      process.stderr.write(`WARNING: ${unprovenAttributionReason(agentType, inference.taskId, "sole-executing")}\n`);
-      taskId = inference.taskId;
-    } else {
-      // Ambiguous or unavailable attribution cannot release any execution
-      // reservation: in a parallel Wave every entry may belong to a live
-      // sibling. Preserve authority and make the missing settlement explicit.
-      const executingCount = inference.executingCount;
-      if (executingCount > 0) {
-        process.stderr.write(`WARNING: ${agentType} completed without task ID, ${executingCount} tasks executing (ambiguous)\n`);
-      } else {
-        process.stderr.write(
-          `WARNING: ${agentType} completed but task status was NOT recorded — no task ID in the transcript ` +
-            `(${transcriptPath ? `read ${transcriptPath}` : "no transcript found: the payload named none and none was derivable from session/agent id"}) ` +
-            `and executing_tasks is empty, so there is nothing to attribute the run to\n`,
-        );
-      }
-      return {
-        kind: "error",
-        message:
-          `update-task-status: ${agentType} completion has no task identity; ` +
-          `${executingCount} executing Tasks make attribution ${executingCount === 0 ? "unavailable" : "ambiguous"}, so execution authority was preserved`,
-      };
-    }
-  }
-
+  // Identity comes only from the snapshotted sidecar.
+  const taskId = authority.taskId;
   const state = mgr.load();
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task) {
     return {
       kind: "error",
       message:
-        `update-task-status: transcript named unknown task ${taskId}; ` +
+        `update-task-status: attempt authority names unknown task ${taskId}; ` +
         `known tasks: ${state.tasks.map((candidate) => candidate.id).join(", ") || "<none>"}. ` +
         "Implementation evidence was NOT stored.",
     };
@@ -405,9 +344,7 @@ export const runUpdateTaskStatus = async (
     repositoryRoot = observeTaskGraphProjectBoundary(mgr.getPath()).root;
   } catch (error) {
     const reason = `Claude TaskGraph project boundary unavailable: ${error instanceof Error ? error.message : String(error)}`;
-    return authority === null
-      ? { kind: "error", message: `update-task-status: ${reason}; execution authority was preserved` }
-      : settleModernTranscriptUnavailable(mgr, authority, reason);
+    return settleInfrastructureUnavailable(mgr, authority, reason);
   }
 
   let filesModified: string[];
@@ -423,40 +360,8 @@ export const runUpdateTaskStatus = async (
     // authority; clearing only executing_tasks could leave a re-executed
     // implemented Task green on evidence from before this attempt.
     const cause = error instanceof Error ? error.message : String(error);
-    if (authority === null) {
-      await mgr.update((s) => applyCompletionInfrastructureFailure(s, taskId, true));
-    } else {
-      const observedAt = parseIsoInstant(new Date().toISOString(), "Claude unsafe-path instant");
-      if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
-      let oracleFailure: string | null = null;
-      await mgr.update((state) => {
-        const applied = settleUnavailableImplementation(
-          state,
-          authority,
-          observedAt.value,
-          `Unsafe Claude modified-file evidence: ${cause}`,
-        );
-        if (applied.kind === "error") {
-          oracleFailure = JSON.stringify(applied.error);
-          return state;
-        }
-        return applied.state;
-      });
-      if (oracleFailure !== null) {
-        return { kind: "error", message: `update-task-status: Oracle infrastructure settlement failed: ${oracleFailure}` };
-      }
-    }
-    return {
-      kind: "error",
-      message: `update-task-status: unsafe modified-file evidence for ${taskId}: ${cause}`,
-    };
+    return settleInfrastructureUnavailable(mgr, authority, `unsafe modified-file evidence for ${taskId}: ${cause}`);
   }
-
-  // Pre-refactor graphs carried `tests_passed` on the task (replaced by
-  // `test_result`, no compat read — unshipped branch). Explain the
-  // otherwise-mystifying "missing evidence" once, where we touch the task.
-  const legacyNote = legacyTestsPassedNote(task);
-  if (legacyNote) process.stderr.write(`[loom] ${legacyNote}\n`);
 
   // Section 1: Test evidence — the agent's OWN epoch in the ledger first
   // (execution-time ground truth, attribution via agent_id), transcript
@@ -556,155 +461,44 @@ export const runUpdateTaskStatus = async (
     }
   }
 
-  // Section 3: Atomic state write. Attempt-baseline comparison, cumulative
-  // attribution, and new-test evidence are derived from the locked Task below,
-  // never the stale pre-lock read; the preserve-evidence guards also run INSIDE
-  // the locked update (a pre-lock read can be outdated by a concurrent
-  // writer before this write lands — TOCTOU) and are TRUST-aware ON BOTH
-  // SIDES: an existing trusted failure is preserved against an UNTRUSTED
-  // incoming resolution, while a trusted pass is preserved only if this retry
-  // changed no code. Historical green evidence cannot prove newer bytes. An
-  // untrusted result — e.g. a helper-reported "pass" from agent-controlled
-  // stdin — otherwise cannot preempt ground truth (mirrors
-  // store-test-evidence's skippedTrustedVerdict pattern), but NEWER ground
-  // truth supersedes older: a re-spawned agent's
-  // fresh epoch yielding trusted-pass/trusted-fail must land, or the first
-  // real red run would wedge the task forever (the gate treats trusted-fail
-  // as missing evidence and store-test-evidence also refuses trusted).
-  // A completed task is never reopened, at any trust level.
-  if (authority !== null) {
-    const observedAt = parseIsoInstant(new Date().toISOString(), "Claude implementation observation instant");
-    if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
-    const { application: modernSettlement } = await settleAndPersistExactImplementation(mgr, {
-      transport: "Claude",
-      authority,
-      observedAt: observedAt.value,
-      parserModifiedPaths: filesModified,
-      parserPathLabel: "Claude transcript files_modified",
-      taskCompleted: true,
-      testResult: testEvidence.result,
-      testEvidence: testEvidence.evidence,
-      proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-      ledger: epochLedger,
-    }, productionExactSettlementPorts(repositoryRoot, mgr.getPath()));
-    if (modernSettlement.kind === "error") {
-      return {
-        kind: "error",
-        message: `update-task-status: modern Oracle settlement failed: ${JSON.stringify(modernSettlement.error)}`,
-      };
-    }
-    if (modernSettlement.kind === "ignored") {
-      return passthroughDiagnostic(
-        `update-task-status: ${authority.taskId} result ignored (${modernSettlement.reason}); current authority preserved\n`,
-      );
-    }
-    process.stderr.write(`Task ${authority.taskId} settlement: ${describeSettlement(modernSettlement.transition)}.\n`);
-    const updated = modernSettlement.state;
-    const currentWave = updated.current_wave ?? 1;
-    if (isWaveComplete(updated, currentWave)) {
-      process.stderr.write(`\nWave ${currentWave} implementation complete. Run: /wave-gate\n`);
-    }
-    return modernSettlement.transition.kind === "infrastructure-blocked"
-      ? {
-          kind: "error",
-          message: `update-task-status: ${authority.taskId} completion infrastructure unavailable; exact attempt was released with an Oracle receipt`,
-        }
-      : { kind: "passthrough" };
-  }
-
-  let skippedExistingVerdict = false;
-  let comparisonFailure: string | null = null;
-  let newTestEvidenceFailure: string | null = null;
-  await mgr.update((s) => {
-    const target = s.tasks.find((candidate) => candidate.id === taskId);
-    if (target === undefined || target.status === "completed") {
-      skippedExistingVerdict = true;
-      return applyUntrustedStopResolution(s, taskId, {
-        taskCompleted: false,
-        testResult: testEvidence.result,
-        testEvidence: testEvidence.evidence,
-        filesModified,
-        changedDeclaredArtifacts: [],
-        bytesChangedSinceAttempt: false,
-        newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
-      }, TRUSTED_LEDGER_ONLY_POLICY).state;
-    }
-
-    // No-authority Claude settlement is compatibility quarantine only. It may
-    // compare and invalidate a proven legacy reservation, but never consume a
-    // modern attempt or decide positive completion.
-    if (target.active_implementation_attempt !== undefined ||
-        !(s.executing_tasks ?? []).some((executingTaskId) => executingTaskId === taskId)) {
-      skippedExistingVerdict = true;
-      return s;
-    }
-    const comparison = compareAttemptBaseline(
-      repositoryRoot,
-      target,
-      { kind: "repository-or-declared", extraModifiedPaths: filesModified },
-    );
-    if (comparison.failure !== null) {
-      comparisonFailure = comparison.failure;
-      return applyCompletionInfrastructureFailure(s, taskId, comparison.bytesChangedSinceAttempt);
-    }
-    const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
-    const verificationPolicy = taskVerificationPolicy(target);
-    const newTestObservation = collectNewTestEvidence(
-      cumulativeFiles,
-      verificationPolicy.newTests,
-      target.start_sha,
-      realDiffDepsAt(repositoryRoot),
-    );
-    if (!newTestObservation.ok) {
-      newTestEvidenceFailure = `update-task-status: cannot collect new-test evidence for ${taskId}: ` +
-        describeNewTestObservationError(newTestObservation.error);
-      return applyCompletionInfrastructureFailure(s, taskId, comparison.bytesChangedSinceAttempt);
-    }
-    const currentNewTestEvidence: NewTestEvidence = newTestObservation.value;
-    const applied = applyUntrustedStopResolution(s, taskId, {
-      taskCompleted: true,
-      testResult: testEvidence.result,
-      testEvidence: testEvidence.evidence,
-      filesModified,
-      changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
-      bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-      newTests: currentNewTestEvidence,
-    }, TRUSTED_LEDGER_ONLY_POLICY);
-    skippedExistingVerdict = applied.skipped;
-    return applied.state;
-  });
-
-  if (comparisonFailure !== null) {
+  // Section 3: one exact settlement under the State File lock; the byte
+  // observation and new-test evidence are read against the locked Task.
+  const observedAt = parseIsoInstant(new Date().toISOString(), "Claude implementation observation instant");
+  if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
+  const { application: settlement } = await settleAndPersistExactImplementation(mgr, {
+    transport: "Claude",
+    authority,
+    observedAt: observedAt.value,
+    parserModifiedPaths: filesModified,
+    parserPathLabel: "Claude transcript files_modified",
+    taskCompleted: true,
+    test: testEvidence,
+    proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+    ledger: epochLedger,
+  }, productionExactSettlementPorts(repositoryRoot, mgr.getPath()));
+  if (settlement.kind === "error") {
     return {
       kind: "error",
-      message: `update-task-status: cannot compare declared-artifact baseline for ${taskId}: ${comparisonFailure}`,
+      message: `update-task-status: Oracle settlement failed: ${JSON.stringify(settlement.error)}`,
     };
   }
-  if (newTestEvidenceFailure !== null) {
-    return { kind: "error", message: newTestEvidenceFailure };
+  if (settlement.kind === "ignored") {
+    return passthroughDiagnostic(
+      `update-task-status: ${authority.taskId} result ignored (${settlement.reason}); current authority preserved\n`,
+    );
   }
-
-  if (skippedExistingVerdict) {
-    return passthroughDiagnostic(`update-task-status: ${taskId} is completed or missing — leaving task evidence untouched\n`);
-  }
-
-  const persistedTask = mgr.load().tasks.find((candidate) => candidate.id === taskId);
-  const failures = persistedTask?.proof?.state === "failed"
-    ? persistedTask.proof.failures.map((failure) => failure.kind).join(", ")
-    : "positive Proof unavailable without exact attempt authority";
-  process.stderr.write(
-    `Task ${taskId} legacy completion quarantined pending fresh revalidation: ${failures}.\n`,
-  );
-
-  // The same locked update that landed the resolution reconciled the wave's
-  // implementation bit in both directions. Report completion from that state.
-  const updated = mgr.load();
+  process.stderr.write(`Task ${authority.taskId} settlement: ${describeSettlement(settlement.transition)}.\n`);
+  const updated = settlement.state;
   const currentWave = updated.current_wave ?? 1;
   if (isWaveComplete(updated, currentWave)) {
     process.stderr.write(`\nWave ${currentWave} implementation complete. Run: /wave-gate\n`);
   }
-
-  return { kind: "passthrough" };
+  return settlement.transition.kind === "infrastructure-blocked"
+    ? {
+        kind: "error",
+        message: `update-task-status: ${authority.taskId} completion infrastructure unavailable; exact attempt was released with an Oracle receipt`,
+      }
+    : { kind: "passthrough" };
 };
 
 const handler: HookHandler = (stdin, args) => runUpdateTaskStatus(stdin, args);

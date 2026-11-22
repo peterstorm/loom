@@ -13,11 +13,13 @@ import {
 } from "../../src/core/proof-boundary-observation";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { TaskGraph } from "../../src/types";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const SHA40 = "0123456789abcdef0123456789abcdef01234567";
 
 const graph = (extra: Readonly<Record<string, unknown>> = {}): Record<string, unknown> => ({
   current_phase: "execute",
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,

@@ -5,6 +5,10 @@ Accepted (2026-10-23). Shipped with the G5b owner-enforcement feature
 (`.claude/specs/2026-10-21-g5b-owner-enforcement/spec.md`, FR-013 and FR-016; plan
 `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-7; interview Q3d).
 
+Amended in place (2026-11-20, the complexity trim): the raw JUnit projection parseJunitTestcases is
+renamed `reportTestcases`, and Owner Verification reaches it only through `parseJunitTestcasesUnder`
+(`engine/src/core/report-run-root.ts`). The decision is unchanged.
+
 ## Context
 G5b's Wave Gate mutation-tests the owner module of every owed Invariant. It first runs the Invariant's
 matrix test against the unmutated workspace (the baseline), then once per planned mutant, each time
@@ -75,7 +79,8 @@ ambiguous observation is infrastructure, never a kill.**
   mutants when the owner did not change in the Wave, and it refuses generated mutants that are all
   invalid (`no-valid-mutants`): such a run carries no mutation evidence, so it can never be a verified
   run, whether the gate tallied it or a persisted result is read back.
-- Report parsing goes through `parseJunitTestcases` in `engine/src/core/structured-test-report.ts`. A
+- Report parsing goes through `parseJunitTestcasesUnder` (`engine/src/core/report-run-root.ts`), rooted
+  over the raw projection `reportTestcases` in `engine/src/core/structured-test-report.ts`. A
   report must first pass the strict structured-report parser. A Vitest JSON report is refused by name,
   because it carries no per-testcase file attribution, and a testcase without a name or classname is also
   refused. Either refusal is `report-unreadable`.

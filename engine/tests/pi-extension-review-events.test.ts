@@ -24,7 +24,8 @@ import { fixturePiAgentDirectory } from "./fixtures/fixture-pi-agent-directory";
 import { advertiseInstalledLaunchPort, SynchronousEventBus } from "./fixtures/emission-launch-port";
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
-import { graphFixture, taskFixture, observedEvidence } from "./fixtures/task-lifecycle";
+import { executingGraphFixture, graphFixture, observedEvidence, protectedGraphFixture, taskFixture } from "./fixtures/task-lifecycle";
+import type { TaskGraph } from "../src/types";
 import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/request-publication";
 import { renderSpawnTask } from "../src/handlers/helpers/programs";
 import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
@@ -40,6 +41,7 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../src/runtime-compatibility";
+import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -134,6 +136,7 @@ cpSync(join(fixturePiAgentDirectory(), "models.json"), join(piAgentDir, "models.
 
 const initialGraph = () => ({
   current_phase: "execute",
+  verification_manifest: preI6DefaultVerificationManifest(),
   phase_artifacts: {},
   skipped_phases: [],
   spec_file: null,
@@ -223,6 +226,11 @@ function replacementAttemptContext(
       admission,
     }),
   };
+}
+
+/** `graph` with T1 executing under exact attempt authority, as a live dispatch reserves it (ADR-0098). */
+function executingT1(graph: Record<string, unknown>): TaskGraph {
+  return executingGraphFixture(protectedGraphFixture(graph), ["T1"]);
 }
 
 function writeState(state: unknown, path: string = statePath): void {
@@ -1253,19 +1261,6 @@ describe("Pi extension review tool_result integration", () => {
     } finally {
       rmSync(pointer, { force: true });
       for (const dir of [second, scratch]) rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("retains malformed completion checkpoint parser diagnostics", async () => {
-    const extensionSpecifier = "../../pi/review-run-authority.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      standaloneCompletionCheckpointProblem: (checkpoint: string) => string | null;
-    };
-    expect(module.standaloneCompletionCheckpointProblem(JSON.stringify({ kind: "done" }))).toBeNull();
-    expect(module.standaloneCompletionCheckpointProblem(JSON.stringify({ kind: "blocked" }))).toBe("review is not done");
-    expect(module.standaloneCompletionCheckpointProblem("{")).toMatch(/^completion checkpoint is invalid JSON: .+/);
-    for (const notARecord of ["null", "[]", '"done"', "7", '[{"kind":"done"}]']) {
-      expect(module.standaloneCompletionCheckpointProblem(notARecord), notARecord).toBe("review is not done");
     }
   });
 
@@ -4235,15 +4230,15 @@ describe("Pi extension review tool_result integration", () => {
     mkdirSync(subagentDir, { recursive: true });
     const planPath = join(temp, "current-reservation-retry-plan.md");
     writeFileSync(planPath, "# Plan\n");
-    const strandedAt = new Date(Date.now() - 11 * 60_000).toISOString();
-    writeState({
+    // The fixture's attempt was reserved long before this run: aged past the reclaim window.
+    const stranded = executingT1({
       ...initialGraph(),
       phase_artifacts: { architecture: planPath },
       skipped_phases: ["plan-alignment"],
       plan_file: planPath,
-      executing_tasks: ["T1"],
-      tasks: [{ ...initialGraph().tasks[0], reserved_at: strandedAt }],
     });
+    const strandedAt = stranded.tasks[0]!.reserved_at!;
+    writeState(stranded);
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad483";
     const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
@@ -4294,7 +4289,8 @@ describe("Pi extension review tool_result integration", () => {
       sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad425" },
     };
 
-    writeState({ ...base, executing_tasks: ["T1"] });
+    // Reserved now: a live owner, not an aged reservation a retry may reclaim.
+    writeState(executingGraphFixture(protectedGraphFixture(base), ["T1"], new Date().toISOString()));
     let result = await pi.emit("tool_call", {
       toolName: "subagent",
       toolCallId: "call-duplicate-owner",
@@ -4691,32 +4687,6 @@ describe("Pi extension review tool_result integration", () => {
       content: [expect.objectContaining({ text: expect.stringContaining("orphan execution reservation T1") })],
     }));
     expect(readFileSync(statePath, "utf8")).toBe(before);
-  });
-
-  it.each([
-    ["completed", [{
-      id: "T1", description: "done", agent: "code-implementer-agent", wave: 1,
-      status: "completed", depends_on: [], new_tests_required: false,
-      proof: completedWithoutTestsProof,
-    }], ["T1"]],
-    ["trusted", [{
-      id: "T1", description: "trusted", agent: "code-implementer-agent", wave: 1,
-      status: "pending", depends_on: [], test_result: { verdict: "trusted-pass" },
-      new_tests_required: false, artifact_baseline: [], attempt_artifact_baseline: [],
-    }], ["T1"]],
-  ])("clears executing_tasks for a stopped %s task without overwriting state", async (_label, tasks, executing) => {
-    writeState({ ...initialGraph(), tasks, executing_tasks: executing });
-    const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
-    await pi.emit("tool_result", {
-      toolName: "subagent",
-      content: [],
-      details: { results: [{ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 0, messages: [] }] },
-    }, context);
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.executing_tasks).toEqual([]);
-    if (_label === "trusted") expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
-    if (_label === "completed") expect(state.tasks[0].status).toBe("completed");
   });
 
   it("reports a Loom completion that cannot resolve orchestration state", async () => {
@@ -5288,73 +5258,97 @@ describe("Pi extension review tool_result integration", () => {
     });
   });
 
-  it("captures pi-structured diagnostics without minting positive legacy completion", async () => {
+  /**
+   * T1 reserved through a real Pi dispatch in a disposable repository, the
+   * child's `artifact` written, then stopped with `messages`: the exact
+   * attempt the Pi stop settles (ADR-0098). Returns T1 as settled.
+   */
+  async function settleReservedPiAttempt(input: Readonly<{
+    prefix: string;
+    session: string;
+    artifact: string;
+    newTestsRequired: boolean;
+    messages: readonly unknown[];
+  }>): Promise<Record<string, unknown>> {
+    let settled: Record<string, unknown> = {};
+    await withTaskGraphRepository(input.prefix, {}, async (repository) => {
+      const artifactPath = join(repository.root, input.artifact);
+      expectOutsideLiveCheckout(artifactPath);
+      const planPath = join(temp, `${input.prefix}plan.md`);
+      writeFileSync(planPath, "# Plan\n");
+      writeState({
+        ...initialGraph(),
+        phase_artifacts: { architecture: planPath },
+        skipped_phases: ["plan-alignment"],
+        plan_file: planPath,
+        tasks: [{ ...initialGraph().tasks[0], file_list: [input.artifact], new_tests_required: input.newTestsRequired }],
+      }, repository.statePath);
+      const pi = await extension();
+      const context = { cwd: repository.root, sessionManager: { getSessionId: () => input.session } };
+      const toolCallId = `call-${input.prefix}`;
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test.", agentScope: "user" },
+      }, context)).toEqual([undefined]);
+      mkdirSync(dirname(artifactPath), { recursive: true });
+      writeFileSync(artifactPath, "export {};\n");
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: { results: [{ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 0, messages: input.messages }] },
+      }, context);
+      settled = JSON.parse(readFileSync(repository.statePath, "utf-8")).tasks[0];
+    });
+    return settled;
+  }
+
+  it("captures pi-structured diagnostics as untrusted test evidence; the observed bytes decide the Proof", async () => {
     // LIVE-captured payload shapes (pi 0.83 --mode json child, 2026-08-12):
     // assistant message_end carries the bash toolCall block with
     // id/name/arguments; the toolResult arrives as a message_end with role
     // toolResult + toolCallId/toolName/isError and the runner output text.
-    writeState({
-      ...initialGraph(),
-      executing_tasks: ["T1"],
-      tasks: [{
-        ...initialGraph().tasks[0],
-        file_list: [],
-        files_modified: ["packages/framework/src/__tests__/file-atomic.test.ts"],
-        artifact_baseline: [],
-        attempt_artifact_baseline: [{
-          artifact: "packages/framework/src/__tests__/file-atomic.test.ts",
-          snapshot: { kind: "missing" },
-        }],
-        new_tests_required: false,
-      }],
+    const task = await settleReservedPiAttempt({
+      prefix: "loom-pi-structured-",
+      session: "019fca39-f989-7510-8e62-50dadbcad42e",
+      artifact: "packages/framework/src/__tests__/file-atomic.test.ts",
+      newTestsRequired: false,
+      messages: [
+        {
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "chatcmpl-tool-structured-repro",
+            name: "bash",
+            arguments: {
+              command: "cd /home/peterstorm/dev/agentic/fugue && bun test packages/framework/src/__tests__/file-atomic.test.ts 2>&1 | tail -n 40",
+            },
+          }],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "chatcmpl-tool-structured-repro",
+          toolName: "bash",
+          isError: false,
+          content: [{
+            type: "text",
+            text: "bun test v1.3.13 (bf2e2cec)\n\nfile-atomic.test.ts:\n(pass) atomic commit\n\n 2142 pass\n 0 fail\n 1 expect() calls\nRan 1 test across 1 file. [11.00ms]\n",
+          }],
+        },
+      ],
     });
-    const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42e" } };
-    await pi.emit("tool_result", {
-      toolName: "subagent",
-      content: [],
-      details: {
-        results: [{
-          agent: "code-implementer-agent",
-          task: "Task ID: T1",
-          exitCode: 0,
-          messages: [
-            {
-              role: "assistant",
-              content: [{
-                type: "toolCall",
-                id: "chatcmpl-tool-structured-repro",
-                name: "bash",
-                arguments: {
-                  command: "cd /home/peterstorm/dev/agentic/fugue && bun test packages/framework/src/__tests__/file-atomic.test.ts 2>&1 | tail -n 40",
-                },
-              }],
-            },
-            {
-              role: "toolResult",
-              toolCallId: "chatcmpl-tool-structured-repro",
-              toolName: "bash",
-              isError: false,
-              content: [{
-                type: "text",
-                text: "bun test v1.3.13 (bf2e2cec)\n\nfile-atomic.test.ts:\n(pass) atomic commit\n\n 2142 pass\n 0 fail\n 1 expect() calls\nRan 1 test across 1 file. [11.00ms]\n",
-              }],
-            },
-          ],
-        }],
-      },
-    }, context);
-
-    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
     expect(task.test_result).toMatchObject({
       verdict: "untrusted",
       passed: true,
       label: expect.stringMatching(/^pi-structured: /),
     });
+    // A Task owing no new tests is decided by its observed bytes, never by
+    // the test claim: the declared artifact changed, so the Proof holds.
     expect(task).toMatchObject({
-      status: "pending",
-      proof: { state: "failed" },
-      revalidation_required: true,
+      status: "implemented",
+      proof: { state: "satisfied" },
+      files_modified: ["packages/framework/src/__tests__/file-atomic.test.ts"],
     });
   });
 
@@ -5362,49 +5356,23 @@ describe("Pi extension review tool_result integration", () => {
     ["printf 'bun test\\n654 pass\\n'", "654 pass\n0 fail\n"],
     ["bun test | grep -v fail", "654 pass\n"],
     ["cd engine && bun test | grep -v fail", "654 pass\n"],
-  ] as const)("keeps transcript fallback untrusted for test-looking command: %s", async (command, output) => {
-    writeState({
-      ...initialGraph(),
-      executing_tasks: ["T1"],
-      tasks: [{
-        ...initialGraph().tasks[0],
-        file_list: [],
-        files_modified: ["engine/tests/fallback-proof.test.ts"],
-        artifact_baseline: [],
-        attempt_artifact_baseline: [{
-          artifact: "engine/tests/fallback-proof.test.ts",
-          snapshot: { kind: "missing" },
-        }],
-        new_tests_required: true,
-      }],
+  ] as const)("records no test result for a test-looking but unattributable command: %s", async (command, output) => {
+    const task = await settleReservedPiAttempt({
+      prefix: "loom-pi-fallback-",
+      session: "019fca39-f989-7510-8e62-50dadbcad42d",
+      artifact: "engine/tests/fallback-proof.test.ts",
+      newTestsRequired: true,
+      messages: [
+        { role: "assistant", content: [{ type: "toolCall", id: "call-test", name: "bash", arguments: { command } }] },
+        { role: "toolResult", toolCallId: "call-test", toolName: "bash", content: [{ type: "text", text: output }] },
+      ],
     });
-    const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42d" } };
-    await pi.emit("tool_result", {
-      toolName: "subagent",
-      content: [],
-      details: {
-        results: [{
-          agent: "code-implementer-agent",
-          task: "Task ID: T1",
-          exitCode: 0,
-          messages: [
-            { role: "assistant", content: [{ type: "toolCall", id: "call-test", name: "bash", arguments: { command } }] },
-            { role: "toolResult", toolCallId: "call-test", toolName: "bash", content: [{ type: "text", text: output }] },
-          ],
-        }],
-      },
-    }, context);
-
-    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
     expect(task.status).toBe("pending");
-    expect(task.test_result).toEqual({
-      verdict: "untrusted",
-      passed: true,
-      label: "transcript-regex (fallback)",
-      provenance: "unverified",
-    });
-    expect(task.proof.state).not.toBe("satisfied");
+    // Pass-looking output the classifier cannot attribute to a runner proves
+    // nothing: no regex reading of it is recorded, so nothing claims a pass.
+    expect(task.test_result).toBeUndefined();
+    expect(task.test_evidence).toBeUndefined();
+    expect(task.proof).not.toMatchObject({ state: "satisfied" });
   });
 
   it("invalidates stale implemented evidence when a changed retry has malformed Pi messages", async () => {
@@ -6417,22 +6385,28 @@ describe("Pi extension review tool_result integration", () => {
     expect(specCheck.critical_count).toBeUndefined();
   });
 
-  it("warns when an implementation result has neither task id nor executing task", async () => {
+  it("settles nothing, and reports the unrecorded work to Pi, when an implementation result holds no attempt authority and no Task is executing", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      await pi.emit("tool_result", {
+      const responses = await pi.emit("tool_result", {
         toolName: "subagent",
         content: [],
         details: {
           results: [{
-            agent: "code-implementer-agent", task: "no task identifier", exitCode: 0, messages: [],
+            agent: "code-implementer-agent", task: "no task identifier", exitCode: 0,
+            messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
           }],
         },
       }, context);
-      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
-        .toContain("executing_tasks is empty — task status was NOT recorded");
+      const unrecorded = "code-implementer-agent completed without implementation attempt authority and " +
+        "no Task is executing — nothing settled; its Task status was NOT recorded";
+      expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain(unrecorded);
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining(unrecorded) })],
+      }));
     } finally {
       stderr.mockRestore();
     }

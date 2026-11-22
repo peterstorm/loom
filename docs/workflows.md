@@ -162,7 +162,7 @@ Evidence retains provenance:
 
 - report-backed ledger evidence can produce `trusted-pass`/`trusted-fail`;
 - Pi’s paired structured result remains `pi-structured`;
-- transcript fallback is explicitly untrusted/degraded;
+- Claude Code's transcript fallback is explicitly untrusted/degraded; a Pi run without a paired structured result records no test result at all (`test-result-missing`);
 - a pass invalidated by later writes does not remain a pass.
 
 A Task carries an explicit `verification_policy` with independent `regression` and `new_tests` requirements. Each arm is either `required` or `waived` with a typed reason. For example, `existing-tests-sufficient` waives new-test creation while retaining regression execution; `documentation-only` may waive both. Neither policy waives declared-artifact proof or review. How evidence is recorded and trusted: [Guarded Skill Machines](../machines/README.md#the-evidence-ledger).

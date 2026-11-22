@@ -13,7 +13,14 @@
  */
 import { join } from "node:path";
 import { match } from "ts-pattern";
-import type { AgentRequestAuthority } from "./orchestration-contract";
+import type { AgentRequestAuthority, DomainResult } from "./orchestration-contract";
+import {
+  canonicalRecord,
+  parseContextDigest,
+  parseRequestId,
+  type ContextDigest,
+  type RequestId,
+} from "./orchestration-contract/identity";
 import type { LoomAgentName } from "./model-profiles";
 import { SECURITY_VERIFIER_ROLE } from "./security-adjudication";
 import { FROZEN_DIFF_PAGE_UNITS, type FrozenDiff } from "./standalone-read-coverage";
@@ -93,11 +100,29 @@ export function canonicalSpawnTaskText(rendered: string, issuedTask: string): Ca
     : Object.freeze({ kind: "render-fallback" as const, task: rendered });
 }
 
+/**
+ * The authority markers that bind a spawned task to its issued request
+ * (ADR-0017): the request id, its Context Packet digest, and the packet's path
+ * in the run directory. They are written by `renderSpawnTaskText` and read back
+ * by `parseIssuedTaskIdentity` and `parseIssuedContextPath`, all in this
+ * module, so the grammar has one writer and one reader.
+ */
+const REQUEST_ID_MARKER = "LOOM_REQUEST_ID";
+const CONTEXT_DIGEST_MARKER = "LOOM_CONTEXT_DIGEST";
+const CONTEXT_PATH_MARKER = "LOOM_CONTEXT_PATH";
+type AuthorityMarker = typeof REQUEST_ID_MARKER | typeof CONTEXT_DIGEST_MARKER | typeof CONTEXT_PATH_MARKER;
+
+/** The one marker-line grammar: `MARKER: value` on its own line. */
+const authorityMarkerLine = (marker: AuthorityMarker, value: string): string => `${marker}: ${value}\n`;
+
 /** One POSIX-shell single-quoted word. */
 const shellQuote = (text: string): string => "'" + text.replaceAll("'", "'\\''") + "'";
 
+/** Where a run directory keeps the Context Packet of `digest`, relative to it. */
+const contextPacketLeaf = (digest: string): string => join("contexts", `${digest}.json`);
+
 const contextPath = (facts: SpawnTaskFacts): string =>
-  join(facts.runDirectory, "contexts", `${facts.authority.contextDigest}.json`);
+  join(facts.runDirectory, contextPacketLeaf(facts.authority.contextDigest));
 
 /** The Context Packet reader every reviewer delivery runs; the shell verifies it exists. */
 export const contextPacketReaderPath = (packageRoot: string): string =>
@@ -217,9 +242,9 @@ function reviewerDeliveryBootstrap(facts: SpawnTaskFacts, delivery: ReviewerDeli
 export function renderSpawnTaskText(facts: SpawnTaskFacts): string {
   const { authority } = facts;
   return (facts.standalone ? "LOOM_REVIEW_CONTEXT: standalone\n" : "") +
-    `LOOM_REQUEST_ID: ${authority.requestId}\n` +
-    `LOOM_CONTEXT_DIGEST: ${authority.contextDigest}\n` +
-    `LOOM_CONTEXT_PATH: ${contextPath(facts)}\n` +
+    authorityMarkerLine(REQUEST_ID_MARKER, authority.requestId) +
+    authorityMarkerLine(CONTEXT_DIGEST_MARKER, authority.contextDigest) +
+    authorityMarkerLine(CONTEXT_PATH_MARKER, contextPath(facts)) +
     requiredSkillMarker(authority.requiredSkill) +
     contextSectionDelivery(facts) +
     facts.descriptor +
@@ -227,3 +252,94 @@ export function renderSpawnTaskText(facts: SpawnTaskFacts): string {
     standalonePanelBootstrap(facts.panelViewPath) +
     facts.instruction;
 }
+
+/** The issued request a task's authority markers name: the one spelling of the
+ *  pair, which the `bound` arm below carries. */
+export type TaskIdentity = Readonly<{ requestId: RequestId; contextDigest: ContextDigest }>;
+
+/**
+ * What a task's authority markers claim. `unbound`: neither marker appears,
+ * so the task claims no engine authority. `malformed`: a marker appears but
+ * the pair is incomplete, contradictory or not canonical, which fails closed
+ * wherever it is read. `bound`: exactly one canonical identity. The identity
+ * only LOCATES issued authority; it is never authority on its own.
+ */
+export type IssuedTaskIdentity =
+  | Readonly<{ kind: "unbound" }>
+  | Readonly<{ kind: "malformed"; reason: string }>
+  | (Readonly<{ kind: "bound" }> & TaskIdentity);
+
+/**
+ * One marker as the lines of a task carry it. Every line that starts with
+ * `MARKER:` is a claim. A claim must have the exact `MARKER: value` shape with
+ * a whitespace-free value, or the marker is contradictory. Identical repeats
+ * name one identity and stay bound (a harmless re-render or echo); two
+ * different values are contradictory, and the reader never picks the first.
+ */
+type TaskMarker =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "bound"; value: string }>
+  | Readonly<{ kind: "contradictory" }>;
+
+function taskMarker(lines: readonly string[], marker: AuthorityMarker): TaskMarker {
+  const claimPrefix = `${marker}:`;
+  const valuePrefix = `${marker}: `;
+  const claims = lines.filter((line) => line.startsWith(claimPrefix));
+  const values = claims
+    .map((line) => line.startsWith(valuePrefix) ? line.slice(valuePrefix.length) : "")
+    .filter((value) => value.length > 0 && !/\s/.test(value));
+  if (values.length < claims.length) return canonicalRecord({ kind: "contradictory" as const });
+  const distinct = new Set(values);
+  if (distinct.size === 0) return canonicalRecord({ kind: "absent" as const });
+  return distinct.size === 1
+    ? canonicalRecord({ kind: "bound" as const, value: values[0] })
+    : canonicalRecord({ kind: "contradictory" as const });
+}
+
+const markerReason = (state: TaskMarker): string =>
+  state.kind === "bound" ? `names ${state.value}`
+  : state.kind === "absent" ? "is absent"
+  : "is contradictory";
+
+/**
+ * Parse the issued request identity a spawned task's authority markers name:
+ * the one reader of what `renderSpawnTaskText` writes, total over any text.
+ * Both markers or neither; each value through its branded parser.
+ */
+export function parseIssuedTaskIdentity(taskText: string): IssuedTaskIdentity {
+  const lines = taskText.split("\n");
+  const requestMarker = taskMarker(lines, REQUEST_ID_MARKER);
+  const digestMarker = taskMarker(lines, CONTEXT_DIGEST_MARKER);
+  if (requestMarker.kind === "absent" && digestMarker.kind === "absent") {
+    return canonicalRecord({ kind: "unbound" as const });
+  }
+  if (requestMarker.kind !== "bound" || digestMarker.kind !== "bound") {
+    return malformedIdentity(`task issuance identity is incomplete or contradictory: ${REQUEST_ID_MARKER} marker ${markerReason(requestMarker)}; ` +
+      `${CONTEXT_DIGEST_MARKER} marker ${markerReason(digestMarker)}`);
+  }
+  const requestId = parseRequestId(requestMarker.value);
+  if (!requestId.ok) return malformedIdentity(notCanonical(REQUEST_ID_MARKER, requestId.error.message));
+  const contextDigest = parseContextDigest(digestMarker.value);
+  if (!contextDigest.ok) return malformedIdentity(notCanonical(CONTEXT_DIGEST_MARKER, contextDigest.error.message));
+  return canonicalRecord({ kind: "bound" as const, requestId: requestId.value, contextDigest: contextDigest.value });
+}
+
+const malformedIdentity = (reason: string): IssuedTaskIdentity => canonicalRecord({ kind: "malformed" as const, reason });
+
+/**
+ * The Context Packet path a task names for its bound `identity`: exactly one
+ * `LOOM_CONTEXT_PATH` value, and one that ends in the `contexts/<digest>.json`
+ * leaf `renderSpawnTaskText` writes for that identity's digest. An absent or
+ * contradictory marker, or a path to any other packet, is refused. The path
+ * only locates the run directory; the caller still anchors it before reading.
+ */
+export function parseIssuedContextPath(taskText: string, identity: TaskIdentity): DomainResult<string, string> {
+  const marker = taskMarker(taskText.split("\n"), CONTEXT_PATH_MARKER);
+  if (marker.kind !== "bound") return { ok: false, error: `task ${CONTEXT_PATH_MARKER} marker ${markerReason(marker)}` };
+  const leaf = contextPacketLeaf(identity.contextDigest);
+  return marker.value.endsWith(`/${leaf}`)
+    ? { ok: true, value: marker.value }
+    : { ok: false, error: `task ${CONTEXT_PATH_MARKER} marker names ${marker.value}, not the ${leaf} its ${CONTEXT_DIGEST_MARKER} binds` };
+}
+
+const notCanonical = (marker: AuthorityMarker, message: string): string => `task ${marker} marker is not canonical: ${message}`;

@@ -129,12 +129,6 @@
           ],
           "reason": "digest-only hashing and path math over the resource inventory it is given"
         },
-        "engine/src/core/legacy-archive.ts": {
-          "allow": [
-            "node:crypto"
-          ],
-          "reason": "digest-only hashing of the legacy journal archive bytes"
-        },
         "engine/src/core/orchestration-contract/bytes.ts": {
           "allow": [
             "node:crypto"
@@ -207,12 +201,6 @@
             "node:crypto"
           ],
           "reason": "digest-only hashing of review packet bytes"
-        },
-        "engine/src/core/review-panel.ts": {
-          "allow": [
-            "node:path"
-          ],
-          "reason": "pure path math over panel artifact paths"
         },
         "engine/src/core/rules-gate.ts": {
           "allow": [
@@ -292,7 +280,37 @@
           "allow": [
             "zod/v4"
           ],
-          "reason": "run-metadata.json is an external document the program reads; parsed with one strict zod schema (ADR-0066)"
+          "reason": "the security-audit wire kit: run-metadata.json and the shared field schemas every security volume parses with (ADR-0066)"
+        },
+        "engine/src/core/security-findings.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "security-findings.json is parsed by one strict zod schema; the finding types are derived from it"
+        },
+        "engine/src/core/security-coverage.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the coverage ledger, seeds, unit results and critic result are parsed by strict zod schemas; CoverageUnit is derived from them"
+        },
+        "engine/src/core/security-adjudication.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "verdicts.json ballots and their bindings are parsed by one strict zod schema; the ballot types are derived from it"
+        },
+        "engine/src/core/security-verification.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the verifier's result envelope is parsed by one strict zod schema built on the vote schema"
+        },
+        "engine/src/core/security-audit-start.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the start payload is parsed by one strict zod schema"
         },
         "engine/src/core/owner-verification/import-graph.ts": {
           "allow": [
@@ -316,7 +334,7 @@
     },
     {
       "module": "engine/src/parsers/",
-      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins, the type barrel, ts-pattern, the two shared core vocabularies (tool-vocabulary, claude-record-kind) and the core's one JSON-object predicate (plain-record, a pure leaf with no imports) only.",
+      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins, the type barrel, ts-pattern, the two shared core vocabularies (tool-vocabulary, claude-record-kind) and the core's one JSON-object predicate (plain-record) and its single-diagnostic parse result (parse-result), both pure leaves with no imports, only.",
       "allow": [
         "./",
         "engine/src/parsers/",
@@ -325,6 +343,7 @@
         "engine/src/core/tool-vocabulary",
         "engine/src/core/claude-record-kind",
         "engine/src/core/plain-record",
+        "engine/src/core/parse-result",
         "ts-pattern"
       ],
       "deny": [
@@ -666,7 +685,6 @@
     "engine/src/core/orchestration-contract/effects.ts::envelope.value.kind",
     "engine/src/core/orchestration-contract/roster.ts::entry.kind",
     "engine/src/core/panel-program.ts::state.stage",
-    "engine/src/core/panel-program.ts::state.stage",
     "engine/src/core/panel-verdict-source.ts::accepted.kind",
     "engine/src/core/persistent-panel.ts::envelope.type",
     "engine/src/core/persistent-panel.ts::event.type",
@@ -682,7 +700,6 @@
     "engine/src/core/runtime-baseline-restore.ts::refusal.kind",
     "engine/src/core/standalone-review.ts::event.kind",
     "engine/src/core/standalone-review.ts::state.kind",
-    "engine/src/core/task-attribution.ts::attribution",
     "engine/src/core/wave-gate-machine.ts::event.kind",
     "engine/src/core/wave-gate-machine.ts::state.kind",
     "engine/src/core/wave-gate-registration.ts::admitted.kind",
@@ -757,8 +774,6 @@
     "pi/implementation-brief-expansion.ts::triage.kind"
   ],
   "duplicateBlockBaseline": [
-    "engine/src/core/panel-program.ts::engine/src/core/panel-program.ts@4e66f2f0",
-    "engine/src/core/panel-program.ts::engine/src/core/panel-program.ts@8055d7ab",
     "engine/src/handlers/helpers/programs/remediation-registration.ts::engine/src/handlers/helpers/programs/remediation-registration.ts@081d2ff1",
     "engine/src/handlers/helpers/red-then-green-status.ts::engine/src/handlers/helpers/stop-check-plan.ts@57aa1a8b",
     "engine/src/handlers/helpers/stop-check-plan.ts::engine/src/handlers/helpers/red-then-green-status.ts@57aa1a8b",
@@ -767,7 +782,6 @@
     "engine/tests/acceptance/affected-stop-check.acceptance.test.ts::engine/tests/acceptance/stop-check-plan-affected.acceptance.test.ts@e483678e",
     "engine/tests/acceptance/affected-stop-check.acceptance.test.ts::engine/tests/handlers/changed-files.matrix.test.ts@e483678e",
     "engine/tests/acceptance/affected-stop-check.acceptance.test.ts::engine/tests/handlers/subagent-stop/dispatch-acceptance-stop-check.test.ts@57784c35",
-    "engine/tests/acceptance/red-then-green.acceptance.test.ts::engine/tests/handlers/i6-settlement.matrix.test.ts@ad4fea74",
     "engine/tests/acceptance/red-then-green.acceptance.test.ts::engine/tests/handlers/i6-settlement.matrix.test.ts@bf89ae89",
     "engine/tests/acceptance/skeleton-generation.acceptance.test.ts::engine/tests/core/skeleton-generate.test.ts@3509fcb5",
     "engine/tests/acceptance/skeleton-generation.acceptance.test.ts::engine/tests/core/skeleton-ts-surface.test.ts@8dc397c3",
@@ -779,10 +793,6 @@
     "engine/tests/acceptance/stop-check-plan-affected.acceptance.test.ts::engine/tests/acceptance/affected-stop-check.acceptance.test.ts@e483678e",
     "engine/tests/acceptance/stop-check-plan-affected.acceptance.test.ts::engine/tests/handlers/changed-files.matrix.test.ts@e483678e",
     "engine/tests/acceptance/stop-check-plan-affected.acceptance.test.ts::engine/tests/handlers/subagent-stop/dispatch-acceptance-stop-check.test.ts@57784c35",
-    "engine/tests/core/attestation-binding.test.ts::engine/tests/core/attestation-dispatch.test.ts@20263aec",
-    "engine/tests/core/attestation-binding.test.ts::engine/tests/core/attestation-dispatch.test.ts@7a57b352",
-    "engine/tests/core/attestation-dispatch.test.ts::engine/tests/core/attestation-binding.test.ts@20263aec",
-    "engine/tests/core/attestation-dispatch.test.ts::engine/tests/core/attestation-binding.test.ts@7a57b352",
     "engine/tests/core/context-packet-byte-grammar.test.ts::engine/tests/handlers/helpers/programs/standalone-successor-registration.test.ts@e5a6456c",
     "engine/tests/core/defect-family-accounting.test.ts::engine/tests/fixtures/standalone-remediation-authority.ts@c90b80f4",
     "engine/tests/core/defect-family-accounting.test.ts::engine/tests/handlers/helpers/programs/remediation-registration.test.ts@a4dd5048",
@@ -798,31 +808,25 @@
     "engine/tests/core/skeleton-ts-surface.test.ts::engine/tests/acceptance/skeleton-generation.acceptance.test.ts@8dc397c3",
     "engine/tests/core/spawn-graph-observation.test.ts::engine/tests/handlers/task-execution-attempt-registration.test.ts@2dc8f735",
     "engine/tests/core/standalone-review-checkpoint-refutation-restore.test.ts::engine/tests/core/reviewer-protocol-history.test.ts@512494ce",
-    "engine/tests/core/standalone-review.test.ts::engine/tests/core/standalone-review.test.ts@0a371cc2",
     "engine/tests/core/standalone-review.test.ts::engine/tests/core/standalone-review.test.ts@7fecca10",
     "engine/tests/core/standalone-review.test.ts::engine/tests/fixtures/standalone-remediation-authority.ts@0e7ffbc0",
     "engine/tests/core/stop-check-planner-parity.matrix.test.ts::engine/tests/handlers/stop-checks.test.ts@90dd0cd5",
     "engine/tests/core/verification-manifest-affected.test.ts::engine/tests/core/verification-manifest-affected.test.ts@c245647e",
-    "engine/tests/core/wave-completion-readiness.test.ts::engine/tests/state-manager-load-guards.test.ts@8d1cb915",
     "engine/tests/fixtures/owner-verification-repo.ts::engine/tests/handlers/helpers/wave-completion-suite.test.ts@30cb1cf7",
     "engine/tests/fixtures/standalone-remediation-authority.ts::engine/tests/core/defect-family-accounting.test.ts@c90b80f4",
     "engine/tests/fixtures/standalone-remediation-authority.ts::engine/tests/core/standalone-review.test.ts@0e7ffbc0",
     "engine/tests/handlers/changed-files.matrix.test.ts::engine/tests/acceptance/affected-stop-check.acceptance.test.ts@e483678e",
     "engine/tests/handlers/changed-files.matrix.test.ts::engine/tests/acceptance/stop-check-plan-affected.acceptance.test.ts@e483678e",
     "engine/tests/handlers/changed-files.matrix.test.ts::engine/tests/handlers/stop-checks-isolation.test.ts@7dad38e1",
-    "engine/tests/handlers/complete-wave-gate.test.ts::engine/tests/handlers/complete-wave-gate.test.ts@846b47b4",
     "engine/tests/handlers/helpers/amend-spec-trace.test.ts::engine/tests/handlers/helpers/revise-contract.test.ts@e1d9c2cd",
     "engine/tests/handlers/helpers/amend-spec-trace.test.ts::engine/tests/handlers/helpers/upgrade-spec-trace.test.ts@e1d9c2cd",
     "engine/tests/handlers/helpers/cleanup-state.test.ts::engine/tests/handlers/helpers/set-phase.test.ts@87614bb2",
-    "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@1951f028",
-    "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@1a52f3e2",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@70afd7ab",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@70afd7ab",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@70afd7ab",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@70afd7ab",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@70afd7ab",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@70afd7ab",
-    "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@932988d6",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@c9f674ad",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@ebba3df5",
     "engine/tests/handlers/helpers/orchestration.test.ts::engine/tests/handlers/helpers/orchestration.test.ts@f9edb245",
@@ -840,8 +844,6 @@
     "engine/tests/handlers/helpers/programs/standalone-successor-registration.test.ts::engine/tests/core/context-packet-byte-grammar.test.ts@e5a6456c",
     "engine/tests/handlers/helpers/quality-programs.test.ts::engine/tests/handlers/helpers/quality-programs.test.ts@e359a629",
     "engine/tests/handlers/helpers/quality-programs.test.ts::engine/tests/handlers/helpers/quality-programs.test.ts@f1c7547c",
-    "engine/tests/handlers/helpers/reconcile-implementation-proof.test.ts::engine/tests/handlers/helpers/reconcile-implementation-proof.test.ts@17cc3e12",
-    "engine/tests/handlers/helpers/reconcile-implementation-proof.test.ts::engine/tests/handlers/helpers/reconcile-implementation-proof.test.ts@52a26119",
     "engine/tests/handlers/helpers/red-then-green-status.test.ts::engine/tests/handlers/helpers/stop-check-plan.test.ts@dade09aa",
     "engine/tests/handlers/helpers/revise-contract.test.ts::engine/tests/handlers/helpers/amend-spec-trace.test.ts@e1d9c2cd",
     "engine/tests/handlers/helpers/revise-contract.test.ts::engine/tests/handlers/helpers/upgrade-spec-trace.test.ts@e1d9c2cd",
@@ -853,7 +855,6 @@
     "engine/tests/handlers/helpers/upgrade-spec-trace.test.ts::engine/tests/handlers/helpers/upgrade-spec-trace.test.ts@b71c3a9c",
     "engine/tests/handlers/helpers/upgrade-spec-trace.test.ts::engine/tests/handlers/helpers/upgrade-spec-trace.test.ts@b72a50d3",
     "engine/tests/handlers/helpers/wave-completion-suite.test.ts::engine/tests/fixtures/owner-verification-repo.ts@30cb1cf7",
-    "engine/tests/handlers/i6-settlement.matrix.test.ts::engine/tests/acceptance/red-then-green.acceptance.test.ts@ad4fea74",
     "engine/tests/handlers/i6-settlement.matrix.test.ts::engine/tests/acceptance/red-then-green.acceptance.test.ts@bf89ae89",
     "engine/tests/handlers/i6-settlement.matrix.test.ts::engine/tests/handlers/subagent-stop/update-task-status-project-boundary.test.ts@1cc2ef38",
     "engine/tests/handlers/post-tool-use/record-evidence.test.ts::engine/tests/handlers/post-tool-use/record-evidence.test.ts@0ebd2871",
@@ -865,15 +866,10 @@
     "engine/tests/handlers/revise-contract-skeletons.test.ts::engine/tests/acceptance/skeleton-revision.acceptance.test.ts@d85e0dbf",
     "engine/tests/handlers/stop-checks-isolation.test.ts::engine/tests/handlers/changed-files.matrix.test.ts@7dad38e1",
     "engine/tests/handlers/stop-checks.test.ts::engine/tests/core/stop-check-planner-parity.matrix.test.ts@90dd0cd5",
-    "engine/tests/handlers/store-spec-check-findings.test.ts::engine/tests/handlers/store-spec-check-findings.test.ts@146eb74d",
-    "engine/tests/handlers/store-spec-check-findings.test.ts::engine/tests/handlers/store-spec-check-findings.test.ts@ff3378f7",
     "engine/tests/handlers/subagent-stop/advance-phase.test.ts::engine/tests/utils/find-file.test.ts@b2d8255c",
     "engine/tests/handlers/subagent-stop/dispatch-acceptance-stop-check.test.ts::engine/tests/acceptance/affected-stop-check.acceptance.test.ts@57784c35",
     "engine/tests/handlers/subagent-stop/dispatch-acceptance-stop-check.test.ts::engine/tests/acceptance/stop-check-plan-affected.acceptance.test.ts@57784c35",
     "engine/tests/handlers/subagent-stop/dispatch-acceptance-stop-check.test.ts::engine/tests/handlers/subagent-stop/dispatch-acceptance-stop-check.test.ts@6a1434fa",
-    "engine/tests/handlers/subagent-stop/update-task-status-machine.test.ts::engine/tests/handlers/subagent-stop/update-task-status-machine.test.ts@4dd9314e",
-    "engine/tests/handlers/subagent-stop/update-task-status-machine.test.ts::engine/tests/handlers/subagent-stop/update-task-status-machine.test.ts@e7c93671",
-    "engine/tests/handlers/subagent-stop/update-task-status-machine.test.ts::engine/tests/pi/subagent-result.test.ts@0b44ea03",
     "engine/tests/handlers/subagent-stop/update-task-status-project-boundary.test.ts::engine/tests/handlers/i6-settlement.matrix.test.ts@1cc2ef38",
     "engine/tests/handlers/subagent-stop/update-task-status-project-boundary.test.ts::engine/tests/handlers/subagent-stop/update-task-status-project-boundary.test.ts@eed7905c",
     "engine/tests/handlers/task-execution-attempt-registration.test.ts::engine/tests/core/spawn-graph-observation.test.ts@2dc8f735",
@@ -895,7 +891,6 @@
     "engine/tests/pi/reserved-slot.test.ts::engine/tests/pi/attempt-authority-correlation.test.ts@7a9098a8",
     "engine/tests/pi/rules-gate-parity.test.ts::engine/tests/core/rules-gate.test.ts@54c4f226",
     "engine/tests/pi/spawn-lifecycle.test.ts::engine/tests/pi/subagent-stop.test.ts@2fbd34be",
-    "engine/tests/pi/subagent-result.test.ts::engine/tests/handlers/subagent-stop/update-task-status-machine.test.ts@0b44ea03",
     "engine/tests/pi/subagent-result.test.ts::engine/tests/pi/attempt-authority-correlation.test.ts@9a047310",
     "engine/tests/pi/subagent-result.test.ts::engine/tests/pi/subagent-result.test.ts@05df86b2",
     "engine/tests/pi/subagent-result.test.ts::engine/tests/pi/subagent-result.test.ts@0afd2aeb",
@@ -903,7 +898,6 @@
     "engine/tests/pi/subagent-stop.test.ts::engine/tests/pi/spawn-lifecycle.test.ts@2fbd34be",
     "engine/tests/spec-check-command-contract.test.ts::engine/tests/core/requirement-coverage.property.test.ts@4a085f89",
     "engine/tests/spec-check-command-contract.test.ts::engine/tests/core/requirement-coverage.test.ts@4a085f89",
-    "engine/tests/state-manager-load-guards.test.ts::engine/tests/core/wave-completion-readiness.test.ts@8d1cb915",
     "engine/tests/utils/find-file.test.ts::engine/tests/handlers/subagent-stop/advance-phase.test.ts@b2d8255c"
   ],
   "docReferences": {
@@ -1342,7 +1336,6 @@
     "engine/src/core/pi-agent-directory.ts::getAgentDir",
     "engine/src/core/report-file-attribution.ts::com.acme.FooTest",
     "engine/src/core/report-file-attribution.ts::com.acme.FooTest$Nested",
-    "engine/src/core/review-panel.ts::verdicts/",
     "engine/src/core/route-reachability.ts::provider/model",
     "engine/src/core/run-inspection.ts::events/",
     "engine/src/core/run-inspection.ts::programs/remediation.ts",
@@ -1398,7 +1391,6 @@
     "engine/src/handlers/helpers/orchestration.ts::events/",
     "engine/src/handlers/helpers/panel-run.ts::candidate-performance-first.md",
     "engine/src/handlers/helpers/panel-run.ts::candidates/",
-    "engine/src/handlers/helpers/panel-run.ts::finding-code-reviewer-9.json",
     "engine/src/handlers/helpers/security-audit.ts::verification-runs/",
     "engine/src/handlers/helpers/security-audit.ts::verification-runs/",
     "engine/src/handlers/helpers/security-verification-proofs.ts::verification-runs/",
@@ -1501,10 +1493,8 @@
     "engine/src/core/findings.ts::mergeFindings",
     "engine/src/core/findings.ts::recordReviewRunEvidence",
     "engine/src/core/findings.ts::reviewRunError",
-    "engine/src/core/implementation-application.ts::applyUntrustedStopResolution",
     "engine/src/core/implementation-application.ts::buildTaskLocalByteObservation",
     "engine/src/core/implementation-brief.ts::renderImplementationBrief",
-    "engine/src/core/implementation-completion.ts::evaluateTaskCompletionSuite",
     "engine/src/core/implementation-completion.ts::settleImplementationAttempt",
     "engine/src/core/implementation-evidence.ts::resolveTestEvidence",
     "engine/src/core/implementation-retry.ts::authorizeImplementationSpawn",
@@ -1512,9 +1502,6 @@
     "engine/src/core/implementation-retry.ts::parseImplementationAttemptContext",
     "engine/src/core/implementation-retry.ts::projectLineage",
     "engine/src/core/implementation-window.ts::classifyImplementationWindow",
-    "engine/src/core/legacy-archive.ts::parseAdjudicatedStandaloneReview",
-    "engine/src/core/legacy-archive.ts::translateLegacyPanelJournal",
-    "engine/src/core/legacy-panel-decisions.ts::executeDeterministicPanelOperation",
     "engine/src/core/model-calibration.ts::scoreCalibration",
     "engine/src/core/orchestration-contract/actions.ts::parseBlockedDiagnostic",
     "engine/src/core/orchestration-contract/bytes.ts::readDenseDataArray",
@@ -1536,7 +1523,6 @@
     "engine/src/core/panel-kernel.ts::parseRunManifest",
     "engine/src/core/panel-kernel.ts::parseVerdictEnvelope",
     "engine/src/core/panel-program.ts::reduceArchitectureProgram",
-    "engine/src/core/panel-program.ts::reduceRefutationProgram",
     "engine/src/core/parse-plan-models.ts::collectStrays",
     "engine/src/core/parse-spec.ts::parseEntries",
     "engine/src/core/proof-obligations.ts::evaluateOne",
@@ -1555,10 +1541,6 @@
     "engine/src/core/remediation-machine.ts::verifyTemporaryIndex",
     "engine/src/core/requirement-coverage.ts::parseStoredUnavailableReason",
     "engine/src/core/review-output.ts::parsePriorAssessments",
-    "engine/src/core/review-panel.ts::parseBriefFindingEntry",
-    "engine/src/core/security-coverage.ts::<anonymous>",
-    "engine/src/core/security-coverage.ts::parseCoverageSeeds",
-    "engine/src/core/security-coverage.ts::validateStateInvariants",
     "engine/src/core/shell-normalize.ts::normalizeShellSpanInternal",
     "engine/src/core/spec-check.ts::reconcileSpecCheck",
     "engine/src/core/spec-trace-amendment.ts::amendSpecTrace",
@@ -1590,12 +1572,10 @@
     "engine/src/core/wave-review-authority.ts::prepareWaveReviewBatch",
     "engine/src/core/wave-review-issuance.ts::installWaveReviewRunsTransition",
     "engine/src/core/wave-review-issuance.ts::markWaveTaskReviewRetriesIssuedTransition",
-    "engine/src/handlers/helpers/complete-wave-gate.ts::runCompleteWaveGate",
     "engine/src/handlers/helpers/mark-tests-passed.ts::handler",
     "engine/src/handlers/helpers/model-calibration.ts::handler",
     "engine/src/handlers/helpers/model-profiles.ts::handler",
     "engine/src/handlers/helpers/panel-contract.ts::handler",
-    "engine/src/handlers/helpers/programs/legacy-panel.ts::materializePanelRequest",
     "engine/src/handlers/helpers/programs/remediation-events.ts::replayRemediationCheckObservedEvent",
     "engine/src/handlers/helpers/programs/remediation.ts::checkObservations",
     "engine/src/handlers/helpers/programs/remediation.ts::driveRemediationFacade",
@@ -1622,18 +1602,14 @@
     "engine/src/handlers/helpers/reconcile-implementation-proof.ts::<anonymous>",
     "engine/src/handlers/helpers/reconcile-implementation-proof.ts::<anonymous>",
     "engine/src/handlers/helpers/reconcile-implementation-proof.ts::handler",
-    "engine/src/handlers/helpers/reconcile-implementation-proof.ts::reconcileTaskFromStoredEvidence",
     "engine/src/handlers/helpers/reconcile-implementation-proof.ts::recoverPacketEvidence",
     "engine/src/handlers/helpers/reopen-completed-wave.ts::deriveWaveReopeningProof",
     "engine/src/handlers/helpers/reopen-completed-wave.ts::reopenCompletedWave",
     "engine/src/handlers/helpers/repair-task-graph.ts::handler",
     "engine/src/handlers/helpers/review-packet.ts::handler",
-    "engine/src/handlers/helpers/review-panel.ts::handler",
-    "engine/src/handlers/helpers/review-panel.ts::operationBrief",
     "engine/src/handlers/helpers/store-review-findings.ts::handler",
     "engine/src/handlers/helpers/store-review-findings.ts::updateTaskFindings",
     "engine/src/handlers/helpers/store-spec-check.ts::runStoreSpecCheck",
-    "engine/src/handlers/helpers/store-test-evidence.ts::handler",
     "engine/src/handlers/helpers/suggest-spec-anchors.ts::handler",
     "engine/src/handlers/helpers/task-local-completion.ts::observeAvailableTaskScope",
     "engine/src/handlers/helpers/validate-model-bindings.ts::validateModelBindings",
@@ -1651,7 +1627,6 @@
     "engine/src/handlers/subagent-stop/dispatch.ts::runDispatch",
     "engine/src/handlers/subagent-stop/store-reviewer-findings.ts::handler",
     "engine/src/handlers/subagent-stop/store-spec-check-findings.ts::runStoreSpecCheckFindings",
-    "engine/src/handlers/subagent-stop/update-task-status.ts::<anonymous>",
     "engine/src/handlers/subagent-stop/update-task-status.ts::runUpdateTaskStatus",
     "engine/src/handlers/task-execution.ts::registerTaskExecutionBatch",
     "engine/src/linter/programmatic/no-io-in-pure-modules.ts::handler",
@@ -1664,14 +1639,6 @@
     "engine/src/orchestration/harness-capture-runtime.ts::captureSelectedEmission",
     "engine/src/orchestration/implementation-brief.ts::renderTaskImplementationBrief",
     "engine/src/orchestration/session-run-bindings.ts::registerSessionRunBinding",
-    "engine/src/parsers/parse-transcript.ts::parseFirstUserPrompt",
-    "engine/src/state-file-wire.ts::migrateParsedTask",
-    "engine/src/state-file-wire.ts::parseTaskGraphHistoryFields",
-    "engine/src/state-file-wire.ts::taskAttemptAuthorityError",
-    "engine/src/state-file-wire.ts::taskBaselineError",
-    "engine/src/state-file-wire.ts::taskFindingsError",
-    "engine/src/state-file-wire.ts::taskPacketError",
-    "engine/src/state-file-wire.ts::taskStatusError",
     "engine/src/utils/git.ts::assertionCodeLine",
     "engine/src/utils/git.ts::executableAddedLines",
     "engine/src/utils/no-follow-fs.ts::recoverStaleDirectoryLock",
@@ -1688,8 +1655,6 @@
     "pi/review-run-authority.ts::recordPiSpawnCorrelators",
     "pi/spawn-lifecycle.ts::reserveFromLedger",
     "pi/spawn-reservation.ts::recoverPiSpawnReservation",
-    "pi/subagent-result.ts::<anonymous>",
-    "pi/subagent-result.ts::applyLegacyImplementationQuarantine",
     "pi/subagent-settlement.ts::reduceLockedPiPhaseResult",
     "pi/subagent-stop.ts::dispatchPiSubagentStop",
     "pi/subagent-stop.ts::finalizeReservedImplementations",

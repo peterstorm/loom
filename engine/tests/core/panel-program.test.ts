@@ -1,22 +1,19 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { CODEBASE_FIT_CRITERION, criterionOf } from "../../src/core/panel-contract";
 import {
-  AWAIT_PANEL_RESULTS,
   PANEL_PROGRAM_MODEL_PROFILES,
-  describeDispatchReplayError,
-  isParallelSpawnBatch,
-  nextDispatchProgramAction,
+  describeArchitectureReplayError,
   reduceArchitectureProgram,
-  reduceRefutationProgram,
-  startArchitectureProgram,
-  startRefutationProgram,
+  replayArchitecturePanelJournal,
+  startArchitectureDispatchProgram,
   type ArchitectureEngineOperation,
+  type ArchitectureProgramInput,
   type ArchitectureProgramState,
   type HeadlessSpawnRequest,
+  type InteractiveSpawnRequest,
   type ProgramStep,
-  type RefutationProgramEvent,
-  type RefutationProgramState,
   type SpawnBatchAction,
 } from "../../src/core/panel-program";
 import {
@@ -37,7 +34,7 @@ import {
   completePersistentRefutationPanel,
   panelRequestIdentity,
   parsePersistentRefutationPanelEvent,
-  parseRefutationPanelCheckpoint,
+  parseRefutationPanelCheckpointRecord,
   reducePersistentRefutationPanel,
   refutationPanelCheckpoint,
   replayPersistentRefutationPanel,
@@ -57,29 +54,10 @@ import { createPublicationAuthorityResolver, parseOrchestrationRunId } from "../
 const { issuePanelRequests: issue, refutationPanelFixture, resolver: publicationResolver, withRewrittenPanelRegistration } =
   createPanelPublications();
 
-const waveId = (raw: string) => {
-  const parsed = parseWaveFindingId(raw);
-  if (parsed === null) throw new Error(`invalid test wave finding id: ${raw}`);
-  return parsed;
+const architectureInput: ArchitectureProgramInput = {
+  candidateLenses: ["simplicity-first", "type-driven-fp"],
+  judgeCriteria: [criterionOf("simplicity"), criterionOf("pure functional core"), criterionOf(CODEBASE_FIT_CRITERION)],
 };
-
-const architectureInput = {
-  candidateLenses: ["simplicity-first", "type-driven-fp"] as const,
-  judgeCriteria: ["simplicity", "pure functional core", "codebase fit + effort"] as const,
-};
-
-const refutationInput = {
-  criticalFindingIds: [waveId("T1:code-reviewer-1"), waveId("T2:security-agent-1")],
-  lenses: ["reproduction", "intent", "blast-radius"] as const,
-};
-
-function architectureStart(): ProgramStep<ArchitectureProgramState> {
-  return value(startArchitectureProgram(architectureInput));
-}
-
-function refutationStart(): ProgramStep<RefutationProgramState> {
-  return value(startRefutationProgram(refutationInput));
-}
 
 const spawnSucceeded = (requestId: string, attempt: 1 | 2 = 1) => ({
   type: "spawn-outcome" as const,
@@ -95,15 +73,7 @@ const engineSucceeded = (operationId: ArchitectureEngineOperation) => ({
 });
 
 function enterCandidates(): ProgramStep<ArchitectureProgramState> {
-  const start = architectureStart();
-  const prepared = value(reduceArchitectureProgram(
-    start.state,
-    spawnSucceeded("architecture:interview"),
-  ));
-  return value(reduceArchitectureProgram(
-    prepared.state,
-    engineSucceeded("architecture-prepare-candidates"),
-  ));
+  return value(startArchitectureDispatchProgram(architectureInput));
 }
 
 function enterJudges(): ProgramStep<ArchitectureProgramState> {
@@ -117,33 +87,24 @@ function enterJudges(): ProgramStep<ArchitectureProgramState> {
   ));
 }
 
-function enterVerifiers(): ProgramStep<RefutationProgramState> {
-  const start = refutationStart();
-  return value(reduceRefutationProgram(start.state, {
-    type: "engine-outcome",
-    operationId: "refutation-prepare-verifiers",
-    outcome: "succeeded",
-  }));
-}
-
 describe("architecture panel program", () => {
-  it("emits the exact interview → candidates → judges → aggregate → finalize ordering", () => {
-    let step = architectureStart();
-    expect(step.action).toMatchObject({
-      type: "await-user",
-      request: {
-        id: "architecture:interview",
-        agent: "arch-interviewer-agent",
-        interaction: "interactive",
-        modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architecture,
-        attempt: 1,
-      },
+  it("starts after the interview and candidate preparation, so replayed outcomes for them are duplicates", () => {
+    const start = enterCandidates();
+    expect(start.state).toMatchObject({
+      stage: "candidates",
+      completedRequestIds: ["architecture:interview"],
+      completedOperationIds: ["architecture-prepare-candidates"],
     });
+    expect(reduceArchitectureProgram(start.state, spawnSucceeded("architecture:interview"))).toEqual({
+      ok: false, error: { kind: "duplicate-outcome", requestId: "architecture:interview" },
+    });
+    expect(reduceArchitectureProgram(start.state, engineSucceeded("architecture-prepare-candidates"))).toEqual({
+      ok: false, error: { kind: "duplicate-operation-outcome", operationId: "architecture-prepare-candidates" },
+    });
+  });
 
-    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:interview")));
-    expect(step.action).toMatchObject({ type: "engine-operation", operation: "architecture-prepare-candidates" });
-
-    step = value(reduceArchitectureProgram(step.state, engineSucceeded("architecture-prepare-candidates")));
+  it("emits the exact candidates → judges → aggregate → finalize ordering", () => {
+    let step = enterCandidates();
     expect(step.action?.type).toBe("spawn-batch");
     if (step.action?.type !== "spawn-batch") throw new Error("expected candidate batch");
     expect(step.action.requests.map((request) => request.id)).toEqual([
@@ -158,7 +119,6 @@ describe("architecture panel program", () => {
       request.interaction === "headless" &&
       request.modelProfile === PANEL_PROGRAM_MODEL_PROFILES.design,
     )).toBe(true);
-    expect(isParallelSpawnBatch(step.action)).toBe(true);
 
     // Completion order is deliberately opposite to dispatch order.
     step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:2")));
@@ -197,19 +157,19 @@ describe("architecture panel program", () => {
   });
 
   it("blocks on failed prepare and aggregate engine operations with the original reason", () => {
-    const afterInterview = value(reduceArchitectureProgram(
-      architectureStart().state,
-      spawnSucceeded("architecture:interview"),
-    ));
-    const prepareFailed = value(reduceArchitectureProgram(afterInterview.state, {
+    let candidates = enterCandidates();
+    for (const id of ["architecture:candidate:1", "architecture:candidate:2"]) {
+      candidates = value(reduceArchitectureProgram(candidates.state, spawnSucceeded(id)));
+    }
+    const prepareFailed = value(reduceArchitectureProgram(candidates.state, {
       type: "engine-outcome",
-      operationId: "architecture-prepare-candidates",
+      operationId: "architecture-prepare-judges",
       outcome: "failed",
-      error: "candidate manifest invalid",
+      error: "judge criteria invalid",
     }));
-    expect(prepareFailed.state).toMatchObject({ stage: "blocked", reason: "candidate manifest invalid" });
+    expect(prepareFailed.state).toMatchObject({ stage: "blocked", reason: "judge criteria invalid" });
     expect(prepareFailed.action).toEqual({
-      type: "blocked", panel: "architecture", stage: "prepare-candidates", reason: "candidate manifest invalid",
+      type: "blocked", panel: "architecture", stage: "prepare-judges", reason: "judge criteria invalid",
     });
 
     let aggregate = enterJudges();
@@ -336,118 +296,6 @@ describe("architecture panel program", () => {
     );
     expect(reverse).toEqual(forward);
     expect(forward.action).toMatchObject({ type: "engine-operation", operation: "architecture-aggregate" });
-  });
-});
-
-describe("refutation panel program", () => {
-  it("skips exactly when there are no critical findings", () => {
-    const step = value(startRefutationProgram({
-      criticalFindingIds: [],
-      // A skip does not require or retain a verifier panel.
-      lenses: [],
-    }));
-    expect(step.state.stage).toBe("skipped");
-    expect(step.action).toEqual({
-      type: "done",
-      panel: "refutation",
-      outcome: "skipped-no-critical-findings",
-    });
-  });
-
-  it("emits prepare → non-empty verifier batch → tally → done in exact order", () => {
-    let step = refutationStart();
-    expect(step.action).toMatchObject({ type: "engine-operation", operation: "refutation-prepare-verifiers" });
-
-    step = enterVerifiers();
-    expect(step.action?.type).toBe("spawn-batch");
-    if (step.action?.type !== "spawn-batch") throw new Error("expected verifier batch");
-    expect(step.action.requests.map((request) => request.id)).toEqual([
-      "refutation:verifier:1",
-      "refutation:verifier:2",
-      "refutation:verifier:3",
-    ]);
-    expect(step.action.requests.every((request) =>
-      request.interaction === "headless" &&
-      request.agent === "review-verifier-agent" &&
-      request.modelProfile === PANEL_PROGRAM_MODEL_PROFILES.refutation &&
-      request.outputContract.length > 0,
-    )).toBe(true);
-
-    step = value(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:2")));
-    step = value(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:1")));
-    expect(step.action).toBeNull();
-
-    const earlyTally = reduceRefutationProgram(step.state, {
-      type: "engine-outcome",
-      operationId: "refutation-tally",
-      outcome: "succeeded",
-    });
-    expect(earlyTally).toEqual({
-      ok: false,
-      error: { kind: "unexpected-event", panel: "refutation", stage: "verifiers" },
-    });
-
-    step = value(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:3")));
-    expect(step.action).toMatchObject({ type: "engine-operation", operation: "refutation-tally" });
-    step = value(reduceRefutationProgram(step.state, {
-      type: "engine-outcome",
-      operationId: "refutation-tally",
-      outcome: "succeeded",
-    }));
-    expect(step.state.stage).toBe("complete");
-    expect(step.action).toEqual({ type: "done", panel: "refutation", outcome: "completed" });
-  });
-
-  it("blocks on failed prepare and tally engine operations with the original reason", () => {
-    const prepareFailed = value(reduceRefutationProgram(refutationStart().state, {
-      type: "engine-outcome",
-      operationId: "refutation-prepare-verifiers",
-      outcome: "failed",
-      error: "manifest invalid",
-    }));
-    expect(prepareFailed.state).toMatchObject({ stage: "blocked", reason: "manifest invalid" });
-    expect(prepareFailed.action).toEqual({
-      type: "blocked", panel: "refutation", stage: "prepare-verifiers", reason: "manifest invalid",
-    });
-
-    let tally = enterVerifiers();
-    for (const id of ["refutation:verifier:1", "refutation:verifier:2", "refutation:verifier:3"]) {
-      tally = value(reduceRefutationProgram(tally.state, spawnSucceeded(id)));
-    }
-    const tallyFailed = value(reduceRefutationProgram(tally.state, {
-      type: "engine-outcome",
-      operationId: "refutation-tally",
-      outcome: "failed",
-      error: "verdict set invalid",
-    }));
-    expect(tallyFailed.state).toMatchObject({ stage: "blocked", reason: "verdict set invalid" });
-    expect(tallyFailed.action).toEqual({
-      type: "blocked", panel: "refutation", stage: "tally", reason: "verdict set invalid",
-    });
-  });
-
-  it("retries one verifier once and preserves deterministic completion", () => {
-    let retried = enterVerifiers();
-    retried = value(reduceRefutationProgram(retried.state, {
-      type: "spawn-outcome",
-      requestId: "refutation:verifier:1",
-      attempt: 1,
-      outcome: "failed",
-    }));
-    expect(retried.action).toMatchObject({
-      type: "spawn-batch",
-      requests: [{ id: "refutation:verifier:1", attempt: 2 }],
-    });
-    retried = value(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:3")));
-    retried = value(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:1", 2)));
-    retried = value(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:2")));
-
-    let ordinary = enterVerifiers();
-    for (const id of ["refutation:verifier:1", "refutation:verifier:2", "refutation:verifier:3"]) {
-      ordinary = value(reduceRefutationProgram(ordinary.state, spawnSucceeded(id)));
-    }
-    expect(retried.action).toEqual(ordinary.action);
-    expect(retried.state.stage).toBe("tally");
   });
 });
 
@@ -734,10 +582,10 @@ describe("persistent refutation panel", () => {
       verdictJson(fixture.authority, 1, votes[1]!),
     ));
     const checkpoint = value(refutationPanelCheckpoint(afterResume.state, [...journal, afterResume.recordedEvent!], publicationResolver));
-    expect(JSON.parse(JSON.stringify(value(parseRefutationPanelCheckpoint(
+    expect(JSON.parse(JSON.stringify(value(parseRefutationPanelCheckpointRecord(
       JSON.parse(JSON.stringify(checkpoint)),
       publicationResolver,
-    )).state))).toEqual(JSON.parse(JSON.stringify(afterResume.state)));
+    )).step.state))).toEqual(JSON.parse(JSON.stringify(afterResume.state)));
   });
 
   it("structurally hashes verifier authority so delimiter-bearing finding sets cannot collide", () => {
@@ -788,10 +636,10 @@ describe("persistent refutation panel", () => {
     if (!replayResult.ok) throw new Error(JSON.stringify(replayResult.error));
     expect(JSON.parse(JSON.stringify(replayResult.value.state))).toEqual(JSON.parse(JSON.stringify(step.state)));
     const checkpoint = value(refutationPanelCheckpoint(step.state, events, publicationResolver));
-    expect(value(parseRefutationPanelCheckpoint(
+    expect(value(parseRefutationPanelCheckpointRecord(
       JSON.parse(JSON.stringify(checkpoint)),
       publicationResolver,
-    )).state.stage).toBe("terminal-blocked");
+    )).step.state.stage).toBe("terminal-blocked");
   });
 
   it("replays the complete roster after JSON restart and preserves strict-majority audit evidence", () => {
@@ -826,8 +674,8 @@ describe("persistent refutation panel", () => {
     });
     const checkpoint = value(refutationPanelCheckpoint(step.state, events, publicationResolver));
     expect(JSON.parse(JSON.stringify(value(
-      parseRefutationPanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), publicationResolver),
-    ).state))).toEqual(JSON.parse(JSON.stringify(step.state)));
+      parseRefutationPanelCheckpointRecord(JSON.parse(JSON.stringify(checkpoint)), publicationResolver),
+    ).step.state))).toEqual(JSON.parse(JSON.stringify(step.state)));
     expect(events.at(-1)).not.toHaveProperty("roster");
   });
 
@@ -1033,7 +881,7 @@ describe("current and historical Findings through the full persistent panel", ()
       expect(checkpoint.schemaVersion).toBe(2);
       expect(checkpoint.events).toHaveLength(events.length);
       const snapshot = JSON.stringify(checkpoint);
-      const reloaded = value(parseRefutationPanelCheckpoint(JSON.parse(snapshot), publicationResolver));
+      const reloaded = value(parseRefutationPanelCheckpointRecord(JSON.parse(snapshot), publicationResolver)).step;
       expect(JSON.stringify(reloaded.state)).toBe(JSON.stringify(step.state));
       expect(JSON.stringify(value(replayPersistentRefutationPanel(fixture.authority, JSON.parse(JSON.stringify(events)), publicationResolver)).state))
         .toBe(JSON.stringify(step.state));
@@ -1061,7 +909,7 @@ describe("current and historical Findings through the full persistent panel", ()
     if (mutation === "claim") entry.claim += " altered";
     if (mutation === "consequence") entry.basis.consequence.impact += " altered";
     if (mutation === "advisory") { entry.severity = "advisory"; entry.reason = "downgraded"; }
-    expect(parseRefutationPanelCheckpoint(checkpoint, publicationResolver).ok).toBe(false);
+    expect(parseRefutationPanelCheckpointRecord(checkpoint, publicationResolver).ok).toBe(false);
   });
 
   it("reloads a checkpoint whose recorded roster view is a legacy serialization, yet refuses recorded roster slots that disagree", () => {
@@ -1074,11 +922,11 @@ describe("current and historical Findings through the full persistent panel", ()
     const legacy = durable();
     expect(legacy.state.authority.verifierRoster.byId).toEqual({});
     legacy.state.authority.verifierRoster.byId = { size: legacy.state.authority.verifierRoster.orderedSlots.length };
-    expect(value(parseRefutationPanelCheckpoint(legacy, publicationResolver)).state.stage).toBe("done");
+    expect(value(parseRefutationPanelCheckpointRecord(legacy, publicationResolver)).step.state.stage).toBe("done");
     // The slots the view derives from are recorded content: reordering them is disagreement.
     const reordered = durable();
     reordered.state.authority.verifierRoster.orderedSlots.reverse();
-    expect(parseRefutationPanelCheckpoint(reordered, publicationResolver)).toMatchObject({ ok: false,
+    expect(parseRefutationPanelCheckpointRecord(reordered, publicationResolver)).toMatchObject({ ok: false,
       error: { kind: "malformed-checkpoint", message: "refutation checkpoint state disagrees with its immutable event prefix" } });
   });
 
@@ -1111,20 +959,58 @@ describe("current and historical Findings through the full persistent panel", ()
   });
 });
 
+describe("replayArchitecturePanelJournal — the journal folded through the program", () => {
+  it("replays the event prefix to the step the last event leaves", () => {
+    const replayed = replayArchitecturePanelJournal({
+      input: architectureInput,
+      events: [spawnSucceeded("architecture:candidate:2"), spawnSucceeded("architecture:candidate:1")],
+    });
+    const stepwise = value(reduceArchitectureProgram(
+      value(reduceArchitectureProgram(enterCandidates().state, spawnSucceeded("architecture:candidate:2"))).state,
+      spawnSucceeded("architecture:candidate:1"),
+    ));
+    expect(replayed).toEqual({ ok: true, value: stepwise });
+    expect(stepwise.action).toMatchObject({ type: "engine-operation", operation: "architecture-prepare-judges" });
+  });
+
+  it("refuses an input the start refuses, with the start's diagnostics one per line", () => {
+    const replayed = replayArchitecturePanelJournal({ input: { candidateLenses: [], judgeCriteria: [] }, events: [] });
+    expect(replayed).toEqual({
+      ok: false,
+      error: { kind: "start-refused", errors: ["candidate lenses must be non-empty", "judge criteria must be non-empty"] },
+    });
+    if (!replayed.ok) {
+      expect(describeArchitectureReplayError(replayed.error))
+        .toBe("candidate lenses must be non-empty\njudge criteria must be non-empty");
+    }
+  });
+
+  it("refuses at the first event the reducer refuses, naming the reducer's error", () => {
+    const duplicate = spawnSucceeded("architecture:candidate:1");
+    const replayed = replayArchitecturePanelJournal({ input: architectureInput, events: [duplicate, duplicate] });
+    const error = { kind: "duplicate-outcome", requestId: "architecture:candidate:1" } as const;
+    expect(replayed).toEqual({ ok: false, error: { kind: "event-refused", error } });
+    if (!replayed.ok) {
+      expect(describeArchitectureReplayError(replayed.error))
+        .toBe(`Panel program rejected event: ${JSON.stringify(error)}`);
+    }
+  });
+});
+
 describe("panel program construction invariants", () => {
   it("rejects empty and duplicate fan-out definitions at construction", () => {
-    const empty = startArchitectureProgram({ candidateLenses: [], judgeCriteria: [] });
+    const empty = startArchitectureDispatchProgram({ candidateLenses: [], judgeCriteria: [] });
     expect(empty.ok).toBe(false);
     if (!empty.ok) {
       expect(empty.errors).toContain("candidate lenses must be non-empty");
       expect(empty.errors).toContain("judge criteria must be non-empty");
     }
 
-    const duplicate = startRefutationProgram({
-      criticalFindingIds: [waveId("T1:f-1")],
-      lenses: ["intent", "intent"],
+    const duplicate = startArchitectureDispatchProgram({
+      candidateLenses: ["simplicity-first", "simplicity-first"],
+      judgeCriteria: [criterionOf("simplicity")],
     });
-    expect(duplicate).toEqual({ ok: false, errors: ["refutation lenses must be distinct"] });
+    expect(duplicate).toEqual({ ok: false, errors: ["candidate lenses must be distinct"] });
   });
 
   it("makes an interactive request unrepresentable in a parallel batch", () => {
@@ -1137,29 +1023,35 @@ describe("panel program construction invariants", () => {
       outputContract: "candidate",
     };
     const valid: SpawnBatchAction = { type: "spawn-batch", execution: "parallel", requests: [headless] };
-    expect(isParallelSpawnBatch(valid)).toBe(true);
+    expect(valid.requests).toEqual([headless]);
 
-    const interactive = architectureStart().action;
-    if (interactive?.type !== "await-user") throw new Error("expected interactive request");
-    const invalidRequests = [interactive.request] as const;
+    const interactive: InteractiveSpawnRequest = {
+      id: "architecture:finalize",
+      agent: "architecture-agent",
+      modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architectureFinalization,
+      interaction: "interactive",
+      attempt: 1,
+      outputContract: "plan",
+    };
+    const invalidRequests = [interactive] as const;
     // @ts-expect-error interactive requests cannot inhabit a parallel batch
     const invalid: SpawnBatchAction = { type: "spawn-batch", execution: "parallel", requests: invalidRequests };
-    expect(isParallelSpawnBatch(invalid)).toBe(false);
+    expect(invalid.requests).toBe(invalidRequests);
   });
 
-  it("rejects events from one panel's operation vocabulary in the other reducer", () => {
-    const architecture = architectureStart();
-    const wrong: RefutationProgramEvent = {
-      type: "engine-outcome",
+  it("rejects an operation outside the architecture vocabulary", () => {
+    const architecture = enterCandidates();
+    const wrong = {
+      type: "engine-outcome" as const,
       operationId: "refutation-tally",
-      outcome: "succeeded",
+      outcome: "succeeded" as const,
     };
-    // The event unions are separate; this assertion checks the runtime boundary
-    // for untrusted callers that deserialize an event before dispatch.
-    // @ts-expect-error a refutation event cannot be passed to the architecture reducer
+    // The event union names only architecture operations; this assertion checks
+    // the runtime boundary for untrusted callers that deserialize an event.
+    // @ts-expect-error a foreign operation cannot be passed to the architecture reducer
     expect(reduceArchitectureProgram(architecture.state, wrong)).toEqual({
       ok: false,
-      error: { kind: "unexpected-event", panel: "architecture", stage: "interview" },
+      error: { kind: "unexpected-event", panel: "architecture", stage: "candidates" },
     });
   });
 });
@@ -1250,36 +1142,5 @@ describe("a registration diverging from the canonical roster is refused", () => 
     expect(submitted.ok).toBe(false);
     if (submitted.ok) return;
     expect(submitted.error.kind).toBe("unknown-request");
-  });
-});
-
-describe("nextDispatchProgramAction: the dispatch program's one journal replay", () => {
-  const architectureInput = { candidateLenses: ["type-driven-fp"], judgeCriteria: ["simplicity"] } as const;
-  const refutationInput = { criticalFindingIds: [findings[0].id], lenses: ["reproduction"] } as const;
-  const verifierSucceeded = { type: "spawn-outcome", requestId: "refutation:verifier:1", attempt: 1, outcome: "succeeded" } as const;
-
-  it("starts each panel's dispatch program at its first spawn batch", () => {
-    expect(nextDispatchProgramAction({ panel: "architecture", input: architectureInput, events: [] }))
-      .toMatchObject({ ok: true, value: { type: "spawn-batch", requests: [{ id: "architecture:candidate:1" }] } });
-    expect(nextDispatchProgramAction({ panel: "refutation", input: refutationInput, events: [] }))
-      .toMatchObject({ ok: true, value: { type: "spawn-batch", requests: [{ id: "refutation:verifier:1" }] } });
-  });
-
-  it("folds events in order and awaits results while a batch has unsettled requests", () => {
-    expect(nextDispatchProgramAction({ panel: "refutation", input: refutationInput, events: [verifierSucceeded] }))
-      .toMatchObject({ ok: true, value: { type: "engine-operation", operation: "refutation-tally" } });
-    const twoLenses = { ...refutationInput, lenses: ["reproduction", "intent"] } as const;
-    expect(nextDispatchProgramAction({ panel: "refutation", input: twoLenses, events: [verifierSucceeded] }))
-      .toEqual({ ok: true, value: AWAIT_PANEL_RESULTS });
-  });
-
-  it("refuses in the program's own typed vocabulary, which a caller can branch on", () => {
-    const started = nextDispatchProgramAction({ panel: "architecture", input: { candidateLenses: [], judgeCriteria: ["simplicity"] }, events: [] });
-    expect(started).toEqual({ ok: false, error: { kind: "start-refused", errors: ["candidate lenses must be non-empty"] } });
-    const duplicate = nextDispatchProgramAction({ panel: "refutation", input: refutationInput, events: [verifierSucceeded, verifierSucceeded] });
-    expect(duplicate).toEqual({ ok: false, error: { kind: "event-refused", error: { kind: "duplicate-outcome", requestId: "refutation:verifier:1" } } });
-    if (started.ok || duplicate.ok) throw new Error("unreachable");
-    expect(describeDispatchReplayError(started.error)).toBe("candidate lenses must be non-empty");
-    expect(describeDispatchReplayError(duplicate.error)).toBe(JSON.stringify({ kind: "duplicate-outcome", requestId: "refutation:verifier:1" }));
   });
 });

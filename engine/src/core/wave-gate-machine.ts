@@ -51,6 +51,7 @@ import {
 } from "./orchestration-contract";
 import { applyGateDecision, evaluateWaveGate, type GateDecision, type GateDeps } from "./wave-gate-checks";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
+import { parseManifestedTaskGraph, type ManifestedTaskGraph } from "./manifested-task-graph";
 import {
   completionEligibility,
   deriveFindingCounts,
@@ -461,7 +462,7 @@ function replayWaveGateTransition(
 // ---------------------------------------------------------------------------
 
 export type WaveReadinessSnapshot = Readonly<{
-  graph: TaskGraph;
+  graph: ManifestedTaskGraph;
   registration: ActiveWaveGateRegistration;
   wave: number;
   waveTasks: readonly Task[];
@@ -571,7 +572,7 @@ export function proveWaveGateNextAction(
 }
 
 function completionAuthority(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   registration: ActiveWaveGateRegistration,
   decision: GateDecision,
   currentWaveWorkspaceObservation: WaveWorkspaceObservation | null,
@@ -587,7 +588,7 @@ function completionAuthority(
     wave: registration.wave,
     authorityDigest: registration.authorityDigest,
     expectedRevision: registration.revision,
-    verificationManifestDigest: graph.verification_manifest?.manifestDigest ?? null,
+    verificationManifestDigest: graph.verification_manifest.manifestDigest,
     acceptedCompletionSuite: graph.active_wave_completion_suite ?? null,
     currentWaveWorkspaceObservation,
     currentWaveCompletionResultObservation,
@@ -630,7 +631,9 @@ export type WaveLifecycleProof = Readonly<{
 /**
  * Derive every status fact and completion decision once from one parsed graph
  * snapshot. Consumers (program execution and status) must share this value;
- * renderers must not repeat gate policy.
+ * renderers must not repeat gate policy. This is the seam that parses the
+ * graph into a `ManifestedTaskGraph`: a graph with no frozen Verification
+ * Manifest has no readiness, only the reason it has none.
  */
 export function deriveWaveReadiness(
   graph: TaskGraph,
@@ -649,7 +652,9 @@ export function deriveWaveReadiness(
   if (registration !== undefined && registration.terminalOutcome !== null) {
     failures.push(statusReason("authority-contradiction", "terminal Wave Gate history cannot serve as active current-Wave authority"));
   }
-  if (failures.length > 0 || registration === undefined) {
+  const manifested = parseManifestedTaskGraph(graph);
+  if (!manifested.ok) failures.push(statusReason("authority-unavailable", manifested.error));
+  if (failures.length > 0 || registration === undefined || !manifested.ok) {
     return canonicalRecord({
       ok: false,
       error: canonicalRecord({
@@ -659,8 +664,9 @@ export function deriveWaveReadiness(
     });
   }
 
+  const manifestedGraph = manifested.value;
   const wave = registration.wave;
-  const decision = evaluateWaveGate(graph, wave, deps);
+  const decision = evaluateWaveGate(manifestedGraph, wave, deps);
   const reviews = reviewFacts(graph);
   const tests = deriveTestReadiness(graph, wave);
   const findings = deriveFindingCounts(graph.tasks.filter((task) => task.wave === wave));
@@ -677,7 +683,7 @@ export function deriveWaveReadiness(
     waveCompletionSuiteReadiness: canonicalRecord({
       kind: "known",
       value: deriveWaveCompletionSuiteReadiness(
-        graph,
+        manifestedGraph,
         wave,
         deps.currentWaveWorkspace,
         deps.currentWaveCompletionResult,
@@ -686,13 +692,12 @@ export function deriveWaveReadiness(
     waveGateCompletionEligibility: canonicalRecord({ kind: "known", value: eligibility }),
   });
   const workspaceObservation = deps.currentWaveWorkspace ?? null;
-  const completionResultObservation = graph.verification_manifest !== undefined &&
-    graph.active_wave_completion_suite === undefined &&
+  const completionResultObservation = graph.active_wave_completion_suite === undefined &&
     workspaceObservation?.kind === "observed"
     ? deps.currentWaveCompletionResult ?? null
     : null;
   const completion = completionAuthority(
-    graph,
+    manifestedGraph,
     registration,
     decision,
     workspaceObservation,
@@ -737,7 +742,7 @@ export function deriveWaveReadiness(
     }
   }
   const snapshot: WaveReadinessSnapshot = canonicalRecord({
-    graph,
+    graph: manifestedGraph,
     registration,
     wave,
     waveTasks: Object.freeze(graph.tasks.filter((task) => task.wave === wave)),
@@ -840,26 +845,19 @@ export function commitWaveGateCompletion(
     return commitFailure("locked active/current Wave authority drifted before completion");
   }
   const activeCompletionSuite = snapshot.graph.active_wave_completion_suite;
-  const completedRegistration: CompletedWaveGateRegistration = activeCompletionSuite === undefined
-    ? canonicalRecord({
-        schemaVersion: 1,
-        kind: "completed-wave-gate",
-        runId: snapshot.registration.runId,
-        wave: snapshot.wave,
-        authorityDigest: snapshot.registration.authorityDigest,
-        revision: receipt.committedRevision,
-        completionReceipt: receipt,
-      })
-    : canonicalRecord({
-        schemaVersion: 2,
-        kind: "completed-wave-gate",
-        runId: snapshot.registration.runId,
-        wave: snapshot.wave,
-        authorityDigest: snapshot.registration.authorityDigest,
-        revision: receipt.committedRevision,
-        completionReceipt: receipt,
-        completionSuite: activeCompletionSuite,
-      });
+  if (activeCompletionSuite === undefined) {
+    return commitFailure("completion requires the exact accepted Wave completion suite to archive");
+  }
+  const completedRegistration: CompletedWaveGateRegistration = canonicalRecord({
+    schemaVersion: 2,
+    kind: "completed-wave-gate",
+    runId: snapshot.registration.runId,
+    wave: snapshot.wave,
+    authorityDigest: snapshot.registration.authorityDigest,
+    revision: receipt.committedRevision,
+    completionReceipt: receipt,
+    completionSuite: activeCompletionSuite,
+  });
   const priorHistory = advanced.wave_gate_history ?? [];
   if (priorHistory.some((entry) => entry.runId === completedRegistration.runId)) {
     return commitFailure(`Wave Gate run ${completedRegistration.runId} is already terminal in history`);
@@ -884,6 +882,46 @@ export function commitWaveGateCompletion(
     ok: true,
     value: canonicalRecord({ graph, receipt, completedRegistration }),
   });
+}
+
+/**
+ * The locked completion: re-derive completion from the locked graph through
+ * the caller's pure `derive`, then prove the result terminalizes the exact
+ * active registration, archives the exact active completion suite, and retires
+ * both active authorities before the next Wave can register. The error is the
+ * refusal the shell reports; nothing is persisted on one.
+ */
+export function lockedWaveGateCompletion(
+  state: TaskGraph,
+  derive: (lockedState: TaskGraph) => DomainResult<WaveCompletionCommit, WaveCompletionCommitError>,
+): DomainResult<WaveCompletionCommit, string> {
+  const refuse = (message: string): DomainResult<WaveCompletionCommit, string> => Object.freeze({ ok: false, error: message });
+  const active = state.active_wave_gate;
+  if (state.current_phase !== "execute" || state.current_wave === undefined || active === undefined) {
+    return refuse("Protected execute/current Wave Gate authority is missing");
+  }
+  if (active.wave !== state.current_wave || active.terminalOutcome !== null) {
+    return refuse("Protected active/current Wave Gate authority is contradictory or terminal");
+  }
+  const committed = derive(state);
+  if (!committed.ok) return refuse(committed.error.message);
+  const terminal = committed.value.completedRegistration;
+  if (
+    terminal.runId !== active.runId || terminal.wave !== active.wave ||
+    terminal.authorityDigest !== active.authorityDigest || terminal.revision !== active.revision + 1 ||
+    committed.value.receipt !== terminal.completionReceipt
+  ) {
+    return refuse("Completion result does not terminalize the exact locked active registration");
+  }
+  const activeSuite = state.active_wave_completion_suite;
+  if (activeSuite === undefined || terminal.completionSuite !== activeSuite) {
+    return refuse("Completion must archive the exact active Wave completion suite");
+  }
+  if (committed.value.graph.active_wave_gate !== undefined ||
+      committed.value.graph.active_wave_completion_suite !== undefined) {
+    return refuse("Completion must retire active gate and completion-suite authority before the next Wave can register");
+  }
+  return committed;
 }
 
 // ---------------------------------------------------------------------------

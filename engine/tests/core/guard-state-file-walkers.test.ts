@@ -182,6 +182,20 @@ describe("guard-state-file walker divergence net", () => {
     const data = splitHeredocs(`bash -c 'echo hi' << 'EOF'\nprose\nEOF`);
     expect(data.bodies).toEqual([]); // quoted DATA body: opaque
   });
+
+  it("the opener-line group walk binds a & only after a > it read unquoted itself (readShellOperator's walk)", () => {
+    // An escaped or quoted `>` is a word: the `&` after it is background and
+    // cuts `cat`'s group off from `bash`, so the body stays data. A walk that
+    // read the raw `>` before the `&` would bind it, merge the groups and run
+    // the body under bash.
+    expect(splitHeredocs("cat << 'EOF' \\>& bash\nbody\nEOF").bodies).toEqual([]);
+    expect(splitHeredocs("cat << 'EOF' '>'& bash\nbody\nEOF").bodies).toEqual([]);
+    // An unquoted `>&` binds its `&`, so the pipe keeps `bash` in `cat`'s group
+    // and the body is a script. A walk that dropped the `>` it just read would
+    // cut at the `&` and lose the pipe member.
+    expect(splitHeredocs("cat << 'EOF' 2>&1 | bash\nbody\nEOF").bodies).toEqual(["body\n"]);
+    expect(splitHeredocs("cat << 'EOF' >&2 | bash\nbody\nEOF").bodies).toEqual(["body\n"]);
+  });
 });
 
 /**

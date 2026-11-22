@@ -1,6 +1,7 @@
 /** Shared pure structured-test-report facts and parsers. */
 
 import { SaxesParser } from "saxes";
+import { match } from "ts-pattern";
 import type { DomainResult } from "./orchestration-contract/identity";
 
 // --- Per-file TestRun results (FR-001..FR-004) ---
@@ -58,9 +59,8 @@ declare const REPORT_SUMMARY_PARSED: unique symbol;
  * JUnit report (Bun writes none when every test file fails to load) and whose
  * console reported collection errors: those errors are its only facts
  * (`bunRunSummary`). The completion-check reader in `defect-family-accounting`
- * deliberately accepts a narrower set — only the formats the strict byte
- * parser (`parseStructuredTestReportBytes`) yields, which never includes
- * `bun-console`.
+ * deliberately accepts a narrower set — only the formats `readTestReport`
+ * recognizes (`StructuredReportFormat`), which never includes `bun-console`.
  *
  * `runner-crash` is an engine run (`helper run-tests`) whose runner exited
  * non-zero and wrote no report. The engine knows exactly which test files it
@@ -81,9 +81,9 @@ export const parseReportSource = (raw: unknown): ReportSource | null =>
 type CountFields = Readonly<{ total: number; failed: number; source: ReportSource }>;
 
 /**
- * A report's counts alone, minted only by `parseReportCounts`: what the strict
- * executed-count parser yields for the completion-check and remediation
- * observations, whose exact-key wire records carry exactly these three keys.
+ * A report's counts alone, minted only by `parseReportCounts`: what the
+ * executed-count rule (`reportCounts`) yields for the completion-check and
+ * remediation observations, whose exact-key wire records carry exactly these three keys.
  * It has no per-file results, so it can never stand as a TestRun fact's report.
  */
 export type ReportCounts = CountFields & { readonly [REPORT_COUNTS_PARSED]: true };
@@ -244,6 +244,163 @@ export function parseReportSummary(
   return Object.freeze(summary) as TestReportSummary;
 }
 
+// --- One read of a structured report ---
+//
+// A report's bytes are read once, by `readTestReport`, into one `TestReport`.
+// Two counting rules read the same document and accept different reports:
+//
+// - the declared-count rule (a `TestReportSummary`, held under the
+//   module-private `DECLARED_SUMMARY` key) counts every declared testcase,
+//   skipped included, with per-file results. It refuses the Node JUnit
+//   dialect, whose suite attributes describe immediate children only.
+// - the executed-count rule (`TestReport.executed`, a `ReportCounts`) counts
+//   only the testcases that ran, so an all-skipped report cannot become
+//   passing completion evidence. Completion-check and remediation observations
+//   mint it into exact-key records whose bytes feed pinned digests. It accepts
+//   the Node dialect through the summary comments of its root.
+//
+// Neither rule is derived from the other: each refuses reports the other
+// accepts. TestRun facts (`findReport`, `engineRunReport`) are captured by
+// `readTestRunSummary` (or its null projection `testRunSummary`), which takes
+// the declared summary and holds it to the executed-count rule (ADR-0100), so
+// a TestRun's executed count (`executedTestCount`) is the executed-count
+// rule's. The declared summary is keyed by a symbol this module does not
+// export, so no caller can take it without that check. The projections below
+// are how every caller asks.
+
+/** The two structured formats a report can be: what `TestReport.source` names. */
+export type StructuredReportFormat = Extract<ReportSource, "vitest-json" | "junit-xml">;
+
+/** The key of a report's declared-count summary. Not exported: a TestRun
+ *  summary is reachable only through `readTestRunSummary` (ADR-0100). */
+const DECLARED_SUMMARY: unique symbol = Symbol("declared-count summary");
+
+type CountingRules = Readonly<{
+  /** The declared-count rule's summary; null where that rule refuses the report. */
+  [DECLARED_SUMMARY]: TestReportSummary | null;
+  /** The executed-count rule's counts; null where that rule refuses the report. */
+  executed: ReportCounts | null;
+}>;
+
+type VitestReport = CountingRules & Readonly<{ source: "vitest-json" }>;
+
+/**
+ * One structured test report, read once. A JUnit report carries its testcases
+ * in document order (`projectTestcase`), and how many it holds that name no
+ * testcase or no file.
+ */
+export type TestReport =
+  | VitestReport
+  | (CountingRules & Readonly<{
+    source: "junit-xml";
+    testcases: readonly ReportTestcase[];
+    unnamedTestcases: number;
+  }>);
+
+/**
+ * What one read of report bytes or text yields:
+ * - `report`: Vitest JSON (a JSON object carrying a Vitest summary count) or
+ *   JUnit XML (a testsuite(s) tag was seen), whatever either rule makes of it.
+ * - `ambiguous`: a Vitest JSON report whose text also carries a JUnit
+ *   testsuite(s) tag an XML reader sees. The executed-count rule refuses it as
+ *   matching both formats (`reportCounts`); a TestRun summary still reads it as
+ *   the Vitest JSON it parsed as.
+ * - `foreign-xml`: well-formed XML with no testsuites, testsuite or testcase
+ *   element anywhere, in any namespace (Maven failsafe's
+ *   `failsafe-summary.xml`, a coverage report): it describes no test run, so a
+ *   report-dir scan skips it.
+ * - `unrecognized`: neither format, and not foreign XML.
+ * - `unreadable`: over the byte budget, or bytes that are not UTF-8.
+ */
+export type TestReportRead =
+  | Readonly<{ kind: "report"; report: TestReport }>
+  | Readonly<{ kind: "ambiguous"; report: VitestReport }>
+  | Readonly<{ kind: "foreign-xml" }>
+  | Readonly<{ kind: "unrecognized" }>
+  | Readonly<{ kind: "unreadable"; reason: Extract<StructuredReportErrorReason, "resource-limit" | "invalid-utf8"> }>;
+
+export type StructuredReportErrorReason =
+  | "resource-limit"
+  | "invalid-utf8"
+  | "unrecognized-format"
+  | "ambiguous-format"
+  | "malformed-counts"
+  | "malformed-testcase";
+
+export type StructuredReportError = Readonly<{
+  kind: "invalid-structured-test-report";
+  reason: StructuredReportErrorReason;
+  message: string;
+}>;
+
+export type StructuredReportParseResult = DomainResult<ReportCounts, StructuredReportError>;
+
+const reportFailure = (
+  reason: StructuredReportErrorReason,
+  message: string,
+): DomainResult<never, StructuredReportError> => Object.freeze({
+  ok: false,
+  error: Object.freeze({ kind: "invalid-structured-test-report", reason, message }),
+});
+
+function safeCount(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+}
+
+const OVER_BUDGET: TestReportRead = Object.freeze({ kind: "unreadable", reason: "resource-limit" });
+const NOT_UTF8: TestReportRead = Object.freeze({ kind: "unreadable", reason: "invalid-utf8" });
+const FOREIGN_XML: TestReportRead = Object.freeze({ kind: "foreign-xml" });
+const UNRECOGNIZED: TestReportRead = Object.freeze({ kind: "unrecognized" });
+/** A document that shows a JUnit testsuite(s) tag but is no usable report: both rules refuse it. */
+const MALFORMED_JUNIT: TestReportRead = Object.freeze({
+  kind: "report",
+  report: Object.freeze({
+    source: "junit-xml",
+    [DECLARED_SUMMARY]: null,
+    executed: null,
+    testcases: Object.freeze([]),
+    unnamedTestcases: 0,
+  }),
+});
+
+/**
+ * Read the exact bytes a runner wrote: over the byte budget or not strict
+ * UTF-8 is `unreadable`; anything else is read as `readTestReportText` reads it.
+ */
+export function readTestReport(bytes: Uint8Array): TestReportRead {
+  if (bytes.byteLength > MAX_STRUCTURED_REPORT_BYTES) return OVER_BUDGET;
+  let content: string;
+  try {
+    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return NOT_UTF8;
+  }
+  return readTestReportText(content);
+}
+
+const VITEST_SUMMARY_FIELDS = ["numTotalTests", "numPassedTests", "numFailedTests", "numPendingTests", "numTodoTests"];
+
+/**
+ * Read report text a shell already decoded (a report file read as UTF-8, a
+ * runner's stdout). JSON is tried first: a JSON document is never well-formed
+ * XML, so the XML reader runs on it only when its text holds a testsuite tag,
+ * the one way it could still look like JUnit.
+ */
+export function readTestReportText(content: string): TestReportRead {
+  if (Buffer.byteLength(content, "utf8") > MAX_STRUCTURED_REPORT_BYTES) return OVER_BUDGET;
+  let json: unknown;
+  try {
+    json = JSON.parse(content);
+  } catch {
+    return readJunitDocument(parseJunitDocument(content));
+  }
+  const looksJunit = content.includes("<testsuite") && recognizesJunit(parseJunitDocument(content));
+  if (isPlainRecord(json) && VITEST_SUMMARY_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(json, field))) {
+    return Object.freeze({ kind: looksJunit ? "ambiguous" : "report", report: readVitestReport(json) });
+  }
+  return looksJunit ? MALFORMED_JUNIT : UNRECOGNIZED;
+}
+
 /**
  * Per-file results of a Vitest/Jest JSON report: one file per `testResults`
  * entry, named exactly as the report names it. `executed` counts the entry's
@@ -277,127 +434,24 @@ function vitestFileResults(report: Record<string, unknown>): TestReportFiles | n
   return { kind: "recorded", results };
 }
 
-/** vitest `--reporter=json` / jest `--json` share the summary shape. */
-export function parseVitestJson(content: string): TestReportSummary | null {
-  if (Buffer.byteLength(content, "utf8") > MAX_STRUCTURED_REPORT_BYTES) return null;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(content);
-  } catch {
-    return null;
-  }
-  if (!isPlainRecord(raw)) return null;
-  const files = vitestFileResults(raw);
-  return files === null ? null : parseReportSummary(raw.numTotalTests, raw.numFailedTests, "vitest-json", files);
-}
-
 /**
- * What one XML document is to the legacy JUnit reader:
- * - `not-junit`: well-formed XML that holds no testsuites, testsuite or
- *   testcase element anywhere, in any namespace (Maven failsafe's
- *   `failsafe-summary.xml`, a coverage report). It describes no test run, so a
- *   report-dir scan skips it.
- * - `refused`: a JUnit report that is malformed, has impossible counts, or
- *   whose per-file results disagree with its counts (INV-8), and every
- *   document whose kind cannot be decided (invalid XML, over budget). It
- *   cannot vouch, and it voids the run's capture.
- * - `parsed`: a summary with reconciled per-file results.
+ * vitest `--reporter=json` / jest `--json` share the summary shape. Declared:
+ * `numTotalTests` (pending and todo included) with the per-file results.
+ * Executed: passed plus failed, only when all five counts are present and sum
+ * to `numTotalTests`.
  */
-export type JunitReportRead =
-  | Readonly<{ kind: "not-junit" }>
-  | Readonly<{ kind: "refused" }>
-  | Readonly<{ kind: "parsed"; summary: TestReportSummary }>;
-
-const NOT_JUNIT: JunitReportRead = Object.freeze({ kind: "not-junit" });
-const REFUSED: JunitReportRead = Object.freeze({ kind: "refused" });
-
-/** Legacy machine API counts declared tests (including skipped), never P3 executions.
- * XML syntax and report structure are shared with the strict byte parser.
- * Per-file results are projected under the same declared-count rule. */
-export function readJunitReport(content: string): JunitReportRead {
-  const document = parseJunitDocument(content);
-  if (document.kind === "foreign") return NOT_JUNIT;
-  if (document.kind === "malformed") return REFUSED;
-  const counts = parseTraditionalJunit(document.root);
-  const summary = counts === null
-    ? null
-    : parseReportSummary(counts.total, counts.failed, "junit-xml", junitFileResults(document.root));
-  return summary === null ? REFUSED : Object.freeze({ kind: "parsed", summary });
+function readVitestReport(report: Record<string, unknown>): VitestReport {
+  const files = vitestFileResults(report);
+  const declared = files === null ? null : parseReportSummary(report.numTotalTests, report.numFailedTests, "vitest-json", files);
+  return Object.freeze({ source: "vitest-json", [DECLARED_SUMMARY]: declared, executed: executedVitestCounts(report) });
 }
 
-/** The summary of a document that must be a JUnit report (an explicitly named
- *  artifact): anything but a parsed report is `null`. */
-export function parseJunitXml(content: string): TestReportSummary | null {
-  const read = readJunitReport(content);
-  return read.kind === "parsed" ? read.summary : null;
-}
-
-export type StructuredReportErrorReason =
-  | "resource-limit"
-  | "invalid-utf8"
-  | "unrecognized-format"
-  | "ambiguous-format"
-  | "malformed-counts"
-  | "malformed-testcase";
-
-export type StructuredReportError = Readonly<{
-  kind: "invalid-structured-test-report";
-  reason: StructuredReportErrorReason;
-  message: string;
-}>;
-
-export type StructuredReportParseResult = DomainResult<ReportCounts, StructuredReportError>;
-
-type RecognizedReport = Readonly<{
-  recognized: boolean;
-  summary: ReportCounts | null;
-}>;
-
-const reportSuccess = (value: ReportCounts): StructuredReportParseResult =>
-  Object.freeze({ ok: true, value });
-
-const reportFailure = (
-  reason: StructuredReportErrorReason,
-  message: string,
-): StructuredReportParseResult => Object.freeze({
-  ok: false,
-  error: Object.freeze({ kind: "invalid-structured-test-report", reason, message }),
-});
-
-function safeCount(raw: unknown): number | null {
-  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
-}
-
-/** Vitest/Jest totals include pending tests; remediation counts only tests that actually ran. */
-function parseExecutedVitestSummary(content: string): RecognizedReport {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(content);
-  } catch {
-    return Object.freeze({ recognized: false, summary: null });
-  }
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return Object.freeze({ recognized: false, summary: null });
-  }
-  const report = raw as Record<string, unknown>;
-  const recognized = ["numTotalTests", "numPassedTests", "numFailedTests", "numPendingTests", "numTodoTests"]
-    .some((field) => Object.prototype.hasOwnProperty.call(report, field));
-  if (!recognized) return Object.freeze({ recognized: false, summary: null });
-
-  const total = safeCount(report.numTotalTests);
-  const passed = safeCount(report.numPassedTests);
-  const failed = safeCount(report.numFailedTests);
-  const pending = safeCount(report.numPendingTests);
-  const todo = safeCount(report.numTodoTests);
-  if (total === null || passed === null || failed === null || pending === null || todo === null) {
-    return Object.freeze({ recognized: true, summary: null });
-  }
+function executedVitestCounts(report: Record<string, unknown>): ReportCounts | null {
+  const [total, passed, failed, pending, todo] = VITEST_SUMMARY_FIELDS.map((field) => safeCount(report[field]));
+  if (total === null || passed === null || failed === null || pending === null || todo === null) return null;
   const executed = passed + failed;
   const declared = executed + pending + todo;
-  const summary = Number.isSafeInteger(declared) && declared === total
-    ? parseReportCounts(executed, failed, "vitest-json")
-    : null;
-  return Object.freeze({ recognized: true, summary });
+  return Number.isSafeInteger(declared) && declared === total ? parseReportCounts(executed, failed, "vitest-json") : null;
 }
 
 type ReportElement = Readonly<{
@@ -413,14 +467,17 @@ type ReportElement = Readonly<{
  *   testsuites, testsuite or testcase — it is not a test report at all.
  * - `malformed`: anything that is not a usable report root and not provably
  *   foreign (invalid XML, a DTD, over budget, too deep, or JUnit elements under
- *   a root that is not testsuite(s)). `recognized` keeps the strict parser's
- *   format-recognition fact: a testsuite(s) tag was seen.
+ *   a root that is not testsuite(s)). `recognized` is the format-recognition
+ *   fact: a testsuite(s) tag was seen.
  * - `report`: a well-formed testsuite(s) root.
  */
 type JunitDocument =
   | Readonly<{ kind: "foreign" }>
   | Readonly<{ kind: "malformed"; recognized: boolean }>
   | Readonly<{ kind: "report"; root: ReportElement }>;
+
+const recognizesJunit = (document: JunitDocument): boolean =>
+  document.kind === "report" || (document.kind === "malformed" && document.recognized);
 
 const JUNIT_ELEMENT_NAMES: ReadonlySet<string> = new Set(["testsuites", "testsuite", "testcase"]);
 
@@ -572,53 +629,35 @@ function parseNodeJunitSummary(root: ReportElement): ReportCounts | null {
   return parseReportCounts(tests - declared.skipped, declared.failed, "junit-xml");
 }
 
-function parseExecutedJunitSummary(content: string): RecognizedReport {
-  const document = parseJunitDocument(content);
-  if (document.kind === "foreign") return { recognized: false, summary: null };
-  if (document.kind === "malformed") return { recognized: document.recognized, summary: null };
-  const { root } = document;
-  // A Node-looking summary must never fall back to suite counts on mismatch.
-  if (root.comments.some((comment) => /^\s*(tests|pass|fail|cancelled|skipped|todo)\b/u.test(comment))) {
-    return { recognized: true, summary: parseNodeJunitSummary(root) };
-  }
-  const counts = parseTraditionalJunit(root);
-  const summary = counts === null ? null : parseReportCounts(counts.total - counts.skipped, counts.failed, "junit-xml");
-  return { recognized: true, summary };
-}
+/** A report root whose comments look like a Node summary: it must never fall back to suite counts on mismatch. */
+const isNodeJunitReport = (root: ReportElement): boolean =>
+  root.comments.some((comment) => /^\s*(tests|pass|fail|cancelled|skipped|todo)\b/u.test(comment));
 
 /**
- * Parse the exact bytes collected by the hardened runner. This stricter seam
- * counts executed (not merely declared) tests independently of the legacy
- * machine count API, so an all-skipped report cannot become passing evidence.
- * It yields `ReportCounts`, never a `TestReportSummary`: its counts are minted
- * into exact-key completion-check and remediation observations, whose wire
- * shape and digests are pinned, and per-file results belong to TestRun facts
- * (captured through the legacy parsers by `findReport`), not to those checks.
+ * A JUnit document under both counting rules. Declared: traditional suite
+ * accounting (summary-only reports included), with per-file results from the
+ * testcases; it refuses the Node dialect's direct testcases under testsuites.
+ * Executed: the Node summary when the root carries one, else the traditional
+ * counts less the skipped cases.
  */
-export function parseStructuredTestReportBytes(bytes: Uint8Array): StructuredReportParseResult {
-  if (bytes.byteLength > MAX_STRUCTURED_REPORT_BYTES) {
-    return reportFailure("resource-limit", `structured test report exceeds ${MAX_STRUCTURED_REPORT_BYTES} byte limit`);
-  }
-  let content: string;
-  try {
-    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return reportFailure("invalid-utf8", "structured test report is not valid UTF-8");
-  }
-
-  const vitest = parseExecutedVitestSummary(content);
-  const junit = parseExecutedJunitSummary(content);
-  const recognized = [vitest, junit].filter((candidate) => candidate.recognized);
-  if (recognized.length === 0) {
-    return reportFailure("unrecognized-format", "structured test report is neither Vitest JSON nor JUnit XML");
-  }
-  if (recognized.length > 1) {
-    return reportFailure("ambiguous-format", "structured test report matches more than one supported format");
-  }
-  const summary = recognized[0].summary;
-  return summary === null
-    ? reportFailure("malformed-counts", "structured test report has missing, inconsistent, or unsafe counts")
-    : reportSuccess(summary);
+function readJunitDocument(document: JunitDocument): TestReportRead {
+  if (document.kind === "foreign") return FOREIGN_XML;
+  if (document.kind === "malformed") return document.recognized ? MALFORMED_JUNIT : UNRECOGNIZED;
+  const { root } = document;
+  const traditional = parseTraditionalJunit(root);
+  const projected = testcaseElements(root).map(projectTestcase);
+  const testcases = Object.freeze(projected.filter((testcase): testcase is ReportTestcase => testcase !== null));
+  const unnamedTestcases = projected.length - testcases.length;
+  const declared = traditional === null
+    ? null
+    : parseReportSummary(traditional.total, traditional.failed, "junit-xml", junitFileResults(testcases, unnamedTestcases));
+  const executed = isNodeJunitReport(root)
+    ? parseNodeJunitSummary(root)
+    : traditional === null ? null : parseReportCounts(traditional.total - traditional.skipped, traditional.failed, "junit-xml");
+  return Object.freeze({
+    kind: "report",
+    report: Object.freeze({ source: "junit-xml", [DECLARED_SUMMARY]: declared, executed, testcases, unnamedTestcases }),
+  });
 }
 
 // --- Per-testcase projection ---
@@ -682,8 +721,8 @@ function projectTestcase(element: ReportElement): ReportTestcase | null {
 /**
  * Per-file results of a JUnit report: its testcases grouped by their file
  * identity (`ReportTestcase.file`), in first-appearance order, kept exactly as
- * written. `executed` counts every testcase (the legacy declared-count rule
- * the summary uses), `failed` the failing ones and `skipped` the skipped ones
+ * written. `executed` counts every testcase (the declared-count rule the
+ * summary uses), `failed` the failing ones and `skipped` the skipped ones
  * (a skipped case that also carries a failure, Node's failing TODO, is
  * skipped, as `projectTestcase` reads it); a failing testcase whose `name`
  * equals its `classname` is Vitest's synthetic collection-error case.
@@ -691,11 +730,10 @@ function projectTestcase(element: ReportElement): ReportTestcase | null {
  * report has no testcases, as in a summary-only report, or a testcase that
  * names no file.
  */
-function junitFileResults(root: ReportElement): TestReportFiles | undefined {
-  const testcases = testcaseElements(root).map(projectTestcase);
-  if (testcases.length === 0 || testcases.some((testcase) => testcase === null)) return undefined;
+function junitFileResults(testcases: readonly ReportTestcase[], unnamedTestcases: number): TestReportFiles | undefined {
+  if (testcases.length === 0 || unnamedTestcases > 0) return undefined;
   const byFile = new Map<string, TestFileResult>();
-  for (const testcase of testcases as readonly ReportTestcase[]) {
+  for (const testcase of testcases) {
     const failed = testcase.outcome === "failed";
     const prior = byFile.get(testcase.file);
     byFile.set(testcase.file, {
@@ -709,39 +747,169 @@ function junitFileResults(root: ReportElement): TestReportFiles | undefined {
   return { kind: "recorded", results: [...byFile.values()] };
 }
 
+// --- Projections of one read ---
+
+/**
+ * The executed-count rule's counts of a report whose bytes the hardened runner
+ * collected, or why it refuses them. It yields `ReportCounts`, never a
+ * `TestReportSummary`: its counts are minted into exact-key completion-check
+ * and remediation observations, whose wire shape and digests are pinned, and
+ * per-file results belong to TestRun facts, not to those checks.
+ */
+export function reportCounts(read: TestReportRead): StructuredReportParseResult {
+  return match(read)
+    .with({ kind: "unreadable", reason: "resource-limit" }, () =>
+      reportFailure("resource-limit", `structured test report exceeds ${MAX_STRUCTURED_REPORT_BYTES} byte limit`))
+    .with({ kind: "unreadable", reason: "invalid-utf8" }, () =>
+      reportFailure("invalid-utf8", "structured test report is not valid UTF-8"))
+    .with({ kind: "foreign-xml" }, { kind: "unrecognized" }, () =>
+      reportFailure("unrecognized-format", "structured test report is neither Vitest JSON nor JUnit XML"))
+    .with({ kind: "ambiguous" }, () =>
+      reportFailure("ambiguous-format", "structured test report matches more than one supported format"))
+    .with({ kind: "report" }, ({ report }): StructuredReportParseResult => report.executed === null
+      ? reportFailure("malformed-counts", "structured test report has missing, inconsistent, or unsafe counts")
+      : Object.freeze({ ok: true, value: report.executed }))
+    .exhaustive();
+}
+
+/**
+ * How many tests a TestRun summary proves actually ran (ADR-0100). With
+ * per-file results it is their testcases less the skipped ones (skipped,
+ * pending, todo, disabled), which `readTestRunSummary` holds equal to the
+ * executed-count rule's count of the same bytes. An unrecorded summary carries
+ * no skip facts, so its `total` is the count: capture mints that total under
+ * the executed-count rule wherever the rule reads the report, and a legacy
+ * ledger line keeps the total it was written with.
+ */
+export function executedTestCount(summary: TestReportSummary): number {
+  return summary.files.kind === "recorded"
+    ? summary.files.results.reduce((sum, { executed, skipped }) => sum + executed - skipped, 0)
+    : summary.total;
+}
+
+/**
+ * Why a report cannot stand as a TestRun summary of the format it must be:
+ * - `unreadable`: over the byte budget, or not UTF-8;
+ * - `unrecognized`: neither Vitest JSON nor JUnit XML (foreign XML included);
+ * - `other-format`: a report of the other structured format;
+ * - `malformed-counts`: the declared-count rule refuses it (missing,
+ *   inconsistent or unsafe counts, per-file results that disagree with them
+ *   (INV-8), or a JUnit document it cannot read);
+ * - `executed-count-disagreement`: its per-file results and the executed-count
+ *   rule disagree about how many tests ran (ADR-0100).
+ */
+export type TestRunSummaryRefusal =
+  | Readonly<{ kind: "unreadable"; reason: Extract<StructuredReportErrorReason, "resource-limit" | "invalid-utf8"> }>
+  | Readonly<{ kind: "unrecognized" }>
+  | Readonly<{ kind: "other-format"; expected: StructuredReportFormat; found: StructuredReportFormat }>
+  | Readonly<{ kind: "malformed-counts" }>
+  | Readonly<{ kind: "executed-count-disagreement"; declared: number; executed: number }>;
+
+export type TestRunSummaryRead = DomainResult<TestReportSummary, TestRunSummaryRefusal>;
+
+const summaryRead = (summary: TestReportSummary): TestRunSummaryRead => Object.freeze({ ok: true, value: summary });
+const summaryRefusal = (refusal: TestRunSummaryRefusal): TestRunSummaryRead =>
+  Object.freeze({ ok: false, error: Object.freeze(refusal) });
+
+/**
+ * The TestRun summary of a report that must be `format` (an explicitly named
+ * artifact), or why it cannot be one: the declared-count rule's summary, held
+ * to the executed-count rule wherever that rule reads the same bytes (ADR-0100).
+ * - The executed-count rule cannot count the report (a Vitest summary without
+ *   its passed, pending and todo counts): the declared summary as it is.
+ * - Per-file results recorded: the declared summary when its executed count
+ *   (`executedTestCount`) equals the executed-count rule's, else refused: two
+ *   readings of one document that disagree about what ran cannot vouch.
+ * - No per-file results: the executed-count rule's counts, since nothing else
+ *   in the summary could say what was skipped.
+ * So a report in which nothing ran never mints a summary that proves a test
+ * ran. An ambiguous report is summarized as the Vitest JSON it parsed as.
+ */
+export function readTestRunSummary(read: TestReportRead, format: StructuredReportFormat): TestRunSummaryRead {
+  return match(read)
+    .with({ kind: "unreadable" }, ({ reason }) => summaryRefusal({ kind: "unreadable", reason }))
+    .with({ kind: "foreign-xml" }, { kind: "unrecognized" }, () => summaryRefusal({ kind: "unrecognized" }))
+    .with({ kind: "report" }, { kind: "ambiguous" }, ({ report }) => heldSummary(report, format))
+    .exhaustive();
+}
+
+function heldSummary(report: TestReport, format: StructuredReportFormat): TestRunSummaryRead {
+  if (report.source !== format) return summaryRefusal({ kind: "other-format", expected: format, found: report.source });
+  const declared = report[DECLARED_SUMMARY];
+  const { executed } = report;
+  if (declared === null) return summaryRefusal({ kind: "malformed-counts" });
+  if (executed === null) return summaryRead(declared);
+  if (declared.files.kind === "recorded") {
+    const ran = executedTestCount(declared);
+    return ran === executed.total
+      ? summaryRead(declared)
+      : summaryRefusal({ kind: "executed-count-disagreement", declared: ran, executed: executed.total });
+  }
+  const minted = parseReportSummary(executed.total, executed.failed, executed.source, undefined);
+  return minted === null ? summaryRefusal({ kind: "malformed-counts" }) : summaryRead(minted);
+}
+
+/** `readTestRunSummary` for a caller that only asks whether a summary exists. */
+export function testRunSummary(read: TestReportRead, format: StructuredReportFormat): TestReportSummary | null {
+  const summary = readTestRunSummary(read, format);
+  return summary.ok ? summary.value : null;
+}
+
+/** Why a report cannot vouch, worded to follow the report's name in a diagnostic. */
+export const describeTestRunSummaryRefusal = (refusal: TestRunSummaryRefusal): string =>
+  match(refusal)
+    .with({ kind: "unreadable", reason: "resource-limit" }, () => `exceeds the ${MAX_STRUCTURED_REPORT_BYTES} byte limit`)
+    .with({ kind: "unreadable", reason: "invalid-utf8" }, () => "is not valid UTF-8")
+    .with({ kind: "unrecognized" }, () => "is neither Vitest JSON nor JUnit XML")
+    .with({ kind: "other-format" }, ({ expected, found }) => `is ${found}, not the ${expected} report it must be`)
+    .with({ kind: "malformed-counts" }, () =>
+      "has missing, inconsistent or unsafe counts, or per-file results that disagree with them")
+    .with({ kind: "executed-count-disagreement" }, ({ declared, executed }) =>
+      `lists ${declared} executed test(s) in its per-file results, but its counts say ${executed} ran`)
+    .exhaustive();
+
+/**
+ * What one `*.xml` file of a report dir is to a TestRun capture:
+ * - `not-junit`: foreign XML (see `TestReportRead`); the scan skips it.
+ * - `refused`: anything else `readTestRunSummary` does not summarize as
+ *   JUnit, and why. It cannot vouch, and it voids the run's capture.
+ * - `parsed`: a summary with reconciled per-file results.
+ */
+export type JunitReportRead =
+  | Readonly<{ kind: "not-junit" }>
+  | Readonly<{ kind: "refused"; refusal: TestRunSummaryRefusal }>
+  | Readonly<{ kind: "parsed"; summary: TestReportSummary }>;
+
+const NOT_JUNIT: JunitReportRead = Object.freeze({ kind: "not-junit" });
+
+export function junitReportRead(read: TestReportRead): JunitReportRead {
+  if (read.kind === "foreign-xml") return NOT_JUNIT;
+  const summary = readTestRunSummary(read, "junit-xml");
+  return Object.freeze(summary.ok
+    ? { kind: "parsed", summary: summary.value }
+    : { kind: "refused", refusal: summary.error });
+}
+
 /**
  * Every testcase of a JUnit report, in document order. The report must first
- * pass the strict structured-report parser, so the projection never describes
- * a report whose counts the gate would refuse; a Vitest JSON report is refused
- * by name, since it carries no per-testcase file attribution here.
+ * pass the executed-count rule, so the projection never describes a report
+ * whose counts the gate would refuse; a Vitest JSON report is refused by name,
+ * since it carries no per-testcase file attribution here. Engine code reaches
+ * it only through `parseJunitTestcasesUnder` (INV-9).
  */
-export function parseJunitTestcases(bytes: Uint8Array): JunitTestcasesResult {
-  const summary = parseStructuredTestReportBytes(bytes);
-  if (!summary.ok) return summary;
-  if (summary.value.source !== "junit-xml") {
-    return Object.freeze({
-      ok: false,
-      error: Object.freeze({
-        kind: "invalid-structured-test-report",
-        reason: "unrecognized-format",
-        message: "per-testcase observation needs a JUnit XML report; this report is Vitest JSON",
-      }),
-    });
+export function reportTestcases(read: TestReportRead): JunitTestcasesResult {
+  const counts = reportCounts(read);
+  if (!counts.ok) return counts;
+  if (read.kind !== "report" || read.report.source !== "junit-xml") {
+    return reportFailure("unrecognized-format", "per-testcase observation needs a JUnit XML report; this report is Vitest JSON");
   }
-  const document = parseJunitDocument(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  const elements = document.kind === "report" ? testcaseElements(document.root) : [];
-  const projected = elements.map(projectTestcase);
-  const unnamed = projected.filter((testcase) => testcase === null).length;
-  return unnamed > 0
-    ? Object.freeze({
-        ok: false,
-        error: Object.freeze({
-          kind: "invalid-structured-test-report",
-          reason: "malformed-testcase",
-          message: `${unnamed} JUnit testcase(s) lack a name, or name no file (neither a file attribute nor a classname)`,
-        }),
-      })
-    : Object.freeze({ ok: true, value: Object.freeze(projected as ReportTestcase[]) });
+  const { testcases, unnamedTestcases } = read.report;
+  return unnamedTestcases > 0
+    ? reportFailure(
+      "malformed-testcase",
+      `${unnamedTestcases} JUnit testcase(s) lack a name, or name no file (neither a file attribute nor a classname)`,
+    )
+    : Object.freeze({ ok: true, value: testcases });
 }
 
 /** Per-file results of a merged run: recorded only when every part recorded
@@ -868,7 +1036,10 @@ export function bunRunSummary(
 /** Merge summaries from multiple report files of one run. The inputs must
  *  share ONE source — enforced at runtime, not by comment: a mixed-source
  *  merge would stamp the sum with the first summary's source, silently
- *  mislabeling half the counts. Fail closed to null instead. */
+ *  mislabeling half the counts. Fail closed to null instead.
+ *  A merge that loses per-file results (some part recorded none) sums each
+ *  part's `executedTestCount`, since an unrecorded summary's total is its
+ *  executed count: a recorded part's skipped testcases never reappear as run. */
 export function mergeSummaries(summaries: readonly TestReportSummary[]): TestReportSummary | null {
   if (summaries.length === 0) return null;
   if (summaries.some((s) => s.source !== summaries[0].source)) return null;
@@ -876,11 +1047,13 @@ export function mergeSummaries(summaries: readonly TestReportSummary[]): TestRep
   // smart constructor rather than casting a fresh literal: summing sane
   // summaries stays sane, but the brand must be minted where its invariant
   // is (re)checked.
+  const files = mergeFileResults(summaries.map((s) => s.files));
+  const counted = files.kind === "recorded" ? (s: TestReportSummary) => s.total : executedTestCount;
   let total = 0;
   let failed = 0;
   for (const s of summaries) {
-    total += s.total;
+    total += counted(s);
     failed += s.failed;
   }
-  return parseReportSummary(total, failed, summaries[0].source, mergeFileResults(summaries.map((s) => s.files)));
+  return parseReportSummary(total, failed, summaries[0].source, files);
 }

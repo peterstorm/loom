@@ -11,7 +11,7 @@ import {
   defaultVerificationManifest,
   distillPassSetting,
   freezeVerificationManifest,
-  legacyDefaultVerificationManifest,
+  preI6DefaultVerificationManifest,
   parseFrozenVerificationManifest,
   parseVerificationManifest,
   type FrozenVerificationManifest,
@@ -19,12 +19,12 @@ import {
 
 /**
  * Digests computed by the engine before this key existed: the population
- * default's, the legacy default's, and that of the operator file
+ * default's, the pre-I6 default's, and that of the operator file
  * `{"schemaVersion":2,"kind":"loom-verification-manifest","checks":[]}`.
  * Adding the key must move none of them.
  */
 const PRE_FEATURE_DEFAULT_DIGEST = "a4408176dc5df5ebd1f6ad9459ea9a0f71a92b9aa8b23467fc38ed04420bbbea";
-const PRE_FEATURE_LEGACY_DIGEST = "f151b9015dd8afd2c9ff94add17a86f6b5a9b0408931b31af70e9d4629823d6c";
+const PRE_I6_DEFAULT_DIGEST = "f151b9015dd8afd2c9ff94add17a86f6b5a9b0408931b31af70e9d4629823d6c";
 const PRE_FEATURE_EMPTY_OPERATOR_DIGEST = "5c90251769e3af9a2d0eac4d90593921c9f699edd26723265dec762de6f191cc";
 
 const source = (document: Readonly<Record<string, unknown>>): Record<string, unknown> =>
@@ -66,7 +66,7 @@ describe("distillPass in the source manifest", () => {
     expect("distillPass" in manifest).toBe(false);
     expect(distillPassSetting(manifest)).toBe("on");
     expect(distillPassSetting(defaultVerificationManifest())).toBe("on");
-    expect(distillPassSetting(legacyDefaultVerificationManifest())).toBe("on");
+    expect(distillPassSetting(preI6DefaultVerificationManifest())).toBe("on");
     expect(distillPassSetting(undefined)).toBe("on");
   });
 
@@ -90,7 +90,7 @@ describe("distillPass in the source manifest", () => {
 describe("distillPass and the manifest digest", () => {
   it("leaves the engine defaults' digests where they were", () => {
     expect(defaultVerificationManifest().manifestDigest).toBe(PRE_FEATURE_DEFAULT_DIGEST);
-    expect(legacyDefaultVerificationManifest().manifestDigest).toBe(PRE_FEATURE_LEGACY_DIGEST);
+    expect(preI6DefaultVerificationManifest().manifestDigest).toBe(PRE_I6_DEFAULT_DIGEST);
     expect("distillPass" in defaultVerificationManifest()).toBe(false);
   });
 

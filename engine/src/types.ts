@@ -227,22 +227,6 @@ export { newWaveGate, testResultPassed } from "./core/wave-gate-model";
 import type { TaskTestResult, WaveGate } from "./core/wave-gate-model";
 export type { TaskTestResult, WaveGate } from "./core/wave-gate-model";
 
-/**
- * Pre-refactor task graphs stored `tests_passed: boolean` on the task; the
- * field was replaced by `test_result` with NO compat read (the branch never
- * shipped). Such a task now reads as missing evidence — correct, but
- * mystifying without a note. Pure: returns the operator-facing explanation
- * when the raw task object carries the legacy field without its
- * replacement, null otherwise.
- */
-export function legacyTestsPassedNote(task: unknown): string | null {
-  if (typeof task !== "object" || task === null) return null;
-  const raw = task as Record<string, unknown>;
-  if (!("tests_passed" in raw) || "test_result" in raw) return null;
-  const id = typeof raw.id === "string" ? raw.id : "<unknown>";
-  return `legacy tests_passed found on task ${id}; re-run task or regenerate graph — field replaced by test_result`;
-}
-
 // --- Review findings ---
 //
 // The Finding/ReviewRun/Refutation vocabulary lives in the Finding concept's
@@ -518,10 +502,9 @@ interface TaskCommonMetadataBase {
   /** The repository boundary frozen at the current attempt's registration.
    * Every settlement retires it, so a re-armed attempt freezes a fresh one.
    * (The former `unresolved_repository_paths` carry had no writer after that
-   * retirement; the State File parser validates and drops legacy copies.) */
+   * retirement; the State File load refuses a copy, ADR-0098.) */
   readonly repository_baseline?: readonly DeclaredArtifactBaseline[];
   readonly reserved_at?: string;
-  readonly legacy_execution_reservation?: true;
   /** Engine-issued packet authority retained after a review run closes. A
    * self-hashed packet is integrity evidence, not provenance; historical write
    * recovery accepts a packet only when every registration field matches. */
@@ -588,38 +571,26 @@ export type TaskLifecycle =
       status: "pending";
       proof: PendingTaskProof | FailedTaskProof;
       revalidation_required?: never;
-      legacy_missing_proof?: never;
     }>
   | Readonly<{
       status: "pending";
       proof: TaskProof;
       revalidation_required: true;
-      legacy_missing_proof?: never;
     }>
   | Readonly<{
       status: "implemented";
       proof: SatisfiedTaskProof;
       revalidation_required?: never;
-      legacy_missing_proof?: never;
     }>
   | Readonly<{
       status: "completed";
       proof: SatisfiedTaskProof;
       revalidation_required?: never;
-      legacy_missing_proof?: never;
     }>
   | Readonly<{
       status: "failed";
       proof: FailedTaskProof;
       revalidation_required?: never;
-      legacy_missing_proof?: never;
-    }>
-  | Readonly<{
-      status: "implemented" | "completed";
-      proof?: never;
-      revalidation_required?: never;
-      /** Protected migration marker; ordinary writers cannot claim modern completion with it. */
-      legacy_missing_proof: true;
     }>;
 
 export type Task = Readonly<TaskCommonMetadata & TaskLifecycle>;
@@ -763,17 +734,13 @@ type CompletedWaveGateRegistrationCommon = Readonly<{
   completionReceipt: ProtectedWaveStateCommitted;
 }>;
 
-/** Terminal audit is not active authority for the newly-current Wave. Schema
- * v1 is the exact historical shape; schema v2 additionally archives the suite
- * receipt that authorized the terminal transition. */
-export type CompletedWaveGateRegistration =
-  | Readonly<CompletedWaveGateRegistrationCommon & {
-      schemaVersion: 1;
-    }>
-  | Readonly<CompletedWaveGateRegistrationCommon & {
-      schemaVersion: 2;
-      completionSuite: AcceptedWaveCompletionReceipt;
-    }>;
+/** Terminal audit is not active authority for the newly-current Wave. It
+ * archives the suite receipt that authorized the terminal transition. Schema
+ * v2 is the only shape; the suite-less v1 is refused at load (ADR-0098). */
+export type CompletedWaveGateRegistration = Readonly<CompletedWaveGateRegistrationCommon & {
+  schemaVersion: 2;
+  completionSuite: AcceptedWaveCompletionReceipt;
+}>;
 
 declare const REOPENED_TASK_IDS: unique symbol;
 
@@ -1233,25 +1200,24 @@ export type WaveCompletionSuiteRequiredReason =
   | "workspace-observation-missing"
   | "workspace-observation-unavailable";
 
-/** Canonical completion-suite status. Digest/count data is carried by the
- * status value so JSON and human renderers remain policy-free projections. */
+/** Canonical completion-suite status of a graph whose Verification Manifest
+ * is frozen (`ManifestedTaskGraph`): a graph before `execute` has no suite
+ * readiness, and status reports that fact unavailable. Digest/count data is
+ * carried by the status value so JSON and human renderers remain policy-free
+ * projections. */
 export type WaveCompletionSuiteReadiness =
-  | Readonly<{
-      kind: "legacy-unavailable";
-      verificationManifestDigest: null;
-    }>
   | Readonly<{
       kind: "required";
       projectVerificationCoverage: ProjectVerificationCoverage;
       reason: WaveCompletionSuiteRequiredReason;
       detail: string;
-      verificationManifestDigest: ArtifactDigest | null;
+      verificationManifestDigest: ArtifactDigest;
       acceptedResultDigest: ArtifactDigest | null;
     }>
   | Readonly<{
       kind: "accepted";
       projectVerificationCoverage: ProjectVerificationCoverage;
-      verificationManifestDigest: ArtifactDigest | null;
+      verificationManifestDigest: ArtifactDigest;
       suiteDigest: ArtifactDigest;
       resultDigest: ArtifactDigest;
       workspaceDigest: ArtifactDigest;
@@ -1274,7 +1240,7 @@ export type WaveCompletionSuiteReadiness =
   | Readonly<{
       kind: "stale";
       projectVerificationCoverage: ProjectVerificationCoverage;
-      verificationManifestDigest: ArtifactDigest | null;
+      verificationManifestDigest: ArtifactDigest;
       suiteDigest: ArtifactDigest;
       resultDigest: ArtifactDigest;
       acceptedWorkspaceDigest: ArtifactDigest;

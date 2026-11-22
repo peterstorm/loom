@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isNoFindingSentinel, dropNoFindingSentinels } from "../../src/utils/no-finding-sentinel";
+import { isNoFindingSentinel } from "../../src/utils/no-finding-sentinel";
 
 describe("isNoFindingSentinel", () => {
   const sentinels = [
@@ -34,29 +34,7 @@ describe("isNoFindingSentinel", () => {
     });
   }
 
-  it("returns false for the empty string (handled separately by dropNoFindingSentinels)", () => {
+  it("returns false for the empty string (callers drop empty text before asking)", () => {
     expect(isNoFindingSentinel("")).toBe(false);
-  });
-});
-
-describe("dropNoFindingSentinels", () => {
-  it("drops empty strings and sentinels, preserving real findings", () => {
-    expect(dropNoFindingSentinels(["", "none", "real finding"])).toEqual(["real finding"]);
-  });
-
-  it("drops parenthesized + explanatory sentinels", () => {
-    expect(
-      dropNoFindingSentinels(["(none) — prior critical fixed", "SQL injection in db.ts"])
-    ).toEqual(["SQL injection in db.ts"]);
-  });
-
-  it("preserves a real finding that starts with 'none'", () => {
-    expect(dropNoFindingSentinels(["none of the error paths are handled"])).toEqual([
-      "none of the error paths are handled",
-    ]);
-  });
-
-  it("returns an empty array when every entry is a sentinel or empty", () => {
-    expect(dropNoFindingSentinels(["none", "", "N/A", "  nil  "])).toEqual([]);
   });
 });

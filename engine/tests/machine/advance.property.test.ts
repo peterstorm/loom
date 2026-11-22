@@ -3,7 +3,8 @@ import fc from "fast-check";
 import { advance, foldEvidence, isTerminal, isToolAllowed, missingRequirements, tokensFor } from "../../src/machine/advance";
 import { initialState, type Evidence } from "../../src/machine/types";
 import { parseEvidenceLine } from "../../src/machine/evidence";
-import { judgeTestRun, parseReportSummary } from "../../src/machine/test-report";
+import { parseReportSummary } from "../../src/core/structured-test-report";
+import { judgeTestRun } from "../../src/machine/test-report";
 import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 import { CODE_IMPLEMENTER_MACHINE_RAW, machineFrom } from "../fixtures/machine-definitions";
 

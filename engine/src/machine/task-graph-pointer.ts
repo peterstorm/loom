@@ -317,7 +317,7 @@ function parsePointerBinding(raw: unknown): SessionTaskGraphPointerBinding | nul
   });
 }
 
-export function parsePersistedSessionTaskGraphPointerBinding(
+function parsePersistedSessionTaskGraphPointerBinding(
   raw: unknown,
 ): Readonly<{ ok: true; value: PersistedSessionTaskGraphPointerBinding }> |
   Readonly<{ ok: false; error: string }> {

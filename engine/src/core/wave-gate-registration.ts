@@ -3,7 +3,7 @@
  * may install itself as the protected active registration, and the protected
  * TaskGraph that install produces.
  *
- * Two callers ask it: the locked `StateManager.registerActiveWaveGate`
+ * Two callers ask it: the locked `registerActiveWaveGate` (state-manager)
  * transition persists `installWaveGateRegistration`'s decision under the
  * TaskGraph lock, and the `start wave-gate` preflight asks
  * `admitWaveGateRegistration` the same question of an unlocked snapshot BEFORE
@@ -21,7 +21,8 @@
 
 import type { ActiveWaveGateRegistration, RetiredWaveReviewRun, TaskGraph } from "../types";
 import { preserveAcceptedReviewRunFindings } from "./findings";
-import { canonicalRecord, canonicalStructuralEquals } from "./orchestration-contract";
+import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type OrchestrationRunId } from "./orchestration-contract";
+import { parseAbandonmentReason, type AbandonmentReason } from "./abandonment-reason";
 import { appendRetiredWaveReviewRun } from "./retired-wave-review-runs";
 import { reconcileWaveBlock } from "./wave-gate-model";
 import type { NarrowedTaskReview, WaveGateSuccessionAudit } from "./wave-gate-program";
@@ -411,4 +412,98 @@ export function supersedeAbandonedWaveGateReview(
 /** `graph` with the completed run `completed`, now reopened, recorded for a later start to succeed (ADR-0091). */
 export function retireReopenedWaveReview(graph: TaskGraph, completed: RetiringRun): TaskGraph {
   return withRetiredRun(graph, completed, "completed-reopened");
+}
+
+declare const WAVE_GATE_ABANDONMENT: unique symbol;
+
+/**
+ * The operator's terminal abandonment of one run, as `helper orchestration
+ * abandon` recorded it in the Run Directory (`parseRunAbandonment`): an
+ * `AbandonmentReason` and a successor that is never the run itself. Minted
+ * only by `parseWaveGateAbandonment`, so no caller can stamp a value that
+ * breaks either rule; the State File boundary re-proves both on load.
+ */
+export type WaveGateAbandonment = Readonly<{
+  runsRoot: string;
+  runId: OrchestrationRunId;
+  reason: AbandonmentReason;
+  supersededBy: OrchestrationRunId | null;
+}> & Readonly<{ [WAVE_GATE_ABANDONMENT]: true }>;
+
+/** Parse an abandonment to stamp: the reason is parsed as an `AbandonmentReason`
+ *  and a run that names itself as its successor is refused. */
+export function parseWaveGateAbandonment(input: Readonly<{
+  runsRoot: string;
+  runId: OrchestrationRunId;
+  reason: string;
+  supersededBy: OrchestrationRunId | null;
+}>): DomainResult<WaveGateAbandonment, string> {
+  const reason = parseAbandonmentReason(input.reason);
+  if (!reason.ok) return reason;
+  if (input.supersededBy === input.runId) {
+    return Object.freeze({ ok: false, error: `Wave Gate run ${input.runId} cannot supersede itself` });
+  }
+  const abandonment = canonicalRecord({
+    runsRoot: input.runsRoot,
+    runId: input.runId,
+    reason: reason.value,
+    supersededBy: input.supersededBy,
+  });
+  return Object.freeze({ ok: true, value: abandonment as WaveGateAbandonment });
+}
+
+export type AbandonedWaveGateRegistration = Extract<
+  ActiveWaveGateRegistration,
+  { terminalOutcome: { kind: "terminal-abandoned" } }
+>;
+
+/** Why the abandonment did, or did not, change the protected registration. */
+export type ActiveWaveGateAbandonmentResult =
+  | Readonly<{ kind: "stamped"; registration: AbandonedWaveGateRegistration }>
+  | Readonly<{ kind: "replayed"; registration: AbandonedWaveGateRegistration }>
+  | Readonly<{
+      kind: "not-targeted";
+      reason: "registration-absent" | "authority-mismatch" | "terminal-conflict";
+    }>;
+
+/**
+ * Stamp the operator's terminal abandonment onto the protected registration.
+ *
+ * The Run Directory marker is immutable; this stamps the SAME terminal
+ * decision onto the active registration, so a tombstoned registration stops
+ * being active authority and a fresh `start` can supersede it. Only the run the
+ * marker names, under the same runs-root, is targeted; an exact repeat is a
+ * replay that leaves `state` itself, and any other terminal outcome is a
+ * conflict. Terminalizing the gate retires its correlated live-suite authority
+ * in the same transition: live suites require a nonterminal active gate.
+ */
+export function abandonWaveGateRegistration(
+  state: TaskGraph,
+  abandonment: WaveGateAbandonment,
+): Readonly<{ state: TaskGraph; value: ActiveWaveGateAbandonmentResult }> {
+  const unchanged = (value: ActiveWaveGateAbandonmentResult) => ({ state, value: Object.freeze(value) });
+  const active = state.active_wave_gate;
+  if (active === undefined) return unchanged({ kind: "not-targeted", reason: "registration-absent" });
+  if (active.runsRoot !== abandonment.runsRoot || active.runId !== abandonment.runId) {
+    return unchanged({ kind: "not-targeted", reason: "authority-mismatch" });
+  }
+  const terminal = active.terminalOutcome;
+  if (terminal !== null) {
+    return terminal.kind === "terminal-abandoned" &&
+        terminal.reason === abandonment.reason && terminal.supersededBy === abandonment.supersededBy
+      ? unchanged({ kind: "replayed", registration: Object.freeze({ ...active, terminalOutcome: terminal }) })
+      : unchanged({ kind: "not-targeted", reason: "terminal-conflict" });
+  }
+  const registration = Object.freeze({
+    ...active,
+    terminalOutcome: Object.freeze({
+      kind: "terminal-abandoned" as const,
+      reason: abandonment.reason,
+      supersededBy: abandonment.supersededBy,
+    }),
+  });
+  return {
+    state: { ...state, active_wave_gate: registration, active_wave_completion_suite: undefined },
+    value: Object.freeze({ kind: "stamped", registration }),
+  };
 }

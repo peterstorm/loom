@@ -5,6 +5,7 @@ import {
   buildTaskLocalByteObservation,
   describeSettlement,
   INFRASTRUCTURE_REASON_LIMIT,
+  isWaveComplete,
   NAMED_SCOPE_VIOLATION_PATHS,
   NO_ENGINE_SKELETONS,
   normalizeImplementationEvidence,
@@ -29,6 +30,7 @@ import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdic
 import { authorizeImplementationSpawn, deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import type { Task, TaskGraph } from "../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../src/types";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const digest = (value: string) => value.repeat(64).slice(0, 64);
 const baseline = (path: string, value: string | null) => [{
@@ -57,11 +59,9 @@ function authority(
 }
 
 function observedBytes(
-  attempt: ImplementationAttemptAuthority,
   overrides: Partial<Parameters<typeof buildTaskLocalByteObservation>[0]> = {},
 ): TaskLocalByteObservation {
   return buildTaskLocalByteObservation({
-    authority: attempt,
     attemptBaseline: baseline("src/a.ts", digest("a")),
     currentAttemptScope: baseline("src/a.ts", digest("b")),
     proofBaseline: baseline("src/a.ts", digest("a")),
@@ -102,6 +102,7 @@ function pendingTask(
 function graph(task: Task): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -134,11 +135,12 @@ function expectApplied(result: ReturnType<typeof settleObservedImplementation>) 
 
 describe("Task-local byte-scope application core", () => {
   it("accepts only parser-proven changed bytes inside the attempt baseline", () => {
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       parserModifiedPaths: ["src/a.ts"],
       priorAttributedPaths: ["src/old.ts"],
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
+    expect(bytes.attributedAttemptChangedPaths).toEqual(["src/a.ts"]);
     expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
     expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
     expect(bytes.taskBytesChangedOrUnobservable).toBe(true);
@@ -148,13 +150,13 @@ describe("Task-local byte-scope application core", () => {
     // Production regression (T13): attempt 1's writes were never recorded
     // because its settlement was infrastructure-blocked; a verify-only re-run
     // then failed declared-artifact-not-changed for bytes that had changed.
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       currentAttemptScope: baseline("src/a.ts", digest("a")),
       currentProofScope: baseline("src/a.ts", digest("b")),
       parserModifiedPaths: [],
       priorAttributedPaths: [],
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
     expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.taskBytesChangedOrUnobservable).toBe(false);
     // INV-DF1: the proof boundary predates the Task's production, so the
@@ -169,11 +171,11 @@ describe("Task-local byte-scope application core", () => {
     const attempt = authority(1, "stale-flow-committed");
     // The population-time proof baseline predates the committed production; the
     // re-registered child makes no edits and its attempt scope never moves.
-    const bytes = observedBytes(attempt, {
+    const bytes = observedBytes({
       attemptBaseline: baseline("src/a.ts", digest("b")),
       currentAttemptScope: baseline("src/a.ts", digest("b")),
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
     expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
     expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
@@ -202,7 +204,7 @@ describe("Task-local byte-scope application core", () => {
       fc.subarray(["src/a.ts"]),
       fc.subarray(["src/a.ts"]),
       (attemptChanged, proofChanged, parserPaths, priorPaths) => {
-        const bytes = observedBytes(authority(), {
+        const bytes = observedBytes({
           currentAttemptScope: baseline("src/a.ts", digest(attemptChanged ? "b" : "a")),
           currentProofScope: baseline("src/a.ts", digest(proofChanged ? "b" : "a")),
           parserModifiedPaths: parserPaths,
@@ -215,7 +217,7 @@ describe("Task-local byte-scope application core", () => {
   });
 
   it("retains a prior allowed attribution while refusing an additional no-op parser credit", () => {
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       currentAttemptScope: baseline("src/a.ts", digest("a")),
       currentProofScope: baseline("src/a.ts", digest("b")),
       parserModifiedPaths: ["src/a.ts"],
@@ -226,29 +228,52 @@ describe("Task-local byte-scope application core", () => {
   });
 
   it("classifies transcript paths outside the registered attempt scope as semantic failure", () => {
-    const bytes = observedBytes(authority(), { parserModifiedPaths: ["foreign.ts"] });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({
+    const bytes = observedBytes({ parserModifiedPaths: ["foreign.ts"] });
+    expect(bytes.byteScope).toEqual({
       kind: "out-of-scope-writes",
       paths: ["foreign.ts"],
     });
   });
 
   it("classifies malformed/mismatched baseline observations as infrastructure unavailable", () => {
-    const bytes = observedBytes(authority(), { currentAttemptScope: [] });
-    expect(bytes.suite.checks[0]?.outcome).toMatchObject({ kind: "observation-unavailable" });
+    const bytes = observedBytes({ currentAttemptScope: [] });
+    expect(bytes.byteScope).toMatchObject({ kind: "observation-unavailable" });
     expect(bytes.taskBytesChangedOrUnobservable).toBe(true);
     expect(bytes.invalidationBytesChanged).toBe(true);
   });
 
+  it("refuses a hand-built observation at compile time: only the two constructors mint one", () => {
+    const accepted = observedBytes({ parserModifiedPaths: [] });
+    const foreign = observedBytes({ repositoryChangedPaths: ["src/foreign.ts"] });
+    // @ts-expect-error a literal pairing an accepted scope with unresolved repository paths is not minted
+    const forged: TaskLocalByteObservation = {
+      byteScope: accepted.byteScope,
+      attributedAttemptChangedPaths: [],
+      attemptScopeChangedPaths: [],
+      cumulativeModifiedPaths: [],
+      cumulativeProofArtifactChanges: [],
+      reopenScopeChangedPaths: [],
+      taskBytesChangedOrUnobservable: false,
+      unresolvedRepositoryPaths: foreign.unresolvedRepositoryPaths,
+      invalidationBytesChanged: false,
+    };
+    void forged;
+    expect(accepted.byteScope).toEqual({ kind: "accepted" });
+    expect(foreign.unresolvedRepositoryPaths).toEqual(["src/foreign.ts"]);
+    // What a minted observation holds instead: unresolved paths are written outside the scope.
+    expect(foreign.byteScope.kind).toBe("out-of-scope-writes");
+  });
+
   it("never turns sibling repository movement into Task attribution, proof, or invalidation", () => {
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       currentAttemptScope: baseline("src/a.ts", digest("a")),
       currentProofScope: baseline("src/a.ts", digest("a")),
       parserModifiedPaths: [],
       repositoryChangedPaths: ["src/sibling.ts"],
       siblingOwnedPaths: ["src/sibling.ts"],
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
+    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
     expect(bytes.unresolvedRepositoryPaths).toEqual([]);
     expect(bytes.taskBytesChangedOrUnobservable).toBe(false);
@@ -256,24 +281,24 @@ describe("Task-local byte-scope application core", () => {
   });
 
   it("carries every unowned repository delta even when the parser omits it", () => {
-    const first = observedBytes(authority(), {
+    const first = observedBytes({
       parserModifiedPaths: ["src/a.ts"],
       repositoryChangedPaths: ["src/foreign.ts", "src/sibling.ts"],
       siblingOwnedPaths: ["src/sibling.ts"],
     });
-    expect(first.suite.checks[0]?.outcome).toEqual({
+    expect(first.byteScope).toEqual({
       kind: "out-of-scope-writes",
       paths: ["src/foreign.ts"],
     });
     expect(first.unresolvedRepositoryPaths).toEqual(["src/foreign.ts"]);
     expect(first.invalidationBytesChanged).toBe(true);
 
-    const persistent = observedBytes(authority(), {
+    const persistent = observedBytes({
       parserModifiedPaths: [],
       repositoryChangedPaths: ["src/foreign.ts", "src/sibling.ts"],
       siblingOwnedPaths: ["src/sibling.ts"],
     });
-    expect(persistent.suite.checks[0]?.outcome).toEqual({
+    expect(persistent.byteScope).toEqual({
       kind: "out-of-scope-writes",
       paths: ["src/foreign.ts"],
     });
@@ -285,26 +310,28 @@ describe("Task-local byte-scope application core", () => {
       ...baseline("src/a.ts", digest("a")),
       ...baseline("src/foreign.ts", digest("f")),
     ];
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       attemptBaseline: scoped,
       currentAttemptScope: scoped,
       parserModifiedPaths: [],
       repositoryChangedPaths: ["src/foreign.ts", "src/sibling.ts"],
       siblingOwnedPaths: ["src/sibling.ts"],
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
+    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.unresolvedRepositoryPaths).toEqual([]);
   });
 
   it("accepts cleanup once foreign bytes return to the retained baseline", () => {
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       currentAttemptScope: baseline("src/a.ts", digest("a")),
       currentProofScope: baseline("src/a.ts", digest("a")),
       parserModifiedPaths: [],
       repositoryChangedPaths: ["src/sibling.ts"],
       siblingOwnedPaths: ["src/sibling.ts"],
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
+    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.unresolvedRepositoryPaths).toEqual([]);
     expect(bytes.invalidationBytesChanged).toBe(false);
   });
@@ -312,7 +339,7 @@ describe("Task-local byte-scope application core", () => {
   it("scopes, attributes and proves a directory artifact through writes below it", () => {
     const scoped = [...baseline("src/a.ts", digest("a")), ...baseline("calibration/run", null)];
     const current = [...baseline("src/a.ts", digest("a")), ...baseline("calibration/run", digest("d"))];
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       attemptBaseline: scoped,
       currentAttemptScope: current,
       proofBaseline: scoped,
@@ -320,7 +347,7 @@ describe("Task-local byte-scope application core", () => {
       parserModifiedPaths: ["calibration/run/result.json"],
       repositoryChangedPaths: ["calibration/run/result.json", "calibration/runner.ts"],
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({
+    expect(bytes.byteScope).toEqual({
       kind: "out-of-scope-writes",
       paths: ["calibration/runner.ts"],
     });
@@ -330,24 +357,25 @@ describe("Task-local byte-scope application core", () => {
   });
 
   it("treats repository movement below a sibling-owned directory as inert", () => {
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       currentAttemptScope: baseline("src/a.ts", digest("a")),
       currentProofScope: baseline("src/a.ts", digest("a")),
       parserModifiedPaths: [],
       repositoryChangedPaths: ["calibration/run/result.json"],
       siblingOwnedPaths: ["calibration/run"],
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
+    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
     expect(bytes.unresolvedRepositoryPaths).toEqual([]);
   });
 
   it("fails raw parser paths outside Task scope even when a sibling owns them", () => {
-    const bytes = observedBytes(authority(), {
+    const bytes = observedBytes({
       parserModifiedPaths: ["src/sibling.ts"],
       repositoryChangedPaths: ["src/sibling.ts"],
       siblingOwnedPaths: ["src/sibling.ts"],
     });
-    expect(bytes.suite.checks[0]?.outcome).toEqual({
+    expect(bytes.byteScope).toEqual({
       kind: "out-of-scope-writes",
       paths: ["src/sibling.ts"],
     });
@@ -361,7 +389,7 @@ describe("shared evidence preservation", () => {
     const normalized = normalizeImplementationEvidence(
       pendingTask(attempt),
       { taskCompleted: true, contractConformance: CONFORMANCE_NOT_OWED },
-      observedBytes(attempt),
+      observedBytes(),
     );
     expect(normalized.newTests).toEqual({ kind: "not-written", written: false, evidence: "" });
   });
@@ -380,7 +408,7 @@ describe("shared evidence preservation", () => {
         test_evidence: "trusted history",
         ...(revalidation ? { revalidation_required: true } : {}),
       });
-      const bytes = observedBytes(attempt, {
+      const bytes = observedBytes({
         currentAttemptScope: baseline("src/a.ts", bytesChanged ? digest("b") : digest("a")),
       });
       const normalized = normalizeImplementationEvidence(task, {
@@ -393,6 +421,47 @@ describe("shared evidence preservation", () => {
       expect(normalized.testEvidence).toBe(expected === "untrusted" ? "fallback" : "trusted history");
     },
   );
+
+  it.each([
+    ["untrusted", false, undefined],
+    ["trusted-fail", true, "trusted-fail"],
+    ["trusted-pass", false, "trusted-pass"],
+    ["trusted-pass", true, undefined],
+  ] as const)(
+    "an attempt that observed no test result leaves stored %s (bytesChanged=%s) as %s",
+    (stored, bytesChanged, expected) => {
+      const attempt = authority();
+      const task = pendingTask(attempt, {
+        test_result: stored === "untrusted"
+          ? { verdict: "untrusted", passed: true, label: "earlier attempt", provenance: "pi-structured" }
+          : { verdict: stored },
+        test_evidence: "earlier attempt",
+      });
+      const bytes = observedBytes({
+        currentAttemptScope: baseline("src/a.ts", bytesChanged ? digest("b") : digest("a")),
+      });
+      const normalized = normalizeImplementationEvidence(task, completedEvidence, bytes);
+      expect(normalized.testResult?.verdict).toBe(expected);
+      expect(normalized.testEvidence).toBe(expected === undefined ? undefined : "earlier attempt");
+    },
+  );
+
+  it("never carries an earlier attempt's untrusted result past a settlement that observed none", () => {
+    const attempt = authority();
+    const result = expectApplied(settleObservedImplementation(
+      graph(pendingTask(attempt, {
+        test_result: { verdict: "untrusted", passed: true, label: "earlier attempt", provenance: "pi-structured" },
+        test_evidence: "earlier attempt",
+      })),
+      attempt,
+      "2026-08-24T00:01:00.000Z" as never,
+      completedEvidence,
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(),
+    ));
+    expect(result.state.tasks[0]?.test_result).toBeUndefined();
+    expect(result.state.tasks[0]?.test_evidence).toBeUndefined();
+  });
 });
 
 describe("exact transition application", () => {
@@ -405,7 +474,7 @@ describe("exact transition application", () => {
       "2026-08-24T00:01:00.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     expect(result.transition.kind).toBe("implemented");
     const task = result.state.tasks[0]!;
@@ -445,7 +514,7 @@ describe("exact transition application", () => {
       "2026-08-24T00:01:30.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     expect(result.state.spec_check).toBeUndefined();
     expect(result.state.wave_gates["1"]?.blocked).toBe(true);
@@ -470,7 +539,7 @@ describe("exact transition application", () => {
           contractConformance: CONFORMANCE_NOT_OWED,
         },
         TRUSTED_LEDGER_ONLY_POLICY,
-        observedBytes(attempt),
+        observedBytes(),
       ));
       expect(result.transition.kind).toBe(semanticAttempt === 1 ? "retry-required" : "escalation-required");
       expect(result.state.tasks[0]).toMatchObject({ status: "pending", proof: { state: "failed" } });
@@ -493,7 +562,7 @@ describe("exact transition application", () => {
       "2026-08-24T00:02:30.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt, {
+      observedBytes({
         attemptBaseline: baseline("src/a.ts", digest("b")),
         currentAttemptScope: baseline("src/a.ts", digest("b")),
         parserModifiedPaths: [],
@@ -511,7 +580,7 @@ describe("exact transition application", () => {
       "2026-08-24T00:03:00.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt, {
+      observedBytes({
         parserModifiedPaths: ["src/a.ts", "foreign.ts"],
         repositoryChangedPaths: ["foreign.ts", "sibling.ts"],
         siblingOwnedPaths: ["sibling.ts"],
@@ -534,7 +603,7 @@ describe("exact transition application", () => {
 
   it("infrastructure settlement after exact byte observation retires the attempt boundary", () => {
     const attempt = authority(1, "infrastructure-unowned-path");
-    const bytes = observedBytes(attempt, {
+    const bytes = observedBytes({
       parserModifiedPaths: [],
       repositoryChangedPaths: ["foreign.ts", "sibling.ts"],
       siblingOwnedPaths: ["sibling.ts"],
@@ -599,14 +668,14 @@ describe("exact transition application", () => {
       "2026-08-24T00:04:30.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(old),
+      observedBytes(),
     )).transition;
     const current = graph(pendingTask(replacement));
     const applied = applyImplementationCompletionTransition(
       current,
       replacement,
       oldTransition,
-      { bytes: observedBytes(replacement) },
+      { bytes: observedBytes() },
     );
     expect(applied).toMatchObject({ kind: "ignored", reason: "stale" });
     expect(applied.state).toBe(current);
@@ -634,7 +703,7 @@ describe("exact transition application", () => {
       "2026-08-24T00:06:00.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     const duplicate = settleObservedImplementation(
       first.state,
@@ -642,7 +711,7 @@ describe("exact transition application", () => {
       "2026-08-24T00:06:00.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     );
     expect(duplicate).toMatchObject({ kind: "ignored", reason: "duplicate" });
     expect(duplicate.state).toBe(first.state);
@@ -658,7 +727,7 @@ describe("exact transition application", () => {
         "2026-08-24T00:03:45.000Z" as never,
         completedEvidence,
         TRUSTED_LEDGER_ONLY_POLICY,
-        observedBytes(attempt, { parserModifiedPaths: ["src/a.ts", ...foreign] }),
+        observedBytes({ parserModifiedPaths: ["src/a.ts", ...foreign] }),
       ));
       const named = foreign.slice(0, NAMED_SCOPE_VIOLATION_PATHS).join(", ");
       const rest = count > NAMED_SCOPE_VIOLATION_PATHS ? ` and ${count - NAMED_SCOPE_VIOLATION_PATHS} more` : "";
@@ -680,7 +749,7 @@ describe("exact transition application", () => {
       "2026-08-24T00:03:50.000Z" as never,
       { taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN, contractConformance: CONFORMANCE_NOT_OWED },
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     expect(describeSettlement(result.transition)).toBe("retry-required: regression-tests-failed, new-tests-not-observed");
     expect(result.state.tasks[0]?.failure_reason).toBe(describeSettlement(result.transition));
@@ -693,7 +762,7 @@ describe("exact transition application", () => {
       attempt,
       "2026-08-24T00:03:59.000Z" as never,
       "Claude JSONL transcript record 16.message.role must be user or assistant",
-      observedBytes(attempt, { currentAttemptScope: [] }),
+      observedBytes({ currentAttemptScope: [] }),
     ));
     const description = describeSettlement(result.transition);
     expect(description).toMatch(
@@ -727,7 +796,7 @@ describe("exact transition application", () => {
       "2026-08-24T00:03:55.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     expect(describeSettlement(implemented.transition)).toBe("implemented");
 
@@ -779,8 +848,8 @@ describe("engine skeleton bytes are no implementer write (FR-012)", () => {
     paths.map((path) => ({ record: record(path), currentDigest }));
   /** The engine wrote `src/a.ts` before the attempt baselines; the first Task
    *  baseline still predates it. */
-  const skeletonBytes = (attempt: ImplementationAttemptAuthority, current: string | null, overrides: Partial<Parameters<typeof buildTaskLocalByteObservation>[0]> = {}) =>
-    observedBytes(attempt, {
+  const skeletonBytes = (current: string | null, overrides: Partial<Parameters<typeof buildTaskLocalByteObservation>[0]> = {}) =>
+    observedBytes({
       attemptBaseline: baseline("src/a.ts", ENGINE),
       currentAttemptScope: baseline("src/a.ts", current),
       proofBaseline: baseline("src/a.ts", null),
@@ -791,54 +860,56 @@ describe("engine skeleton bytes are no implementer write (FR-012)", () => {
     });
 
   it("AS-015: an untouched engine skeleton never counts as changed and never enters the attempt-scope delta", () => {
-    const bytes = skeletonBytes(authority(), ENGINE);
+    const bytes = skeletonBytes(ENGINE);
     expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
     expect(bytes.cumulativeModifiedPaths).toEqual([]);
     expect(bytes.attemptScopeChangedPaths).toEqual([]);
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
+    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
   });
 
   it("AS-015: without the recorded engine digest the same bytes are the Task's own production", () => {
-    const bytes = skeletonBytes(authority(), ENGINE, { engineSkeletons: NO_ENGINE_SKELETONS });
+    const bytes = skeletonBytes(ENGINE, { engineSkeletons: NO_ENGINE_SKELETONS });
     expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
     expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
   });
 
   it("FR-012: implementing the skeleton is the implementer's write", () => {
-    const bytes = skeletonBytes(authority(), digest("f"), { parserModifiedPaths: ["src/a.ts"] });
+    const bytes = skeletonBytes(digest("f"), { parserModifiedPaths: ["src/a.ts"] });
     expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
     expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
-    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
+    expect(bytes.byteScope).toEqual({ kind: "accepted" });
+    expect(bytes.attributedAttemptChangedPaths).toEqual(["src/a.ts"]);
   });
 
   it("FR-012: deleting the skeleton is the implementer's write too", () => {
-    const bytes = skeletonBytes(authority(), null, { parserModifiedPaths: ["src/a.ts"], proofBaseline: baseline("src/a.ts", digest("a")) });
+    const bytes = skeletonBytes(null, { parserModifiedPaths: ["src/a.ts"], proofBaseline: baseline("src/a.ts", digest("a")) });
     expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
   });
 
   it("FR-012: a repository-changed path still holding a recorded engine digest stays out of the out-of-scope set", () => {
-    const attempt = authority();
-    const stub = observedBytes(attempt, {
+    const stub = observedBytes({
       repositoryChangedPaths: ["src/stub.ts"],
       engineSkeletons: engineAt(ENGINE, "src/stub.ts"),
     });
-    expect(stub.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
+    expect(stub.byteScope).toEqual({ kind: "accepted" });
+    expect(stub.attributedAttemptChangedPaths).toEqual(["src/a.ts"]);
     expect(stub.unresolvedRepositoryPaths).toEqual([]);
 
-    const edited = observedBytes(attempt, {
+    const edited = observedBytes({
       repositoryChangedPaths: ["src/stub.ts"],
       engineSkeletons: engineAt(digest("f"), "src/stub.ts"),
     });
-    expect(edited.suite.checks[0]?.outcome).toEqual({ kind: "out-of-scope-writes", paths: ["src/stub.ts"] });
+    expect(edited.byteScope).toEqual({ kind: "out-of-scope-writes", paths: ["src/stub.ts"] });
     expect(edited.unresolvedRepositoryPaths).toEqual(["src/stub.ts"]);
 
-    const removed = observedBytes(attempt, {
+    const removed = observedBytes({
       repositoryChangedPaths: ["src/stub.ts"],
       engineSkeletons: engineAt(null, "src/stub.ts"),
     });
     expect(removed.unresolvedRepositoryPaths).toEqual(["src/stub.ts"]);
 
-    const unrecorded = observedBytes(attempt, {
+    const unrecorded = observedBytes({
       repositoryChangedPaths: ["src/stub.ts"],
       engineSkeletons: NO_ENGINE_SKELETONS,
     });
@@ -846,7 +917,7 @@ describe("engine skeleton bytes are no implementer write (FR-012)", () => {
   });
 
   it("matches recorded engine paths through the plan-path rule", () => {
-    const bytes = skeletonBytes(authority(), ENGINE, {
+    const bytes = skeletonBytes(ENGINE, {
       engineSkeletons: engineAt(ENGINE, "./src/a.ts", "./src/stub.ts"),
       repositoryChangedPaths: ["src/stub.ts"],
     });
@@ -875,7 +946,7 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       "2026-08-24T00:05:00.000Z" as never,
       { ...completedEvidence, contractConformance: violated([UNIMPLEMENTED, RELISTED]) },
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     expect(result.transition.kind).toBe("retry-required");
     const task = result.state.tasks[0]!;
@@ -899,7 +970,7 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       "2026-08-24T00:05:01.000Z" as never,
       { ...completedEvidence, contractConformance: violated([UNIMPLEMENTED, RELISTED]) },
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     const retried = result.state.tasks[0]!;
     const disposition = deriveImplementationRetryDisposition(retried);
@@ -933,7 +1004,7 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       "2026-08-24T00:05:02.000Z" as never,
       { ...completedEvidence, contractConformance: violated(many as unknown as readonly [ConformanceViolation, ...ConformanceViolation[]]) },
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     const [kind] = result.state.tasks[0]?.implementation_attempt_history?.[0]?.failureKinds ?? [];
     expect(kind?.length).toBeLessThanOrEqual(4_096);
@@ -958,8 +1029,43 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       "2026-08-24T00:05:03.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt),
+      observedBytes(),
     ));
     expect(result.transition.kind).toBe("implemented");
+  });
+});
+
+describe("isWaveComplete — the wave-completion predicate shared by engine and pi (round-16)", () => {
+  const waveTask = (id: string, wave: number, status: "pending" | "failed" | "implemented" | "completed"): Task =>
+    taskFixture({ id, description: "impl", agent: "code-implementer-agent", wave, status, depends_on: [] });
+  const waveGraph = (tasks: readonly Task[]): TaskGraph => ({
+    current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    current_wave: 1,
+    tasks: [...tasks],
+    wave_gates: {},
+  });
+
+  it("complete when every wave task is implemented or completed", () => {
+    const state = waveGraph([
+      waveTask("T1", 1, "implemented"),
+      waveTask("T2", 1, "completed"),
+      waveTask("T3", 2, "pending"), // other wave: ignored
+    ]);
+    expect(isWaveComplete(state, 1)).toBe(true);
+  });
+
+  it("incomplete while any wave task is pending or failed", () => {
+    for (const status of ["pending", "failed"] as const) {
+      expect(isWaveComplete(waveGraph([waveTask("T1", 1, "implemented"), waveTask("T2", 1, status)]), 1)).toBe(false);
+    }
+  });
+
+  it("a wave with no tasks counts as complete (long-standing inlined semantics, now pinned)", () => {
+    expect(isWaveComplete(waveGraph([waveTask("T1", 1, "pending")]), 7)).toBe(true);
   });
 });

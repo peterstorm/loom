@@ -1,8 +1,7 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 /**
  * SubagentStop dispatch resilience:
  * - malformed stdin fails closed with a specific "bindings may leak" error
- * - a cleanupSubagentFlag crash still runs update-task-status
+ * - a cleanupSubagentFlag crash still settles the exact implementation attempt
  * - update-task-status judges the dispatcher's pre-unbind ledger snapshot,
  *   not whatever file is on disk when it runs
  */
@@ -14,7 +13,6 @@ import dispatch, { runDispatch } from "../../../src/handlers/subagent-stop/dispa
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
 import { SUBAGENT_DIR } from "../../../src/config";
-import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
@@ -22,12 +20,23 @@ import { buildContextPacket, encodeByteSection } from "../../../src/core/context
 import { reportSummary } from "../../machine/report-summary";
 import { resolveTaskGraph } from "../../../src/state-manager";
 import { AGENT_COMMAND_ORIGIN } from "../../../src/machine/types";
+import { executingGraphFixture, graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import {
+  ARMED_ARTIFACT,
+  ARMED_EPOCH,
+  REGRESSION_ONLY,
+  armedClaudeImplementation,
+  writesTranscript,
+} from "../../fixtures/claude-implementation-attempt";
+import type { TaskGraph } from "../../../src/types";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const run = `dispatch-resilience-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
 
 let dirs: string[] = [];
 let sessionFiles: string[] = [];
+const disposals: (() => void)[] = [];
 
 function tempDir(): string {
   const dir = canonicalTempDir("loom-dispatch-");
@@ -49,6 +58,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const dispose of disposals.splice(0)) dispose();
   process.chdir(originalCwd);
   vi.unstubAllEnvs();
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
@@ -60,25 +70,15 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** State with one executing task so update-task-status has unambiguous work. */
-function writeState(dir: string, taskOverrides: Record<string, unknown> = {}): string {
+/**
+ * State with one executing task under exact attempt authority, as every
+ * loadable State File's executing Task carries (ADR-0098).
+ */
+function writeState(dir: string): string {
   const statePath = join(dir, "active_task_graph.json");
+  const task = taskFixture({ id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [] });
   writeFileSync(statePath, JSON.stringify({
-    current_phase: "execute",
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    current_wave: 1,
-    executing_tasks: ["T1"],
-    tasks: [{
-      id: "T1", description: "impl", agent: "code-implementer-agent",
-      // "pending": parseTaskGraph rejects out-of-union statuses at load —
-      // the executing marker is executing_tasks, not a status value.
-      wave: 1, status: "pending", depends_on: [],
-      new_tests_required: true,
-      ...taskOverrides,
-    }],
+    ...executingGraphFixture(graphFixture([task]), ["T1"]),
     wave_gates: { "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false } },
   }));
   return statePath;
@@ -589,12 +589,18 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
   });
 });
 
+/** An exact Claude attempt for T1, disposed after the test. */
+async function armed(label: string, options: Readonly<{ publishSidecar?: boolean; seed?: (graph: TaskGraph) => TaskGraph }> = {}) {
+  const attempt = await armedClaudeImplementation({ label, verificationPolicy: REGRESSION_ONLY, ...options });
+  disposals.push(attempt.dispose);
+  return attempt;
+}
+
 describe("a cleanupSubagentFlag crash still runs update-task-status", () => {
-  it("held cleanup lock reports cleanup failure after T1 quarantine still runs", async () => {
-    const s = sid("cleanup-crash");
-    const dir = tempDir();
-    const statePath = writeState(dir);
-    pointSessionAt(s, statePath);
+  it("held cleanup lock reports cleanup failure after T1 settlement still runs", async () => {
+    const attempt = await armed("cleanup-crash", { publishSidecar: true });
+    writeFileSync(attempt.transcript, writesTranscript("Stopped without changing the artifact.", []));
+    const s = attempt.sessionId;
 
     // .active exists → cleanup must take the lock to rewrite it
     const activeFile = `${SUBAGENT_DIR}/${s}.active`;
@@ -610,10 +616,7 @@ describe("a cleanupSubagentFlag crash still runs update-task-status", () => {
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      const result = await dispatch(
-        JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
-        [],
-      );
+      const result = await dispatch(attempt.stopInput, []);
       expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("cleanup-subagent-flag") });
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(text).not.toContain("ERROR in cleanupSubagentFlag");
@@ -621,20 +624,19 @@ describe("a cleanupSubagentFlag crash still runs update-task-status", () => {
       rmSync(lockDir, { recursive: true, force: true });
     }
 
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    const state = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
     expect(state.tasks[0].status).toBe("pending");
     expect(state.tasks[0].proof.state).toBe("failed");
+    expect(state.tasks[0].implementation_attempt_history).toHaveLength(1);
     expect(state.executing_tasks).toEqual([]);
   }, 30000);
 
-  it("catches a thrown cleanup dependency, still runs category quarantine, and returns the cleanup error", async () => {
-    const s = sid("cleanup-throws");
-    const dir = tempDir();
-    const statePath = writeState(dir, { new_tests_required: false });
-    pointSessionAt(s, statePath);
+  it("catches a thrown cleanup dependency, still settles the attempt, and returns the cleanup error", async () => {
+    const attempt = await armed("cleanup-throws", { publishSidecar: true });
+    writeFileSync(attempt.transcript, writesTranscript("Stopped without changing the artifact.", []));
 
     const result = await runDispatch(
-      JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
+      attempt.stopInput,
       [],
       async () => { throw new Error("injected cleanup crash"); },
     );
@@ -643,28 +645,26 @@ describe("a cleanupSubagentFlag crash still runs update-task-status", () => {
       kind: "error",
       message: expect.stringContaining("cleanupSubagentFlag crashed: injected cleanup crash"),
     });
-    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    const state = JSON.parse(readFileSync(attempt.statePath, "utf8"));
     expect(state.executing_tasks).toEqual([]);
     expect(state.tasks[0]).toMatchObject({
       status: "pending",
       proof: { state: "failed" },
-      revalidation_required: true,
     });
+    expect(state.tasks[0].implementation_attempt_history).toHaveLength(1);
   });
 });
 
 describe("update-task-status honors the pre-unbind evidence snapshot", () => {
   it("a trusted TestRun in the snapshot decides the verdict even with no ledger on disk", async () => {
-    const s = sid("snapshot");
-    const dir = tempDir();
-    // New-test detection is independent of this snapshot-attribution test.
-    const statePath = writeState(dir, { new_tests_required: false });
-    pointSessionAt(s, statePath);
+    const attempt = await armed("snapshot");
+    writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
+    writeFileSync(attempt.transcript, writesTranscript("Changed the artifact.", [ARMED_ARTIFACT]));
 
     // No <session>.evidence.jsonl exists — the snapshot is the only source,
     // exactly the bind-time truncation window the dispatcher closes.
     const snapshot: readonly EvidenceRecord[] = [{
-      epoch: parseEpoch("a-1:code-implementer-agent")!,
+      epoch: ARMED_EPOCH,
       event: {
         kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
         command: "npm test",
@@ -674,144 +674,137 @@ describe("update-task-status honors the pre-unbind evidence snapshot", () => {
     }];
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const result = await runUpdateTaskStatus(
-      JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
-      [],
-      { kind: "snapshot", events: snapshot },
-    );
+    const result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: snapshot }, attempt.observation);
     stderrSpy.mockRestore();
-    expect(result.kind).toBe("passthrough");
+    expect(result.kind, JSON.stringify(result)).toBe("passthrough");
 
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("pending");
-    expect(state.tasks[0].proof.state).toBe("failed");
-    expect(state.tasks[0].revalidation_required).toBe(true);
+    const state = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
+    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].proof.state).toBe("satisfied");
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 0");
   }, 30000);
 });
 
-describe("legacy Claude completion has no positive authority", () => {
-  it("an extracted transcript Task id and passing ledger evidence remain cleanup-only", async () => {
-    const s = sid("legacy-extracted-pass");
-    const dir = tempDir();
-    const statePath = writeState(dir, { new_tests_required: false });
-    pointSessionAt(s, statePath);
-    const transcriptPath = join(dir, "legacy-extracted.jsonl");
-    writeFileSync(transcriptPath, [
-      JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }),
-      JSON.stringify({ type: "assistant", message: { role: "assistant", content: "1 passing" } }),
-    ].join("\n"));
-    const snapshot: readonly EvidenceRecord[] = [{
-      epoch: parseEpoch("a-1:code-implementer-agent")!,
-      event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: reportSummary(1, 0) },
-    }];
-
-    const result = await runUpdateTaskStatus(JSON.stringify({
-      session_id: s,
-      agent_id: "a-1",
-      agent_type: "code-implementer-agent",
-      agent_transcript_path: transcriptPath,
-    }), [], { kind: "snapshot", events: snapshot });
-
-    expect(result.kind).toBe("passthrough");
-    const task = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
-    expect(task).toMatchObject({
-      status: "pending",
-      proof: { state: "failed" },
-      revalidation_required: true,
-      test_result: { verdict: "trusted-pass" },
-    });
-  });
-});
-
-describe("trust-aware skip guard — decided INSIDE the locked update", () => {
-  const stopInput = (s: string) =>
-    JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" });
-
-  it("an untrusted helper-reported 'pass' does NOT preempt the ledger's trusted-fail (laundering hole closed)", async () => {
-    const s = sid("launder");
-    const dir = tempDir();
+describe("an untrusted helper-reported pass never launders the ledger's trusted-fail", () => {
+  it("the stop persists the epoch's trusted-fail over a pass store-test-evidence wrote first", async () => {
     // The classic laundering move: store-test-evidence stdin wrote an
-    // untrusted pass BEFORE SubagentStop fired. The old any-trust skip
-    // guard would have preserved it and dropped the ground truth.
-    const statePath = writeState(dir, {
-      status: "implemented",
-      test_result: { verdict: "untrusted", passed: true, label: "helper-reported (store-test-evidence stdin)" },
-      test_evidence: "all 999 tests pass, honest",
+    // untrusted pass BEFORE SubagentStop fired.
+    const attempt = await armed("launder", {
+      seed: (graph) => ({
+        ...graph,
+        tasks: graph.tasks.map((task) => ({
+          ...task,
+          test_result: { verdict: "untrusted", passed: true, label: "helper-reported (store-test-evidence stdin)", provenance: "unverified" },
+          test_evidence: "all 999 tests pass, honest",
+        })),
+      }),
     });
-    pointSessionAt(s, statePath);
-
+    writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
+    writeFileSync(attempt.transcript, writesTranscript("Changed the artifact.", [ARMED_ARTIFACT]));
     const snapshot: readonly EvidenceRecord[] = [{
-      epoch: parseEpoch("a-1:code-implementer-agent")!,
+      epoch: ARMED_EPOCH,
       event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 1, report: null },
     }];
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: snapshot });
+    const result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: snapshot }, attempt.observation);
     stderrSpy.mockRestore();
-    expect(result.kind).toBe("passthrough");
+    expect(result.kind, JSON.stringify(result)).toBe("passthrough");
 
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    const state = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" }); // ground truth persisted
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 1");
+    expect(state.tasks[0].status).toBe("pending");
   }, 30000);
+});
 
-  it("a trusted verdict is preserved while task cleanup resolves inside the lock", async () => {
-    const s = sid("trusted-kept");
-    const dir = tempDir();
-    const statePath = writeState(dir, {
-      status: "implemented",
-      test_result: { verdict: "trusted-fail" },
-      test_evidence: "ledger: exit 1 (npm test)",
-      new_tests_written: true,
-      new_test_evidence: "legacy fixture evidence",
-    });
-    pointSessionAt(s, statePath);
+describe("a prior trusted verdict survives a stop that carries no trusted evidence", () => {
+  /** Stops of the armed attempt that carry nothing trusted: no ledger line
+   *  at all, or an agent-command pass with no report (judged untrusted). */
+  const UNTRUSTED_STOPS: Readonly<Record<string, readonly EvidenceRecord[]>> = Object.freeze({
+    empty: [],
+    untrusted: [{
+      epoch: ARMED_EPOCH,
+      event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: null },
+    }],
+  });
 
+  for (const [stop, events] of Object.entries(UNTRUSTED_STOPS)) {
+    it(`an ${stop} stop keeps the earlier trusted-fail and still releases the reservation`, async () => {
+      const attempt = await armed(`trusted-kept-${stop}`, {
+        seed: (graph) => ({
+          ...graph,
+          tasks: graph.tasks.map((task) => ({
+            ...task, test_result: { verdict: "trusted-fail" }, test_evidence: "ledger: exit 1 (npm test)",
+          })),
+        }),
+      });
+      writeFileSync(attempt.transcript, writesTranscript("Stopped without changing the artifact.", []));
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const result = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events }, attempt.observation);
+      stderrSpy.mockRestore();
+      expect(result.kind, JSON.stringify(result)).toBe("passthrough");
+
+      const state = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
+      expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" });
+      expect(state.tasks[0].test_evidence).toBe("ledger: exit 1 (npm test)");
+      // The verdict stands, but the Agent still stopped: its reservation is
+      // released, or the duplicate-spawn check ghost-blocks the retry.
+      expect(state.tasks[0].status).toBe("pending");
+      expect(state.tasks[0].active_implementation_attempt).toBeUndefined();
+      expect(state.executing_tasks).toEqual([]);
+    }, 30000);
+  }
+});
+
+describe("a late stop never reopens a completed Task", () => {
+  it("redelivering the settled attempt's stop after the Task completed changes nothing", async () => {
+    const attempt = await armed("completed-kept");
+    writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
+    writeFileSync(attempt.transcript, writesTranscript("Changed the artifact.", [ARMED_ARTIFACT]));
+    const pass: readonly EvidenceRecord[] = [{
+      epoch: ARMED_EPOCH,
+      event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: reportSummary(5, 0) },
+    }];
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    // Empty snapshot + no transcript: the handler produces an untrusted
-    // failure, but the existing trusted verdict must survive while execution
-    // cleanup lands. New-test evidence is deliberately not asserted here: it is
-    // recomputed from the repository diff and belongs to dedicated tests with
-    // injected DiffDeps.
-    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: [] });
+    const settled = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: pass }, attempt.observation);
+    expect(settled.kind, JSON.stringify(settled)).toBe("passthrough");
+
+    // The Wave Gate then completes T1 (the protected State File is written
+    // the way its lock-holder writes it).
+    const implemented = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
+    expect(implemented.tasks[0]).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
+    chmodSync(attempt.statePath, 0o644);
+    writeFileSync(attempt.statePath, JSON.stringify({
+      ...implemented,
+      tasks: implemented.tasks.map((task: { id: string }) => task.id === "T1" ? { ...task, status: "completed" } : task),
+    }));
+    chmodSync(attempt.statePath, 0o444);
+    const before = readFileSync(attempt.statePath);
+
+    // A late SubagentStop for the same attempt arrives with no evidence at all.
+    const late = await runUpdateTaskStatus(attempt.stopInput, [], { kind: "snapshot", events: [] }, attempt.observation);
     const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     stderrSpy.mockRestore();
-    expect(result.kind).toBe("passthrough");
-    expect(text).not.toContain("leaving it untouched");
 
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" });
-    expect(state.tasks[0].test_evidence).toBe("ledger: exit 1 (npm test)");
-    // The VERDICT stands down, but the agent still STOPPED: the task must
-    // leave executing_tasks or the duplicate-spawn check ghost-blocks re-runs.
-    expect(state.executing_tasks).toEqual([]);
-  }, 30000);
-
-  it("a completed task is never reopened", async () => {
-    const s = sid("completed-kept");
-    const dir = tempDir();
-    const statePath = writeState(dir, { status: "completed" });
-    pointSessionAt(s, statePath);
-
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: [] });
-    stderrSpy.mockRestore();
-    expect(result.kind).toBe("passthrough");
-
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("completed");
-    expect(state.tasks[0].test_result).toBeUndefined();
+    expect(late.kind, JSON.stringify(late)).toBe("passthrough");
+    // The completed Task already holds this attempt's receipt: the redelivery is a duplicate.
+    expect(text).toContain("T1 result ignored (duplicate)");
+    expect(readFileSync(attempt.statePath).equals(before)).toBe(true);
+    const state = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
+    expect(state.tasks[0]).toMatchObject({ status: "completed", test_result: { verdict: "trusted-pass" } });
   }, 30000);
 });
 
 describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (snapshot-failed sentinel)", () => {
   it("unreadable ledger → verdict is labeled snapshot-read-failed, never 'degraded'", async () => {
-    const s = sid("snapshot-fail");
-    const dir = tempDir();
-    const statePath = writeState(dir);
-    pointSessionAt(s, statePath);
+    const attempt = await armed("snapshot-fail", { publishSidecar: true });
+    writeFileSync(join(attempt.root, ARMED_ARTIFACT), "export const value = 2;\n");
+    // No pass markers: the transcript-regex fallback finds nothing.
+    writeFileSync(attempt.transcript, writesTranscript("Changed the artifact.", [ARMED_ARTIFACT]));
+    const s = attempt.sessionId;
 
     // A DIRECTORY at the ledger path makes readEvidence throw (EISDIR):
     // the dispatcher's snapshot read fails. The { kind: "snapshot-failed" }
@@ -823,24 +816,19 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
     sessionFiles.push(ledgerDir);
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const result = await dispatch(
-      JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
-      [],
-    );
+    const result = await dispatch(attempt.stopInput, []);
     const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     stderrSpy.mockRestore();
 
-    expect(result.kind).toBe("passthrough"); // dispatcher never crashes the pipeline
+    expect(result.kind, JSON.stringify(result)).toBe("passthrough"); // dispatcher never crashes the pipeline
     expect(text).toContain(`evidence snapshot failed for ${s}`);
     // The handler proceeds (labeled), it does not crash:
     expect(text).not.toContain("ERROR in updateTaskStatus");
     expect(text).toContain("labeled snapshot-read-failed");
 
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    const state = JSON.parse(readFileSync(attempt.statePath, "utf-8"));
     expect(state.tasks[0].status).toBe("pending");
     expect(state.tasks[0].proof.state).toBe("failed");
-    // No transcript in this run → the fallback found no pass markers; the
-    // labeled untrusted verdict carries exactly that.
     expect(state.tasks[0].test_result).toEqual({
       verdict: "untrusted",
       passed: false,
@@ -850,6 +838,7 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
     expect(state.tasks[0].test_result.label).not.toContain("degraded");
   }, 30000);
 });
+
 
 describe("an INVALID session id is a typed snapshot failure, never an empty snapshot (round-10 gap 22)", () => {
   it("session_id with reserved characters → typed snapshot failure + cleanup error", async () => {

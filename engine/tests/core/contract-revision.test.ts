@@ -22,6 +22,7 @@ import {
   protectedGraphFixture,
   satisfiedProof,
   taskFixture,
+  executingGraphFixture,
 } from "../fixtures/task-lifecycle";
 
 const TYPES = "src/payload-contract.ts";
@@ -168,7 +169,7 @@ describe("reviseAcceptanceContract", () => {
   });
 
   it("refuses while implementation reservations are active", () => {
-    expect(refusal(populated({ executing_tasks: ["T3"] }))).toMatchObject({ kind: "implementation-active" });
+    expect(refusal(executingGraphFixture(populated(), ["T3"]))).toMatchObject({ kind: "implementation-active" });
   });
 
   it("refuses while a current-Wave Task holds an active implementation attempt, through the precondition Task Reopening shares", () => {

@@ -36,10 +36,10 @@ import {
   type WaveRequestBatch,
 } from "../../src/core/wave-review-authority";
 import { WHOLE_ISSUANCE } from "../../src/core/wave-review-carry-plan";
-import { generateWaveGateSummary } from "../../src/handlers/helpers/complete-wave-gate";
 import { observeWaveSpecCheckDocuments } from "../../src/orchestration/wave-spec-check-documents";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import type { ReviewStatus, Task, TaskGraph, TaskStatus } from "../../src/types";
+import { acceptedWaveCompletionSuite, COMPLETION_SUITE_WORKSPACE } from "../fixtures/accepted-wave-completion-suite";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { value } from "../fixtures/parse-result";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
@@ -50,6 +50,7 @@ import {
   protectedGraphFixture,
   siblingTaskFixture,
   type DistillTaskFixtureInput,
+  manifestedGraphFixture,
 } from "../fixtures/task-lifecycle";
 
 const cleanup: string[] = [];
@@ -288,12 +289,15 @@ describe("Wave Gate checks over a Distill Task", () => {
   const deps: GateDeps = {
     loadPlanModels: () => ({ kind: "loaded", models: { lifecycles: [], pipeline: null, invariants: [], contracts: [], strays: [] } }),
     filePresence: () => ({ ok: true, exists: true }),
+    currentWaveWorkspace: COMPLETION_SUITE_WORKSPACE,
   };
-  const gateGraph = (tasks: readonly Task[]): TaskGraph => graphOf(tasks, {
+  const activeGate = activeWaveGateFixture({ runId: RUN_ID, wave: 1, authorityDigest: AUTHORITY });
+  const gateGraph = (tasks: readonly Task[]) => manifestedGraphFixture(graphOf(tasks, {
     wave_gates: { "1": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: false } },
     spec_check: capturedSpecCheck({ wave: 1, runAt: "", criticalFindings: [] }),
-    active_wave_gate: activeWaveGateFixture({ runId: RUN_ID, wave: 1, authorityDigest: AUTHORITY }),
-  });
+    active_wave_gate: activeGate,
+    active_wave_completion_suite: acceptedWaveCompletionSuite(activeGate),
+  }));
 
   it("implementation proof is owed: a pending Distill Task keeps the gate from starting", () => {
     const graph = graphOf([reviewed("T1"), distill("T2", ["T1"], "pending")]);
@@ -370,7 +374,7 @@ describe("Wave Gate checks over a Distill Task", () => {
     expect(completed.tasks[1]!.accepted_review_authority).toBeUndefined();
     expect(completed.wave_gates["1"]).toMatchObject({ impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false });
     // The completed graph is one the State File loads.
-    const { active_wave_gate: _retired, ...archived } = completed;
+    const { active_wave_gate: _retired, active_wave_completion_suite: _archivedSuite, ...archived } = completed;
     expect(protectedGraphFixture(archived).tasks[1]).toMatchObject({ id: "T2", status: "completed", review_status: "pending" });
   });
 
@@ -379,11 +383,5 @@ describe("Wave Gate checks over a Distill Task", () => {
     const decision = evaluateWaveGate(state, null, deps);
     expect(decision.verdict.kind).toBe("fail");
     expect(applyGateDecision(state, decision)).toBe(state);
-  });
-
-  it("the Wave summary reports the Distill Task as not reviewed", () => {
-    const summary = generateWaveGateSummary(1, [reviewed("T1"), distill("T2", ["T1"], "completed")]);
-    expect(summary).toContain("**Status:** passed — 0 critical, 0 advisory");
-    expect(summary).toContain("**Status:** not reviewed (exempt from Wave review: distill-task)");
   });
 });

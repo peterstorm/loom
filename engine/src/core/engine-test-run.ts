@@ -24,10 +24,10 @@
 
 import { hasExactKeys, isRecord, type UnknownRecord } from "./plain-record";
 import {
-  parseJunitXml,
+  testRunSummary,
   parseReportSource,
   parseReportSummary,
-  parseVitestJson,
+  readTestReportText,
   runnerCrashSummary,
   type TestReportSummary,
 } from "./structured-test-report";
@@ -160,7 +160,8 @@ export function parseEngineTestRunReceipt(stdout: string): EngineTestRunReceiptP
  * - null otherwise: an exit 0 with no report proves nothing.
  */
 export function engineRunReport(files: readonly string[], exit: number, reportText: string | null): TestReportSummary | null {
-  const parsed = reportText === null ? null : parseJunitXml(reportText) ?? parseVitestJson(reportText);
+  const read = reportText === null ? null : readTestReportText(reportText);
+  const parsed = read === null ? null : testRunSummary(read, "junit-xml") ?? testRunSummary(read, "vitest-json");
   if (parsed !== null) return parsed;
   return exit === 0 ? null : runnerCrashSummary(files);
 }

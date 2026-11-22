@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { parseOrchestrationRunId, parseRequestId, type RequestId } from "../core/orchestration-contract";
 import { compareStrings } from "../core/ordering";
 import { isRecord } from "../core/plain-record";
+import type { TaskIdentity } from "../core/spawn-task-text";
 import { ORCHESTRATION_RUNS_SUFFIX, parseSessionId, type SessionId } from "../machine/evidence";
 import {
   type AnchoredDirectory,
@@ -14,7 +15,7 @@ import {
   withAnchoredDirectoryLock,
   writeDirectoryFileExclusiveNoFollow,
 } from "../utils/no-follow-fs";
-import { parseRunDirectoryReference, type RunDirectoryReference } from "./run-directory-handle";
+import { openRegisteredRunDirectory, parseRunDirectoryReference, type RunDirectoryReference } from "./run-directory-handle";
 
 export { ORCHESTRATION_RUNS_SUFFIX } from "../machine/evidence";
 
@@ -292,4 +293,103 @@ export async function registerSessionRunBinding(
   } catch (error) {
     return failed(`cannot publish ${label} session run binding: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/** Where one orchestration run lives: the pair every run-directory primitive takes. */
+export type RunLocation = Readonly<{ runsRoot: string; runDirectory: string }>;
+
+/** The explicit `LOOM_ORCHESTRATION_RUNS_ROOT` / `LOOM_ORCHESTRATION_RUN_DIR` pair, as read. */
+export type ExplicitRunEnvironment = Readonly<{ runsRoot: string | undefined; runDirectory: string | undefined }>;
+
+/**
+ * The run the explicit environment names: both variables or neither. `null`
+ * when neither is set; half an authority is a fault, never "unrelated".
+ */
+export function explicitRun(
+  environment: ExplicitRunEnvironment,
+  harness: SessionBindingHarness,
+): BindingResult<RunLocation | null> {
+  const { runsRoot, runDirectory } = environment;
+  if (runsRoot === undefined && runDirectory === undefined) return ok(null);
+  if (runsRoot === undefined || runDirectory === undefined) {
+    return failed(`${HARNESS_LABEL[harness]} orchestration requires both run-root and run-directory authority`);
+  }
+  return ok(Object.freeze({ runsRoot, runDirectory }));
+}
+
+/**
+ * The reads run resolution needs, each asked lazily and only when the decision
+ * gets that far: the session's bindings (never when an explicit run is set),
+ * and the issued identities of a run whose binding lists every requested id.
+ */
+export type IssuingRunReads = Readonly<{
+  bindings: () => BindingResult<readonly SessionRunBinding[]>;
+  issuedIdentities: (run: RunLocation) => BindingResult<readonly TaskIdentity[]>;
+}>;
+
+const describeIdentities = (identities: readonly TaskIdentity[]): string =>
+  identities.map(({ requestId, contextDigest }) => `${requestId}@${contextDigest}`).join(", ");
+
+const locationOf = ({ runsRoot, runDirectory }: RunLocation): RunLocation => Object.freeze({ runsRoot, runDirectory });
+
+/**
+ * Resolve the run that issued every one of `identities`, for both harnesses.
+ *
+ * An explicit run wins unchanged; the reads that later open it verify the
+ * request. Otherwise the run is the one session binding
+ * `resolveIssuingSessionBinding` proves issued them. The decision is pure
+ * over its reads.
+ */
+export function resolveIssuingRun(
+  explicit: RunLocation | null,
+  reads: IssuingRunReads,
+  identities: readonly TaskIdentity[],
+  harness: SessionBindingHarness,
+): BindingResult<RunLocation> {
+  if (explicit !== null) return ok(locationOf(explicit));
+  const binding = resolveIssuingSessionBinding(reads, identities, harness);
+  return binding.ok ? ok(locationOf(binding.value)) : binding;
+}
+
+/**
+ * The one session binding whose run issued every one of `identities`, for a
+ * shell that keeps the binding itself (Pi keys its review witnesses by it).
+ *
+ * Exactly one binding must list every request id AND have issued each one
+ * under the exact context digest the task names. The digest is part of the
+ * match, not a later check: request ids are not unique across runs (a legacy
+ * panel request id is caller-chosen), so the digest is what tells two bound
+ * runs issuing the same id apart. None or several matching bindings fail
+ * closed. The decision is pure over its reads.
+ */
+export function resolveIssuingSessionBinding(
+  reads: IssuingRunReads,
+  identities: readonly TaskIdentity[],
+  harness: SessionBindingHarness,
+): BindingResult<SessionRunBinding> {
+  const label = HARNESS_LABEL[harness];
+  if (identities.length === 0) return failed(`${label} session run resolution names no issued request`);
+  const bindings = reads.bindings();
+  if (!bindings.ok) return bindings;
+  const issuing: SessionRunBinding[] = [];
+  for (const binding of bindings.value) {
+    if (!identities.every(({ requestId }) => binding.requestIds.includes(requestId))) continue;
+    const issued = reads.issuedIdentities(binding);
+    if (!issued.ok) return issued;
+    const issuedAll = identities.every((identity) => issued.value.some((candidate) =>
+      candidate.requestId === identity.requestId && candidate.contextDigest === identity.contextDigest));
+    if (issuedAll) issuing.push(binding);
+  }
+  if (issuing.length === 1) return ok(issuing[0]);
+  return failed(issuing.length === 0
+    ? `no ${label} session run binding contains issued request/context authority ${describeIdentities(identities)}`
+    : `multiple ${label} session run bindings contain issued request/context authority ${describeIdentities(identities)}`);
+}
+
+/** The production `issuedIdentities` read: the run's reserved requests. */
+export function readIssuedIdentities(run: RunLocation): BindingResult<readonly TaskIdentity[]> {
+  const opened = openRegisteredRunDirectory(run.runsRoot, run.runDirectory);
+  if (!opened.ok) return failed(opened.error.message);
+  const issued = opened.value.readIssuedRequests();
+  return issued.ok ? ok(issued.value) : failed(issued.error.message);
 }

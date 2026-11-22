@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { piWriteTargetPaths } from "../../pi/tool-input";
+import { piWriteTargetPaths } from "../src/core/harness-tool-call";
 
 const paths = (input: unknown): readonly string[] => {
   const parsed = piWriteTargetPaths(input);
@@ -71,6 +71,17 @@ describe("piWriteTargetPaths — all-or-nothing scoped write parsing", () => {
     it("uses a direct path for the standard one-file multi-edit shape", () => {
       expect(paths({ path: "src/a.ts", edits: [{ oldText: "x", newText: "y" }] }))
         .toEqual(["src/a.ts"]);
+    });
+
+    it("a present target key commits the input to its own target, even when it holds null", () => {
+      expect(piWriteTargetPaths({ path: null, edits: [{ path: "src/a.ts" }] })).toEqual({
+        ok: false,
+        error: "write input must name one non-empty path, file_path, or filePath target",
+      });
+    });
+
+    it("a null target key defers to a later key that names the path", () => {
+      expect(paths({ path: null, file_path: "src/b.ts", edits: [{ path: "src/a.ts" }] })).toEqual(["src/b.ts"]);
     });
   });
 });

@@ -425,8 +425,8 @@ function bashEvidence(
     // still writing: surefire has per-class XML for the suites that happen to
     // have completed, every mtime postdates the call, and the merged summary
     // reads `total > 0, failed = 0`. That minted `trusted-pass` on a suite
-    // still running, and `applyUntrustedStopResolution` then refused to let
-    // any later evidence correct it. `findReport`'s guards bound STALENESS;
+    // still running, and a downstream resolution could refuse to let any later
+    // evidence correct it. `findReport`'s guards bound STALENESS;
     // nothing bounds completeness, so the only honest answer here is no
     // evidence at all.
     //

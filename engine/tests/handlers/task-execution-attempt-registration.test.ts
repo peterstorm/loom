@@ -8,7 +8,9 @@ import {
   rollbackTaskExecutionRegistration,
 } from "../../src/handlers/task-execution";
 import {
+  applyTaskExecutionAuthorityBatch,
   createTaskExecutionAuthorityBatch,
+  proveStaleReservations,
   rollbackTaskExecutionAuthorityBatch,
   taskExecutionRegistrationError,
 } from "../../src/core/validate-task-execution";
@@ -20,11 +22,10 @@ import {
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import { StateManager } from "../../src/state-manager";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   parseIsoInstant,
   parseReservationId,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
@@ -165,13 +166,12 @@ describe("modern implementation attempt registration", () => {
       expect(task.reserved_at).toBe(authority.reservedAt);
       expect(task.implementation_retry_protocol).toBe(2);
       expect(task.implementation_retry_history_start).toBe(0);
-      expect(task.legacy_execution_reservation).toBeUndefined();
       expect(task.attempt_artifact_baseline).toBeDefined();
       expect(task.attempt_repository_baseline).toBeDefined();
     }
   });
 
-  it("binds a fresh attempt to a retained repository baseline and retires a legacy unresolved-path carry", async () => {
+  it("binds a fresh attempt to a retained repository baseline", async () => {
     const repo = repository();
     writeFileSync(join(repo.root, "foreign.ts"), "foreign write from failed attempt\n");
     const task = taskFixture({
@@ -184,13 +184,7 @@ describe("modern implementation attempt registration", () => {
       file_list: ["src/a.ts"],
       repository_baseline: [],
     });
-    // State File bytes written before the carry was retired still read: the
-    // parser validates the legacy field and drops it, so the next write omits it.
-    const legacy = graph([task]);
-    writeFileSync(repo.statePath, JSON.stringify({
-      ...legacy,
-      tasks: legacy.tasks.map((entry) => ({ ...entry, unresolved_repository_paths: ["foreign.ts"] })),
-    }, null, 2));
+    writeFileSync(repo.statePath, JSON.stringify(graph([task]), null, 2));
 
     const result = await registerTaskExecutionBatch([spawn("T1")]);
 
@@ -199,7 +193,6 @@ describe("modern implementation attempt registration", () => {
     const stored = JSON.parse(readFileSync(repo.statePath, "utf8")) as TaskGraph;
     expect(stored.tasks[0]?.repository_baseline).toEqual([]);
     expect(stored.tasks[0]?.attempt_repository_baseline).toEqual([]);
-    expect(stored.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
   });
 
   it("re-arms a retry on a fresh repository boundary so foreign and sibling movement between attempts cannot block or attribute it", async () => {
@@ -238,8 +231,7 @@ describe("modern implementation attempt registration", () => {
       parserModifiedPaths,
       parserPathLabel: "integration result paths",
       taskCompleted,
-      testResult: { verdict: "trusted-pass" },
-      testEvidence: "focused integration pass",
+      test: { result: { verdict: "trusted-pass" }, evidence: "focused integration pass" },
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
       ledger: { kind: "read", events: [] },
     }, productionExactSettlementPorts(repo.root, repo.statePath)).application.state);
@@ -341,8 +333,6 @@ describe("modern implementation attempt registration", () => {
     );
     if (!batch.ok) throw new Error(batch.error);
     const plannedAuthority = batch.plans[0]!.authority;
-    const suite = createTaskCompletionSuiteAuthority(plannedAuthority);
-    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
     const settled = settleImplementationAttempt(
       {
         ...state.tasks[0]!,
@@ -364,17 +354,7 @@ describe("modern implementation attempt registration", () => {
         }),
         proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
       },
-      {
-        schemaVersion: 1,
-        kind: "task-completion-suite-result",
-        implementationAuthorityDigest: suite.value.implementationAuthorityDigest,
-        suiteDigest: suite.value.suiteDigest,
-        checks: [{
-          checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-          scope: "task",
-          outcome: { kind: "accepted", changedPaths: [] },
-        }],
-      },
+      observedByteScope([]),
     );
     if (!settled.ok || settled.value.kind !== "retry-required") {
       throw new Error("retry receipt fixture failed");
@@ -608,6 +588,41 @@ describe("modern implementation attempt registration", () => {
         transition: "infrastructure-blocked",
       }),
     ]);
+  });
+
+  it("refuses to reclaim a held authority that no longer parses, instead of leaving its Task reserved", () => {
+    const state = graph([taskFixture({
+      id: "T1", description: "one", agent: "code-implementer-agent",
+      wave: 1, status: "pending", depends_on: [], file_list: ["src/a.ts"],
+    })]);
+    const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const instant = parseIsoInstant("2026-01-01T00:00:00.000Z");
+    const later = parseIsoInstant("2026-01-02T00:00:00.000Z");
+    const reservation = parseReservationId("corrupt-authority");
+    if (!instant.ok || !later.ok || !reservation.ok) throw new Error("corrupt-authority fixture failed");
+    const batch = createTaskExecutionAuthorityBatch(
+      state, [spawn("T1")], ["T1"], [reservation.value], "1".repeat(40), instant.value,
+      new Map([["T1", { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] }]]),
+    );
+    if (!batch.ok) throw new Error(batch.error);
+    // Same authorityDigest, other body: the digest no longer matches its canonical authority.
+    const corrupt: ImplementationAttemptAuthority = { ...batch.plans[0]!.authority, reservedAt: later.value };
+    const held: TaskGraph = {
+      ...state,
+      executing_tasks: ["T1"],
+      tasks: [{
+        ...state.tasks[0]!,
+        active_implementation_attempt: corrupt,
+        attempt_artifact_baseline: baseline,
+        attempt_repository_baseline: [],
+        reserved_at: instant.value,
+      }],
+    };
+
+    expect(() => rollbackTaskExecutionAuthorityBatch(held, [corrupt], instant.value))
+      .toThrow(/Cannot reclaim the implementation attempt of T1: .*authorityDigest does not match/);
+    expect(() => applyTaskExecutionAuthorityBatch(held, [], proveStaleReservations(held, new Set(["T1"])), instant.value))
+      .toThrow(/Cannot reclaim the implementation attempt of T1/);
   });
 
   it("an exact rollback cannot clear a late replacement for the same Task", () => {

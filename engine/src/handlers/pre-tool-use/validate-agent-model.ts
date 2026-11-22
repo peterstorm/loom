@@ -27,8 +27,8 @@ import {
 import {
   anchoredRunDirectoryFromContextPath,
   engineIssuedClaudeModel,
-  loomMarkerValue,
 } from "../../core/grandfathered-spawn-model";
+import { parseIssuedContextPath, parseIssuedTaskIdentity } from "../../core/spawn-task-text";
 import { resolveRepositoryRoot } from "../../utils/git";
 import { parseFrontmatterFields } from "../../utils/frontmatter";
 import { parseStoredAgentRequestAuthority, type AgentRequestAuthority } from "../../core/orchestration-contract";
@@ -252,9 +252,12 @@ export function engineIssuedClaudeModelFromRunDir(
 
 /**
  * Did the engine itself issue `requestedModel` for the request this spawn
- * carries? Keyed on the spawn's LOOM_REQUEST_ID, read from the run directory
- * its LOOM_CONTEXT_PATH names — but only after that directory is ANCHORED to a
- * canonical, in-repository Run Directory (`anchoredRunDirectoryFromContextPath`).
+ * carries? Keyed on the request id of the spawn's authority markers (read by
+ * the one marker parser, `parseIssuedTaskIdentity`: both markers or no
+ * rescue), read from the run directory its LOOM_CONTEXT_PATH names
+ * (`parseIssuedContextPath`: exactly one path, to the packet the bound digest
+ * names) — but only after that directory is ANCHORED to a canonical,
+ * in-repository Run Directory (`anchoredRunDirectoryFromContextPath`).
  *
  * The anchor is the whole security property. Both markers are written by the
  * spawning agent, and a stored authority proves only internal self-consistency,
@@ -263,7 +266,7 @@ export function engineIssuedClaudeModelFromRunDir(
  * it liked. Anchoring confines the read to directories the engine creates and
  * guards.
  *
- * Every failure — no markers, an unanchored path, an unreadable dir, no
+ * Every failure — no or malformed markers, an unanchored path, an unreadable dir, no
  * matching authority — returns false so the caller keeps the original block:
  * the rescue can only ADD an allow when a real, guarded authority proves the
  * model, never remove one.
@@ -277,16 +280,23 @@ function grandfatheredModelAuthorization(
   requestedModel: string,
 ): GrandfatheredModelAuthorization {
   const prompt = typeof input.tool_input?.prompt === "string" ? input.tool_input.prompt : "";
-  const requestId = loomMarkerValue(prompt, "REQUEST_ID");
-  const contextPath = loomMarkerValue(prompt, "CONTEXT_PATH");
-  if (requestId === null || contextPath === null) {
+  const identity = parseIssuedTaskIdentity(prompt);
+  if (identity.kind === "malformed") {
+    return { authorized: false, diagnostic: `grandfathered model authority markers are unusable: ${identity.reason}` };
+  }
+  if (identity.kind === "unbound") {
     return { authorized: false, diagnostic: "grandfathered model authority requires exact request and context markers" };
   }
+  const contextPath = parseIssuedContextPath(prompt, identity);
+  if (!contextPath.ok) {
+    return { authorized: false, diagnostic: `grandfathered model authority markers are unusable: ${contextPath.error}` };
+  }
+  const { requestId } = identity;
   const repositoryRoot = resolveRepositoryRoot();
   if (repositoryRoot === undefined) {
     return { authorized: false, diagnostic: "grandfathered model authority cannot resolve the repository root" };
   }
-  const runDirectory = anchoredRunDirectoryFromContextPath(repositoryRoot, contextPath);
+  const runDirectory = anchoredRunDirectoryFromContextPath(repositoryRoot, contextPath.value);
   if (runDirectory === null) {
     return { authorized: false, diagnostic: "grandfathered model authority context is not anchored to an in-repository Run Directory" };
   }

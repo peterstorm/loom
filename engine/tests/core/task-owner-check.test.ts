@@ -29,7 +29,6 @@ import {
   renderTaskOwnerCheckBlock,
   renderTaskOwnerCheckReport,
   sortTaskOwnerFindings,
-  TASK_OWNER_CHECK_BASH_TIMEOUT_MS,
   taskOwnerCheckDigest,
   taskOwnerCheckDuty,
   taskOwnerCheckRecordJson,
@@ -43,12 +42,18 @@ import {
   type TaskOwnerCheckObservation,
   type TaskOwnerCheckResult,
 } from "../../src/core/task-owner-check";
-import { TASK_RECORD_CHECK_OFF, TASK_RECORD_NOT_RUN, taskRecordStanding, type TaskRecordDigest } from "../../src/core/task-record";
+import {
+  TASK_RECORD_CHECK_OFF,
+  TASK_RECORD_NOT_RUN,
+  taskRecordStanding,
+  type TaskRecordDigest,
+} from "../../src/core/task-record";
 import type { Task } from "../../src/types";
 import { contract, task } from "../fixtures/contract-status-fixtures";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { mutationManifest } from "../fixtures/task-mutation";
+import { taskRecordBlockTail } from "../fixtures/task-record-block";
 
 const OWNER = "src/rules/owner.ts";
 const SIBLING_A = "src/rules/a.ts";
@@ -409,8 +414,7 @@ describe("what the implementer reads", () => {
   it("the block repeats the command with its timeout and the blocks left", () => {
     const block = renderTaskOwnerCheckBlock({ kind: "not-run" }, "CMD", 1);
     expect(block).toContain("The check has not run for this Task.");
-    expect(block).toContain(`timeout of ${TASK_OWNER_CHECK_BASH_TIMEOUT_MS} ms`);
-    expect(block).toContain("\n  CMD\n");
-    expect(block).toContain("blocks at most 1 more time(s)");
+    const tail = taskRecordBlockTail("CMD", 1);
+    expect(block.slice(-tail.length)).toBe(tail);
   });
 });

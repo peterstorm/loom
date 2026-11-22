@@ -121,11 +121,11 @@ SPEC_CHECK_VERDICT: PASSED' | bun {LOOM_DIR}/engine/src/cli.ts helper store-spec
 echo 'ADVISORY: original finding — reason for downgrade' | bun {LOOM_DIR}/engine/src/cli.ts helper store-review-findings --task T1
 ```
 
-Then return to the registered Wave Gate: resume its exact Run Directory with `helper orchestration resume`, or start a fresh `/wave-gate` when no registration is active. For a TaskGraph that has a `verification_manifest`, never run `complete-wave-gate` directly: it is legacy-only and refuses.
+Then return to the registered Wave Gate: resume its exact Run Directory with `helper orchestration resume`, or start a fresh `/wave-gate` when no registration is active. Only the registered Wave Gate completes a Wave.
 
 ## Helpers you may run directly
 
-Hooks and `/wave-gate` drive most state-writing helpers themselves (`complete-wave-gate`, `store-review-findings` and `store-spec-check` outside the override above). Calling one of those by hand races the hook that owns the write. The direct invocations below are sanctioned, each only where a Loom document says to use it.
+Hooks and `/wave-gate` drive most state-writing helpers themselves (`store-review-findings` and `store-spec-check` outside the override above). Calling one of those by hand races the hook that owns the write. The direct invocations below are sanctioned, each only where a Loom document says to use it.
 
 **Allowed by the state guard on a guarded path** (`WHITELISTED_HELPERS` in `engine/src/core/guard-state-file.ts`):
 
@@ -143,16 +143,14 @@ Hooks and `/wave-gate` drive most state-writing helpers themselves (`complete-wa
 | `cleanup-state` | Abort (below) |
 | `record-retro` | Recording a written or skipped retro (Completion, below; `/retro`) |
 
-The guard's list also holds `complete-wave-gate`, `store-test-evidence`, `reconcile-implementation-proof` and `upgrade-spec-trace`. Run one of those by hand only for a recovery that `docs/operations.md` or `docs/reference/recovery.md` names.
+The guard's list also holds `store-test-evidence`, `reconcile-implementation-proof` and `upgrade-spec-trace`. Run one of those by hand only for a recovery that `docs/operations.md` or `docs/reference/recovery.md` names.
 
 **Outside the guard's scope when invoked as documented** (they name no guarded path):
 
 - `validate-task-graph`, `validate-lint-rules`, and `lint-wave-gate` (a diagnostic; the registered Wave Gate runs the same full-tier lint itself).
 - `orchestration status`, `contract-status`, `retro-facts` and `stop-check-plan --task <id>`: pure reads of the State File that write only to stdout. `retro-facts [--wave <N>] [--graph <path>]` prints the friction the run recorded, for `/retro`. `contract-status` takes no arguments and prints each Acceptance Contract's freeze state, roster and due Waves. `stop-check-plan` prints what the Acceptance Stop Check would do at that Task's stop, or the one reason the check is off; it refuses an unknown Task id with a non-zero exit. See `docs/reference/helpers.md`.
-- `panel-contract` (the architecture panel), `review-panel` and `standalone-review`: each writes only into a run directory under the runs root it is given (`.claude/specs/{date_slug}/panel-runs/`, `.claude/reviews/panel-runs/`, `.claude/reviews/review-and-fix-runs/`). Invoked against a guarded path they are blocked like anything else.
+- `panel-contract` (the architecture panel): it writes only into a run directory under the runs root it is given (`.claude/specs/{date_slug}/panel-runs/`). Invoked against a guarded path it is blocked like anything else.
 - `accept-plan-design-review` (Phase 3.6): its arguments name only a runs root under `.claude/reviews/`, and its one State File write goes through the engine's locked writer.
-
-**`review-panel tally` is the exception in that class.** It writes the TaskGraph: it moves refuted findings into `refuted_findings` and can change `review_status` from `blocked` to `passed`. The registered Wave Gate runs its own Refutation Panel and never calls it. It refuses a second tally on a run it has already adjudicated, and refuses `--threshold`. Do not invoke it to "re-check" a Wave.
 
 Everything else is driven by hooks.
 

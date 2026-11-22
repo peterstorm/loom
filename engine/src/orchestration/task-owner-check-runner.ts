@@ -8,7 +8,7 @@
  * the frozen `affectedRunner` over the matrix test.
  *
  * What differs from the gate is only the deadline: a matrix-test run launches
- * only while the time left before `TASK_OWNER_CHECK_DEADLINE_MS` holds its
+ * only while the time left before `TASK_RECORD_CHECK_DEADLINE_MS` holds its
  * whole time limit. A run it cannot hold is not launched, and reads as the
  * gate's own `spawn-failed` outcome naming the deadline, so its obligation's
  * mutation half is an infrastructure verdict while its coverage is still
@@ -22,7 +22,6 @@ import { mapNonEmpty } from "../core/orchestration-contract/identity";
 import { obligationRunOf } from "../core/owner-verification/owed-verification";
 import type { MatrixTestRun } from "../core/owner-verification/types";
 import {
-  TASK_OWNER_CHECK_DEADLINE_MS,
   taskOwnerCheckResult,
   taskOwnerCheckUnavailable,
   type OwedTaskOwnerCheck,
@@ -33,6 +32,7 @@ import { describeCause } from "../utils/describe-cause";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
 import { runOnce } from "./mutation-run-steps";
 import { verifyObligations, type ExecuteMatrixTest, type ScopedRun } from "./owner-verification-runner";
+import { TASK_RECORD_CHECK_DEADLINE_MS } from "../core/task-record";
 
 export type TaskOwnerCheckRunInput = Readonly<{
   /** The real workspace. It is only ever read. */
@@ -48,7 +48,7 @@ export function deadlineRefusal(deadlineMs: number, now: number, timeoutMs: numb
   const left = deadlineMs - now;
   return left >= timeoutMs
     ? null
-    : `not launched: the Task owner check's ${TASK_OWNER_CHECK_DEADLINE_MS / 1000} s deadline cannot hold another run ` +
+    : `not launched: the Task owner check's ${TASK_RECORD_CHECK_DEADLINE_MS / 1000} s deadline cannot hold another run ` +
       `(${Math.max(left, 0)} ms left, one run may take ${timeoutMs} ms)`;
 }
 
@@ -75,7 +75,7 @@ const dutyRuns = (duty: OwedTaskOwnerCheck) =>
 export async function runTaskOwnerCheck(input: TaskOwnerCheckRunInput, execute: ExecuteMatrixTest = runOnce): Promise<TaskOwnerCheckResult> {
   try {
     const { duty } = input;
-    const deadlineMs = input.now() + TASK_OWNER_CHECK_DEADLINE_MS;
+    const deadlineMs = input.now() + TASK_RECORD_CHECK_DEADLINE_MS;
     const scope = { root: input.root, graph: input.graph, wave: duty.wave, execute: withinDeadline(execute, deadlineMs, input.now) };
     const ran = await verifyObligations(scope, dutyRuns(duty));
     return taskOwnerCheckResult(ran.verdicts);

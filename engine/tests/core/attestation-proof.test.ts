@@ -24,9 +24,9 @@ import {
 import { LEGACY_TESTS_WAIVED_POLICY, REQUIRED_VERIFICATION_POLICY, serializeVerificationPolicy, type VerificationPolicy } from "../../src/core/verification-policy";
 import {
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   parseIsoInstant,
   parseReservationId,
+  observedByteScope,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
@@ -237,22 +237,7 @@ describe("attestation settlement through the Implementation Completion Oracle", 
     if (!created.ok) throw new Error(created.error.errors.join("; "));
     return created.value;
   })();
-  const suite = (() => {
-    const built = createTaskCompletionSuiteAuthority(authority);
-    if (!built.ok) throw new Error(built.error.errors.join("; "));
-    return built.value;
-  })();
-  const suiteResult = {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: suite.implementationAuthorityDigest,
-    suiteDigest: suite.suiteDigest,
-    checks: [{
-      checkId: suite.checks[0].checkId,
-      scope: "task",
-      outcome: { kind: "accepted", changedPaths: [] },
-    }],
-  };
+  const acceptedByteScope = observedByteScope([]);
   const attestationProof = derivePendingTaskProof({
     verificationPolicy: ATTESTED_POLICY,
     declaredArtifacts: ["src/a.ts"],
@@ -275,7 +260,7 @@ describe("attestation settlement through the Implementation Completion Oracle", 
 
   it("settles a verify-only child as implemented", () => {
     const result = settleImplementationAttempt(
-      settleableTask, authority, authority, observation, suiteResult,
+      settleableTask, authority, authority, observation, acceptedByteScope,
     );
     expect(result).toMatchObject({ ok: true });
     if (!result.ok || result.value.kind !== "implemented") throw new Error(JSON.stringify(result));
@@ -291,7 +276,7 @@ describe("attestation settlement through the Implementation Completion Oracle", 
       evidence: observed({ filesModified: ["src/a.ts"] }),
     };
     const result = settleImplementationAttempt(
-      settleableTask, authority, authority, drifted, suiteResult,
+      settleableTask, authority, authority, drifted, acceptedByteScope,
     );
     expect(result).toMatchObject({ ok: true });
     if (!result.ok || result.value.kind !== "retry-required") throw new Error(JSON.stringify(result));
@@ -308,7 +293,7 @@ describe("attestation settlement through the Implementation Completion Oracle", 
       evidence: observed({ testResult: undefined }),
     };
     const result = settleImplementationAttempt(
-      settleableTask, authority, authority, noTests, suiteResult,
+      settleableTask, authority, authority, noTests, acceptedByteScope,
     );
     expect(result).toMatchObject({ ok: true });
     if (!result.ok || result.value.kind !== "retry-required") throw new Error(JSON.stringify(result));

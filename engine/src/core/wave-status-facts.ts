@@ -31,7 +31,7 @@ export const nonEmptyReasons = (values: readonly StatusReason[], fallback: Statu
 function taskBucket(task: Task, executing: ReadonlySet<string>): keyof StatusTaskCounts {
   if (task.status === "completed") return "completed";
   if (
-    task.status === "failed" || task.proof?.state === "failed" ||
+    task.status === "failed" || task.proof.state === "failed" ||
     task.review_status === "blocked" || task.review_status === "evidence_capture_failed"
   ) return "blocked";
   if (executing.has(task.id)) return "running";
@@ -47,7 +47,7 @@ export function taskCounts(graph: TaskGraph): StatusTaskCounts {
 }
 
 export function failedProofs(graph: TaskGraph): readonly FailedProofObligation[] {
-  return Object.freeze(graph.tasks.flatMap((task) => task.proof?.state === "failed"
+  return Object.freeze(graph.tasks.flatMap((task) => task.proof.state === "failed"
     ? task.proof.failures.map((failure) => canonicalRecord({ taskId: task.id, failure }))
     : []));
 }
@@ -162,7 +162,7 @@ export function readinessReasons(
   const waveTaskIds = new Set(waveTasks.map((task) => task.id));
   for (const task of waveTasks) {
     if ((graph.executing_tasks ?? []).includes(task.id)) reasons.push(statusReason("task-running", `${task.id} is still executing`, task.id));
-    if (task.proof?.state === "failed") reasons.push(statusReason("proof-failed", `${task.id} has ${task.proof.failures.length} failed proof obligation(s)`, task.id));
+    if (task.proof.state === "failed") reasons.push(statusReason("proof-failed", `${task.id} has ${task.proof.failures.length} failed proof obligation(s)`, task.id));
   }
   if (tests.kind === "not-ready") {
     for (const affected of tests.affectedTasks) reasons.push(statusReason("tests-not-ready", `${affected.taskId}: ${affected.reasons.join("; ")}`, affected.taskId));

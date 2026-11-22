@@ -50,7 +50,7 @@ import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import type { EmissionSchemaVersion } from "../../core/emission-tool";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { parseRegisteredFacadeProgram } from "../helpers/programs";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";
 import {
   claudeEmissionScan,
@@ -63,12 +63,11 @@ import {
 } from "../../core/claude-transcript-projection";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
-import type { BindingResult } from "../../orchestration/session-run-bindings";
+import type { BindingResult, RunLocation } from "../../orchestration/session-run-bindings";
 import {
   claudeRunContext,
   recordClaudeSpawnCorrelator,
   resolveClaudeStopRun,
-  type ClaudeRun,
   type ClaudeRunAuthority,
   type ClaudeRunContext,
 } from "../../orchestration/claude-run-authority";
@@ -179,7 +178,7 @@ export async function establishClaudeStopRun(
     return { ok: false, message: `cannot resolve the role of Claude agent ${nativeId}: ${error instanceof Error ? error.message : String(error)}` };
   }
   if (role.length === 0) return { ok: false, message: `Claude agent ${nativeId} has no agent role to correlate` };
-  const recorded = await recordClaudeSpawnCorrelator(authority.run, { requestId: authority.requestId, role, nativeId });
+  const recorded = await recordClaudeSpawnCorrelator(authority.run, { identity: authority.identity, role, nativeId });
   return recorded.ok ? { ok: true, value: Object.freeze({ kind: "bound", run: authority.run }) } : recorded;
 }
 
@@ -206,7 +205,7 @@ function issuedEmissionVersionOf(
  * still waiting.
  */
 export type ClaudeRequestAuthority =
-  | Readonly<{ ok: true; bound: Readonly<{ request: AgentRequestAuthority; run: ClaudeRun }> | null }>
+  | Readonly<{ ok: true; bound: Readonly<{ request: AgentRequestAuthority; run: RunLocation }> | null }>
   | Readonly<{ ok: false; message: string }>;
 
 /**
@@ -389,7 +388,7 @@ export async function captureClaudeStop(
 }
 
 const handler: HookHandler = async (stdin): Promise<HookResult> => {
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     // Without a parsed payload there is no session to resolve bindings for, so
     // only an explicit environment authority makes the malformed stop a fault.

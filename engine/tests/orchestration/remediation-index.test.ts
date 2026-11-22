@@ -12,13 +12,13 @@ import {
   observeDirtyPaths,
   observeStagedPaths,
   openGitRepository,
-  readRepositoryBytes,
   readStagedPaths,
   snapshotRepositoryWitness,
   stageAuditedPaths,
   type GitRepository,
 } from "../../src/orchestration/git-remediation";
 import { git, gitResult, pathspecContract, write } from "../fixtures/git-repository";
+import { readRepositoryBytes } from "../fixtures/repository-bytes";
 import { verifiedRemediationInstallation } from "../fixtures/verified-remediation-installation";
 import {
   parseVerifiedIndexInstallation,

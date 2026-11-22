@@ -1,9 +1,8 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
   parseImplementationObservation,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
   type TaskId,
@@ -19,6 +18,7 @@ import {
   createImplementationAttemptContext,
   deriveImplementationRetryDisposition,
 } from "../src/core/implementation-retry";
+import { preI6DefaultVerificationManifest } from "../src/core/verification-manifest";
 import { value } from "./fixtures/parse-result";
 import { observedEvidence } from "./fixtures/task-lifecycle";
 
@@ -78,8 +78,12 @@ const graph = (task: Record<string, unknown>, overrides: Record<string, unknown>
   plan_file: null,
   tasks: [task],
   wave_gates: {},
+  verification_manifest: preI6DefaultVerificationManifest(),
   ...overrides,
 });
+
+/** The operator refusal a State File only a retired engine writes earns (ADR-0098). */
+const legacyRefusal = (shape: string) => `legacy State File refused (ADR-0098): ${shape}.`;
 
 function errorOf(raw: Record<string, unknown>): string {
   const parsed = parseTaskGraph(raw);
@@ -89,7 +93,6 @@ function errorOf(raw: Record<string, unknown>): string {
 }
 
 function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = true) {
-  const suite = value(createTaskCompletionSuiteAuthority(attempt));
   const observation = value(parseImplementationObservation({
     schemaVersion: 1,
     kind: "implementation-observed",
@@ -108,24 +111,13 @@ function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = tru
     attempt,
     attempt,
     observation,
-    {
-      schemaVersion: 1,
-      kind: "task-completion-suite-result",
-      implementationAuthorityDigest: suite.implementationAuthorityDigest,
-      suiteDigest: suite.suiteDigest,
-      checks: [{
-        checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-        scope: "task",
-        outcome: { kind: "accepted", changedPaths: ["engine/src/a.ts"] },
-      }],
-    },
+    observedByteScope([]),
   );
   if (!settled.ok || settled.value.kind === "ignored") throw new Error("fixture must settle");
   return settled.value.receipt;
 }
 
 function infrastructureReceiptFor(attempt: ImplementationAttemptAuthority) {
-  const suite = value(createTaskCompletionSuiteAuthority(attempt));
   const settled = settleImplementationAttempt({
     id: "T1",
     status: "pending",
@@ -137,17 +129,7 @@ function infrastructureReceiptFor(attempt: ImplementationAttemptAuthority) {
     kind: "implementation-observation-unavailable",
     observedAt: "2026-08-23T00:02:00.000Z",
     failure: { kind: "observation-unavailable", message: "legacy transport failure" },
-  }, {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: suite.implementationAuthorityDigest,
-    suiteDigest: suite.suiteDigest,
-    checks: [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "accepted", changedPaths: [] },
-    }],
-  });
+  }, observedByteScope([]));
   if (!settled.ok || settled.value.kind !== "infrastructure-blocked") {
     throw new Error("legacy infrastructure receipt fixture failed");
   }
@@ -167,18 +149,78 @@ describe("Task lifecycle migration", () => {
   });
 
   it.each(["implemented", "completed"])(
-    "classifies legacy %s without Proof using the protected marker instead of inventing evidence",
+    "refuses a legacy %s Task without Proof instead of inventing evidence",
     (status) => {
-      const parsed = parseTaskGraph(graph({ ...baseTask(), status }));
-      expect(parsed.ok).toBe(true);
-      if (!parsed.ok) return;
-      const task = parsed.value.tasks[0];
-      expect(task?.status).toBe(status);
-      expect(task?.proof).toBeUndefined();
-      expect(task?.legacy_missing_proof).toBe(true);
-      expect(parseTaskGraph(JSON.parse(JSON.stringify(parsed.value))).ok).toBe(true);
+      expect(errorOf(graph({ ...baseTask(), status }))).toContain(
+        legacyRefusal(`${status} Task "T1" without a frozen proof`),
+      );
     },
   );
+
+  it.each(["legacy_execution_reservation", "legacy_missing_proof", "new_tests_written", "new_test_evidence", "unresolved_repository_paths"])(
+    "refuses a Task carrying the retired %s field, and loads the same Task without it",
+    (field) => {
+      expect(errorOf(graph({ ...baseTask(), proof: pendingProof(), [field]: true }))).toContain(
+        legacyRefusal(`Task "T1" carrying ${field}`),
+      );
+      expect(parseTaskGraph(graph({ ...baseTask(), proof: pendingProof() })).ok).toBe(true);
+    },
+  );
+
+  it("refuses an execute-phase TaskGraph without a frozen verification_manifest, and keeps an earlier Phase readable", () => {
+    const { verification_manifest: _manifest, ...unfrozen } = graph({ ...baseTask(), proof: pendingProof() });
+    const error = errorOf(unfrozen);
+    expect(error).toContain(legacyRefusal("an execute-phase TaskGraph without verification_manifest"));
+    expect(error).toContain("move the State File aside and run /loom again");
+    expect(parseTaskGraph({ ...unfrozen, current_phase: "decompose", tasks: [] }).ok).toBe(true);
+  });
+
+  it("refuses a schema-1 wave_gate_history entry: a Wave completed without a completion suite", () => {
+    expect(errorOf(graph({ ...baseTask(), proof: pendingProof() }, {
+      wave_gate_history: [{ schemaVersion: 1, kind: "completed-wave-gate", wave: 1 }],
+    }))).toContain(legacyRefusal("a schema-1 wave_gate_history entry (Wave 1 completed without a completion suite)"));
+  });
+
+  // The legacy check runs before any document or Task parse, and takes the
+  // first shape it meets in a fixed order, so the operator is always told the
+  // one diagnostic ADR-0098 names, however else the State File is wrong.
+  const modern = (fields: Record<string, unknown> = {}) => ({ ...baseTask(), proof: pendingProof(), ...fields });
+  it.each([
+    [
+      "a legacy Task field over a malformed document field",
+      graph(modern({ new_tests_written: true }), { spec_file: 42 }),
+      'Task "T1" carrying new_tests_written',
+    ],
+    [
+      "a legacy Task field over a malformed field on the same Task",
+      graph(modern({ new_tests_written: true, status: "bogus" })),
+      'Task "T1" carrying new_tests_written',
+    ],
+    [
+      "an earlier Task's missing Proof over a later Task's legacy field",
+      graph(modern(), {
+        tasks: [{ ...baseTask(), status: "completed" }, modern({ id: "T2", legacy_execution_reservation: true })],
+      }),
+      'completed Task "T1" without a frozen proof',
+    ],
+    [
+      "an earlier Task's legacy field over a later Task's missing Proof",
+      graph(modern(), {
+        tasks: [modern({ unresolved_repository_paths: [] }), { ...baseTask(), id: "T2", status: "implemented" }],
+      }),
+      'Task "T1" carrying unresolved_repository_paths',
+    ],
+    [
+      "a missing manifest over a schema-1 wave_gate_history entry",
+      graph(modern(), {
+        verification_manifest: undefined,
+        wave_gate_history: [{ schemaVersion: 1, kind: "completed-wave-gate", wave: 1 }],
+      }),
+      "an execute-phase TaskGraph without verification_manifest",
+    ],
+  ] as const)("names %s", (_case, raw, shape) => {
+    expect(errorOf(raw)).toContain(legacyRefusal(shape));
+  });
 
   it("rejects every illegal modern status/Proof/revalidation combination", () => {
     const pending = pendingProof();
@@ -232,7 +274,6 @@ describe("Task attempt authority StateManager lockstep", () => {
     expect(task?.active_implementation_attempt).toEqual(active);
     expect(task?.active_implementation_context).toEqual(context);
     expect(task?.implementation_attempt_history).toEqual([receipt]);
-    expect(task?.legacy_execution_reservation).toBeUndefined();
     expect(Object.isFrozen(task?.active_implementation_attempt)).toBe(true);
     expect(Object.isFrozen(task?.active_implementation_context)).toBe(true);
     expect(Object.isFrozen(task?.implementation_attempt_history)).toBe(true);
@@ -390,7 +431,7 @@ describe("Task attempt authority StateManager lockstep", () => {
     expect(parseTaskGraph(graph({ ...baseTask(), proof: pendingProof() })).ok).toBe(true);
   });
 
-  it("rejects active modern authority on the legacy-missing-Proof lifecycle", () => {
+  it("refuses active authority on a proof-less implemented Task", () => {
     const active = authority();
     expect(errorOf(graph({
       ...baseTask(),
@@ -399,7 +440,20 @@ describe("Task attempt authority StateManager lockstep", () => {
       attempt_artifact_baseline: attemptBaseline,
       attempt_repository_baseline: repositoryBaseline,
       reserved_at: active.reservedAt,
-    }, { executing_tasks: ["T1"] }))).toContain("requires modern authored Proof");
+    }, { executing_tasks: ["T1"] }))).toContain(legacyRefusal('implemented Task "T1" without a frozen proof'));
+  });
+
+  // The shape settlement used to refuse by name as `proof-unfrozen`: the load
+  // boundary now refuses it, so no settlement can be handed one.
+  it("refuses active authority on a proof-less pending Task, the shape settlement used to refuse as proof-unfrozen", () => {
+    const active = authority();
+    expect(errorOf(graph({
+      ...baseTask(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+    }, { executing_tasks: ["T1"] }))).toContain('tasks[0] ("T1"): active_implementation_attempt requires modern authored Proof');
   });
 
   it("rejects missing executing membership, baseline/digest drift, reservation-time drift, and receipt Task drift", () => {
@@ -560,19 +614,13 @@ describe("Task attempt authority StateManager lockstep", () => {
     }, { executing_tasks: ["T1"] }))).toContain("unique(file_list + files_modified)");
   });
 
-  it("keeps legacy executing entries readable but explicitly classified", () => {
-    const parsed = parseTaskGraph(graph(baseTask(), { executing_tasks: ["T1"] }));
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.value.tasks[0]?.legacy_execution_reservation).toBe(true);
-    expect(parsed.value.tasks[0]?.active_implementation_attempt).toBeUndefined();
-    expect(parseTaskGraph(JSON.parse(JSON.stringify(parsed.value))).ok).toBe(true);
+  it("refuses an executing Task without attempt authority: a reservation that predates it", () => {
+    expect(errorOf(graph({ ...baseTask(), proof: pendingProof() }, { executing_tasks: ["T1"] }))).toContain(
+      legacyRefusal('Task "T1" in executing_tasks without active_implementation_attempt'),
+    );
   });
 
-  it("retires stale legacy classifications, rejects orphan reservations with repair guidance, and rejects duplicate receipts", () => {
-    const staleMarker = parseTaskGraph(graph({ ...baseTask(), legacy_execution_reservation: true }));
-    expect(staleMarker.ok).toBe(true);
-    if (staleMarker.ok) expect(staleMarker.value.tasks[0]?.legacy_execution_reservation).toBeUndefined();
+  it("rejects orphan reservations with repair guidance, and rejects duplicate receipts", () => {
     expect(errorOf(graph(baseTask(), { executing_tasks: ["T99"] }))).toContain(
       "orphan execution reservation T99",
     );
@@ -585,7 +633,7 @@ describe("Task attempt authority StateManager lockstep", () => {
     }))).toContain("duplicate receipt IDs");
   });
 
-  it("parser-enforces persistent repository carry and migrates active legacy authority safely", () => {
+  it("carries the active attempt's repository baseline as the Task's persistent carry", () => {
     const active = authority("carry-parser");
     const activeTask = {
       ...baseTask(),
@@ -598,30 +646,16 @@ describe("Task attempt authority StateManager lockstep", () => {
     const migrated = parseTaskGraph(graph(activeTask, { executing_tasks: ["T1"] }));
     expect(migrated.ok).toBe(true);
     if (migrated.ok) expect(migrated.value.tasks[0]?.repository_baseline).toEqual(repositoryBaseline);
-
-    expect(errorOf(graph({
-      ...baseTask(),
-      proof: pendingProof(),
-      repository_baseline: repositoryBaseline,
-      unresolved_repository_paths: ["foreign.ts", "foreign.ts"],
-    }))).toContain("unresolved_repository_paths");
-    expect(errorOf(graph({
-      ...baseTask(),
-      proof: pendingProof(),
-      unresolved_repository_paths: ["foreign.ts"],
-    }))).toContain("requires repository_baseline");
   });
 
-  it("reads a well-formed legacy unresolved-path carry and drops it from the parsed Task", () => {
-    const legacy = parseTaskGraph(graph({
-      ...baseTask(),
-      proof: pendingProof(),
-      repository_baseline: repositoryBaseline,
-      unresolved_repository_paths: ["foreign.ts"],
-    }));
-    expect(legacy.ok).toBe(true);
-    if (!legacy.ok) return;
-    expect(legacy.value.tasks[0]?.repository_baseline).toEqual(repositoryBaseline);
-    expect(legacy.value.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
+  it("refuses a legacy unresolved-path carry, well-formed or not", () => {
+    for (const unresolved of [["foreign.ts"], ["foreign.ts", "foreign.ts"]]) {
+      expect(errorOf(graph({
+        ...baseTask(),
+        proof: pendingProof(),
+        repository_baseline: repositoryBaseline,
+        unresolved_repository_paths: unresolved,
+      }))).toContain(legacyRefusal('Task "T1" carrying unresolved_repository_paths'));
+    }
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 /** Narrowing helper: errors of a failed validation, [] when ok */
 function errorsOf(r: import("../../src/handlers/helpers/validate-task-graph").ValidationResult): readonly string[] {
@@ -11,6 +12,7 @@ function errorsOf(r: import("../../src/handlers/helpers/validate-task-graph").Va
 function wrapTasks(tasks: Record<string, unknown>[]) {
   return {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     plan_title: "Test Plan",

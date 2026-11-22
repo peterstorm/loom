@@ -200,7 +200,7 @@ const handler: HookHandler = async (stdin, args) => {
   // X" and exit 0 with nothing written. The downgrade direction self-corrects
   // (the gate keeps blocking and the operator retries); the ADD direction is
   // terminal — a critical the operator deliberately injected never reaches
-  // complete-wave-gate, and nothing anywhere says so.
+  // the Wave Gate, and nothing anywhere says so.
   const known = mgr.load().tasks;
   const target = known.find((t) => t.id === taskId);
   if (!target) {

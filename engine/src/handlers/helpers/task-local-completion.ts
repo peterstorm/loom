@@ -209,7 +209,6 @@ function observeAvailableTaskScope(
           },
         };
     observed = buildTaskLocalByteObservation({
-      authority: args.authority,
       attemptBaseline: baselines.attempt,
       currentAttemptScope,
       proofBaseline: baselines.proof,
@@ -248,13 +247,12 @@ export function observeTaskLocalCompletion(
 ): TaskLocalByteObservation {
   const baselines = requireTaskBaselines(args.task);
   if (!baselines.ok) {
-    return unavailableTaskLocalByteObservation(args.authority, `Task-local byte observation unavailable: ${baselines.error.message}`);
+    return unavailableTaskLocalByteObservation(`Task-local byte observation unavailable: ${baselines.error.message}`);
   }
   try {
     return observeAvailableTaskScope(args, baselines.value, ports);
   } catch (error) {
     return unavailableTaskLocalByteObservation(
-      args.authority,
       `Task-local byte observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
   }

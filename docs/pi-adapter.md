@@ -70,7 +70,7 @@ A root containing characters that cannot be interpolated safely into the shared 
 | Roll a reservation back | `spawn-claims.ts` (pure), `spawn-claim-shell.ts` |
 | Hold each parent session's reservations and cleanup debt | `spawn-reservation.ts` |
 | Render shared resources | `resources.ts`; the agent directory rule is `engine/src/core/pi-agent-directory.ts` |
-| Lower Pi messages for the shared parsers | `transcript-adapter.ts` |
+| Parse a child's Pi messages, project them to tool calls, and fold write targets and structured test evidence | `transcript-adapter.ts`; the tool vocabulary is `engine/src/core/harness-tool-call.ts` |
 | Settle finished subagent results | `subagent-result-batch.ts` (parse the harness batch), `reserved-slot.ts` (parse a slot's role claims at the spawn), `subagent-settlement.ts` (pure reducers), `subagent-result.ts` (shell, under the TaskGraph lock), `subagent-result-route.ts`, `subagent-stop.ts`, `reserved-results.ts` |
 | Mint, activate and revoke write grants | `write-grant.ts`, `child-write-grant.ts` |
 | Record a child's tool calls in the parent's evidence ledger | `evidence-recorder.ts` |
@@ -126,7 +126,12 @@ When adding a writer role, update the role-driven artifact-scope policy (`engine
 
 ## Completion and transcript capture
 
-Claude Code's SubagentStop has transcript-path conventions. Pi produces structured messages and tool results, which `pi/transcript-adapter.ts` lowers into the evidence and review representations the shared parsers expect.
+Claude Code's SubagentStop has transcript-path conventions, read by the Claude-only parsers in `engine/src/parsers/`. Pi produces structured messages and tool results, which `pi/transcript-adapter.ts` reads in one pass: `parsePiMessages` parses the harness payload, `piTranscriptToolCalls` projects it to the tool calls the child made (each a `HarnessToolCall` paired with its result, or unfinished), and settlement folds that one projection. Implementation settlement crosses one message-level entry point, `piTranscriptEvidence(messages, cwd)`, which composes the three steps in that order and returns the write targets, the structured test verdict and its diagnostics:
+
+- `piWriteTargets` is every `write`, `edit` and `multi_edit` target, read with the write guard's path keys (`path`, `file_path`, `filePath`, then each `edits[]` target), whatever the call's result. It feeds `files_modified` and the phase written-path check.
+- `piStructuredTestResult` is the latest classified, exit-attributable Bash test run. When there is none, the Task records no test result (`test-result-missing`); there is no regex fallback on the Pi path.
+
+The tool names and path keys are the ones `piToolCall` uses for live `tool_result` events (`engine/src/core/harness-tool-call.ts`), so the ledger, the write guard and the transcript cannot disagree about what a call was. The transcript reading case-folds the tool name (and reads `multiedit` as `multi_edit`), as the readers it replaced did; the live recorder matches exactly.
 
 For registered orchestration programs, both harnesses follow the same path:
 

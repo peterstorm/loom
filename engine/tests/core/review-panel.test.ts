@@ -1,38 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
-import { join } from "node:path";
 import type { Task, TaskCommonMetadata } from "../../src/types";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { Finding } from "../../src/core/findings";
 import { applyFindingOutcomes, claimsOfSeverity } from "../../src/core/findings";
 import type { VerdictEnvelope } from "../../src/core/panel-kernel";
 import {
-  briefCompletenessErrors,
-  briefFindingFilename,
   buildFindingBrief,
   defaultRefutationThreshold,
-  parseFindingBriefJson,
   parseRefutationVerdict,
-  parseReviewManifest,
-  renderFindingBriefMarkdown,
   reviewSignals,
   selectReviewLenses,
-  serializeFindingBrief,
-  serializeOutcomes,
   serializeRefutationVerdict,
-  serializeReviewManifest,
   tallyRefutations,
   waveFindingId,
   REVIEW_LENSES,
   REVIEW_LENSES_DEFAULT,
   REVIEW_LENSES_MIN,
   type BriefFinding,
+  type FindingBrief,
   type FindingOutcome,
   type RefutationVerdict,
   type ReviewLens,
   type WaveFindingId,
 } from "../../src/core/review-panel";
-import { REVIEW_LAYOUT } from "../../src/core/panel-kernel";
 import { findingId } from "../fixtures/finding-id";
 
 const finding = (over: Partial<Extract<Finding, { protocolVersion?: never; review_generation?: never }>> = {}): Finding => ({
@@ -211,182 +202,18 @@ describe("buildFindingBrief", () => {
   it("produces an empty brief for a wave with no criticals", () => {
     const result = buildFindingBrief(1, [task({ findings: [finding({ severity: "advisory" })] })]);
     expect(result.findings).toEqual([]);
-    expect(renderFindingBriefMarkdown(result)).toContain("nothing to adjudicate");
-  });
-});
-
-describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => {
-  // A short brief makes every later stage succeed vacuously and report
-  // "0 survived, 0 refuted", which is indistinguishable from a panel that
-  // adjudicated the wave and upheld nothing. Now a pure function beside the
-  // builder whose postcondition it is, rather than an unexported helper in the
-  // shell reachable only by spawning the CLI.
-  const withView = (id: string, findings: readonly Finding[], view: readonly string[]) =>
-    task({ id, findings, critical_findings: [...view] });
-
-  const briefFor = (tasks: readonly Task[]) =>
-    briefCompletenessErrors(buildFindingBrief(1, tasks), tasks);
-
-  it("passes when every counted critical carries identity", () => {
-    expect(briefFor([withView("T1", [finding()], ["unchecked cast"])])).toEqual([]);
   });
 
-  it("names the wave when it holds no criticals at all", () => {
-    const errors = briefFor([withView("T1", [], [])]);
-    expect(errors[0]).toContain("has no critical findings");
-    expect(errors[0]).toContain("nothing to adjudicate");
-  });
-
-  it("refuses a wave whose --wave flag matches no task", () => {
-    expect(briefCompletenessErrors(buildFindingBrief(9, []), [])[0])
-      .toContain("check --wave against .current_wave");
-  });
-
-  it("catches a task whose view outruns its findings, and names it", () => {
-    const errors = briefFor([withView("T1", [], ["orphaned critical"])]);
-    expect(errors[0]).toContain("T1 has 1 critical_findings but only 0 carry structured identity");
-    expect(errors[0]).toContain("repair-task-graph");
-  });
-
-  it("counts the view that matches the brief's severity, not always the critical one", () => {
-    // buildFindingBrief takes the severity as a parameter and the diagnostic
-    // interpolates brief.severity, but the arithmetic read critical_findings
-    // unconditionally — so the proof was wrong in BOTH directions for any other
-    // severity. Here: one advisory, fully identified, beside two criticals. The
-    // advisory brief is complete, and the check used to reject it by comparing
-    // its one entry against the two criticals it does not cover.
-    const advisory = finding({ id: findingId("code-reviewer-9"), severity: "advisory", claim: "a nit" });
-    const t1 = task({
-      id: "T1",
-      findings: [finding(), finding({ id: findingId("code-reviewer-2"), claim: "second" }), advisory],
-      critical_findings: ["unchecked cast", "second"],
-      advisory_findings: ["a nit"],
-    });
-    expect(briefCompletenessErrors(buildFindingBrief(1, [t1], "advisory"), [t1])).toEqual([]);
-  });
-
-  it("catches a SHORT advisory brief, and says advisory", () => {
-    // The other direction: a task with no criticals and an orphaned advisory
-    // used to pass, because 0 criticals never outran anything.
-    const t1 = task({ id: "T1", findings: [], critical_findings: [], advisory_findings: ["orphaned nit"] });
-    const errors = briefCompletenessErrors(buildFindingBrief(1, [t1], "advisory"), [t1]);
-    expect(errors[0]).toContain("T1 has 1 advisory_findings but only 0 carry structured identity");
-  });
-
-  it("does NOT let one task's surplus mask another task's orphans", () => {
-    // The wave-wide sum this replaces: T1's two identified findings offset T2's
-    // orphan, the totals matched, the check passed — and T2's critical entered
-    // no brief, could never be refuted, and blocked the wave permanently, with
-    // the only prescribed escape being a --fix that used to delete it.
-    const errors = briefFor([
-      withView("T1", [finding(), finding({ id: findingId("code-reviewer-2"), claim: "second" })], ["unchecked cast", "second"]),
-      withView("T2", [], ["invisible to the panel"]),
-    ]);
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain("T2 has 1 critical_findings but only 0");
-    expect(errors[0], "the task that IS complete is not blamed").not.toContain("T1 has");
-  });
-
-  it("names every short task, not just the first", () => {
-    const errors = briefFor([
-      withView("T1", [], ["one orphan"]),
-      withView("T2", [], ["another orphan"]),
-    ]);
-    expect(errors[0]).toContain("T1 has 1");
-    expect(errors[0]).toContain("T2 has 1");
-  });
-});
-
-describe("parseFindingBriefJson — re-parse, never trust the writer", () => {
-  const validBrief = () => JSON.parse(serializeFindingBrief(buildFindingBrief(1, [task({ findings: [finding()] })])));
-
-  it("round-trips a brief this module wrote", () => {
-    const parsed = parseFindingBriefJson(validBrief());
-    expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(parsed.value.findings[0]!.id).toBe("T1:code-reviewer-1");
-  });
-
-  it.each([
-    ["non-object", "not a brief"],
-    ["bad wave", { ...validBrief(), wave: 0 }],
-    ["bad severity", { ...validBrief(), severity: "high" }],
-    ["non-array findings", { ...validBrief(), findings: {} }],
-    ["empty task_ids entry", { ...validBrief(), task_ids: [""] }],
-  ])("rejects %s", (_label, raw) => {
-    expect(parseFindingBriefJson(raw).ok).toBe(false);
-  });
-
-  it("rejects a finding whose task is not in task_ids", () => {
-    const raw = validBrief();
-    raw.findings[0].task_id = "T9";
-    expect(parseFindingBriefJson(raw).ok).toBe(false);
-  });
-
-  it("rejects an id that is not scoped by its task", () => {
-    const raw = validBrief();
-    raw.findings[0].id = "code-reviewer-1";
-    expect(parseFindingBriefJson(raw).ok).toBe(false);
-  });
-
-  it.each(["T1:code:reviewer-1", "T1:code reviewer-1"])(
-    "rejects an id outside the WaveFindingId grammar: %s",
-    (id) => {
-      const raw = validBrief();
-      raw.findings[0].id = id;
-      expect(parseFindingBriefJson(raw).ok).toBe(false);
-    },
-  );
-
-  it("rejects duplicate finding ids", () => {
-    const raw = validBrief();
-    raw.findings.push({ ...raw.findings[0] });
-    expect(parseFindingBriefJson(raw).ok).toBe(false);
-  });
-
-  it("rejects ids that collide once mapped to filenames", () => {
-    const raw = validBrief();
-    raw.findings.push({ ...raw.findings[0], id: "T1:code/reviewer/1" });
-    expect(briefFindingFilename(waveId("T1:code-reviewer-1"))).toBe(briefFindingFilename(waveId("T1:code/reviewer/1")));
-    expect(parseFindingBriefJson(raw).ok).toBe(false);
-  });
-});
-
-describe("parseReviewManifest", () => {
-  const RUN_DIR = join("panel-runs", "run.abc");
-  const LENSES: readonly ReviewLens[] = ["reproduction", "intent"];
-  const FINDINGS = [brief(), brief({ id: waveId("T1:silent-failure-hunter-1"), agent: "silent-failure-hunter" })];
-  const IDS = FINDINGS.map((f) => f.id);
-
-  interface RawManifest {
-    run_id: string;
-    brief_file: string;
-    brief_json: string;
-    lenses: string[];
-    findings: { id: string; filename: string; path: string }[];
-  }
-  const valid = (): RawManifest =>
-    JSON.parse(serializeReviewManifest("run.abc", RUN_DIR, REVIEW_LAYOUT, LENSES, FINDINGS));
-
-  it("accepts the manifest this module serializes", () => {
-    const parsed = parseReviewManifest(valid(), RUN_DIR, REVIEW_LAYOUT, LENSES, IDS);
-    expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(parsed.value.findings.map((f) => f.id)).toEqual(IDS);
-  });
-
-  it.each<[string, (m: RawManifest) => void]>([
-    ["a wrong run id", (m) => { m.run_id = "run.other"; }],
-    ["a brief path outside the run dir", (m) => { m.brief_json = "/etc/passwd"; }],
-    ["a wrong lens count", (m) => { m.lenses = ["reproduction"]; }],
-    ["an unknown lens", (m) => { m.lenses = ["reproduction", "vibes"]; }],
-    ["reordered lenses", (m) => { m.lenses = ["intent", "reproduction"]; }],
-    ["a foreign finding", (m) => { m.findings[0]!.id = "T9:x-1"; }],
-    ["a finding path outside the item dir", (m) => { m.findings[0]!.path = "/tmp/evil.json"; }],
-    ["a filename that does not match its id", (m) => { m.findings[0]!.filename = "other.json"; }],
-    ["a dropped finding", (m) => { m.findings.pop(); }],
-  ])("rejects %s", (_label, mutate) => {
-    const raw = valid();
-    mutate(raw);
-    expect(parseReviewManifest(raw, RUN_DIR, REVIEW_LAYOUT, LENSES, IDS).ok).toBe(false);
+  it("types every finding at the verified severity, the only one a brief can carry", () => {
+    const result = buildFindingBrief(1, [task({ findings: [
+      finding({ severity: "advisory", claim: "nit" }),
+      finding({ id: findingId("code-reviewer-2") }),
+    ] })]);
+    expect(result.findings.map(({ id, severity }) => [id, severity])).toEqual([["T1:code-reviewer-2", "critical"]]);
+    expectTypeOf<FindingBrief["findings"][number]["severity"]>().toEqualTypeOf<"critical">();
+    // @ts-expect-error an advisory finding cannot be written into a brief
+    const advisory: FindingBrief = { ...result, findings: [brief({ severity: "advisory" })] };
+    void advisory;
   });
 });
 
@@ -643,19 +470,6 @@ describe("tallyRefutations", () => {
       expect(tally({ reproduction: ["upheld", "upheld"], intent: ["upheld", "upheld"], security: ["upheld", "upheld"] }, threshold).ok).toBe(false);
     }
   });
-
-  it("serializes a tally the gate can read", () => {
-    const result = tally({
-      reproduction: ["refuted", "upheld"],
-      intent: ["refuted", "upheld"],
-      security: ["refuted", "upheld"],
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    const json = JSON.parse(serializeOutcomes(result.value, LENSES, 2));
-    expect(json).toMatchObject({ lenses: LENSES, threshold: 2, surviving: 1, refuted: 1 });
-    expect(json.outcomes[0].refuted_by).toEqual(LENSES);
-  });
 });
 
 describe("applyFindingOutcomes", () => {
@@ -736,35 +550,6 @@ describe("applyFindingOutcomes", () => {
   it("ignores outcomes belonging to another task", () => {
     const other = { ...outcome(critical, false), finding: brief({ id: waveId("T2:code-reviewer-1"), taskId: "T2" }) };
     expect(applyFindingOutcomes(blocked, [other])).toBe(blocked);
-  });
-});
-
-describe("the brief's severity policy is enforced by its own re-parser", () => {
-  const validCriticalBrief = () => JSON.parse(serializeFindingBrief({
-    wave: 1,
-    severity: "critical",
-    taskIds: ["T1"],
-    findings: [brief()],
-  }));
-
-  it("rejects an entry whose severity disagrees with the brief's", () => {
-    // VERIFIED_SEVERITY is policy: advisories skip the panel because refuting
-    // one saves nothing and the agent quota it burns is real. The brief filters
-    // on it; without this check the re-parse that exists to stop the disk and
-    // the panel diverging would wave through the one divergence that matters,
-    // and a refuted advisory would be stripped from advisory_findings.
-    const raw = validCriticalBrief();
-    raw.findings[0].severity = "advisory";
-    const parsed = parseFindingBriefJson(raw);
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.errors.join("\n")).toContain("must equal brief.severity");
-  });
-
-  it("accepts an advisory entry in a brief that declares advisory", () => {
-    const raw = validCriticalBrief();
-    raw.severity = "advisory";
-    raw.findings[0].severity = "advisory";
-    expect(parseFindingBriefJson(raw).ok).toBe(true);
   });
 });
 

@@ -176,6 +176,10 @@ describe("helper invocation forms", () => {
     ["in backticks", (rest) => `echo \`loom helper ${rest}\``],
     ["executed heredoc", (rest) => `bash <<'EOF'\nloom helper ${rest}\nEOF`],
     ["subshell", (rest) => `( loom helper ${rest} )`],
+    // A clobber redirect is one operator (`>|`), never a pipe into `helper …`.
+    ["a clobber redirect before the helper word", (rest) => `loom >|/tmp/o helper ${rest}`],
+    // An escaped `\>` is a word, so the `&` after it runs the next command.
+    ["after an escaped > and a background &", (rest) => `echo \\>& loom helper ${rest}`],
     ["quoted helper and operation", () => `loom 'helper' "security-audit" 'submit' --out ${R}`],
     ["split quoting", () => `loom helper secu"rity-audit" sub'mit' --out ${R}`],
   ];
@@ -192,7 +196,7 @@ describe("helper invocation forms", () => {
     ["grep for the text", "grep -rn 'helper security-audit submit' docs/"],
     ["echo the text", "echo loom helper security-audit submit"],
     ["a heredoc that only holds the text", "cat > /tmp/notes.md <<'EOF'\nloom helper security-audit submit\nEOF"],
-    ["another helper", "loom helper standalone-review status"],
+    ["another helper", "loom helper model-profiles show"],
     ["a different program's helper word", "make helper security-audit"],
     ["the sandbox script", `scripts/security-sandbox.sh --target /repo --scratch ${R}/agents/h/scratch --nonce n -- npm test > ${R}/agents/h/artifacts/out.txt`],
   ])("does not mistake text for an invocation: %s", (_name, command) => {

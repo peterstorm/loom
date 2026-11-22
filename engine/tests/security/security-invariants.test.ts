@@ -6,7 +6,7 @@
  *            `blocked` disposition can never be silently upgraded to `covered`;
  *   INV-S6b  the published documents are a function of the finding SET, not its
  *            arrival order (two hunters' files may land in either order);
- *   INV-S5   `validateLedger` is total: arbitrary junk is refused, never thrown on.
+ *   INV-S5   `parseLedger` is total: arbitrary junk is refused, never thrown on.
  */
 
 import fc from "fast-check";
@@ -17,7 +17,6 @@ import {
   assignUnits,
   recordUnitResult,
   seedCoverageUnit,
-  validateLedger,
   type CoverageLedger,
   type UnitResult,
 } from "../../src/core/security-coverage";
@@ -31,6 +30,7 @@ import {
   aRejectedFinding,
   aRunMetadata,
   aSeed,
+  ledgerViolations,
   ok,
 } from "./fixtures";
 
@@ -152,7 +152,7 @@ describe("published documents are order-invariant (INV-S6b)", () => {
   });
 });
 
-describe("validateLedger is total (INV-S5)", () => {
+describe("the ledger parser is total (INV-S5)", () => {
   const junk = fc.oneof(
     fc.anything(),
     fc.array(fc.anything(), { maxLength: 3 }),
@@ -162,7 +162,7 @@ describe("validateLedger is total (INV-S5)", () => {
   it("refuses arbitrary input instead of throwing on it", () => {
     fc.assert(
       fc.property(junk, (value) => {
-        expect(Array.isArray(validateLedger(value as CoverageLedger))).toBe(true);
+        expect(Array.isArray(ledgerViolations(value))).toBe(true);
       }),
       { numRuns: 200 },
     );
@@ -170,7 +170,7 @@ describe("validateLedger is total (INV-S5)", () => {
 
   it("refuses null, a bare object, and an array of junk", () => {
     for (const value of [null, {}, [null], [{}], [{ status: "covered" }], [42]]) {
-      expect(validateLedger(value as CoverageLedger).length).toBeGreaterThan(0);
+      expect(ledgerViolations(value).length).toBeGreaterThan(0);
     }
   });
 });

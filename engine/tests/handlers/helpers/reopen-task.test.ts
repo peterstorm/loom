@@ -13,6 +13,8 @@ import { ORCHESTRATION_OPERATIONS } from "../../../src/handlers/helpers/orchestr
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../../src/handler-routes";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { satisfiedProof } from "../../fixtures/task-lifecycle";
 
 const cleanup: string[] = [];
 let previousStatePath: string | undefined;
@@ -31,6 +33,7 @@ function installState(): string {
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   writeFileSync(statePath, JSON.stringify({
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     current_wave: 1,
     phase_artifacts: {},
     skipped_phases: [],
@@ -39,8 +42,8 @@ function installState(): string {
     executing_tasks: [],
     wave_gates: { "1": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: false } },
     tasks: [
-      { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [] },
-      { id: "T2", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [] },
+      { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", proof: satisfiedProof([]), depends_on: [] },
+      { id: "T2", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", proof: satisfiedProof([]), depends_on: [] },
     ],
   }));
   process.env.LOOM_STATE_PATH = statePath;

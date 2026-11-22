@@ -18,7 +18,9 @@
  * parent model, run-directory roots, the Pi agent marker, `HOME`, `PATH`,
  * any other variable): one apply/restore-in-finally implementation, so no
  * suite keeps its own. `withEnvOverlaySync` is the same scope for a
- * synchronous operation whose result the caller reads without awaiting.
+ * synchronous operation whose result the caller reads without awaiting, and
+ * `applyEnvOverlayUntilRestored` hands a fixture that outlives one call the
+ * restore to run from its dispose.
  *
  * Dependency-free on purpose: the setup file imports it before every test
  * file, so it must load no engine module a suite might later `vi.mock`.
@@ -62,6 +64,15 @@ export async function withEnvOverlay<T>(overlay: EnvironmentOverlay, operation: 
   } finally {
     applyOverlay(previous);
   }
+}
+
+/** The same overlay for a fixture whose environment outlives one call: it is
+ *  applied now and lifted by the returned restore, which the fixture's own
+ *  dispose (and its failure path) must call. */
+export function applyEnvOverlayUntilRestored(overlay: EnvironmentOverlay): () => void {
+  const previous = restoringOverlay(overlay);
+  applyOverlay(overlay);
+  return () => applyOverlay(previous);
 }
 
 /** `withEnvOverlay` for a synchronous `operation`: its result is returned

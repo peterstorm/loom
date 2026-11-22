@@ -8,7 +8,7 @@
  * `none` becomes a stored "critical finding" that blocks the wave gate even though
  * the agent reported zero. This was a recurring false-positive: a passing review
  * (`review_status: passed`, count 0) still left `["none"]` in `critical_findings`,
- * and `complete-wave-gate` counts that array.
+ * and the Wave Gate counts that array.
  *
  * A sentinel is a finding whose text is JUST a no-result token — optionally
  * parenthesized, optionally followed by an explanatory clause introduced by
@@ -31,9 +31,4 @@ const NO_FINDING_SENTINEL = /^[\s(]*(?:none|n\/?a|nil|null)[\s)]*(?:$|[—–\-.
 /** True when `text` is a "no findings" sentinel rather than an actual finding. */
 export function isNoFindingSentinel(text: string): boolean {
   return NO_FINDING_SENTINEL.test(text.trim());
-}
-
-/** Drop empty strings and "no findings" sentinels from a list of finding texts. */
-export function dropNoFindingSentinels(xs: readonly string[]): string[] {
-  return xs.filter((s) => s.trim() !== "" && !isNoFindingSentinel(s));
 }

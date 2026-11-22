@@ -2,9 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { TaskGraph, Task, WaveGate } from "../../src/types";
+import { parseNewTestEvidence, type TaskGraph, type Task, type WaveGate } from "../../src/types";
 import { evaluateProofObligations } from "../../src/core/proof-obligations";
 import { pendingTaskProof, observedEvidence } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 /**
  * E2E integration test: simulates full hook lifecycle with real filesystem.
@@ -72,7 +73,7 @@ function markImplemented(path: string, taskId: string, testsPassed: boolean) {
   updateState(path, (s) => ({
     ...s,
     tasks: s.tasks.map((t): Task => {
-      if (t.id !== taskId || t.proof === undefined) return t;
+      if (t.id !== taskId) return t;
       const proof = evaluateProofObligations(t.proof.obligations, observedEvidence({
         taskCompleted: true,
         testResult: testsPassed ? { verdict: "trusted-pass" } : { verdict: "trusted-fail" },
@@ -85,8 +86,7 @@ function markImplemented(path: string, taskId: string, testsPassed: boolean) {
           ? ({ verdict: "trusted-pass" } as const)
           : ({ verdict: "trusted-fail" } as const),
         test_evidence: testsPassed ? "mock evidence" : "",
-        new_tests_written: true,
-        new_test_evidence: "1 new test, 1 assertion",
+        new_test_observation: parseNewTestEvidence(true, "1 new test, 1 assertion"),
       };
       return proof.state === "satisfied"
         ? {
@@ -94,7 +94,6 @@ function markImplemented(path: string, taskId: string, testsPassed: boolean) {
             status: "implemented",
             proof,
             revalidation_required: undefined,
-            legacy_missing_proof: undefined,
             ...evidence,
           }
         : {
@@ -102,7 +101,6 @@ function markImplemented(path: string, taskId: string, testsPassed: boolean) {
             status: "pending",
             proof,
             revalidation_required: t.revalidation_required,
-            legacy_missing_proof: undefined,
             ...evidence,
           };
     }),
@@ -117,7 +115,7 @@ function isWaveImplComplete(state: TaskGraph, wave: number): boolean {
     .every((t) => t.status === "implemented" || t.status === "completed");
 }
 
-/** Simulate complete-wave-gate: mark wave complete, advance */
+/** Simulate Wave Gate completion: mark the wave's implemented Tasks completed, close its gate, advance current_wave */
 function completeWaveGate(path: string, wave: number) {
   updateState(path, (s) => ({
     ...s,
@@ -152,6 +150,7 @@ describe("E2E: hook pipeline state machine", () => {
 
     const initialState: TaskGraph = {
       current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: ".claude/specs/test/spec.md",
@@ -290,6 +289,7 @@ describe("E2E: edge cases", () => {
   it("single task, single wave — simplest happy path", () => {
     const state: TaskGraph = {
       current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,
@@ -309,6 +309,7 @@ describe("E2E: edge cases", () => {
   it("3 waves with linear deps", () => {
     const state: TaskGraph = {
       current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

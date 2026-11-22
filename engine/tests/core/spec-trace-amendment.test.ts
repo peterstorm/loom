@@ -18,6 +18,7 @@ import {
   protectedGraphFixture,
   taskFixture,
 } from "../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const parsedSpec = parseSpec(AMENDMENT_SPEC);
 if (!parsedSpec.ok) throw new Error("amendment fixture specification must parse");
@@ -74,6 +75,7 @@ function populated(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return protectedGraphFixture({
     spec_trace_version: 2,
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: "spec.md",

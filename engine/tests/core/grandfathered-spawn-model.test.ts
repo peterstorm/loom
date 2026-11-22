@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   engineIssuedClaudeModel,
-  loomMarkerValue,
   runDirectoryFromContextPath,
 } from "../../src/core/grandfathered-spawn-model";
 // The fs-reading shell function moved to the pre-tool-use handler (the core
@@ -43,15 +42,7 @@ function authority(overrides: Record<string, unknown> = {}): AgentRequestAuthori
   } as AgentRequestAuthority;
 }
 
-describe("grandfathered-spawn-model — marker + path parsing (pure)", () => {
-  it("extracts single LOOM markers and returns null when absent", () => {
-    const prompt = "LOOM_REQUEST_ID: request:comment-analyzer:2\nLOOM_CONTEXT_PATH: /r/contexts/d.json\nread it";
-    expect(loomMarkerValue(prompt, "REQUEST_ID")).toBe("request:comment-analyzer:2");
-    expect(loomMarkerValue(prompt, "CONTEXT_PATH")).toBe("/r/contexts/d.json");
-    expect(loomMarkerValue(prompt, "MISSING")).toBeNull();
-    expect(loomMarkerValue("no markers here", "REQUEST_ID")).toBeNull();
-  });
-
+describe("grandfathered-spawn-model — context path parsing (pure)", () => {
   it("derives the run directory from a context path, rejecting a wrong shape", () => {
     expect(runDirectoryFromContextPath("/runs/run.abc/contexts/deadbeef.json")).toBe("/runs/run.abc");
     expect(runDirectoryFromContextPath("/runs/run.abc/contexts/deadbeef.json/")).toBe("/runs/run.abc");

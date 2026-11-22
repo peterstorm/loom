@@ -1,0 +1,15 @@
+{
+  "kind": "regex",
+  "name": "inv-11-one-request-marker-parser",
+  "description": "A spawned task's authority markers (LOOM_REQUEST_ID, LOOM_CONTEXT_DIGEST) have one writer and one reader, both in engine/src/core/spawn-task-text.ts: renderSpawnTaskText writes them and parseIssuedTaskIdentity reads them back as unbound | malformed | bound. Three readers once disagreed (Claude's correlator ignored the digest and refused an identical repeat, Pi's required exactly one of each and skipped non-matching lines, the emission capability accepted identical repeats), so the same prompt meant different authority on each harness. A module that spells a marker in code (a string or regex literal naming it, or the marker-line text) is the next disagreeing reader; prose in a comment defines nothing and is not matched.",
+  "extensions": [".ts", ".tsx", ".mts", ".cts"],
+  "pattern": "^(?!\\s*(?:\\*|//|/\\*)).*(?:['\"`/]\\^?LOOM_(?:REQUEST_ID|CONTEXT_DIGEST)\\b|LOOM_(?:REQUEST_ID|CONTEXT_DIGEST):)",
+  "flags": "",
+  "excludePatterns": [
+    "engine/src/core/spawn-task-text.ts",
+    "/tests/",
+    ".test.ts"
+  ],
+  "fixHint": "Read a task's markers with parseIssuedTaskIdentity (and write them only through renderSpawnTaskText) from engine/src/core/spawn-task-text.ts; resolve the run that issued the identity with resolveIssuingRun from engine/src/orchestration/session-run-bindings.ts.",
+  "enabled": true
+}

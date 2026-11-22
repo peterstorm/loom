@@ -14,8 +14,9 @@ import { resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseAgentType, parseReportedAgentId, parseSessionId, readActiveAgentRoles, readEvidence } from "../../machine";
 import { ensureRosteredImplementationBinding, suppliedTranscript } from "../implementation-binding";
 import { PENDING_BINDING_ESCALATION } from "../../core/implementation-binding";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
-import { claudeRunContext, type ClaudeRun, type ClaudeRunAuthority } from "../../orchestration/claude-run-authority";
+import { parseSubagentLifecycleStdin, type SubagentLifecycleInput } from "../../parsers/parse-subagent-lifecycle-input";
+import { claudeRunContext, type ClaudeRunAuthority } from "../../orchestration/claude-run-authority";
+import type { RunLocation } from "../../orchestration/session-run-bindings";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
 import { parseRegisteredFacadeProgram, reviewerProtocolResolver } from "../helpers/programs";
 
@@ -43,16 +44,13 @@ import { readFileSync } from "node:fs";
 import { claudeFinalTurnHandedBack, parseClaudeTranscript } from "../../core/claude-transcript-projection";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { readSettledJsonl } from "../../utils/read-settled-jsonl";
-import type { ParsedSubagentStopInput } from "../../parsers/parse-subagent-stop-input";
-
-type SubagentStopInput = Extract<ParsedSubagentStopInput, { ok: true }>["value"];
 
 /**
  * Whether this stop is final: the agent already handed its report back with
  * `SubagentHandback`, so a block cannot keep it working. Read only when a stop
  * check would block. Any read fault answers false, which keeps the block.
  */
-export type StopFinality = (input: SubagentStopInput) => Promise<boolean>;
+export type StopFinality = (input: SubagentLifecycleInput) => Promise<boolean>;
 
 export const transcriptStopFinality: StopFinality = async (input) => {
   try {
@@ -174,7 +172,7 @@ export const runDispatch = async (
 ): Promise<HookResult> => {
   // The hook budget (FR-025) is measured from the hook clock's first reading.
   const hookStartedAtMs = stopCheckPorts.now();
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     // No trustworthy session or Agent identity exists, so cleanup cannot be
     // named. Fail closed rather than reporting a successful stop that settled
@@ -288,7 +286,7 @@ export const runDispatch = async (
   // Which PROGRAM a stop belongs to decides whether legacy category settlement
   // applies at all, and it is decided from the same correlation, in the same
   // run, the capture above used.
-  let requestBinding: Readonly<{ request: AgentRequestAuthority; run: ClaudeRun }> | null = null;
+  let requestBinding: Readonly<{ request: AgentRequestAuthority; run: RunLocation }> | null = null;
   if (captureFailure === null) {
     const resolved = resolveClaudeRequestAuthority(input, runAuthority);
     if (resolved.ok) requestBinding = resolved.bound;

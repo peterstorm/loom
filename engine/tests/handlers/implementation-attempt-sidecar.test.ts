@@ -34,6 +34,7 @@ import {
   authorizeImplementationSpawn,
   createImplementationAttemptContext,
 } from "../../src/core/implementation-retry";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const roots: string[] = [];
 const previousDir = process.env.LOOM_SUBAGENT_DIR;
@@ -115,6 +116,7 @@ function modernGraph(
   });
   const graph: TaskGraph = {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -251,17 +253,17 @@ describe("Claude implementation authority sidecar", () => {
     expect(readFileSync(machineBindingPath(SESSION_ID), "utf8")).toContain(AGENT);
   });
 
-  it("blocks an implementation start when the bound Task has only a legacy reservation", async () => {
+  it("blocks an implementation start when the bound Task has no current attempt", async () => {
     const dir = root();
     const statePath = join(dir, "active_task_graph.json");
-    const legacy = taskFixture({
-      id: "T1", description: "legacy", agent: "code-implementer-agent",
+    const unreserved = taskFixture({
+      id: "T1", description: "unreserved", agent: "code-implementer-agent",
       wave: 1, status: "pending", depends_on: [], file_list: [],
     });
     writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, current_wave: 1,
-      executing_tasks: ["T1"], tasks: [legacy], wave_gates: {},
+      executing_tasks: [], tasks: [unreserved], wave_gates: {},
     }, null, 2));
     process.env.LOOM_STATE_PATH = statePath;
     const transcriptPath = join(dir, "agent.jsonl");
@@ -367,6 +369,7 @@ describe("Claude implementation authority sidecar", () => {
     const statePath = join(dir, "custom-state.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",
+      verification_manifest: preI6DefaultVerificationManifest(),
       phase_artifacts: {},
       skipped_phases: [],
       spec_file: null,

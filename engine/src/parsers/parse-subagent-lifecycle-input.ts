@@ -14,7 +14,7 @@ export type ParsedSubagentLifecycleInput =
 const OPTIONAL_STRING_FIELDS = ["agent_id", "agent_type", "agent_transcript_path"] as const;
 
 /** Parse one untrusted subagent lifecycle wire value with event-specific diagnostics. */
-export function parseSubagentLifecycleInput(
+function parseSubagentLifecycleInput(
   event: SubagentLifecycleEvent,
   raw: unknown,
 ): ParsedSubagentLifecycleInput {

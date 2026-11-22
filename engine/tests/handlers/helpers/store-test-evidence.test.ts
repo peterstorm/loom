@@ -15,7 +15,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import { parseNewTestEvidence, type TaskGraph, type Task } from "../../../src/types";
-import { pendingTaskProof } from "../../fixtures/task-lifecycle";
+import { pendingTaskProof, satisfiedProof } from "../../fixtures/task-lifecycle";
+import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
+import { decideTestEvidenceStore, type HelperTestEvidence } from "../../../src/handlers/helpers/store-test-evidence";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -27,6 +29,7 @@ function makeTmpDir(): string {
 function graphWith(task: Partial<Task>): TaskGraph {
   return {
     current_phase: "execute",
+    verification_manifest: preI6DefaultVerificationManifest(),
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
@@ -75,19 +78,17 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     return JSON.parse(readFileSync(statePath, "utf-8"));
   }
 
-  it("a ledger trusted-fail survives an attempted untrusted-pass overwrite (with a stderr note)", () => {
-    writeFileSync(
-      statePath,
-      JSON.stringify(
-        graphWith({
-          status: "implemented",
-          test_result: { verdict: "trusted-fail" },
-          test_evidence: "ledger: exit 1 (npm test)",
-        }),
-        null,
-        2,
-      ),
+  it("a ledger trusted-fail survives an attempted untrusted-pass overwrite (with a stderr note), and the refusal writes nothing", () => {
+    const originalBytes = JSON.stringify(
+      graphWith({
+        status: "implemented", proof: satisfiedProof([]),
+        test_result: { verdict: "trusted-fail" },
+        test_evidence: "ledger: exit 1 (npm test)",
+      }),
+      null,
+      2,
     );
+    writeFileSync(statePath, originalBytes);
 
     // The agent claims success via helper stdin — the classic laundering move.
     const { exitCode, stderr } = runHelper(
@@ -100,19 +101,23 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(task.test_evidence).toBe("ledger: exit 1 (npm test)"); // untouched
     expect(task.new_test_observation).toBeUndefined(); // nothing else laundered in either
     expect(stderr).toContain("refusing to overwrite");
+    expect(readFileSync(statePath, "utf8")).toBe(originalBytes);
   });
 
-  it("a trusted-pass verdict is equally protected", () => {
-    writeFileSync(
-      statePath,
-      JSON.stringify(graphWith({ status: "implemented", test_result: { verdict: "trusted-pass" } }), null, 2),
+  it("a trusted-pass verdict is equally protected, and the refusal writes nothing", () => {
+    const originalBytes = JSON.stringify(
+      graphWith({ status: "implemented", proof: satisfiedProof([]), test_result: { verdict: "trusted-pass" } }),
+      null,
+      2,
     );
+    writeFileSync(statePath, originalBytes);
 
     const { exitCode } = runHelper("TEST_PASSED: false\nTEST_EVIDENCE: fabricated failure\n");
     expect(exitCode).toBe(0);
 
     const task = readState().tasks[0];
     expect(task.test_result).toEqual({ verdict: "trusted-pass" });
+    expect(readFileSync(statePath, "utf8")).toBe(originalBytes);
   });
 
   it("rejects helper stdin for a revalidation-required Task without changing any stored evidence", () => {
@@ -192,6 +197,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(stderr).toContain("no task T9");
     // …and nothing was stored anywhere.
     expect(readState().tasks[0].test_result).toBeUndefined();
+    expect(readFileSync(statePath, "utf8")).toBe(original);
   });
 
   it("an existing UNTRUSTED result may be overwritten (helper is the same trust tier)", () => {
@@ -199,7 +205,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
       statePath,
       JSON.stringify(
         graphWith({
-          status: "implemented",
+          status: "implemented", proof: satisfiedProof([]),
           test_result: { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)", provenance: "unverified" },
         }),
         null,
@@ -215,6 +221,44 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
       verdict: "untrusted",
       passed: true,
       label: "helper-reported (store-test-evidence stdin)", provenance: "unverified",
+    });
+  });
+});
+
+describe("decideTestEvidenceStore", () => {
+  const evidence: HelperTestEvidence = {
+    passed: true,
+    testEvidence: "12 passing",
+    newTests: parseNewTestEvidence(true, "3 new tests"),
+  };
+
+  it.each([
+    ["missing", graphWith({}), "T9"],
+    ["requires-agent-revalidation", graphWith({ revalidation_required: true, proof: pendingTaskProof() }), "T1"],
+    ["trusted-verdict-skipped", graphWith({ status: "implemented", proof: satisfiedProof([]), test_result: { verdict: "trusted-fail" } }), "T1"],
+    ["trusted-verdict-skipped", graphWith({ status: "implemented", proof: satisfiedProof([]), test_result: { verdict: "trusted-pass" } }), "T1"],
+  ] as const)("refuses as %s by handing back the very graph it was given", (outcome, graph, taskId) => {
+    const decided = decideTestEvidenceStore(graph, taskId, evidence);
+    expect(decided.value).toBe(outcome);
+    expect(decided.state).toBe(graph);
+  });
+
+  it("stores untrusted helper-reported evidence in a new graph, leaving the input unchanged", () => {
+    const graph = graphWith({});
+    const before = structuredClone(graph);
+    const decided = decideTestEvidenceStore(graph, "T1", evidence);
+    expect(decided.value).toBe("stored");
+    expect(decided.state).not.toBe(graph);
+    expect(graph).toEqual(before);
+    expect(decided.state.tasks[0]).toMatchObject({
+      test_result: {
+        verdict: "untrusted",
+        passed: true,
+        label: "helper-reported (store-test-evidence stdin)",
+        provenance: "unverified",
+      },
+      test_evidence: "12 passing",
+      new_test_observation: { kind: "written", written: true, evidence: "3 new tests" },
     });
   });
 });

@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { git } from "../../../fixtures/git-repository";
+import { git, ignoredRunsRoot } from "../../../fixtures/git-repository";
 import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
 import { graphFixture, taskFixture, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 import { OTHER_CONTEXT_DIGEST, REVIEWER_V2 } from "../../../fixtures/issued-emission";
@@ -45,7 +45,7 @@ import { parseRegisteredFacadeProgram, type RegisteredStandaloneProgram } from "
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph } from "../../../../src/state-manager";
-import type { TaskGraph } from "../../../../src/types";
+import { parseNewTestEvidence, type TaskGraph } from "../../../../src/types";
 
 const successorSource = value(encodeByteSection(
   "standalone-frozen-source",
@@ -120,13 +120,13 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
   const root = canonicalTempDir("loom-t6-wave-wiring-");
   waveCliRoots.push(root);
   mkdirSync(join(root, "src"));
-  mkdirSync(join(root, "runs"));
+  const runsRoot = ignoredRunsRoot(root);
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
   writeFileSync(join(root, "spec.md"), waveSpecText);
   writeFileSync(join(root, "plan.md"), "# Model-free plan\n");
   git(root, ["init", "-q"]);
-  git(root, ["add", "src/x.ts", "spec.md", "plan.md"]);
+  git(root, ["add", ".gitignore", "src/x.ts", "spec.md", "plan.md"]);
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
   const proof = evaluateTaskProof(
     { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
@@ -138,7 +138,7 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
       id: "T1", description: "review fixture", agent: "code-implementer-agent", wave: 1,
       depends_on: [], status: "implemented", proof, file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
       spec_anchors: ["FR-001", "AS-001"], spec_contributions: [], test_result: { verdict: "trusted-pass" },
-      test_evidence: "fixture checks passed", new_tests_written: true, new_test_evidence: "fixture tests present",
+      test_evidence: "fixture checks passed", new_test_observation: parseNewTestEvidence(true, "fixture tests present"),
       review_generation: 0, review_status: "pending", findings: [],
       critical_findings: [], advisory_findings: [],
     })]),
@@ -147,7 +147,7 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
   const parsedGraph = parseTaskGraph(graph);
   if (!parsedGraph.ok) throw new Error(`fixture task graph refused: ${parsedGraph.error}`);
   writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(parsedGraph.value));
-  return { root, runsRoot: join(root, "runs") };
+  return { root, runsRoot };
 }
 
 function standaloneEmissionProject(): { root: string; runsRoot: string } {

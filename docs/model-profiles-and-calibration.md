@@ -47,13 +47,12 @@ Each issuing seam takes the minted type or mints what it issues itself, so a bui
 - a fresh roster slot (`mintAgentRosterSlot`): the standalone reviewer roster and every refutation verifier slot;
 - an exact roster (`issueExactRoster`): it takes its slots' identities and mints each slot itself, so no recorded slot and no cast value can reach it, and a slot the catalog will not mint is refused by its slot id with the catalog's reasons;
 - a refutation panel (`issueRefutationPanelAuthority`), which issues its roster through `issueExactRoster`;
-- the Wave review batch and materialized panel requests;
+- the Wave review batch;
 - refutation verifier slots, minted only when the panel has no record, under the catalog the plan names.
 
 Coverage stops at an aggregate that is persisted as issued and only ever read back:
 
 - the standalone review authority's roster;
-- the architecture panel authority, whose requests are minted one at a time by panel materialization;
 - a refutation panel read back from its record, and the prepared panel every program consumes.
 
 ### Recorded history

@@ -207,46 +207,6 @@ describe("Claude SubagentStop project boundary", () => {
     expect(JSON.parse(readFileSync(statePath, "utf8")).tasks[0].failure_reason).toBe(settlement);
   }, 30_000);
 
-  it("preserves the State File byte-for-byte when the boundary observation throws without a bound modern authority", async () => {
-    // A LEGACY-shaped graph: the handler refuses an unobserved modern attempt
-    // before the boundary observation, so this arm needs a task without an
-    // active implementation attempt, attributed by its sole executing entry.
-    const dir = canonicalTempDir("loom-boundary-legacy-");
-    roots.push(dir);
-    const statePath = join(dir, "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, executing_tasks: ["T1"],
-      wave_gates: { "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false } },
-      tasks: [{
-        id: "T1", description: "impl", agent: "code-implementer-agent",
-        wave: 1, status: "pending", depends_on: [], new_tests_required: false,
-      }],
-    }));
-    const sessionId = `claude-boundary-legacy-${process.pid}-${Date.now()}`;
-    mkdirSync(SUBAGENT_DIR, { recursive: true });
-    const pointer = join(SUBAGENT_DIR, `${sessionId}.task_graph`);
-    writeFileSync(pointer, statePath);
-    pointers.push(pointer);
-    const before = readFileSync(statePath);
-    vi.spyOn(config, "observeTaskGraphProjectBoundary").mockImplementation(() => {
-      throw new Error("git rev-parse could not start: scripted boundary failure");
-    });
-
-    const result = await runUpdateTaskStatus(JSON.stringify({
-      session_id: sessionId, agent_id: "a-1", agent_type: "code-implementer-agent",
-    }), [], { kind: "snapshot", events: [] });
-
-    expect(result).toMatchObject({
-      kind: "error",
-      message: expect.stringContaining(
-        "update-task-status: Claude TaskGraph project boundary unavailable: " +
-        "git rev-parse could not start: scripted boundary failure; execution authority was preserved",
-      ),
-    });
-    expect(readFileSync(statePath).equals(before)).toBe(true);
-  }, 30_000);
-
   it("settles a bound modern authority with a non-consuming infrastructure receipt when the boundary observation throws", async () => {
     const { statePath, sessionId, authority, transcript } = await armedImplementationWorktree("bound");
     vi.spyOn(config, "observeTaskGraphProjectBoundary").mockImplementation(() => {

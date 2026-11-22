@@ -42,6 +42,7 @@
  *   every other `tool_result` handler, so it reads the tool's own result.
  */
 
+import { parseErr, parseOk, type LineParseResult } from "./parse-result";
 import { isRecord } from "./plain-record";
 import type {
   BashToolOutcome,
@@ -267,8 +268,9 @@ export function claudeToolCall(payload: ClaudeToolPayload): HarnessToolCall {
 
 // ─── Pi ───────────────────────────────────────────────────────────────────
 
-/** Pi's lowercase tool names, mapped onto the harness vocabulary. Every
- *  other Pi tool (`grep`, `find`, `ls`, `subagent`, custom tools) is `Other`. */
+/** Pi's lowercase tool names, mapped onto the harness vocabulary: the one Pi
+ *  tool table. Every other Pi tool (`grep`, `find`, `ls`, `subagent`, custom
+ *  tools) is `Other`. */
 const PI_TOOLS: Readonly<Record<string, HarnessToolCall["tool"]>> = Object.freeze({
   read: "Read",
   write: "Write",
@@ -276,6 +278,106 @@ const PI_TOOLS: Readonly<Record<string, HarnessToolCall["tool"]>> = Object.freez
   multi_edit: "MultiEdit",
   bash: "Bash",
 });
+
+/**
+ * A tool name read back from a Pi transcript, as the tool it spells in
+ * `PI_TOOLS`: case-folded, with `multiedit` (Claude's `MultiEdit`, folded)
+ * read as `multi_edit`. A live `tool_result` event carries the registered
+ * name exactly (`piToolCall`); a transcript is read after the fact for what
+ * the child may have written, so a spelling a live event would not carry
+ * still reads as the tool it names rather than as `Other`.
+ */
+export function piTranscriptTool(name: string): HarnessToolCall["tool"] {
+  const folded = name.toLowerCase();
+  return toolOf(PI_TOOLS, folded === "multiedit" ? "multi_edit" : folded);
+}
+
+/**
+ * The tool-input keys that may name a Pi write target, in probe order. One
+ * ordered vocabulary for the extension's write guard (`piWriteTargetPaths`)
+ * and the transcript's write targets (`pi/transcript-adapter.ts`), so the
+ * paths a guard verified and the paths a settlement attributes cannot drift.
+ */
+export const WRITE_TARGET_KEYS = Object.freeze(["path", "file_path", "filePath"] as const);
+
+/**
+ * What one tool input says of its own write target, the one reading both
+ * `writeTargetPathOf` and `piWriteTargetPaths` share:
+ * - `absent`: no `WRITE_TARGET_KEYS` key is present at all;
+ * - `named`: the value of the first key, in probe order, whose value is not
+ *   nullish is a non-empty string;
+ * - `unnamed`: a key is present, but that first non-nullish value is not a
+ *   non-empty string, or every present key holds `null`/`undefined`. A later
+ *   key never stands in for an earlier non-nullish value that is not a path,
+ *   so the target a guard verifies is the one the tool reads.
+ */
+type OwnWriteTarget =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "named"; path: string }>
+  | Readonly<{ kind: "unnamed" }>;
+
+const ABSENT_TARGET: OwnWriteTarget = Object.freeze({ kind: "absent" });
+const UNNAMED_TARGET: OwnWriteTarget = Object.freeze({ kind: "unnamed" });
+
+function ownWriteTargetOf(input: Readonly<Record<string, unknown>>): OwnWriteTarget {
+  if (!WRITE_TARGET_KEYS.some((key) => key in input)) return ABSENT_TARGET;
+  const key = WRITE_TARGET_KEYS.find((candidate) => input[candidate] != null);
+  const value = key === undefined ? undefined : input[key];
+  return typeof value === "string" && value.length > 0 ? Object.freeze({ kind: "named", path: value }) : UNNAMED_TARGET;
+}
+
+/** The input's own write target when it names one (`ownWriteTargetOf`), else `null`. */
+export function writeTargetPathOf(args: unknown): string | null {
+  if (!isRecord(args)) return null;
+  const target = ownWriteTargetOf(args);
+  return target.kind === "named" ? target.path : null;
+}
+
+export type PiWriteTargetPathsResult = LineParseResult<readonly [string, ...string[]]>;
+
+/** A frozen success or refusal; the value type comes from the caller's declared result. */
+const accepted = <T>(value: T): LineParseResult<T> => Object.freeze(parseOk(value));
+const refused = <T>(error: string): LineParseResult<T> => Object.freeze(parseErr<T>(error));
+
+const unnamedTargetError = (path: string): string => `${path} must name one non-empty path, file_path, or filePath target`;
+
+/** One `edits[]` entry's target: an entry must name its own. */
+const editTarget = (edit: unknown, index: number): LineParseResult<string> => {
+  const at = `write input.edits[${index}]`;
+  if (!isRecord(edit)) return refused(`${at} must be a plain object`);
+  const target = ownWriteTargetOf(edit);
+  return target.kind === "named" ? accepted(target.path) : refused(unnamedTargetError(at));
+};
+
+/**
+ * Every target one Pi write-tool input names: its own target, or else each of
+ * its `edits[]` targets (deduplicated, in order). A target key that is
+ * present, even holding `null`, commits the input to its own target
+ * (`ownWriteTargetOf`): `edits[]` is read only when no target key is present,
+ * so `{ path: null, edits: [...] }` fails rather than reading the edits. All
+ * or nothing: one target that cannot be proven fails the whole input, so no
+ * partial batch exists.
+ */
+export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
+  if (!isRecord(raw)) return refused("write input must be a plain object");
+  const own = ownWriteTargetOf(raw);
+  if (own.kind === "named") return accepted(Object.freeze([own.path] as const));
+  if (own.kind === "unnamed") return refused(unnamedTargetError("write input"));
+  if (!Array.isArray(raw.edits) || raw.edits.length === 0) {
+    return refused("write input must contain a target or a non-empty edits array");
+  }
+  // Head first: the first edit's target makes the list non-empty by type.
+  const [firstEdit, ...restEdits] = raw.edits as readonly unknown[];
+  const first = editTarget(firstEdit, 0);
+  if (!first.ok) return first;
+  const paths: [string, ...string[]] = [first.value];
+  for (const [offset, edit] of restEdits.entries()) {
+    const parsed = editTarget(edit, offset + 1);
+    if (!parsed.ok) return parsed;
+    if (!paths.includes(parsed.value)) paths.push(parsed.value);
+  }
+  return accepted(Object.freeze(paths));
+}
 
 /** The `tool_result` event fields the adapter reads, all untrusted. */
 export type PiToolResultEvent = Readonly<{
@@ -317,13 +419,25 @@ function piBashOutcome(event: PiToolResultEvent): BashToolOutcome {
   return { kind: "exited", exit: failed ? 1 : 0, stdout };
 }
 
-/** Normalize a Pi child's `tool_result` event. Pi events carry no cwd: the
- *  shell passes the session's. */
-export function piToolCall(event: PiToolResultEvent, cwd: string): HarnessToolCall {
+/** One Pi tool call as `tool`, its outcome read from the result alone. */
+function piCallAs(tool: HarnessToolCall["tool"], event: PiToolResultEvent, cwd: string): HarnessToolCall {
   return normalized(
-    toolOf(PI_TOOLS, event.toolName),
+    tool,
     { input: recordOrEmpty(event.input), callId: parseToolCallId(event.toolCallId), cwd },
     () => (event.isError === true ? { kind: "failed" } : { kind: "succeeded" }),
     () => piBashOutcome(event),
   );
+}
+
+/** Normalize a Pi child's `tool_result` event. Pi events carry no cwd: the
+ *  shell passes the session's. */
+export function piToolCall(event: PiToolResultEvent, cwd: string): HarnessToolCall {
+  return piCallAs(toolOf(PI_TOOLS, event.toolName), event, cwd);
+}
+
+/** Normalize one tool call a Pi transcript recorded, paired with its result:
+ *  `piToolCall`'s outcome rules over the transcript's name reading
+ *  (`piTranscriptTool`). */
+export function piTranscriptToolCall(event: PiToolResultEvent, cwd: string): HarnessToolCall {
+  return piCallAs(piTranscriptTool(event.toolName), event, cwd);
 }

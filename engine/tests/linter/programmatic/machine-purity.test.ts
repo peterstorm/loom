@@ -4,7 +4,7 @@
  * holds pure must have a transitive closure that stays pure — a file inside a
  * root that imports a declared shell is impure too, and must be declared as
  * one. The Guarded Skill Machine, Defect-Family Accounting, and the emission
- * kernel with the legacy panel decisions are probed in depth below.
+ * kernel with the refutation panel program are probed in depth below.
  */
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
@@ -151,8 +151,7 @@ const EMISSION_TOOL = "engine/src/core/emission-tool.ts";
 const EMISSION_OBSERVATION = "engine/src/core/emission-observation.ts";
 const FINAL_PAYLOAD = "engine/src/core/harness-capture.ts";
 const EMISSION_SELECTION = "engine/src/core/emission-ingestion.ts";
-const LEGACY_ARCHIVE = "engine/src/core/legacy-archive.ts";
-const LEGACY_PANEL_DECISIONS = "engine/src/core/legacy-panel-decisions.ts";
+const PERSISTENT_PANEL = "engine/src/core/persistent-panel.ts";
 const REVIEWER_ENTRIES = new Map([
   ["zod/v4", "zod/v4/index.js"], ["jsonc-parser", "jsonc-parser/lib/umd/main.js"],
 ]);
@@ -510,12 +509,12 @@ describe("functional core — executable purity closure", () => {
   });
 });
 
-describe("emission kernel and legacy panel decisions — executable purity closure", () => {
-  const ENROLLED = [EMISSION_TOOL, EMISSION_OBSERVATION, FINAL_PAYLOAD, EMISSION_SELECTION, LEGACY_ARCHIVE, LEGACY_PANEL_DECISIONS] as const;
+describe("emission kernel and the refutation panel program — executable purity closure", () => {
+  const ENROLLED = [EMISSION_TOOL, EMISSION_OBSERVATION, FINAL_PAYLOAD, EMISSION_SELECTION, PERSISTENT_PANEL] as const;
 
-  it("enrolls the emission kernel and the legacy panel decisions with a pure transitive closure", () => {
+  it("enrolls the emission kernel and the refutation panel program with a pure transitive closure", () => {
     for (const mod of ENROLLED) expect(isLoomPure(mod), mod).toBe(true);
-    const audit = auditClosure([LEGACY_PANEL_DECISIONS]);
+    const audit = auditClosure([PERSISTENT_PANEL]);
     expect(audit.errors).toEqual([]);
     for (const required of [...ENROLLED, "engine/src/core/panel-verdict-source.ts", "zod/v4/index.js"]) {
       expect(audit.visited, `walk must reach ${required}`).toContain(required);
@@ -535,14 +534,14 @@ describe("emission kernel and legacy panel decisions — executable purity closu
   ] as const;
 
   it.each(ENROLLED.map((mod, index) => [mod, CLASS_PROBES[index % CLASS_PROBES.length]!] as const))(
-    "%s cannot hide transitive impurity from the legacy panel decisions: %s",
+    "%s cannot hide transitive impurity from the refutation panel program: %s",
     (mod, probe) => {
-      const audit = auditClosure([LEGACY_PANEL_DECISIONS], new Map([[mod, `${readSource(mod)}\n${probe}`]]));
+      const audit = auditClosure([PERSISTENT_PANEL], new Map([[mod, `${readSource(mod)}\n${probe}`]]));
       expect(audit.errors.some((error) => error.startsWith(`${mod}:`))).toBe(true);
     },
   );
 
-  it.each([EMISSION_OBSERVATION, FINAL_PAYLOAD, EMISSION_SELECTION, LEGACY_ARCHIVE, LEGACY_PANEL_DECISIONS])(
+  it.each([EMISSION_OBSERVATION, FINAL_PAYLOAD, EMISSION_SELECTION, PERSISTENT_PANEL])(
     "%s holds no zod grant of its own",
     (mod) => {
       const audit = auditClosure([mod], new Map([[mod, `${readSource(mod)}\nimport "zod/v4";`]]));
@@ -555,16 +554,16 @@ describe("emission kernel and legacy panel decisions — executable purity closu
   // Both sides are pure, so the closure alone cannot see this edge.
   it.each([EMISSION_TOOL, EMISSION_OBSERVATION, FINAL_PAYLOAD, EMISSION_SELECTION])("%s stays below the panel program layer", (mod) => {
     const specifiers = dependencies(readSource(mod)).map(({ specifier }) => specifier);
-    for (const forbidden of ["./panel-program", "./panel-verdict-source", "./persistent-panel", "./persistent-panel-program", "./legacy-panel-decisions"]) {
+    for (const forbidden of ["./panel-program", "./panel-verdict-source", "./persistent-panel", "./persistent-panel-program"]) {
       expect(specifiers, `${mod} -> ${forbidden}`).not.toContain(forbidden);
     }
   });
 
-  it.each(["../handlers/helpers/programs/legacy-panel", "../orchestration/harness-capture-runtime"])(
-    "the legacy panel decisions cannot import their shell: %s",
+  it.each(["../handlers/helpers/programs/wave-refutation", "../orchestration/harness-capture-runtime"])(
+    "the refutation panel program cannot import its shell: %s",
     (specifier) => {
-      const audit = auditClosure([LEGACY_PANEL_DECISIONS], new Map([[LEGACY_PANEL_DECISIONS, `${readSource(LEGACY_PANEL_DECISIONS)}\nimport "${specifier}";`]]));
-      expect(audit.errors.some((error) => error.startsWith(`${LEGACY_PANEL_DECISIONS}:`))).toBe(true);
+      const audit = auditClosure([PERSISTENT_PANEL], new Map([[PERSISTENT_PANEL, `${readSource(PERSISTENT_PANEL)}\nimport "${specifier}";`]]));
+      expect(audit.errors.some((error) => error.startsWith(`${PERSISTENT_PANEL}:`))).toBe(true);
     },
   );
 });

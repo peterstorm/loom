@@ -280,6 +280,17 @@ export type AffectedStopCheckNoteKind =
  *  and the `command-refused` plan-view off reason both read it. */
 const COMMAND_REFUSED_TEXT = "the affected runner command could not be formed for the changed files";
 
+/** The subject the affected check's notes name it by. */
+export const AFFECTED_STOP_CHECK_SUBJECT = "the affected stop check";
+
+/** The fail-open note of a stop check whose counter reached its cap: the one
+ *  wording every check's cap note uses, the affected check's included. */
+export const capReachedNote = (subject: string, cap: number): string => `${subject} reached its ${cap}-block cap`;
+
+/** The fail-open note of a stop check whose counter cannot be read: the one
+ *  wording every check uses; the reason, when known, follows after a colon. */
+export const counterUnreadableNote = (subject: string): string => `${subject}'s block counter is unreadable`;
+
 /** The fixed text each affected-check note carries. */
 export const AFFECTED_NOTE_TEXT: Readonly<Record<AffectedStopCheckNoteKind, string>> = {
   "no-changed-files": "the affected stop check is skipped: this attempt has no changed files",
@@ -291,8 +302,8 @@ export const AFFECTED_NOTE_TEXT: Readonly<Record<AffectedStopCheckNoteKind, stri
   "start-failed": "the affected runner could not start",
   "did-not-complete": "the affected runner did not complete",
   "budget-exhausted": "the stop hook budget was exhausted before the affected runner could run in full",
-  "cap-reached": `the affected stop check reached its ${AFFECTED_STOP_CHECK_MAX_BLOCKS}-block cap`,
-  "counter-unreadable": "the affected stop check's block counter is unreadable",
+  "cap-reached": capReachedNote(AFFECTED_STOP_CHECK_SUBJECT, AFFECTED_STOP_CHECK_MAX_BLOCKS),
+  "counter-unreadable": counterUnreadableNote(AFFECTED_STOP_CHECK_SUBJECT),
   "command-refused": COMMAND_REFUSED_TEXT,
   "lock-held": "another stop holds the stop-check runner lock",
   "repository-unavailable": "the repository root is unavailable to the affected stop check",

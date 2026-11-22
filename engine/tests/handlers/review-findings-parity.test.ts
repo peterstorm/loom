@@ -1,3 +1,4 @@
+import { satisfiedProof } from "../fixtures/task-lifecycle";
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -40,7 +41,7 @@ const baseTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
-  legacy_missing_proof: true,
+  proof: satisfiedProof([]),
   depends_on: [],
 };
 

@@ -1,19 +1,18 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import fc from "fast-check";
-import { parsePiEntry } from "../../src/parsers/types";
-import { notAJsonObject, wireOf } from "../fixtures/json-wire";
 
 import { parseFirstUserPrompt, parseTranscript } from "../../src/parsers/parse-transcript";
-import { parseFilesModified } from "../../src/parsers/parse-files-modified";
+import { parseFilesModified, PI_SESSION_REFUSAL } from "../../src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
 import { readPersistedOutput } from "../../src/utils/persisted-output";
 
 /** The production persisted-output reader, bound once: no test here is about it. */
 const parseBashOutput = (jsonl: string): string => parseBashTestOutput(jsonl, readPersistedOutput);
 import { parsePhaseArtifacts } from "../../src/parsers/parse-phase-artifacts";
-import { parseSubagentStartInput, parseSubagentStartStdin } from "../../src/parsers/parse-subagent-start-input";
-import { parseSubagentStopInput, parseSubagentStopStdin } from "../../src/parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../src/parsers/parse-subagent-lifecycle-input";
+
+const parseSubagentStartStdin = (stdin: string) => parseSubagentLifecycleStdin("SubagentStart", stdin);
+const parseSubagentStopStdin = (stdin: string) => parseSubagentLifecycleStdin("SubagentStop", stdin);
 
 describe("Claude Code harness records", () => {
   // Claude Code writes request telemetry beside the conversation. Its
@@ -22,7 +21,7 @@ describe("Claude Code harness records", () => {
   const fixture = readFileSync(new URL("../fixtures/claude-harness-records-transcript.jsonl", import.meta.url), "utf8");
 
   it("contribute no modified files", () => {
-    expect(parseFilesModified(fixture)).toEqual(["/repo/src/real.ts"]);
+    expect(parseFilesModified(fixture)).toEqual({ ok: true, value: ["/repo/src/real.ts"] });
   });
 
   it("contribute no test output", () => {
@@ -32,7 +31,7 @@ describe("Claude Code harness records", () => {
   });
 
   it("contribute no transcript text", () => {
-    const text = parseTranscript(fixture, "claude");
+    const text = parseTranscript(fixture);
     expect(text).toContain("Done.");
     expect(text).not.toContain("1 failed");
     expect(text).not.toContain("tools just became available");
@@ -43,7 +42,7 @@ describe("Claude Code harness records", () => {
       JSON.stringify({ type: "api-request-blob", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: "stale" }] } }),
       JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }),
     ].join("\n");
-    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, prompt: "Task ID: T1" });
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, value: "Task ID: T1" });
   });
 });
 
@@ -55,9 +54,9 @@ describe("Subagent lifecycle input parsers", () => {
     agent_transcript_path: "/tmp/transcript.jsonl",
   };
 
-  it("projects the same immutable wire fields through both public wrappers", () => {
-    const start = parseSubagentStartInput({ ...valid, ignored: true });
-    const stop = parseSubagentStopInput({ ...valid, ignored: true });
+  it("projects the same immutable wire fields through both stdin parsers", () => {
+    const start = parseSubagentStartStdin(JSON.stringify({ ...valid, ignored: true }));
+    const stop = parseSubagentStopStdin(JSON.stringify({ ...valid, ignored: true }));
 
     expect(start).toEqual({ ok: true, value: valid });
     expect(stop).toEqual({ ok: true, value: valid });
@@ -66,10 +65,10 @@ describe("Subagent lifecycle input parsers", () => {
   });
 
   it.each([
-    ["SubagentStart", parseSubagentStartInput],
-    ["SubagentStop", parseSubagentStopInput],
+    ["SubagentStart", parseSubagentStartStdin],
+    ["SubagentStop", parseSubagentStopStdin],
   ] as const)("retains event-specific diagnostics for malformed %s fields", (event, parse) => {
-    expect(parse({ session_id: "session-1", agent_id: 42 })).toEqual({
+    expect(parse(JSON.stringify({ session_id: "session-1", agent_id: 42 }))).toEqual({
       ok: false,
       error: `${event} agent_id must be a string when present`,
     });
@@ -93,17 +92,51 @@ describe("parseFirstUserPrompt", () => {
       JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "Review Task T1" }] } }),
       JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "LOOM_REVIEW_CONTEXT: standalone" }] } }),
     ].join("\n");
-    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, prompt: "Review Task T1" });
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, value: "Review Task T1" });
   });
 
-  it("reads the standalone marker from the initial Pi user task", () => {
+  it("reads no prompt or write set from a Pi session file: each reader fails closed", () => {
+    // Every reader here serves a Claude Code hook. A Pi session handed to one
+    // is never read as Pi (that dialect is gone): its `session`/`message`
+    // records classify as harness records and attribute nothing.
+    const header = JSON.stringify({ type: "session", version: 1 });
     const content = [
-      JSON.stringify({ type: "session", version: 1 }),
+      header,
       JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "LOOM_REVIEW_CONTEXT: standalone\nReview" }] } }),
     ].join("\n");
-    expect(parseFirstUserPrompt(content)).toEqual({
-      ok: true,
-      prompt: "LOOM_REVIEW_CONTEXT: standalone\nReview",
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: false, error: "transcript contains no user-authored prompt" });
+    expect(parseTranscript(content)).toBe("");
+    const write = JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "write", arguments: { path: "/tmp/pi.ts" } }] } });
+    // A Pi session's write set is refused, never read as an empty one.
+    expect(parseFilesModified(`${header}\n${write}`)).toEqual({ ok: false, error: PI_SESSION_REFUSAL });
+    // Wherever the header sits, and beside Claude records.
+    const claudeWrite = '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/a.ts"}}]}}';
+    expect(parseFilesModified(`${claudeWrite}\n${header}`)).toEqual({ ok: false, error: PI_SESSION_REFUSAL });
+    // A record typed session without a version is no Pi header.
+    expect(parseFilesModified(`${JSON.stringify({ type: "session" })}\n${claudeWrite}`)).toEqual({ ok: true, value: ["/tmp/a.ts"] });
+  });
+
+  describe("a Pi session header refuses the write set wherever it sits", () => {
+    const header = JSON.stringify({ type: "session", version: 3, id: "pi-session" });
+    const claudeWrite = (path: string): string =>
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: path } }] } });
+
+    it.each([
+      ["the first line", [header, claudeWrite("/tmp/a.ts"), claudeWrite("/tmp/b.ts")]],
+      ["between two Claude writes", [claudeWrite("/tmp/a.ts"), header, claudeWrite("/tmp/b.ts")]],
+      ["after leading blank lines", ["", "   ", header, claudeWrite("/tmp/a.ts")]],
+      ["the last line", [claudeWrite("/tmp/a.ts"), claudeWrite("/tmp/b.ts"), header]],
+      ["an escaped type spelling", [claudeWrite("/tmp/a.ts"), '{"type":"\\u0073ession","version":3}']],
+    ])("as %s", (_position, lines) => {
+      expect(parseFilesModified(lines.join("\n"))).toEqual({ ok: false, error: PI_SESSION_REFUSAL });
+    });
+
+    it("reads no text from a Pi assistant tool call", () => {
+      const toolCall = JSON.stringify({
+        type: "message",
+        message: { role: "assistant", content: [{ type: "toolCall", name: "write", arguments: { path: "/tmp/pi.ts", content: "x" } }] },
+      });
+      expect(parseTranscript([header, toolCall].join("\n"))).toBe("");
     });
   });
 
@@ -139,26 +172,16 @@ describe("parseFirstUserPrompt", () => {
     { message: 7 },
     { message: ["user"] },
   ])("skips an entry whose message is $message, never reading it as the user prompt", ({ message }) => {
-    for (const [format, entryType] of [["pi", "message"], ["claude", "user"]] as const) {
-      const content = [
-        JSON.stringify({ type: entryType, message }),
-        JSON.stringify({ type: entryType, message: { role: "user", content: "Review Task T3" } }),
-      ].join("\n");
-      expect(parseFirstUserPrompt(content, format)).toEqual({ ok: true, prompt: "Review Task T3" });
-    }
+    const content = [
+      JSON.stringify({ type: "user", message }),
+      JSON.stringify({ type: "user", message: { role: "user", content: "Review Task T3" } }),
+    ].join("\n");
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, value: "Review Task T3" });
   });
 
-  it.each([
-    ["pi", [
-      JSON.stringify({ type: "session", version: 1 }),
-      JSON.stringify({ type: "message", message: { role: "user", content: { malformed: true } } }),
-    ].join("\n")],
-    ["claude", JSON.stringify({
-      type: "user",
-      message: { role: "user", content: { malformed: true } },
-    })],
-  ] as const)("returns a typed failure for malformed %s user content", (format, content) => {
-    expect(parseFirstUserPrompt(content, format)).toEqual({
+  it("returns a typed failure for malformed user content", () => {
+    const content = JSON.stringify({ type: "user", message: { role: "user", content: { malformed: true } } });
+    expect(parseFirstUserPrompt(content)).toEqual({
       ok: false,
       error: expect.stringContaining("unsupported content"),
     });
@@ -209,79 +232,7 @@ describe("parseTranscript", () => {
         { type: "text", text: "second" },
       ] }] },
     });
-    expect(parseTranscript(content, "claude")).toBe("first\nsecond");
-  });
-
-  it.each([
-    ["string", "Pi string", "Pi string"],
-    ["text blocks", [{ type: "text", text: "Pi first" }, { type: "text", text: "Pi second" }], "Pi first\nPi second"],
-  ] as const)("extracts Pi %s content through the shared flattener", (_label, body, expected) => {
-    const content = JSON.stringify({ type: "message", message: { role: "assistant", content: body } });
-    expect(parseTranscript(content, "pi")).toBe(expected);
-  });
-});
-
-describe("parsePiEntry", () => {
-  const block = fc.record(
-    { type: fc.string(), text: fc.string(), name: fc.string(), id: fc.string(), arguments: fc.dictionary(fc.string(), fc.jsonValue()) },
-    { requiredKeys: ["type"] },
-  );
-  const message = fc.record(
-    {
-      role: fc.string(),
-      content: fc.oneof(fc.string(), fc.array(block, { maxLength: 3 })),
-      toolCallId: fc.string(),
-      toolName: fc.string(),
-      isError: fc.boolean(),
-    },
-    { requiredKeys: [] },
-  );
-  const entry = fc.record(
-    { type: fc.string(), id: fc.string(), parentId: fc.option(fc.string(), { nil: null }), message },
-    { requiredKeys: ["type"] },
-  );
-  it("round-trips every entry through its wire form", () => {
-    fc.assert(fc.property(entry, (value) => {
-      expect(parsePiEntry(wireOf(value))).toEqual(wireOf(value));
-    }));
-  });
-
-  it("refuses a value that is not an object or has no string type", () => {
-    fc.assert(fc.property(notAJsonObject, (value) => {
-      expect(parsePiEntry(value)).toBeNull();
-    }));
-    fc.assert(fc.property(entry, fc.jsonValue().filter((value) => typeof value !== "string"), (value, type) => {
-      expect(parsePiEntry(wireOf({ ...value, type }))).toBeNull();
-    }));
-  });
-
-  it("drops a field of the wrong type and keeps the rest of the entry", () => {
-    const wrong = fc.constantFrom<readonly [string, unknown]>(["id", 7], ["parentId", 7], ["message", "text"], ["message", null]);
-    fc.assert(fc.property(entry, wrong, (value, [field, bad]) => {
-      const { [field]: _dropped, ...rest } = value as Readonly<Record<string, unknown>>;
-      expect(parsePiEntry(wireOf({ ...value, [field]: bad }))).toEqual(wireOf(rest));
-    }));
-  });
-
-  it("drops content that is neither text nor blocks, and blocks that are not blocks", () => {
-    fc.assert(fc.property(entry, fc.constantFrom<unknown>(7, null, { type: "text" }), (value, content) => {
-      expect(parsePiEntry(wireOf({ ...value, message: { role: "user", content } }))?.message).toEqual({ role: "user" });
-    }));
-    fc.assert(fc.property(fc.array(block, { maxLength: 3 }), fc.constantFrom<unknown>(null, "text", 7, { text: "untyped" }, { type: 7 }), (blocks, bad) => {
-      const parsed = parsePiEntry(wireOf({ type: "message", message: { content: [bad, ...blocks, bad] } }));
-      expect(parsed?.message?.content).toEqual(wireOf(blocks));
-    }));
-  });
-
-  it("lets the Pi extractors skip malformed entries and blocks instead of throwing", () => {
-    const content = [
-      "null",
-      "7",
-      JSON.stringify({ type: "message", message: { role: "assistant", content: [null, { type: "toolCall", name: 7, arguments: { path: "/tmp/no.ts" } }, { type: "toolCall", name: "write", arguments: "x" }] } }),
-      JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "kept" }, { type: "toolCall", name: "write", arguments: { path: "/tmp/yes.ts" } }] } }),
-    ].join("\n");
-    expect(parseFilesModified(content, "pi")).toEqual(["/tmp/yes.ts"]);
-    expect(parseTranscript(content, "pi")).toBe("kept");
+    expect(parseTranscript(content)).toBe("first\nsecond");
   });
 });
 
@@ -289,22 +240,19 @@ describe("parseFilesModified", () => {
   it("extracts Write file paths", () => {
     const content =
       '{"message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/test.ts"}}]}}';
-    const result = parseFilesModified(content);
-    expect(result).toEqual(["/tmp/test.ts"]);
+    expect(parseFilesModified(content)).toEqual({ ok: true, value: ["/tmp/test.ts"] });
   });
 
   it("extracts Edit file paths", () => {
     const content =
       '{"message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/tmp/other.ts"}}]}}';
-    const result = parseFilesModified(content);
-    expect(result).toEqual(["/tmp/other.ts"]);
+    expect(parseFilesModified(content)).toEqual({ ok: true, value: ["/tmp/other.ts"] });
   });
 
   it("ignores non-file-modifying tools", () => {
     const content =
       '{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}';
-    const result = parseFilesModified(content);
-    expect(result).toEqual([]);
+    expect(parseFilesModified(content)).toEqual({ ok: true, value: [] });
   });
 
   it("deduplicates files", () => {
@@ -312,79 +260,7 @@ describe("parseFilesModified", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/test.ts"}}]}}',
       '{"message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/tmp/test.ts"}}]}}',
     ].join("\n");
-    const result = parseFilesModified(content);
-    expect(result).toEqual(["/tmp/test.ts"]);
-  });
-
-  // Pi transcripts embed tool calls as { type: "toolCall", name, arguments }
-  // inside assistant messages, keyed by `path` (or `file_path`). This branch
-  // is live production code (pi/subagent-result.ts threads it) and format-shape
-  // regressions here would ship silently.
-  it("extracts pi toolCall write paths via `path` (explicit format)", () => {
-    const content =
-      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"write","arguments":{"path":"/tmp/pi.ts"}}]}}';
-    const result = parseFilesModified(content, "pi");
-    expect(result).toEqual(["/tmp/pi.ts"]);
-  });
-
-  it("extracts pi toolCall edit paths via `file_path` fallback", () => {
-    const content =
-      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"edit","arguments":{"file_path":"/tmp/edit.ts"}}]}}';
-    const result = parseFilesModified(content, "pi");
-    expect(result).toEqual(["/tmp/edit.ts"]);
-  });
-
-  it("collects a pi `multi_edit` toolCall path (PI_FILE_TOOLS membership)", () => {
-    // multi_edit is a first-class pi file tool; dropping it from PI_FILE_TOOLS
-    // silently shrinks the wave-gate lint set. Mutation-survivable without this.
-    const content =
-      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"multi_edit","arguments":{"path":"/tmp/multi.ts"}}]}}';
-    expect(parseFilesModified(content, "pi")).toEqual(["/tmp/multi.ts"]);
-  });
-
-  it("case-folds a capitalized pi `Write` toolCall name (extension.ts hedges on casing)", () => {
-    // pi tool blocks appear in both lowercase and capitalized forms; the
-    // `.toLowerCase()` fold is load-bearing — a capitalized `Write` must match.
-    const content =
-      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"Write","arguments":{"path":"/tmp/cap.ts"}}]}}';
-    expect(parseFilesModified(content, "pi")).toEqual(["/tmp/cap.ts"]);
-  });
-
-  it("ignores pi toolCalls from non-assistant roles and non-file tools", () => {
-    const content = [
-      '{"type":"message","message":{"role":"user","content":[{"type":"toolCall","name":"write","arguments":{"path":"/tmp/nope.ts"}}]}}',
-      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"ls"}}]}}',
-    ].join("\n");
-    const result = parseFilesModified(content, "pi");
-    expect(result).toEqual([]);
-  });
-
-  it("auto-detects pi format from the session header line", () => {
-    const content = [
-      '{"type":"session","version":1}',
-      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"write","arguments":{"path":"/tmp/auto.ts"}}]}}',
-    ].join("\n");
-    const result = parseFilesModified(content);
-    expect(result).toEqual(["/tmp/auto.ts"]);
-  });
-
-  it("parses the exact re-encoding pi/extension.ts produces from per-result messages (round-16 Fix 8)", () => {
-    // The pi Stop mirror maps each PiMessage to `{ type: "message", message }`
-    // JSONL and passes format "pi" — this row pins that shape end to end so
-    // files_modified stops arriving empty at lint-wave-gate under pi.
-    const messages = [
-      {
-        role: "assistant",
-        content: [
-          { type: "text", text: "editing" },
-          { type: "toolCall", name: "write", arguments: { path: "/tmp/impl.ts" } },
-          { type: "toolCall", name: "edit", arguments: { path: "/tmp/impl.test.ts" } },
-        ],
-      },
-      { role: "toolResult", content: [{ type: "text", text: "ok" }] },
-    ];
-    const piJsonl = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
-    expect(parseFilesModified(piJsonl, "pi")).toEqual(["/tmp/impl.test.ts", "/tmp/impl.ts"]);
+    expect(parseFilesModified(content)).toEqual({ ok: true, value: ["/tmp/test.ts"] });
   });
 });
 

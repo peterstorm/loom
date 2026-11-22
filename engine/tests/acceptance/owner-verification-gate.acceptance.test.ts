@@ -26,6 +26,7 @@ import {
   OWNER_FIXTURE,
   type OwnerVerificationRepo,
 } from "../fixtures/owner-verification-repo";
+import { manifestedGraphFixture } from "../fixtures/task-lifecycle";
 
 const OWNER_CHECK = "loom:owner-verification";
 const GATE_TIMEOUT_MS = 60_000;
@@ -36,7 +37,7 @@ async function gate(repo: OwnerVerificationRepo) {
   return ensureWaveCompletionSuite({
     handle: repo.handle,
     manager: repo.manager,
-    graph: repo.manager.load(),
+    graph: manifestedGraphFixture(repo.manager.load()),
     registration: repo.registration,
   });
 }
@@ -52,7 +53,7 @@ async function blockedGate(repo: OwnerVerificationRepo): Promise<Blocked> {
 
 async function acceptedGate(repo: OwnerVerificationRepo): Promise<void> {
   const result = await gate(repo);
-  expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+  expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { disposition: "installed" } });
 }
 
 /** The single owner-verification observation the suite persisted. */

@@ -51,6 +51,7 @@ import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { admittedNote } from "../fixtures/operator-note";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { invariantId, planOwnership } from "../fixtures/owner-obligation";
+import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
 const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>
@@ -259,7 +260,7 @@ describe("renderImplementationBrief", () => {
       newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
     };
     const graph = parseTaskGraph({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {},
       tasks: [{
         id: "T5", description: "Re-attest T5", agent: "code-implementer-agent", wave: 1, depends_on: [],

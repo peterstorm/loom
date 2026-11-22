@@ -18,9 +18,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
+  observedByteScope,
   settleImplementationAttempt,
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
 } from "../../src/core/implementation-completion";
 import { renderImplementationBrief, RULE_DOCUMENTS, type RuleDocument } from "../../src/core/implementation-brief";
 import {
@@ -284,8 +283,6 @@ describe("settlement implements a test-only contract writer with no implementati
       dirtySetBaseline: [],
     });
     if (!authority.ok) throw new Error(authority.error.errors.join("; "));
-    const suite = createTaskCompletionSuiteAuthority(authority.value);
-    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
     const result = settleImplementationAttempt({
       id: "T1",
       status: "pending",
@@ -302,13 +299,7 @@ describe("settlement implements a test-only contract writer with no implementati
         redThenGreen: { kind: "unproven", gap: { kind: "implementation-write-missing" } },
       }),
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-    }, {
-      schemaVersion: 1,
-      kind: "task-completion-suite-result",
-      implementationAuthorityDigest: suite.value.implementationAuthorityDigest,
-      suiteDigest: suite.value.suiteDigest,
-      checks: [{ checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } }],
-    });
+    }, observedByteScope([]));
     expect(result).toMatchObject({ ok: true, value: { kind: "implemented", receipt: { failureKinds: [] } } });
   });
 });

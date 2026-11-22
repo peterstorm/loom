@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestDiagnostics, piStructuredTestResult, type PiMessage } from "../../pi/transcript-adapter";
-import { parseBashTestOutput } from "../src/parsers/parse-bash-test-output";
-import { readPersistedOutput } from "../src/utils/persisted-output";
-import { extractTestEvidence } from "../src/core/test-evidence";
+import {
+  parsePiMessages,
+  piTranscriptEvidence,
+  piTranscriptToolCalls,
+  type PiMessage,
+  type PiTranscriptEvidence,
+  type PiTranscriptResult,
+} from "../../pi/transcript-adapter";
 
-/** The production parser with the production persisted-output reader bound once. */
-const parseBashOutput = (jsonl: string): string => parseBashTestOutput(jsonl, readPersistedOutput);
+/** One reading of the message-level entry point settlement itself crosses. */
+const reading = <K extends keyof PiTranscriptEvidence>(key: K) =>
+  (messages: unknown): PiTranscriptResult<PiTranscriptEvidence[K]> => {
+    const evidence = piTranscriptEvidence(messages, "/repo");
+    return evidence.ok ? { ok: true, value: evidence.value[key] } : evidence;
+  };
+const structuredResult = reading("testResult");
+const structuredDiagnostics = reading("testDiagnostics");
 
 type PiToolResultMessage = Extract<PiMessage, { role: "toolResult" }>;
 
@@ -31,21 +41,11 @@ const testRun = (
   },
 ];
 
-function claudeJsonl(messages: readonly PiMessage[]): string {
-  const adapted = messagesToClaudeJsonl(messages);
-  expect(adapted.ok).toBe(true);
-  if (!adapted.ok) throw new Error(adapted.errors.join("; "));
-  return adapted.value;
-}
-
-describe("Pi test-evidence transcript adapter", () => {
-  it("preserves a real Bash test call/result pair for the anti-spoofing parser", () => {
-    const output = parseBashOutput(claudeJsonl(testRun("654 pass\n0 fail\n")));
-
-    expect(output).toContain("654 pass");
-    expect(extractTestEvidence(output)).toEqual({
-      passed: true,
-      evidence: "bun: 654 pass",
+describe("Pi structured test evidence", () => {
+  it("mints a verdict from a real Bash test call paired with its exact result", () => {
+    expect(structuredResult(testRun("654 pass\n0 fail\n"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
     });
   });
 
@@ -55,16 +55,18 @@ describe("Pi test-evidence transcript adapter", () => {
       content: [{ type: "text", text: "654 pass, 0 fail" }],
     }];
 
-    const output = parseBashOutput(claudeJsonl(messages));
-    expect(output).toBe("");
-    expect(extractTestEvidence(output).passed).toBe(false);
+    expect(structuredResult(messages)).toEqual({ ok: true, value: null });
   });
 
   it("does not pair a test command with another tool call's result", () => {
     const messages = testRun("654 pass\n0 fail\n");
     messages[1] = { ...messages[1], toolCallId: "different-call" };
 
-    expect(parseBashOutput(claudeJsonl(messages))).toBe("");
+    expect(structuredResult(messages)).toEqual({ ok: true, value: null });
+    expect(structuredDiagnostics(messages)).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ attributedPairs: 0, verdict: "no-paired-result" }),
+    });
   });
 
   it("rejects print-only commands that mention a test runner in data or comments", () => {
@@ -73,7 +75,7 @@ describe("Pi test-evidence transcript adapter", () => {
       "printf '654 pass\\n' # bun test",
       "echo \"npm test: 5 passing\"",
     ]) {
-      expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", command))).toEqual({ ok: true, value: null });
+      expect(structuredResult(testRun("654 pass\n0 fail\n", command))).toEqual({ ok: true, value: null });
     }
   });
 
@@ -81,7 +83,7 @@ describe("Pi test-evidence transcript adapter", () => {
     const messages = testRun("654 pass\n0 fail\n");
     messages[1] = { ...messages[1], isError: true };
 
-    expect(piStructuredTestResult(messages)).toEqual({
+    expect(structuredResult(messages)).toEqual({
       ok: true,
       value: { passed: false, evidence: "bun: 654 pass" },
     });
@@ -89,17 +91,17 @@ describe("Pi test-evidence transcript adapter", () => {
 
   it("requires the classified test segment to own the Bash result — unless the output summary is the verdict", () => {
     // Standard refusal: the line exit is not provably the test's.
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test &"))).toEqual({ ok: true, value: null });
+    expect(structuredResult(testRun("654 pass\n0 fail\n", "bun test &"))).toEqual({ ok: true, value: null });
     // A red run laundered through a line-stripping pipe loses the pipeline
     // exit AND the zero-fail line: strict-summary guard refuses it.
-    expect(piStructuredTestResult(testRun("654 pass\n", "bun test | grep -v fail"))).toEqual({ ok: true, value: null });
+    expect(structuredResult(testRun("654 pass\n", "bun test | grep -v fail"))).toEqual({ ok: true, value: null });
     // Exit-0 `;`/`&&` chains with the test LAST ran it green by construction
     // (a red chain would exit nonzero) — standard attribution applies.
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "echo skip; bun test"))).toEqual({
+    expect(structuredResult(testRun("654 pass\n0 fail\n", "echo skip; bun test"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "git stash && bun test"))).toEqual({
+    expect(structuredResult(testRun("654 pass\n0 fail\n", "git stash && bun test"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
@@ -107,16 +109,16 @@ describe("Pi test-evidence transcript adapter", () => {
     // standard attribution refuses, and the errored line never mints green.
     const guarded = testRun("654 pass\n0 fail\n", "git stash && bun test");
     guarded[1] = { ...guarded[1], isError: true };
-    expect(piStructuredTestResult(guarded)).toEqual({ ok: true, value: null });
+    expect(structuredResult(guarded)).toEqual({ ok: true, value: null });
     // An errored attributable line (sole test run) resolves to a structured FAIL.
     const errored = testRun("654 pass\n0 fail\n", "bun test");
     errored[1] = { ...errored[1], isError: true };
-    expect(piStructuredTestResult(errored)).toEqual({
+    expect(structuredResult(errored)).toEqual({
       ok: true,
       value: { passed: false, evidence: "bun: 654 pass" },
     });
     // IsLast + `&&` compositions keep the standard attribution.
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test"))).toEqual({
+    expect(structuredResult(testRun("654 pass\n0 fail\n", "cd engine && bun test"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
@@ -124,32 +126,32 @@ describe("Pi test-evidence transcript adapter", () => {
     // preamble and trailed only by PIPE stages (`| tail`, `| tee`) may use the
     // paired runner summary as its verdict even though standard exit
     // attribution refused the composition.
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
+    expect(structuredResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
     // The GNU tail obsolete form `-N` is a legacy synonym for `-n N`: GNU
     // tail treats them identically, so the pipe grammar must as well.
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -40"))).toEqual({
+    expect(structuredResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -40"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
     // The attached no-space synonym reaches the same relaxation.
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n40"))).toEqual({
+    expect(structuredResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n40"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test --no-color 2>&1 | tee /tmp/out.log"))).toEqual({
+    expect(structuredResult(testRun("654 pass\n0 fail\n", "cd engine && bun test --no-color 2>&1 | tee /tmp/out.log"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
     // A supported relaxed pipe still needs the explicit zero-failure marker;
     // pass-looking truncated output alone cannot mint green evidence.
-    expect(piStructuredTestResult(testRun("654 pass\n", "cd engine && bun test | tail -n 1")))
+    expect(structuredResult(testRun("654 pass\n", "cd engine && bun test | tail -n 1")))
       .toEqual({ ok: true, value: null });
     // A relaxed composition whose summary shows failures still resolves to a
     // structured FAIL — the gate rejects it either way, but it is not silent.
-    expect(piStructuredTestResult(testRun("600 pass\n54 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
+    expect(structuredResult(testRun("600 pass\n54 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
       ok: true,
       value: { passed: false, evidence: "bun: 54 fail" },
     });
@@ -167,12 +169,12 @@ describe("Pi test-evidence transcript adapter", () => {
       "bun test; echo EXIT:$?",                                // benign trailer, still not trustable
       "bun test || true",                                      // trailing `|| true`
     ]) {
-      expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", injected))).toEqual({ ok: true, value: null });
+      expect(structuredResult(testRun("654 pass\n0 fail\n", injected))).toEqual({ ok: true, value: null });
     }
     // The fabrication is caught even when the runner genuinely FAILED: a red
     // run whose output is overwritten by injected green counters must NOT mint
     // a pass.
-    expect(piStructuredTestResult(testRun(" 2 pass\n 3 fail\n 5 pass\n 0 fail\n", "bun test; echo ' 5 pass'; echo ' 0 fail'")))
+    expect(structuredResult(testRun(" 2 pass\n 3 fail\n 5 pass\n 0 fail\n", "bun test; echo ' 5 pass'; echo ' 0 fail'")))
       .toEqual({ ok: true, value: null });
   });
 
@@ -185,7 +187,7 @@ describe("Pi test-evidence transcript adapter", () => {
       "echo $(true; npm test >/dev/null) 'Tests  5 passed (5)'",
       "echo $(true; bun test 2>/dev/null) ' 5 pass' ' 0 fail'",
     ]) {
-      expect(piStructuredTestResult(testRun("Tests  5 passed (5)\n 5 pass\n 0 fail\n", forged)), forged)
+      expect(structuredResult(testRun("Tests  5 passed (5)\n 5 pass\n 0 fail\n", forged)), forged)
         .toEqual({ ok: true, value: null });
     }
   });
@@ -209,8 +211,8 @@ describe("Pi test-evidence transcript adapter", () => {
     ["missing result id", [{ role: "toolResult", toolName: "bash", content: [{ type: "text", text: "ok" }] }]],
     ["missing result name", [{ role: "toolResult", toolCallId: "call-1", content: [{ type: "text", text: "ok" }] }]],
   ] as const)("rejects malformed tool evidence without throwing: %s", (_label, messages) => {
-    expect(messagesToClaudeJsonl(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
-    expect(piStructuredTestResult(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
+    expect(parsePiMessages(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
+    expect(structuredResult(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
   });
 
   it.each([
@@ -274,8 +276,7 @@ describe("Pi test-evidence transcript adapter", () => {
     ["malformed tool call", { role: "assistant", content: { type: "toolCall", id: "call-1", name: "bash", arguments: {} } }],
   ] as const)("fails closed for malformed singleton content objects: %s", (_label, message) => {
     expect(parsePiMessages([message])).toMatchObject({ ok: false, errors: [expect.any(String)] });
-    expect(messagesToClaudeJsonl([message])).toMatchObject({ ok: false, errors: [expect.any(String)] });
-    expect(piStructuredTestResult([message])).toMatchObject({ ok: false, errors: [expect.any(String)] });
+    expect(structuredResult([message])).toMatchObject({ ok: false, errors: [expect.any(String)] });
   });
 
   it("returns immutable parser-owned copies for singleton typed content blocks", () => {
@@ -331,7 +332,7 @@ describe("Pi test-evidence transcript adapter", () => {
       .toMatchObject({ ok: false, errors: ["messages[0].toolCallId must be non-empty when present"] });
   });
 
-  it("omits unknown-role strings from JSONL and test evidence", () => {
+  it("never pairs an unknown-role message with a test call, even when it names the call's id", () => {
     const unknownMessage = {
       role: "custom",
       toolCallId: "call-test-1",
@@ -339,45 +340,50 @@ describe("Pi test-evidence transcript adapter", () => {
       content: "654 pass\n0 fail\n",
     };
 
-    expect(messagesToClaudeJsonl([unknownMessage])).toEqual({ ok: true, value: "" });
-    expect(piStructuredTestResult([testRun("")[0], unknownMessage])).toEqual({ ok: true, value: null });
+    const parsed = parsePiMessages([testRun("")[0], unknownMessage]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(piTranscriptToolCalls(parsed.value, "/repo")).toEqual(
+      [{ kind: "unfinished", tool: "Bash", input: { command: "bun test src/domain/calendar.test.ts" } }],
+    );
+    expect(structuredResult([testRun("")[0], unknownMessage])).toEqual({ ok: true, value: null });
   });
 
   it("diagnoses why structured capture did not mint (wave-gate blocker forensics)", () => {
     // No test command at all → no-test-command.
-    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "git status"))).toEqual({
+    expect(structuredDiagnostics(testRun("654 pass\n0 fail\n", "git status"))).toEqual({
       ok: true,
       value: { classifiedCommands: [], attributedPairs: 0, verdict: "no-test-command" },
     });
     // Classified but never attributable (backgrounded) → exit-not-attributable.
-    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "bun test &"))).toMatchObject({
+    expect(structuredDiagnostics(testRun("654 pass\n0 fail\n", "bun test &"))).toMatchObject({
       ok: true,
       value: expect.objectContaining({ attributedPairs: 0, verdict: "exit-not-attributable" }),
     });
     // An unsupported pipe is not attributable at all; it cannot reach the
     // weaker summary-marker guard as if its stdout were runner-owned.
-    expect(piStructuredTestDiagnostics(testRun("654 pass\n", "bun test | grep -v fail"))).toMatchObject({
+    expect(structuredDiagnostics(testRun("654 pass\n", "bun test | grep -v fail"))).toMatchObject({
       ok: true,
       value: expect.objectContaining({ attributedPairs: 0, verdict: "exit-not-attributable" }),
     });
     // Genuine structured mint → structured.
-    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "bun test"))).toMatchObject({
+    expect(structuredDiagnostics(testRun("654 pass\n0 fail\n", "bun test"))).toMatchObject({
       ok: true,
       value: expect.objectContaining({ attributedPairs: 1, verdict: "structured" }),
     });
     // Relaxed-but-valid pipe → relaxed.
-    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toMatchObject({
+    expect(structuredDiagnostics(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toMatchObject({
       ok: true,
       value: expect.objectContaining({ attributedPairs: 1, verdict: "relaxed" }),
     });
     // The GNU tail obsolete form reaches the same relaxation.
-    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -40"))).toMatchObject({
+    expect(structuredDiagnostics(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -40"))).toMatchObject({
       ok: true,
       value: expect.objectContaining({ attributedPairs: 1, verdict: "relaxed" }),
     });
     // A supported relaxed pipe that stripped the failure tally reaches the
     // strict marker guard instead of being mistaken for unsupported syntax.
-    expect(piStructuredTestDiagnostics(testRun("654 pass\n", "cd engine && bun test | tail -n 1"))).toMatchObject({
+    expect(structuredDiagnostics(testRun("654 pass\n", "cd engine && bun test | tail -n 1"))).toMatchObject({
       ok: true,
       value: expect.objectContaining({ attributedPairs: 1, verdict: "strict-summary-refused" }),
     });
@@ -394,7 +400,7 @@ describe("Pi test-evidence transcript adapter", () => {
       },
     ];
 
-    expect(piStructuredTestResult(messages)).toEqual({
+    expect(structuredResult(messages)).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
@@ -407,8 +413,7 @@ describe("Pi test-evidence transcript adapter", () => {
     const messages = [testRun("")[0], result];
 
     expect(parsePiMessages(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
-    expect(messagesToClaudeJsonl(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
-    expect(piStructuredTestResult(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
+    expect(structuredResult(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
   });
 
   it("returns immutable parser-owned copies rather than trusting harness objects", () => {

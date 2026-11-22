@@ -18,7 +18,7 @@
  */
 
 import { findClosingBacktick, findClosingParen } from "./shell-substitution";
-import { shellOperatorAt, splitCommandSegmentsWithOps, type ShellOperator } from "./shell-command";
+import { OPERATOR_WALK_START, readShellOperator, splitCommandSegmentsWithOps, type ShellOperator } from "./shell-command";
 import { analyzeCommandHead, headBase, resolvedInterpreter, unquote } from "./shell-command-head";
 
 /** Substitution nesting deeper than this on a guarded line is nobody's
@@ -314,6 +314,7 @@ function openerLineGroups(line: string): readonly OpenerGroup[] {
   let groupStart = 0;
   const compound: string[] = [];
   let quote: '"' | "'" | null = null;
+  let walk = OPERATOR_WALK_START;
   let i = 0;
   const n = line.length;
   while (i < n) {
@@ -332,7 +333,9 @@ function openerLineGroups(line: string): readonly OpenerGroup[] {
     if (pastSpan !== null) { i = pastSpan; continue; }
     const pastCompound = pastCompoundSyntax(line, i, compound);
     if (pastCompound !== null) { i = pastCompound; continue; }
-    const operator = shellOperatorAt(line, i);
+    const read = readShellOperator(line, i, walk);
+    walk = read.walk;
+    const { operator } = read;
     if (operator !== null) {
       if (cutsGroup(operator) && compound.length === 0) {
         groups.push({ start: groupStart, end: i });
@@ -404,8 +407,9 @@ function pastCompoundSyntax(line: string, i: number, compound: string[]): number
 /** Does this operator cut an opener-line group at depth 0? Every separator
  *  does (`;` `&` `&&` `||` newline) EXCEPT a pipe: `|`/`|&` link members of
  *  one group, which share the body's fate. A binding `&` (redirect, fd dup)
- *  cuts nothing. The operator table itself is shellOperatorAt's, shared with
- *  the segment splitter so the two cannot disagree on what separates. */
+ *  cuts nothing. The operator table and the walk that reads it are
+ *  readShellOperator's, shared with the segment splitter so the two cannot
+ *  disagree on what separates. */
 const cutsGroup = (operator: ShellOperator): boolean =>
   operator.separator !== null && operator.separator !== "|";
 
