@@ -88,6 +88,43 @@ export function staleEntries(
     .map(([entry]) => entry);
 }
 
+declare const SWEEP_CUTOFFS: unique symbol;
+
+/**
+ * The two cutoffs one sweep judges idle time by: a session idle past `idleMs`
+ * is swept unless it is protected, and one whose run binding names an open run
+ * is kept until it is idle past `openRunMs`. Only `sweepCutoffs` mints one, so
+ * `openRunMs <= idleMs` always holds and the two cannot be passed swapped.
+ */
+export type SweepCutoffs = Readonly<{ idleMs: number; openRunMs: number }> & { readonly [SWEEP_CUTOFFS]: true };
+
+/**
+ * The cutoffs for a sweep whose idle cutoff is `idleCutoffMs`, keeping an open
+ * run's session `openRunGraceMs` longer. Constructor invariant: the grace is a
+ * finite, non-negative duration, so the open-run cutoff never passes the idle
+ * cutoff.
+ */
+export function sweepCutoffs(idleCutoffMs: number, openRunGraceMs: number = OPEN_RUN_GRACE_MS): SweepCutoffs {
+  if (!Number.isFinite(openRunGraceMs) || openRunGraceMs < 0) {
+    throw new RangeError(`open-run grace must be a finite, non-negative duration, got ${openRunGraceMs}`);
+  }
+  return Object.freeze({ idleMs: idleCutoffMs, openRunMs: idleCutoffMs - openRunGraceMs }) as SweepCutoffs;
+}
+
+/**
+ * Pure: the entries the idle cutoff would sweep but the open-run grace still
+ * covers. Only their sessions' run bindings are worth reading: every other
+ * entry is kept or swept whatever its runs say.
+ */
+export function entriesWithinOpenRunGrace(
+  mtimes: ReadonlyMap<string, number>,
+  cutoffs: SweepCutoffs,
+  protectedSessions: ReadonlySet<SessionGroupKey> = new Set(),
+): string[] {
+  const pastGrace = new Set(staleEntries(mtimes, cutoffs.openRunMs, protectedSessions));
+  return staleEntries(mtimes, cutoffs.idleMs, protectedSessions).filter((entry) => !pastGrace.has(entry));
+}
+
 /**
  * The session SessionStart names. `absent` is empty input (nothing to protect,
  * nothing to report); `unusable` is input that should have named a session and
@@ -141,7 +178,7 @@ export type StaleSessionOperations = Readonly<{
   /** A file's text, or null when it does not exist; any other failure throws. */
   readText: (path: string) => string | null;
   exists: (path: string) => boolean;
-  /** Whether the run a Session Run Binding names is still open; never throws. */
+  /** Observes the run a Session Run Binding names: absent, observed (open or finished), or unreadable; never throws. */
   observeBoundRun: (binding: SessionRunBinding) => BoundRunObservation;
   remove: (path: string) => void;
 }>;
@@ -215,6 +252,30 @@ function sessionNamedBy(entry: string, suffix: string): string | null {
   return session === "" ? null : session;
 }
 
+/** One tracking entry's text; `absent` when it is gone; `unreadable` once its read failure is reported. */
+type TrackingEntryRead =
+  | Readonly<{ kind: "text"; text: string }>
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "unreadable" }>;
+
+const ABSENT_ENTRY: TrackingEntryRead = Object.freeze({ kind: "absent" });
+const UNREADABLE_ENTRY: TrackingEntryRead = Object.freeze({ kind: "unreadable" });
+
+function readTrackingEntry(
+  path: string,
+  operations: StaleSessionOperations,
+  diagnostics: StaleCleanupDiagnostic[],
+): TrackingEntryRead {
+  let text: string | null;
+  try {
+    text = operations.readText(path);
+  } catch (error) {
+    diagnostics.push(diagnostic("read", path, error));
+    return UNREADABLE_ENTRY;
+  }
+  return text === null ? ABSENT_ENTRY : Object.freeze({ kind: "text", text });
+}
+
 /**
  * Shell: the session groups bound to a TaskGraph that still exists. A
  * malformed pointer binds nothing (it ages out like any stale file) and is
@@ -231,15 +292,10 @@ function graphBoundSessions(
     const session = sessionNamedBy(entry, TASK_GRAPH_POINTER_SUFFIX);
     if (session === null) return [];
     const path = join(dir, entry);
-    let raw: string | null;
-    try {
-      raw = operations.readText(path);
-    } catch (error) {
-      diagnostics.push(diagnostic("read", path, error));
-      return [sessionGroupKey(session)];
-    }
-    if (raw === null) return [];
-    const pointer = parseCanonicalTaskGraphPointer(raw);
+    const read = readTrackingEntry(path, operations, diagnostics);
+    if (read.kind === "unreadable") return [sessionGroupKey(session)];
+    if (read.kind === "absent") return [];
+    const pointer = parseCanonicalTaskGraphPointer(read.text);
     if (!pointer.ok) {
       diagnostics.push(diagnostic("parse", path, pointer.error));
       return [];
@@ -291,15 +347,10 @@ function sessionsWithOpenRuns(
     const session = sessionNamedBy(entry, ORCHESTRATION_RUNS_SUFFIX);
     if (session === null) return [];
     const path = join(dir, entry);
-    let raw: string | null;
-    try {
-      raw = operations.readText(path);
-    } catch (error) {
-      diagnostics.push(diagnostic("read", path, error));
-      return [sessionGroupKey(session)];
-    }
-    if (raw === null) return [];
-    const parsed = registryJson(path, raw, diagnostics);
+    const read = readTrackingEntry(path, operations, diagnostics);
+    if (read.kind === "unreadable") return [sessionGroupKey(session)];
+    if (read.kind === "absent") return [];
+    const parsed = registryJson(path, read.text, diagnostics);
     if (parsed === null) return [];
     const registry = parsePublishedSessionRunBindingRegistry(parsed.json, session);
     if (!registry.ok) {
@@ -313,36 +364,33 @@ function sessionsWithOpenRuns(
 
 /**
  * Shell: the sessions kept by what they are bound to: a TaskGraph that still
- * exists, or an open run. Only a registry whose session the idle cutoff would
- * sweep and the open-run cutoff still covers is worth reading: every other
- * session is kept or swept whatever its runs say.
+ * exists, or an open run. Only registries inside the open-run grace window
+ * (`entriesWithinOpenRunGrace`) are read.
  */
 function boundSessions(
   dir: string,
   mtimes: ReadonlyMap<string, number>,
-  cutoffs: Readonly<{ idle: number; openRun: number }>,
+  cutoffs: SweepCutoffs,
   alreadyProtected: ReadonlySet<SessionGroupKey>,
   operations: StaleSessionOperations,
   diagnostics: StaleCleanupDiagnostic[],
 ): readonly SessionGroupKey[] {
   const graphBound = graphBoundSessions(dir, [...mtimes.keys()], operations, diagnostics);
   const protectedSoFar = new Set([...alreadyProtected, ...graphBound]);
-  const pastGrace = new Set(staleEntries(mtimes, cutoffs.openRun, protectedSoFar));
-  const withinGrace = staleEntries(mtimes, cutoffs.idle, protectedSoFar).filter((entry) => !pastGrace.has(entry));
+  const withinGrace = entriesWithinOpenRunGrace(mtimes, cutoffs, protectedSoFar);
   return [...graphBound, ...sessionsWithOpenRuns(dir, withinGrace, operations, diagnostics)];
 }
 
 /**
  * Shell: returns every failed operation with its exact path and cause. A
- * session idle past `cutoffMs` is swept unless it is protected; one whose run
- * binding names an open run is kept until it is idle past `openRunCutoffMs`.
+ * session idle past `cutoffs.idleMs` is swept unless it is protected; one whose
+ * run binding names an open run is kept until it is idle past `cutoffs.openRunMs`.
  */
 export function sweepStaleSessions(
   dir: string,
-  cutoffMs: number,
+  cutoffs: SweepCutoffs,
   operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
   startingSession: SessionId | null = null,
-  openRunCutoffMs: number = cutoffMs - OPEN_RUN_GRACE_MS,
 ): readonly StaleCleanupDiagnostic[] {
   const directory = operations.probeDirectory(dir);
   if (directory.kind === "absent") return Object.freeze([]);
@@ -377,11 +425,10 @@ export function sweepStaleSessions(
       diagnostics.push(diagnostic("stat", path, error));
     }
   }
-  const cutoffs = { idle: cutoffMs, openRun: openRunCutoffMs };
   for (const session of boundSessions(dir, mtimes, cutoffs, protectedSessions, operations, diagnostics)) {
     protectedSessions.add(session);
   }
-  for (const entry of staleEntries(mtimes, cutoffMs, protectedSessions)) {
+  for (const entry of staleEntries(mtimes, cutoffs.idleMs, protectedSessions)) {
     const path = join(dir, entry);
     try {
       operations.remove(path);
@@ -404,7 +451,8 @@ export function runCleanupStaleSubagents(
     : [];
   for (const failure of inputDiagnostics) process.stderr.write(`${renderDiagnostic(failure)}\n`);
   const named = startingSession.kind === "named" ? startingSession.sessionId : null;
-  const diagnostics = [...inputDiagnostics, ...sweepStaleSessions(dir, nowMs - STALE_SUBAGENT_TTL_MS, operations, named)];
+  const cutoffs = sweepCutoffs(nowMs - STALE_SUBAGENT_TTL_MS);
+  const diagnostics = [...inputDiagnostics, ...sweepStaleSessions(dir, cutoffs, operations, named)];
   return passthroughResult(
     diagnostics.length === 0 ? undefined : diagnostics.map(renderDiagnostic).join("\n"),
   );

@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseRequestId } from "../../src/core/orchestration-contract";
@@ -81,6 +81,35 @@ describe("observeBoundRun", () => {
     const observation = observeBoundRun(bindingTo(root, "run-garbled"));
     expect(observation.kind).toBe("unreadable");
     if (observation.kind === "unreadable") expect(observation.cause).toMatch(/checkpoint is invalid JSON/);
+  });
+
+  // Every arm below must answer unreadable: absent would release the binding
+  // and open would hide the failure, and the sweep's own tests script this port.
+  it("a corrupt abandonment marker is unreadable, not finished", async () => {
+    const root = runsRoot();
+    await createdRun(root, "run-marker", { kind: "remediation" });
+    writeFileSync(join(root, "run-marker", "abandoned.json"), "{not json");
+    const observation = observeBoundRun(bindingTo(root, "run-marker"));
+    expect(observation.kind).toBe("unreadable");
+    if (observation.kind === "unreadable") expect(observation.cause).toMatch(/abandonment marker is unreadable/);
+  });
+
+  it("a corrupt program registration is unreadable, not open", async () => {
+    const root = runsRoot();
+    await createdRun(root, "run-program", { kind: "remediation" });
+    writeFileSync(join(root, "run-program", "program.json"), "{not json");
+    const observation = observeBoundRun(bindingTo(root, "run-program"));
+    expect(observation.kind).toBe("unreadable");
+    if (observation.kind === "unreadable") expect(observation.cause).toMatch(/program registration is unreadable/);
+  });
+
+  it("a checkpoint that cannot be read at all is unreadable, not open", async () => {
+    const root = runsRoot();
+    await createdRun(root, "run-checkpoint-dir", { kind: "remediation" });
+    mkdirSync(join(root, "run-checkpoint-dir", "checkpoint.json"));
+    const observation = observeBoundRun(bindingTo(root, "run-checkpoint-dir"));
+    expect(observation.kind).toBe("unreadable");
+    if (observation.kind === "unreadable") expect(observation.cause).toMatch(/run checkpoint is unreadable/);
   });
 
   it("a symlink where the Run Directory should be is unreadable, never followed", () => {

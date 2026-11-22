@@ -2,6 +2,7 @@ import { renameSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseOrchestrationRunId, parseRequestId, type RequestId } from "../core/orchestration-contract";
 import { compareStrings } from "../core/ordering";
+import { isRecord } from "../core/plain-record";
 import { ORCHESTRATION_RUNS_SUFFIX, parseSessionId, type SessionId } from "../machine/evidence";
 import {
   type AnchoredDirectory,
@@ -152,7 +153,7 @@ export function parsePublishedSessionRunBindingRegistry(
   raw: unknown,
   expectedSessionId: string,
 ): BindingResult<SessionRunBindingRegistry> {
-  const harness = typeof raw === "object" && raw !== null ? (raw as Readonly<Record<string, unknown>>)["harness"] : undefined;
+  const harness = isRecord(raw) ? raw["harness"] : undefined;
   return isSessionBindingHarness(harness)
     ? parseSessionRunBindingRegistry(raw, expectedSessionId, harness)
     : failed("session run binding registry names no harness this build knows");

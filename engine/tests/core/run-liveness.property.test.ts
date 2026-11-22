@@ -11,9 +11,7 @@ import * as fc from "fast-check";
 import { INSPECTABLE_PROGRAMS, type InspectableProgram } from "../../src/core/run-inspection";
 import { runLiveness, TERMINAL_CHECKPOINT_STATES, type RunLivenessObservation } from "../../src/core/run-liveness";
 
-const NOTHING_READ: RunLivenessObservation = {
-  resultPublished: false, abandoned: false, registration: null, checkpoint: null,
-};
+const NOTHING_READ: RunLivenessObservation = { kind: "run-files", registration: null, checkpoint: null };
 
 /** The checkpoint shape each program keeps its state name in. */
 function checkpointIn(program: InspectableProgram, state: string): unknown {
@@ -35,16 +33,24 @@ function checkpointIn(program: InspectableProgram, state: string): unknown {
 }
 
 const observing = (program: InspectableProgram, state: string): RunLivenessObservation => ({
-  ...NOTHING_READ, registration: { kind: program }, checkpoint: checkpointIn(program, state),
+  kind: "run-files", registration: { kind: program }, checkpoint: checkpointIn(program, state),
 });
 
 const anyProgram = fc.constantFrom(...INSPECTABLE_PROGRAMS);
-const anyObservation = fc.record({
-  resultPublished: fc.boolean(),
-  abandoned: fc.boolean(),
+const anyRunFiles = fc.record({
+  kind: fc.constant("run-files" as const),
   registration: fc.oneof(fc.jsonValue(), anyProgram.map((kind) => ({ kind }))),
   checkpoint: fc.jsonValue(),
 });
+const anyObservation: fc.Arbitrary<RunLivenessObservation> = fc.oneof(
+  fc.constant({ kind: "result-published" as const }),
+  fc.constant({ kind: "abandoned" as const }),
+  anyRunFiles,
+);
+/** A program paired with one of its own terminal states; the panels have none. */
+const anyTerminalPair = fc.constantFrom(
+  ...INSPECTABLE_PROGRAMS.flatMap((program) => TERMINAL_CHECKPOINT_STATES[program].map((state) => [program, state] as const)),
+);
 
 describe("runLiveness — examples", () => {
   it("a run with nothing read yet is open", () => {
@@ -75,16 +81,24 @@ describe("runLiveness — examples", () => {
     }
   });
 
-  it("a published result and an abandonment each finish the run, the published result first", () => {
-    expect(runLiveness({ ...NOTHING_READ, resultPublished: true })).toEqual({ kind: "finished", because: "result-published" });
-    expect(runLiveness({ ...NOTHING_READ, abandoned: true })).toEqual({ kind: "finished", because: "abandoned" });
-    expect(runLiveness({ ...NOTHING_READ, resultPublished: true, abandoned: true }))
-      .toEqual({ kind: "finished", because: "result-published" });
+  it("a published result and an abandonment each finish the run, naming their proof", () => {
+    expect(runLiveness({ kind: "result-published" })).toEqual({ kind: "finished", because: "result-published" });
+    expect(runLiveness({ kind: "abandoned" })).toEqual({ kind: "finished", because: "abandoned" });
   });
 
   it("only the panels lack terminal checkpoint states", () => {
-    const withoutEnd = INSPECTABLE_PROGRAMS.filter((program) => TERMINAL_CHECKPOINT_STATES[program].size === 0);
+    const withoutEnd = INSPECTABLE_PROGRAMS.filter((program) => TERMINAL_CHECKPOINT_STATES[program].length === 0);
     expect(withoutEnd).toEqual(["architecture", "refutation"]);
+  });
+
+  it("no caller can add a terminal state: the table is frozen through every list", () => {
+    expect(Object.isFrozen(TERMINAL_CHECKPOINT_STATES)).toBe(true);
+    for (const program of INSPECTABLE_PROGRAMS) {
+      const states = TERMINAL_CHECKPOINT_STATES[program];
+      expect(Object.isFrozen(states), program).toBe(true);
+      expect(() => (states as string[]).push("running"), program).toThrow(TypeError);
+    }
+    expect(runLiveness(observing("standalone-review", "running"))).toEqual({ kind: "open" });
   });
 });
 
@@ -95,10 +109,10 @@ describe("runLiveness — properties", () => {
     }));
   });
 
-  it("a published result or an abandonment finishes the run whatever its files say", () => {
-    fc.assert(fc.property(anyObservation, (observation) => {
-      fc.pre(observation.resultPublished || observation.abandoned);
-      expect(runLiveness(observation).kind).toBe("finished");
+  it("a run finished by its files is finished only by a terminal state", () => {
+    fc.assert(fc.property(anyRunFiles, (observation) => {
+      const liveness = runLiveness(observation);
+      if (liveness.kind === "finished") expect(liveness.because).toBe("terminal-state");
     }));
   });
 
@@ -108,21 +122,20 @@ describe("runLiveness — properties", () => {
         ? (registration as Record<string, unknown>)["kind"]
         : undefined;
       fc.pre(!INSPECTABLE_PROGRAMS.some((program) => program === kind));
-      expect(runLiveness({ ...NOTHING_READ, registration, checkpoint })).toEqual({ kind: "open" });
+      expect(runLiveness({ kind: "run-files", registration, checkpoint })).toEqual({ kind: "open" });
     }));
   });
 
   it("a state name outside its program's terminal set keeps the run open", () => {
     fc.assert(fc.property(anyProgram, fc.string(), (program, state) => {
-      fc.pre(!TERMINAL_CHECKPOINT_STATES[program].has(state));
+      fc.pre(!TERMINAL_CHECKPOINT_STATES[program].includes(state));
       expect(runLiveness(observing(program, state))).toEqual({ kind: "open" });
     }));
   });
 
-  it("finishing is monotone: adding an abandonment never reopens a run", () => {
-    fc.assert(fc.property(anyObservation, (observation) => {
-      fc.pre(runLiveness(observation).kind === "finished");
-      expect(runLiveness({ ...observation, abandoned: true }).kind).toBe("finished");
+  it("every terminal state finishes exactly its own program, read through that program's checkpoint shape", () => {
+    fc.assert(fc.property(anyTerminalPair, ([program, state]) => {
+      expect(runLiveness(observing(program, state))).toEqual({ kind: "finished", because: "terminal-state" });
     }));
   });
 });

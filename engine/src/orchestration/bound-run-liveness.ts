@@ -1,8 +1,8 @@
 /**
  * Shell: observe whether the run one Session Run Binding names is still open.
  *
- * Every read is synchronous, because the SessionStart sweep that asks runs
- * synchronously in Pi. The decision itself is the pure `runLiveness`; this
+ * Every read is synchronous because Pi runs the SessionStart sweep as a
+ * synchronous startup sweep. The decision itself is the pure `runLiveness`; this
  * module only reads the files it decides from, and keeps three answers apart:
  *   - `absent`: the Run Directory is gone, so the binding names nothing a hook
  *     could still resolve;
@@ -20,7 +20,11 @@ export type BoundRunObservation =
   | Readonly<{ kind: "observed"; liveness: RunLiveness }>
   | Readonly<{ kind: "unreadable"; cause: string }>;
 
-/** The program and checkpoint bound every other whole-file reader of a run uses. */
+/**
+ * The 16 MiB cap applied to this run's `program.json` and `checkpoint.json`:
+ * the bound the capture runtime and reviewer-protocol resolution already
+ * apply when they read a run's program registration.
+ */
 const RUN_FILE_READ_LIMIT = 16_777_216;
 
 const ABSENT: BoundRunObservation = Object.freeze({ kind: "absent" });
@@ -38,10 +42,15 @@ function parsedCheckpoint(text: string | null): Readonly<{ ok: true; value: unkn
   }
 }
 
+/**
+ * What the sweep may conclude about the run `binding` names, checked in the
+ * order a run proves its end: a recorded result digest (nothing is read), then
+ * the Run Directory entry, its abandonment marker, its program registration and
+ * its checkpoint. Never throws: every read failure is `unreadable`.
+ */
 export function observeBoundRun(binding: SessionRunBinding): BoundRunObservation {
-  const unread = { resultPublished: false, abandoned: false, registration: null, checkpoint: null } as const;
   // A recorded result digest is the run's own proof of its end; nothing to read.
-  if (binding.resultDigest !== null) return observed(runLiveness({ ...unread, resultPublished: true }));
+  if (binding.resultDigest !== null) return observed(runLiveness({ kind: "result-published" }));
   const entry = inspectRunDirectoryEntry(binding.runsRoot, binding.runDirectory);
   if (!entry.ok) return unreadable(entry.error.message);
   if (entry.value.kind === "absent") return ABSENT;
@@ -52,12 +61,12 @@ export function observeBoundRun(binding: SessionRunBinding): BoundRunObservation
   if (!handle.ok) return unreadable(handle.error.message);
   const abandonment = handle.value.readAbandonment();
   if (!abandonment.ok) return unreadable(abandonment.error.message);
-  if (abandonment.value !== null) return observed(runLiveness({ ...unread, abandoned: true }));
+  if (abandonment.value !== null) return observed(runLiveness({ kind: "abandoned" }));
   const registration = handle.value.readProgramRegistration(RUN_FILE_READ_LIMIT);
   if (!registration.ok) return unreadable(registration.error.message);
   const checkpointText = readCheckpointNow(handle.value, RUN_FILE_READ_LIMIT);
   if (!checkpointText.ok) return unreadable(checkpointText.error.message);
   const checkpoint = parsedCheckpoint(checkpointText.value);
   if (!checkpoint.ok) return unreadable(checkpoint.cause);
-  return observed(runLiveness({ ...unread, registration: registration.value, checkpoint: checkpoint.value }));
+  return observed(runLiveness({ kind: "run-files", registration: registration.value, checkpoint: checkpoint.value }));
 }
