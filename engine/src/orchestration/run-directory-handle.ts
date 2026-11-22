@@ -82,6 +82,7 @@ import {
 } from "../utils/no-follow-fs";
 import { parseProgramEventRecord, type ProgramEventRecord } from "./program-journal";
 import { hasExactPlainKeys } from "../core/plain-record";
+import { parseAbandonmentReason, type AbandonmentReason } from "../core/abandonment-reason";
 
 export const RUN_DIRECTORY_SCHEMA_VERSION = 1;
 
@@ -188,7 +189,7 @@ export type RunAbandonment = Readonly<{
   runId: OrchestrationRunId;
   /** The run that replaces this one, or `null` when nothing does. */
   supersededBy: OrchestrationRunId | null;
-  reason: string;
+  reason: AbandonmentReason;
 }>;
 
 export type RunAbandonmentInput = Readonly<{
@@ -994,26 +995,21 @@ function programOperations(runId: OrchestrationRunId, directory: string) {
   };
 }
 
-const MAX_ABANDONMENT_REASON = 512;
-
 /**
  * Parse an abandonment claim into the marker it may become.
  *
  * The self-reference refusal is the invariant that matters: a run naming itself
  * as its own replacement is a pointer that reads as "look elsewhere" and sends
- * the operator back to the run they are already standing in. The reason is
- * required and bounded because an unexplained abandonment tells the next
- * operator nothing the directory listing did not already say.
+ * the operator back to the run they are already standing in. The reason is an
+ * `AbandonmentReason`: required and bounded.
  */
 export function parseRunAbandonment(
   runId: OrchestrationRunId,
   input: RunAbandonmentInput,
 ): DomainResult<RunAbandonment, RunDirectoryError> {
-  const reason = input.reason.trim();
-  if (reason === "") return failure("abandonment", "an abandonment must carry a reason");
-  if (reason.length > MAX_ABANDONMENT_REASON) {
-    return failure("abandonment", `abandonment reason exceeds ${MAX_ABANDONMENT_REASON} characters`);
-  }
+  const parsedReason = parseAbandonmentReason(input.reason);
+  if (!parsedReason.ok) return failure("abandonment", parsedReason.error);
+  const reason = parsedReason.value;
   if (input.supersededBy === null) {
     return success(canonicalRecord({
       schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,

@@ -63,12 +63,14 @@ export function returnToRevalidation(
   const { implementation_attestation: attested, reopen_scope: scoped, reopen_baseline: _baseline, ...unscoped } = task;
   const rederive = testsOnly !== undefined || attested === true || scoped !== undefined ||
     isTestsOnlyProof(task.proof.obligations);
-  const proof = !rederive ? task.proof : derivePendingTaskProof({
-    verificationPolicy: taskVerificationPolicy(task),
-    declaredArtifacts: task.file_list ?? [],
-    ...(testsOnly === undefined ? { declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }) } : { testsOnly }),
-    redThenGreen: redThenGreenEra(verificationManifest),
-  });
+  const proof = rederive
+    ? derivePendingTaskProof({
+        verificationPolicy: taskVerificationPolicy(task),
+        declaredArtifacts: task.file_list ?? [],
+        ...(testsOnly === undefined ? { declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }) } : { testsOnly }),
+        redThenGreen: redThenGreenEra(verificationManifest),
+      })
+    : task.proof;
   return {
     ...unscoped,
     ...(testsOnly === undefined ? {} : { reopen_scope: testsOnly }),

@@ -213,4 +213,4 @@ export const initialState: PhaseState = { phaseIndex: 0, counts: ZERO_COUNTS };
 
 // --- Parse results (parse, don't validate) ---
 
-export { parseErr, parseOk, type ParseResult } from "../core/parse-result";
+export { parseErr, parseOk, type LineParseResult } from "../core/parse-result";

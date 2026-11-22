@@ -21,7 +21,8 @@
 
 import type { ActiveWaveGateRegistration, RetiredWaveReviewRun, TaskGraph } from "../types";
 import { preserveAcceptedReviewRunFindings } from "./findings";
-import { canonicalRecord, canonicalStructuralEquals, type OrchestrationRunId } from "./orchestration-contract";
+import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type OrchestrationRunId } from "./orchestration-contract";
+import { parseAbandonmentReason, type AbandonmentReason } from "./abandonment-reason";
 import { appendRetiredWaveReviewRun } from "./retired-wave-review-runs";
 import { reconcileWaveBlock } from "./wave-gate-model";
 import type { NarrowedTaskReview, WaveGateSuccessionAudit } from "./wave-gate-program";
@@ -415,16 +416,39 @@ export function retireReopenedWaveReview(graph: TaskGraph, completed: RetiringRu
 
 /**
  * The operator's terminal abandonment of one run, as `helper orchestration
- * abandon` recorded it in the Run Directory (`parseRunAbandonment`): a trimmed,
- * non-blank reason of at most 512 characters and a successor that is never the
- * run itself. The State File boundary re-proves both when the stamp is written.
+ * abandon` recorded it in the Run Directory (`parseRunAbandonment`): an
+ * `AbandonmentReason` and a successor that is never the run itself. Minted
+ * only by `parseWaveGateAbandonment`, so no caller can stamp a value that
+ * breaks either rule; the State File boundary re-proves both on load.
  */
 export type WaveGateAbandonment = Readonly<{
   runsRoot: string;
   runId: OrchestrationRunId;
+  reason: AbandonmentReason;
+  supersededBy: OrchestrationRunId | null;
+}> & { readonly __brand: "WaveGateAbandonment" };
+
+/** Parse an abandonment to stamp: the reason is parsed as an `AbandonmentReason`
+ *  and a run that names itself as its successor is refused. */
+export function parseWaveGateAbandonment(input: Readonly<{
+  runsRoot: string;
+  runId: OrchestrationRunId;
   reason: string;
   supersededBy: OrchestrationRunId | null;
-}>;
+}>): DomainResult<WaveGateAbandonment, string> {
+  const reason = parseAbandonmentReason(input.reason);
+  if (!reason.ok) return reason;
+  if (input.supersededBy === input.runId) {
+    return Object.freeze({ ok: false, error: `Wave Gate run ${input.runId} cannot supersede itself` });
+  }
+  const abandonment = canonicalRecord({
+    runsRoot: input.runsRoot,
+    runId: input.runId,
+    reason: reason.value,
+    supersededBy: input.supersededBy,
+  });
+  return Object.freeze({ ok: true, value: abandonment as WaveGateAbandonment });
+}
 
 export type AbandonedWaveGateRegistration = Extract<
   ActiveWaveGateRegistration,

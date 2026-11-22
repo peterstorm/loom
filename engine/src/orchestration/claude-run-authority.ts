@@ -138,13 +138,12 @@ export function resolveClaudeSpawnRun(
 ): BindingResult<ClaudeRun> {
   const explicit = explicitClaudeRun(context);
   if (!explicit.ok) return explicit;
-  const resolved = resolveIssuingRun(
+  return resolveIssuingRun(
     explicit.value,
     { bindings: () => sessionBindings(context), issuedIdentities: readIssuedIdentities },
     [identity],
     "claude-code",
   );
-  return resolved.ok ? ok(resolved.value.run) : resolved;
 }
 
 /** Does this bound run hold a Claude correlator for `nativeId`? Absent runs hold nothing. */
@@ -220,7 +219,7 @@ export function resolveClaudeStopRun(
     [claimed],
     "claude-code",
   );
-  return run.ok ? ok(Object.freeze({ kind: "uncorrelated" as const, run: run.value.run, identity: claimed })) : run;
+  return run.ok ? ok(Object.freeze({ kind: "uncorrelated" as const, run: run.value, identity: claimed })) : run;
 }
 
 /**

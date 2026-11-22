@@ -12,7 +12,6 @@
 
 import { readFileSync, realpathSync } from "node:fs";
 import type { HookHandler, HookResult } from "../../types";
-import { legacyTestsPassedNote } from "../../types";
 import { machineSource, observeTaskGraphProjectBoundary } from "../../config";
 import { IMPL_AGENTS } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
@@ -23,7 +22,7 @@ import { readSettledJsonl } from "../../utils/read-settled-jsonl";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
 import { readPersistedOutput } from "../../utils/persisted-output";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 import {
   epochOf,
   eventsForEpoch,
@@ -121,7 +120,7 @@ export function claudeEpochLedger(
   return Object.freeze({ kind: "read", events: Object.freeze(eventsForEpoch(read.records, epochOf(agentId, agentType))) });
 }
 
-async function settleModernTranscriptUnavailable(
+async function settleTranscriptUnavailable(
   manager: StateManager,
   authority: ImplementationAttemptAuthority,
   reason: string,
@@ -173,7 +172,7 @@ export const runUpdateTaskStatus = async (
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
   // where a bare JSON.parse throw would surface as an uncontextualized
   // "Hook error" (mirrors cleanup-subagent-flag).
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     return {
       kind: "error",
@@ -220,17 +219,23 @@ export const runUpdateTaskStatus = async (
     ? authorityObservation.sidecar.authority
     : null;
   const graphBeforeTranscript = mgr.load();
-  const modernAttempts = graphBeforeTranscript.tasks.filter((task) => task.active_implementation_attempt !== undefined);
-  if (authorityObservation?.kind === "authority-unavailable" && modernAttempts.length > 0) {
+  const executing = graphBeforeTranscript.tasks.some((task) => task.active_implementation_attempt !== undefined);
+  // A sidecar that exists but cannot be read is lost authority whether or not
+  // a Task still executes: its attempt may already have been released or
+  // reclaimed, so only an error keeps the lost settlement visible. An absent
+  // sidecar loses something only while a Task executes.
+  if (authorityObservation?.kind === "authority-unavailable" &&
+      (executing || authorityObservation.failure.kind !== "missing-sidecar")) {
     return {
       kind: "error",
-      message: `update-task-status: ${authorityObservation.failure.kind}: ${authorityObservation.failure.message}; modern implementation authority was preserved`,
+      message: `update-task-status: ${authorityObservation.failure.kind}: ${authorityObservation.failure.message}; ` +
+        (executing ? "implementation authority was preserved" : "no Task is executing and nothing was settled"),
     };
   }
-  if (authorityObservation === undefined && modernAttempts.length > 0) {
+  if (authorityObservation === undefined && executing) {
     return {
       kind: "error",
-      message: "update-task-status: modern implementation settlement requires a snapshotted Claude authority sidecar; execution authority was preserved",
+      message: "update-task-status: implementation settlement requires a snapshotted Claude authority sidecar; execution authority was preserved",
     };
   }
   if (authorityObservation?.kind === "authority-observed") {
@@ -266,11 +271,13 @@ export const runUpdateTaskStatus = async (
   }
 
   // Every executing Task carries an attempt (the State File refuses any other,
-  // ADR-0098), and an attempt without this stop's sidecar was refused above. A
-  // stop with no authority therefore finds nothing executing: nothing to settle.
+  // ADR-0098), an attempt without this stop's sidecar and an unreadable sidecar
+  // were refused above. A stop with no authority therefore found no sidecar and
+  // nothing executing: nothing to settle, and the diagnostic names why.
   if (authority === null) {
+    const absence = authorityObservation?.kind === "authority-unavailable" ? `: ${authorityObservation.failure.message}` : "";
     return passthroughDiagnostic(
-      `update-task-status: ${agentType} stopped without implementation attempt authority and no Task is executing; nothing was settled\n`,
+      `update-task-status: ${agentType} stopped without implementation attempt authority and no Task is executing; nothing was settled${absence}\n`,
     );
   }
 
@@ -281,7 +288,7 @@ export const runUpdateTaskStatus = async (
   // unlocatable or unreadable one becomes an infrastructure receipt.
   const transcriptPath = resolveAgentTranscriptPath(input);
   if (transcriptPath === null) {
-    return settleModernTranscriptUnavailable(
+    return settleTranscriptUnavailable(
       mgr,
       authority,
       "Claude transcript unavailable: no resolvable transcript path",
@@ -292,17 +299,23 @@ export const runUpdateTaskStatus = async (
     rawTranscript = await readSettledJsonl(() => readFileSync(transcriptPath, "utf-8"));
   } catch (error) {
     const cause = error instanceof Error ? error.message : String(error);
-    return settleModernTranscriptUnavailable(mgr, authority, `Claude transcript unreadable: ${cause}`);
+    return settleTranscriptUnavailable(mgr, authority, `Claude transcript unreadable: ${cause}`);
   }
   // Exact settlement cannot consume partial JSONL. Parse the complete
   // transcript before any file or test evidence extractor runs; a
   // malformed/truncated tail invalidates otherwise-valid earlier records.
   const integrity = parseCompleteClaudeJsonl(rawTranscript);
   if (integrity.kind === "malformed") {
-    return settleModernTranscriptUnavailable(mgr, authority, integrity.reason);
+    return settleTranscriptUnavailable(mgr, authority, integrity.reason);
   }
   const transcriptContent = integrity.transcript;
-  const rawFilesModified = parseFilesModified(transcriptContent);
+  // A Pi session handed to this Claude reader is refused, not read as an
+  // empty write set: a shrunken files_modified shrinks the Wave Gate lint set.
+  const writeEvidence = parseFilesModified(transcriptContent);
+  if (!writeEvidence.ok) {
+    return settleTranscriptUnavailable(mgr, authority, `Claude transcript unusable: ${writeEvidence.error}`);
+  }
+  const rawFilesModified = writeEvidence.value;
   const bashTestOutput = parseBashTestOutput(transcriptContent, readPersistedOutput);
 
   // Identity comes only from the snapshotted sidecar.
@@ -324,7 +337,7 @@ export const runUpdateTaskStatus = async (
     repositoryRoot = observeTaskGraphProjectBoundary(mgr.getPath()).root;
   } catch (error) {
     const reason = `Claude TaskGraph project boundary unavailable: ${error instanceof Error ? error.message : String(error)}`;
-    return settleModernTranscriptUnavailable(mgr, authority, reason);
+    return settleTranscriptUnavailable(mgr, authority, reason);
   }
 
   let filesModified: string[];
@@ -364,12 +377,6 @@ export const runUpdateTaskStatus = async (
       message: `update-task-status: unsafe modified-file evidence for ${taskId}: ${cause}`,
     };
   }
-
-  // Pre-refactor graphs carried `tests_passed` on the task (replaced by
-  // `test_result`, no compat read — unshipped branch). Explain the
-  // otherwise-mystifying "missing evidence" once, where we touch the task.
-  const legacyNote = legacyTestsPassedNote(task);
-  if (legacyNote) process.stderr.write(`[loom] ${legacyNote}\n`);
 
   // Section 1: Test evidence — the agent's OWN epoch in the ledger first
   // (execution-time ground truth, attribution via agent_id), transcript
@@ -487,7 +494,7 @@ export const runUpdateTaskStatus = async (
   if (settlement.kind === "error") {
     return {
       kind: "error",
-      message: `update-task-status: modern Oracle settlement failed: ${JSON.stringify(settlement.error)}`,
+      message: `update-task-status: Oracle settlement failed: ${JSON.stringify(settlement.error)}`,
     };
   }
   if (settlement.kind === "ignored") {

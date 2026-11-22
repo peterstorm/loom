@@ -18,6 +18,7 @@ import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program'
 import { inspectFilePresence, loadPlanModelsSource } from '../wave-gate-observers';
 import { runFullTierWaveLint } from '../lint-wave-gate';
 import { ensureWaveCompletionSuite, observeWaveCompletionWorkspace } from '../wave-completion-suite';
+import { parseManifestedTaskGraph } from '../../../core/manifested-task-graph';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-check-documents';
 import type { TaskGraph } from '../../../types';
@@ -176,7 +177,9 @@ async function resumeWaveGateAfter(
     const startReadiness = deriveWaveStartReadiness(graph, graph.tasks.filter((task) => task.wave === registration.input.wave));
     if (startReadiness.kind === "not-ready") return waveBlocked(handle, startReadiness.failures.join("; "));
 
-    const ensured = await ensureWaveCompletionSuite({ handle, manager, graph, registration });
+    const manifested = parseManifestedTaskGraph(graph);
+    if (!manifested.ok) return waveBlocked(handle, manifested.error);
+    const ensured = await ensureWaveCompletionSuite({ handle, manager, graph: manifested.value, registration });
     if (!ensured.ok) {
       return {
         ok: true,

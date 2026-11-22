@@ -300,14 +300,6 @@ export function explicitRun(
 }
 
 /**
- * The run that issued a task's request: the explicit run, which alone is the
- * authority when set, or the one session binding whose run issued it.
- */
-export type IssuingRun =
-  | Readonly<{ kind: "explicit"; run: RunLocation }>
-  | Readonly<{ kind: "session-binding"; run: RunLocation; binding: SessionRunBinding }>;
-
-/**
  * The reads run resolution needs, each asked lazily and only when the decision
  * gets that far: the session's bindings (never when an explicit run is set),
  * and the issued identities of a run whose binding lists every requested id.
@@ -326,20 +318,37 @@ const locationOf = ({ runsRoot, runDirectory }: RunLocation): RunLocation => Obj
  * Resolve the run that issued every one of `identities`, for both harnesses.
  *
  * An explicit run wins unchanged; the reads that later open it verify the
- * request. Otherwise exactly one session binding must list every request id
- * AND have issued each one under the exact context digest the task names. The
- * digest is part of the match, not a later check: request ids are not unique
- * across runs (a legacy panel request id is caller-chosen), so the digest is
- * what tells two bound runs issuing the same id apart. None or several
- * matching bindings fail closed. The decision is pure over its reads.
+ * request. Otherwise the run is the one session binding
+ * `resolveIssuingSessionBinding` proves issued them. The decision is pure
+ * over its reads.
  */
 export function resolveIssuingRun(
   explicit: RunLocation | null,
   reads: IssuingRunReads,
   identities: readonly TaskIdentity[],
   harness: SessionBindingHarness,
-): BindingResult<IssuingRun> {
-  if (explicit !== null) return ok(Object.freeze({ kind: "explicit" as const, run: locationOf(explicit) }));
+): BindingResult<RunLocation> {
+  if (explicit !== null) return ok(locationOf(explicit));
+  const binding = resolveIssuingSessionBinding(reads, identities, harness);
+  return binding.ok ? ok(locationOf(binding.value)) : binding;
+}
+
+/**
+ * The one session binding whose run issued every one of `identities`, for a
+ * shell that keeps the binding itself (Pi keys its review witnesses by it).
+ *
+ * Exactly one binding must list every request id AND have issued each one
+ * under the exact context digest the task names. The digest is part of the
+ * match, not a later check: request ids are not unique across runs (a legacy
+ * panel request id is caller-chosen), so the digest is what tells two bound
+ * runs issuing the same id apart. None or several matching bindings fail
+ * closed. The decision is pure over its reads.
+ */
+export function resolveIssuingSessionBinding(
+  reads: IssuingRunReads,
+  identities: readonly TaskIdentity[],
+  harness: SessionBindingHarness,
+): BindingResult<SessionRunBinding> {
   const label = HARNESS_LABEL[harness];
   if (identities.length === 0) return failed(`${label} session run resolution names no issued request`);
   const bindings = reads.bindings();
@@ -353,9 +362,7 @@ export function resolveIssuingRun(
       candidate.requestId === identity.requestId && candidate.contextDigest === identity.contextDigest));
     if (issuedAll) issuing.push(binding);
   }
-  if (issuing.length === 1) {
-    return ok(Object.freeze({ kind: "session-binding" as const, run: locationOf(issuing[0]), binding: issuing[0] }));
-  }
+  if (issuing.length === 1) return ok(issuing[0]);
   return failed(issuing.length === 0
     ? `no ${label} session run binding contains issued request/context authority ${describeIdentities(identities)}`
     : `multiple ${label} session run bindings contain issued request/context authority ${describeIdentities(identities)}`);

@@ -122,7 +122,7 @@ import {
   type SkeletonStatusReport,
 } from "../../core/skeleton/status";
 import { parseTaskGraph, StateManager } from "../../state-manager";
-import { abandonWaveGateRegistration, type ActiveWaveGateAbandonmentResult } from "../../core/wave-gate-registration";
+import { abandonWaveGateRegistration, parseWaveGateAbandonment, type ActiveWaveGateAbandonmentResult } from "../../core/wave-gate-registration";
 import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
@@ -550,17 +550,12 @@ async function observedAdvisoryApprovalFromParsed(
   if (!parsed.ok) return unavailable(parsed.error);
   const opened = openStatusObservationHandle(observation, boundHandle);
   if (!opened.ok) return unavailable(opened.message);
-  const readiness = deriveWaveReadiness(parsed.value, parsed.value.verification_manifest === undefined
-    ? gateDeps
-    : Object.freeze({
-        ...gateDeps,
-        currentWaveWorkspace: workspace,
-        currentWaveCompletionResult: observeCurrentWaveCompletionResult(
-          opened.value,
-          parsed.value,
-          workspace,
-        ),
-      }));
+  // Readiness refuses a graph with no frozen manifest itself, naming why.
+  const readiness = deriveWaveReadiness(parsed.value, Object.freeze({
+    ...gateDeps,
+    currentWaveWorkspace: workspace,
+    currentWaveCompletionResult: observeCurrentWaveCompletionResult(opened.value, parsed.value, workspace),
+  }));
   if (!readiness.ok) return unavailable(readiness.error.reasons.map(({ message }) => message).join("; "));
   const findingCounts = readiness.value.facts.findingCounts;
   if (findingCounts.kind !== "known" || findingCounts.value.advisory === 0) {
@@ -1058,13 +1053,20 @@ async function stampAbandonedWaveGateRegistration(
 ): Promise<WaveGateAbandonmentStampOutcome> {
   const manager = StateManager.fromPath(TASK_GRAPH_PATH);
   if (manager === null) return Object.freeze({ kind: "no-graph" });
+  const abandonment = parseWaveGateAbandonment({
+    runsRoot,
+    runId: marker.runId,
+    reason: marker.reason,
+    supersededBy: marker.supersededBy,
+  });
+  if (!abandonment.ok) {
+    return Object.freeze({
+      kind: "stamp-failed",
+      message: `run abandonment was recorded in the Run Directory, but its marker cannot tombstone the protected Wave Gate registration: ${abandonment.error}`,
+    });
+  }
   try {
-    return await manager.updateAndReturn((state) => abandonWaveGateRegistration(state, {
-      runsRoot,
-      runId: marker.runId,
-      reason: marker.reason,
-      supersededBy: marker.supersededBy,
-    }));
+    return await manager.updateAndReturn((state) => abandonWaveGateRegistration(state, abandonment.value));
   } catch (error) {
     return Object.freeze({
       kind: "stamp-failed",

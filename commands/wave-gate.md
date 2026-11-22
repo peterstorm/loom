@@ -252,7 +252,7 @@ Relay `waveCompletionSuiteReadiness` and its independent `projectVerificationCov
 - `configured` has non-empty sorted `checkIds`. Configuration is not a pass; only accepted suite evidence establishes those commands' acceptance.
 - `not-configured` with `engine-default` means the manifest was absent at population; `empty-operator-manifest` means it explicitly listed zero project checks. Both allow engine-only advancement. Report **Reserved checks accepted; Project verification NOT CONFIGURED**, not "project verification passed."
 - A completed Wave reports its archived receipt roster. A reserved-only receipt has reason `historical-unknown`, because it cannot distinguish an absent manifest from an empty one.
-- `legacy-unavailable` stays unavailable; do not invent coverage for it. A required, rejected or stale outcome is not a pass because checks are configured.
+- Before population freezes the manifest (every phase before `execute`) the readiness fact itself is `unavailable`; do not invent coverage for it. A required, rejected or stale outcome is not a pass because checks are configured.
 
 Coverage is a report, not a waiver: it never claims that an unconfigured test, build or typecheck category ran. The manifest is installed with `write-verification-manifest` before population; later edits do not replace the frozen commands.
 

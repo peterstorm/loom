@@ -18,7 +18,7 @@
  * Pure.
  */
 
-import { parseErr, parseOk, type ParseResult } from "./parse-result";
+import { parseErr, parseOk, type LineParseResult } from "./parse-result";
 import type { TaskGraph } from "../types";
 import { hasExactKeys, isRecord, type UnknownRecord } from "./plain-record";
 import type { AffectedRunner, FrozenVerificationManifest } from "./verification-manifest";
@@ -43,7 +43,7 @@ export type EngineRunnableManifest = Readonly<{ manifest: FrozenVerificationMani
  * The manifest and runner `helper run-tests` runs under, or why there are
  * none: the manifest must exist and declare an `affectedRunner`.
  */
-export function engineRunnable(manifest: FrozenVerificationManifest | undefined): ParseResult<EngineRunnableManifest> {
+export function engineRunnable(manifest: FrozenVerificationManifest | undefined): LineParseResult<EngineRunnableManifest> {
   if (manifest === undefined) return parseErr("the TaskGraph froze no Verification Manifest");
   return manifest.affectedRunner === undefined
     ? parseErr("the frozen Verification Manifest declares no affectedRunner")
@@ -54,7 +54,7 @@ export function engineRunnable(manifest: FrozenVerificationManifest | undefined)
 export function engineRunTestEvidence(
   manifest: FrozenVerificationManifest | undefined,
   adoption: TestEvidenceAdoption,
-): ParseResult<EngineRunTestEvidence> {
+): LineParseResult<EngineRunTestEvidence> {
   const runnable = engineRunnable(manifest);
   return runnable.ok
     ? parseOk(Object.freeze({ kind: "engine-run", manifestDigest: runnable.value.manifest.manifestDigest, ...adoption }))
@@ -80,7 +80,7 @@ export function testEvidenceModeNotice(
 }
 
 /** An operator's reason as the field records it: one trimmed, non-empty line of bounded length. */
-export function parseAdoptionReason(raw: unknown): ParseResult<string> {
+export function parseAdoptionReason(raw: unknown): LineParseResult<string> {
   if (typeof raw !== "string" || raw.trim() === "" || raw.trim() !== raw) {
     return parseErr("the adoption reason must be non-blank trimmed text");
   }
@@ -92,7 +92,7 @@ export function parseAdoptionReason(raw: unknown): ParseResult<string> {
 }
 
 /** The adoption a wire record names, with exactly the keys that adoption carries. */
-function parseAdoption(record: Readonly<UnknownRecord>): ParseResult<TestEvidenceAdoption> {
+function parseAdoption(record: Readonly<UnknownRecord>): LineParseResult<TestEvidenceAdoption> {
   if (record.adoptedBy === "population") {
     return hasExactKeys(record, POPULATION_KEYS)
       ? parseOk(POPULATION_ADOPTION)
@@ -120,7 +120,7 @@ function parseAdoption(record: Readonly<UnknownRecord>): ParseResult<TestEvidenc
 export function parseTestEvidenceField(
   raw: unknown,
   manifest: FrozenVerificationManifest | undefined,
-): ParseResult<EngineRunTestEvidence | undefined> {
+): LineParseResult<EngineRunTestEvidence | undefined> {
   if (raw === undefined) return parseOk(undefined);
   if (!isRecord(raw) || Array.isArray(raw)) return parseErr("test_evidence must be an object when present");
   if (raw.kind !== "engine-run") return parseErr("test_evidence.kind must be engine-run");
@@ -146,7 +146,7 @@ export type EngineRunAdoption =
  * no `affectedRunner` to run, and while any implementation attempt is
  * reserved: an attempt's evidence must be judged under the mode it ran under.
  */
-export function adoptEngineRunTestEvidence(graph: TaskGraph, rawReason: string): ParseResult<EngineRunAdoption> {
+export function adoptEngineRunTestEvidence(graph: TaskGraph, rawReason: string): LineParseResult<EngineRunAdoption> {
   if (graph.test_evidence !== undefined) {
     return parseOk(Object.freeze({ kind: "already-adopted", testEvidence: graph.test_evidence }));
   }

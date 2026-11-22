@@ -30,6 +30,7 @@ import {
 import type { ProofFailure } from "./proof-obligations";
 import { renderProjectVerificationCoverage } from "./verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
+import type { ManifestedTaskGraph } from "./manifested-task-graph";
 import { canonicalRecord, type NonEmpty, nonEmptyOf } from "./orchestration-contract";
 import type { FrozenPathObservations } from "./acceptance-contract";
 import { waveReviewStanding, waveReviewView } from "./wave-review-authority";
@@ -291,17 +292,13 @@ export interface GateDeps {
 }
 
 export function checkWaveCompletionSuite(
-  state: TaskGraph,
+  state: ManifestedTaskGraph,
   wave: number,
   currentWorkspace: WaveWorkspaceObservation | undefined,
   currentResult: WaveCompletionResultObservation | undefined = undefined,
 ): GateCheck {
   const readiness = deriveWaveCompletionSuiteReadiness(state, wave, currentWorkspace, currentResult);
   return match(readiness)
-    .with({ kind: "legacy-unavailable" }, () => fail(
-      "FAILED: Wave completion suite unavailable: the TaskGraph carries no verification_manifest " +
-      "(a legacy State File the loader refuses, ADR-0098).",
-    ))
     .with({ kind: "required" }, (value) => fail(
       `FAILED: Wave completion suite required (${value.reason}): ${value.detail}. ` +
       renderProjectVerificationCoverage(value.projectVerificationCoverage),
@@ -425,7 +422,7 @@ export function deriveWaveStartReadiness(state: TaskGraph, waveTasks: readonly T
     : canonicalRecord({ kind: "not-ready" as const, failures: nonEmptyOf(first, ...rest) });
 }
 
-function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
+function waveGateChecks(state: ManifestedTaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
   return Object.freeze([
     ...waveStartPrerequisiteChecks(state, waveTasks),
     checkWaveCompletionSuite(
@@ -450,7 +447,7 @@ function passedGateDecision(state: TaskGraph, wave: number, checks: readonly Gat
   });
 }
 
-export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps: GateDeps): GateDecision {
+export function evaluateWaveGate(state: ManifestedTaskGraph, waveArg: number | null, deps: GateDeps): GateDecision {
   const authority = waveGateAuthorityCheck(state, waveArg);
   if (authority.failures.length > 0) {
     return failedGateDecision(

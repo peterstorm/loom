@@ -52,7 +52,7 @@ import {
   type RejectedCompletionSuite,
   type WaveCompletionSuiteResult,
 } from "../../core/completion-suite";
-import type { FrozenVerificationManifest } from "../../core/verification-manifest";
+import { parseManifestedTaskGraph, type ManifestedTaskGraph } from "../../core/manifested-task-graph";
 import { canonicalStructuralEquals } from "../../core/orchestration-contract";
 import {
   runCompletionCheck as productionRunCompletionCheck,
@@ -94,7 +94,6 @@ export type EnsureWaveCompletionSuiteResult =
   | Readonly<{
       ok: true;
       value: Readonly<{
-        kind: "accepted";
         disposition: "reused" | "installed";
         currentWaveWorkspace: WaveWorkspaceObservation;
       }>;
@@ -127,7 +126,7 @@ export type RunOwnerVerification = (input: OwnerVerificationInput) => Promise<Ow
 export type EnsureWaveCompletionSuiteInput = Readonly<{
   handle: RunDirHandle;
   manager: StateManager;
-  graph: TaskGraph;
+  graph: ManifestedTaskGraph;
   registration: WaveCompletionRegistration;
   runCompletionCheck?: RunCompletionCheck;
   runOwnerVerification?: RunOwnerVerification;
@@ -282,7 +281,7 @@ function accepted(
 ): EnsureWaveCompletionSuiteResult {
   return freeze({
     ok: true,
-    value: freeze({ kind: "accepted", disposition, currentWaveWorkspace }),
+    value: freeze({ disposition, currentWaveWorkspace }),
   });
 }
 
@@ -411,7 +410,8 @@ async function ownerVerificationObservation(
   context: SuiteContext,
   check: OwnerVerificationCheck,
 ): Promise<OwnerVerificationObservation> {
-  const { graph, repositoryRoot, wave, manifest } = context;
+  const { graph, repositoryRoot, wave } = context;
+  const manifest = graph.verification_manifest;
   const duty = waveOwnerDuty(graph, wave);
   const decision = ownerObservationDecision({
     integrity: planIntegrityFailure(graph, duty, repositoryRoot),
@@ -563,14 +563,13 @@ export function observeWaveCompletionWorkspace(
 }
 
 function reusableReceipt(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   workspace: Extract<WaveWorkspaceObservation, { readonly kind: "observed" }>,
   expectation: AcceptanceExpectation,
 ): AcceptedWaveCompletionReceipt | null {
   const active = graph.active_wave_gate;
-  const manifest = graph.verification_manifest;
   const rawReceipt = graph.active_wave_completion_suite;
-  if (active === undefined || manifest === undefined || rawReceipt === undefined) return null;
+  if (active === undefined || rawReceipt === undefined) return null;
   const receipt = parseAcceptedWaveCompletionReceipt(rawReceipt);
   if (!receipt.ok) return null;
   const authority = authorizeGraphCompletionSuite(graph, workspace.workspaceDigest);
@@ -812,7 +811,7 @@ async function installAcceptedReceiptAndVerifyWorkspace(
 type ProvenSuiteInputs = Readonly<{
   handle: RunDirHandle;
   manager: StateManager;
-  graph: TaskGraph;
+  graph: ManifestedTaskGraph;
   repositoryRoot: CanonicalRepositoryRoot;
   before: ObservedWorkspace;
   expectation: AcceptanceExpectation;
@@ -820,10 +819,9 @@ type ProvenSuiteInputs = Readonly<{
   runOwnerVerification: RunOwnerVerification;
 }>;
 
-/** Everything one suite execution reads, fixed once the active authority is proven: the Wave and its frozen manifest included. */
+/** Everything one suite execution reads, fixed once the active authority is proven: the Wave included. */
 type SuiteContext = ProvenSuiteInputs & Readonly<{
   wave: number;
-  manifest: FrozenVerificationManifest;
 }>;
 
 /**
@@ -836,11 +834,6 @@ export async function ensureWaveCompletionSuite(
 ): Promise<EnsureWaveCompletionSuiteResult> {
   const { handle, manager, registration } = input;
   let graph = input.graph;
-  if (graph.verification_manifest === undefined) {
-    const current = observeCurrentWaveWorkspace(graph, handle.runDirectory);
-    return blocked(current, ["authority"], [], "the TaskGraph carries no frozen verification_manifest to run a completion suite by");
-  }
-
   const repository = completionRepositoryAuthority(handle, manager);
   if (!repository.ok) {
     const unavailable = freeze({ kind: "unavailable" as const, reason: repository.reason });
@@ -869,10 +862,13 @@ export async function ensureWaveCompletionSuite(
   if (graph.active_wave_completion_suite !== undefined) {
     try {
       await clearStaleReceipt(manager, graph);
-      graph = manager.load();
     } catch (cause) {
       return blocked(before, ["state"], [], describeCause(cause));
     }
+    // The clear proved the locked manifest unchanged; the reload re-proves it.
+    const reloaded = parseManifestedTaskGraph(manager.load());
+    if (!reloaded.ok) return blocked(before, ["state"], [], reloaded.error);
+    graph = reloaded.value;
   }
 
   return runAuthorizedSuite({
@@ -886,11 +882,10 @@ export async function ensureWaveCompletionSuite(
 async function runAuthorizedSuite(proven: ProvenSuiteInputs): Promise<EnsureWaveCompletionSuiteResult> {
   const { handle, manager, graph, repositoryRoot, before, expectation } = proven;
   const active = graph.active_wave_gate;
-  const manifest = graph.verification_manifest;
-  if (active === undefined || manifest === undefined) {
-    return blocked(before, ["authority"], [], "modern completion authority disappeared before suite execution");
+  if (active === undefined) {
+    return blocked(before, ["authority"], [], "completion authority disappeared before suite execution");
   }
-  const context: SuiteContext = freeze({ ...proven, wave: active.wave, manifest });
+  const context: SuiteContext = freeze({ ...proven, wave: active.wave });
   const authorized = authorizeGraphCompletionSuite(graph, before.workspaceDigest);
   if (!authorized.ok) {
     return blocked(before, ["authority"], [], authorized.error.errors.join("; "));

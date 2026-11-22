@@ -21,7 +21,7 @@ import {
   bunRunSummary,
   mergeSummaries,
   parseBunConsoleCollectionErrors,
-  declaredSummary,
+  testRunSummary,
   junitReportRead,
   readTestReportText,
 } from "../core/structured-test-report";
@@ -438,7 +438,7 @@ export function findReport(
         process.stderr.write(`findReport: Bun JUnit report '${path}' does not exist\n`);
       } else if (presence === "present" && isFresh(path, nowMs, callStartMs)) {
         try {
-          const parsed = declaredSummary(readTestReportText(readFileSync(path, "utf-8")), "junit-xml");
+          const parsed = testRunSummary(readTestReportText(readFileSync(path, "utf-8")), "junit-xml");
           if (parsed) {
             const errors = collectionErrors();
             if (errors.length > 0 && parsed.files.kind !== "recorded") {
@@ -473,7 +473,7 @@ export function findReport(
       noStamp(`--outputFile '${path}'`);
     } else if (explicitReportExists(path, "--outputFile report") && isFresh(path, nowMs, callStartMs)) {
       try {
-        const parsed = declaredSummary(readTestReportText(readFileSync(path, "utf-8")), "vitest-json");
+        const parsed = testRunSummary(readTestReportText(readFileSync(path, "utf-8")), "vitest-json");
         if (parsed) return parsed;
         process.stderr.write(`findReport: malformed --outputFile report '${path}'\n`);
       } catch (e) {
@@ -486,7 +486,7 @@ export function findReport(
   }
 
   if (/--reporter[= ]json|--json\b/.test(segment)) {
-    const parsed = declaredSummary(readTestReportText(stdout.trim()), "vitest-json");
+    const parsed = testRunSummary(readTestReportText(stdout.trim()), "vitest-json");
     if (parsed) return parsed;
     process.stderr.write(
       "findReport: --reporter=json requested but stdout carried no parseable summary\n",

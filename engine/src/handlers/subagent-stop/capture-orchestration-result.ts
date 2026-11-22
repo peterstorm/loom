@@ -50,7 +50,7 @@ import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import type { EmissionSchemaVersion } from "../../core/emission-tool";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { parseRegisteredFacadeProgram } from "../helpers/programs";
-import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { parseSubagentLifecycleStdin } from "../../parsers/parse-subagent-lifecycle-input";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";
 import {
   claudeEmissionScan,
@@ -389,7 +389,7 @@ export async function captureClaudeStop(
 }
 
 const handler: HookHandler = async (stdin): Promise<HookResult> => {
-  const parsedInput = parseSubagentStopStdin(stdin);
+  const parsedInput = parseSubagentLifecycleStdin("SubagentStop", stdin);
   if (!parsedInput.ok) {
     // Without a parsed payload there is no session to resolve bindings for, so
     // only an explicit environment authority makes the malformed stop a fault.

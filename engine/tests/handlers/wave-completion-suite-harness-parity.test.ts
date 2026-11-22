@@ -28,6 +28,7 @@ import {
   ownerVerificationRepo,
   type OwnerVerificationRepoOptions,
 } from "../fixtures/owner-verification-repo";
+import { manifestedGraphFixture } from "../fixtures/task-lifecycle";
 
 const GATE_TIMEOUT_MS = 90_000;
 const START_WAVE_GATE = "helper orchestration start wave-gate";
@@ -54,7 +55,7 @@ async function ownerVerdictUnder(layout: "claude" | "pi", options: Omit<OwnerVer
   const gate = await ensureWaveCompletionSuite({
     handle: repo.handle,
     manager: repo.manager,
-    graph: repo.manager.load(),
+    graph: manifestedGraphFixture(repo.manager.load()),
     registration: repo.registration,
   });
   const observations = repo.publishedResults().map((result) => result.ownerVerification).filter((entry) => entry !== undefined);

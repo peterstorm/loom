@@ -51,6 +51,7 @@ import {
 } from "./orchestration-contract";
 import { applyGateDecision, evaluateWaveGate, type GateDecision, type GateDeps } from "./wave-gate-checks";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
+import { parseManifestedTaskGraph, type ManifestedTaskGraph } from "./manifested-task-graph";
 import {
   completionEligibility,
   deriveFindingCounts,
@@ -461,7 +462,7 @@ function replayWaveGateTransition(
 // ---------------------------------------------------------------------------
 
 export type WaveReadinessSnapshot = Readonly<{
-  graph: TaskGraph;
+  graph: ManifestedTaskGraph;
   registration: ActiveWaveGateRegistration;
   wave: number;
   waveTasks: readonly Task[];
@@ -571,7 +572,7 @@ export function proveWaveGateNextAction(
 }
 
 function completionAuthority(
-  graph: TaskGraph,
+  graph: ManifestedTaskGraph,
   registration: ActiveWaveGateRegistration,
   decision: GateDecision,
   currentWaveWorkspaceObservation: WaveWorkspaceObservation | null,
@@ -587,7 +588,7 @@ function completionAuthority(
     wave: registration.wave,
     authorityDigest: registration.authorityDigest,
     expectedRevision: registration.revision,
-    verificationManifestDigest: graph.verification_manifest?.manifestDigest ?? null,
+    verificationManifestDigest: graph.verification_manifest.manifestDigest,
     acceptedCompletionSuite: graph.active_wave_completion_suite ?? null,
     currentWaveWorkspaceObservation,
     currentWaveCompletionResultObservation,
@@ -630,7 +631,9 @@ export type WaveLifecycleProof = Readonly<{
 /**
  * Derive every status fact and completion decision once from one parsed graph
  * snapshot. Consumers (program execution and status) must share this value;
- * renderers must not repeat gate policy.
+ * renderers must not repeat gate policy. This is the seam that parses the
+ * graph into a `ManifestedTaskGraph`: a graph with no frozen Verification
+ * Manifest has no readiness, only the reason it has none.
  */
 export function deriveWaveReadiness(
   graph: TaskGraph,
@@ -649,7 +652,9 @@ export function deriveWaveReadiness(
   if (registration !== undefined && registration.terminalOutcome !== null) {
     failures.push(statusReason("authority-contradiction", "terminal Wave Gate history cannot serve as active current-Wave authority"));
   }
-  if (failures.length > 0 || registration === undefined) {
+  const manifested = parseManifestedTaskGraph(graph);
+  if (!manifested.ok) failures.push(statusReason("authority-unavailable", manifested.error));
+  if (failures.length > 0 || registration === undefined || !manifested.ok) {
     return canonicalRecord({
       ok: false,
       error: canonicalRecord({
@@ -659,8 +664,9 @@ export function deriveWaveReadiness(
     });
   }
 
+  const manifestedGraph = manifested.value;
   const wave = registration.wave;
-  const decision = evaluateWaveGate(graph, wave, deps);
+  const decision = evaluateWaveGate(manifestedGraph, wave, deps);
   const reviews = reviewFacts(graph);
   const tests = deriveTestReadiness(graph, wave);
   const findings = deriveFindingCounts(graph.tasks.filter((task) => task.wave === wave));
@@ -677,7 +683,7 @@ export function deriveWaveReadiness(
     waveCompletionSuiteReadiness: canonicalRecord({
       kind: "known",
       value: deriveWaveCompletionSuiteReadiness(
-        graph,
+        manifestedGraph,
         wave,
         deps.currentWaveWorkspace,
         deps.currentWaveCompletionResult,
@@ -686,13 +692,12 @@ export function deriveWaveReadiness(
     waveGateCompletionEligibility: canonicalRecord({ kind: "known", value: eligibility }),
   });
   const workspaceObservation = deps.currentWaveWorkspace ?? null;
-  const completionResultObservation = graph.verification_manifest !== undefined &&
-    graph.active_wave_completion_suite === undefined &&
+  const completionResultObservation = graph.active_wave_completion_suite === undefined &&
     workspaceObservation?.kind === "observed"
     ? deps.currentWaveCompletionResult ?? null
     : null;
   const completion = completionAuthority(
-    graph,
+    manifestedGraph,
     registration,
     decision,
     workspaceObservation,
@@ -737,7 +742,7 @@ export function deriveWaveReadiness(
     }
   }
   const snapshot: WaveReadinessSnapshot = canonicalRecord({
-    graph,
+    graph: manifestedGraph,
     registration,
     wave,
     waveTasks: Object.freeze(graph.tasks.filter((task) => task.wave === wave)),

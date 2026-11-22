@@ -251,9 +251,8 @@ export function parseReportSummary(
 //
 // - the declared-count rule (`TestReport.declared`, a `TestReportSummary`)
 //   counts every declared testcase, skipped included, with per-file results.
-//   TestRun facts are captured under it (`findReport`, `engineRunReport`), and
-//   its `total` is stored in Evidence Ledger lines. It refuses the Node JUnit
-//   dialect, whose suite attributes describe immediate children only.
+//   It refuses the Node JUnit dialect, whose suite attributes describe
+//   immediate children only.
 // - the executed-count rule (`TestReport.executed`, a `ReportCounts`) counts
 //   only the testcases that ran, so an all-skipped report cannot become
 //   passing completion evidence. Completion-check and remediation observations
@@ -261,8 +260,11 @@ export function parseReportSummary(
 //   the Node dialect through the summary comments of its root.
 //
 // Neither rule is derived from the other: each refuses reports the other
-// accepts, and on a contrived JUnit document they can disagree about `failed`.
-// The projections below are how every caller asks.
+// accepts. TestRun facts (`findReport`, `engineRunReport`) are captured by
+// `testRunSummary`, which takes the declared summary and holds it to the
+// executed-count rule (ADR-0100), so a TestRun's executed count
+// (`executedTestCount`) is the executed-count rule's. The projections below are
+// how every caller asks.
 
 /** The two structured formats a report can be: what `TestReport.source` names. */
 export type StructuredReportFormat = Extract<ReportSource, "vitest-json" | "junit-xml">;
@@ -751,18 +753,49 @@ export function reportCounts(read: TestReportRead): StructuredReportParseResult 
     .exhaustive();
 }
 
-/** The declared-count rule's summary of a report that must be `format` (an
- *  explicitly named artifact): anything else is `null`. */
-export const declaredSummary = (read: TestReportRead, format: StructuredReportFormat): TestReportSummary | null =>
-  read.kind === "report" && read.report.source === format ? read.report.declared : null;
+/**
+ * How many tests a TestRun summary proves actually ran (ADR-0100). With
+ * per-file results it is their testcases less the skipped ones (skipped,
+ * pending, todo, disabled), which `testRunSummary` holds equal to the
+ * executed-count rule's count of the same bytes. An unrecorded summary carries
+ * no skip facts, so its `total` is the count: capture mints that total under
+ * the executed-count rule wherever the rule reads the report, and a legacy
+ * ledger line keeps the total it was written with.
+ */
+export function executedTestCount(summary: TestReportSummary): number {
+  return summary.files.kind === "recorded"
+    ? summary.files.results.reduce((sum, { executed, skipped }) => sum + executed - skipped, 0)
+    : summary.total;
+}
+
+/**
+ * The TestRun summary of a report that must be `format` (an explicitly named
+ * artifact), or `null`: the declared-count rule's summary, held to the
+ * executed-count rule wherever that rule reads the same bytes (ADR-0100).
+ * - The executed-count rule cannot count the report (a Vitest summary without
+ *   its passed, pending and todo counts): the declared summary as it is.
+ * - Per-file results recorded: the declared summary when its executed count
+ *   (`executedTestCount`) equals the executed-count rule's, else `null`: two
+ *   readings of one document that disagree about what ran cannot vouch.
+ * - No per-file results: the executed-count rule's counts, since nothing else
+ *   in the summary could say what was skipped.
+ * So a report in which nothing ran never mints a summary that proves a test ran.
+ */
+export function testRunSummary(read: TestReportRead, format: StructuredReportFormat): TestReportSummary | null {
+  if (read.kind !== "report" || read.report.source !== format) return null;
+  const { declared, executed } = read.report;
+  if (declared === null || executed === null) return declared;
+  if (declared.files.kind === "recorded") return executedTestCount(declared) === executed.total ? declared : null;
+  return parseReportSummary(executed.total, executed.failed, executed.source, undefined);
+}
 
 /**
  * What one `*.xml` file of a report dir is to a TestRun capture:
  * - `not-junit`: foreign XML (see `TestReportRead`); the scan skips it.
- * - `refused`: anything else the declared-count rule does not summarize as
- *   JUnit: malformed, impossible counts, per-file results that disagree with
- *   the counts (INV-8), over budget, or not XML. It cannot vouch, and it voids
- *   the run's capture.
+ * - `refused`: anything else `testRunSummary` does not summarize as JUnit:
+ *   malformed, impossible counts, per-file results that disagree with the
+ *   counts (INV-8) or with the executed-count rule, over budget, or not XML.
+ *   It cannot vouch, and it voids the run's capture.
  * - `parsed`: a summary with reconciled per-file results.
  */
 export type JunitReportRead =
@@ -775,7 +808,7 @@ const REFUSED: JunitReportRead = Object.freeze({ kind: "refused" });
 
 export function junitReportRead(read: TestReportRead): JunitReportRead {
   if (read.kind === "unrecognized" && read.foreignXml) return NOT_JUNIT;
-  const summary = declaredSummary(read, "junit-xml");
+  const summary = testRunSummary(read, "junit-xml");
   return summary === null ? REFUSED : Object.freeze({ kind: "parsed", summary });
 }
 
@@ -926,7 +959,10 @@ export function bunRunSummary(
 /** Merge summaries from multiple report files of one run. The inputs must
  *  share ONE source — enforced at runtime, not by comment: a mixed-source
  *  merge would stamp the sum with the first summary's source, silently
- *  mislabeling half the counts. Fail closed to null instead. */
+ *  mislabeling half the counts. Fail closed to null instead.
+ *  A merge that loses per-file results (some part recorded none) sums each
+ *  part's `executedTestCount`, since an unrecorded summary's total is its
+ *  executed count: a recorded part's skipped testcases never reappear as run. */
 export function mergeSummaries(summaries: readonly TestReportSummary[]): TestReportSummary | null {
   if (summaries.length === 0) return null;
   if (summaries.some((s) => s.source !== summaries[0].source)) return null;
@@ -934,11 +970,13 @@ export function mergeSummaries(summaries: readonly TestReportSummary[]): TestRep
   // smart constructor rather than casting a fresh literal: summing sane
   // summaries stays sane, but the brand must be minted where its invariant
   // is (re)checked.
+  const files = mergeFileResults(summaries.map((s) => s.files));
+  const counted = files.kind === "recorded" ? (s: TestReportSummary) => s.total : executedTestCount;
   let total = 0;
   let failed = 0;
   for (const s of summaries) {
-    total += s.total;
+    total += counted(s);
     failed += s.failed;
   }
-  return parseReportSummary(total, failed, summaries[0].source, mergeFileResults(summaries.map((s) => s.files)));
+  return parseReportSummary(total, failed, summaries[0].source, files);
 }
