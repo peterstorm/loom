@@ -3,6 +3,7 @@ import {
   abandonWaveGateRegistration,
   admitWaveGateRegistration,
   installWaveGateRegistration,
+  parseWaveGateAbandonment,
   retireWaveReviewAuthority,
   supersedeAbandonedWaveGateReview,
   type WaveGateRegistrationCandidate,
@@ -17,7 +18,10 @@ import {
   graphFixture,
   protectedGraphFixture,
   taskFixture,
+  waveGateAbandonmentFixture,
 } from "../fixtures/task-lifecycle";
+import { refusal, value } from "../fixtures/parse-result";
+import { MAX_ABANDONMENT_REASON } from "../../src/core/abandonment-reason";
 import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 
 const base = graphFixture([
@@ -322,7 +326,8 @@ describe("retireWaveReviewAuthority", () => {
 
 describe("abandonWaveGateRegistration", () => {
   const live = active(base, "run.live");
-  const abandonment = { runsRoot: "/runs", runId: live.runId, reason: "reviewed bytes changed", supersededBy: null };
+  const input = { runsRoot: "/runs", runId: live.runId, reason: "reviewed bytes changed", supersededBy: null };
+  const abandonment = waveGateAbandonmentFixture(input);
   const withSuite = { ...withActive(live), active_wave_completion_suite: acceptedWaveCompletionSuite(live) };
 
   it("stamps the live registration terminal and retires its completion suite in the same graph", () => {
@@ -339,15 +344,40 @@ describe("abandonWaveGateRegistration", () => {
     expect(replay.value).toEqual({ kind: "replayed", registration: stamped.active_wave_gate });
   });
 
-  it.each<readonly [string, TaskGraph, Partial<typeof abandonment>, string]>([
+  it.each<readonly [string, TaskGraph, Partial<typeof input>, string]>([
     ["no registration", base, {}, "registration-absent"],
     ["another runs-root", withActive(live), { runsRoot: "/other" }, "authority-mismatch"],
     ["another run", withActive(live), { runId: active(base, "run.other").runId }, "authority-mismatch"],
     ["a different abandonment", withActive(active(base, "run.live", abandoned(null))), { reason: "another story" }, "terminal-conflict"],
     ["another terminal outcome", withActive(active(base, "run.live", done("run.live"))), {}, "terminal-conflict"],
   ])("targets nothing on %s, leaving the graph itself", (_, graph, overrides, reason) => {
-    const decision = abandonWaveGateRegistration(graph, { ...abandonment, ...overrides });
+    const decision = abandonWaveGateRegistration(graph, waveGateAbandonmentFixture({ ...input, ...overrides }));
     expect(decision.state).toBe(graph);
     expect(decision.value).toEqual({ kind: "not-targeted", reason });
+  });
+});
+
+describe("parseWaveGateAbandonment", () => {
+  const runId = active(base, "run.live").runId;
+  const successor = active(base, "run.next").runId;
+  const input = { runsRoot: "/runs", runId, reason: "reviewed bytes changed", supersededBy: successor };
+
+  it("mints the abandonment with its reason trimmed", () => {
+    expect(value(parseWaveGateAbandonment({ ...input, reason: "  reviewed bytes changed\n" })))
+      .toEqual({ runsRoot: "/runs", runId, reason: "reviewed bytes changed", supersededBy: successor });
+  });
+
+  it("admits a reason of exactly the bound", () => {
+    const longest = "x".repeat(MAX_ABANDONMENT_REASON);
+    expect(value(parseWaveGateAbandonment({ ...input, reason: longest })).reason).toBe(longest);
+  });
+
+  it.each([
+    ["a blank reason", { reason: " \t\n" }, "an abandonment must carry a reason"],
+    ["an empty reason", { reason: "" }, "an abandonment must carry a reason"],
+    ["a reason past the bound", { reason: "x".repeat(MAX_ABANDONMENT_REASON + 1) }, `abandonment reason exceeds ${MAX_ABANDONMENT_REASON} characters`],
+    ["a run superseding itself", { supersededBy: runId }, "Wave Gate run run.live cannot supersede itself"],
+  ] as const)("refuses %s", (_name, overrides, message) => {
+    expect(refusal(parseWaveGateAbandonment({ ...input, ...overrides }))).toBe(message);
   });
 });

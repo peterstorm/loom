@@ -43,7 +43,6 @@ import {
   type TaskOwnerCheckResult,
 } from "../../src/core/task-owner-check";
 import {
-  TASK_RECORD_CHECK_BASH_TIMEOUT_MS,
   TASK_RECORD_CHECK_OFF,
   TASK_RECORD_NOT_RUN,
   taskRecordStanding,
@@ -54,6 +53,7 @@ import { contract, task } from "../fixtures/contract-status-fixtures";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { mutationManifest } from "../fixtures/task-mutation";
+import { taskRecordBlockTail } from "../fixtures/task-record-block";
 
 const OWNER = "src/rules/owner.ts";
 const SIBLING_A = "src/rules/a.ts";
@@ -414,9 +414,7 @@ describe("what the implementer reads", () => {
   it("the block repeats the command with its timeout and the blocks left", () => {
     const block = renderTaskOwnerCheckBlock({ kind: "not-run" }, "CMD", 1);
     expect(block).toContain("The check has not run for this Task.");
-    expect(block).toContain(`timeout of ${TASK_RECORD_CHECK_BASH_TIMEOUT_MS} ms`);
-    expect(block).toContain("\n  CMD\n");
-    expect(block).toContain("blocks at most 1 more time(s)");
-    expect(block.endsWith("\n\nRun it as one Bash call with a timeout of 600000 ms, then your final verification run:\n  CMD\nThis check blocks at most 1 more time(s); after that your stop proceeds and the Wave Gate judges.")).toBe(true);
+    const tail = taskRecordBlockTail("CMD", 1);
+    expect(block.slice(-tail.length)).toBe(tail);
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
 import type { Task, TaskCommonMetadata } from "../../src/types";
 import { taskFixture } from "../fixtures/task-lifecycle";
@@ -18,6 +18,7 @@ import {
   REVIEW_LENSES_DEFAULT,
   REVIEW_LENSES_MIN,
   type BriefFinding,
+  type FindingBrief,
   type FindingOutcome,
   type RefutationVerdict,
   type ReviewLens,
@@ -201,6 +202,15 @@ describe("buildFindingBrief", () => {
   it("produces an empty brief for a wave with no criticals", () => {
     const result = buildFindingBrief(1, [task({ findings: [finding({ severity: "advisory" })] })]);
     expect(result.findings).toEqual([]);
+  });
+
+  it("states the verified severity, the only one a brief can carry", () => {
+    const result = buildFindingBrief(1, [task({ findings: [finding({ severity: "advisory" })] })]);
+    expect(result.severity).toBe("critical");
+    expectTypeOf(result.severity).toEqualTypeOf<"critical">();
+    // @ts-expect-error an advisory brief is unrepresentable
+    const advisory: FindingBrief = { ...result, severity: "advisory" };
+    void advisory;
   });
 });
 

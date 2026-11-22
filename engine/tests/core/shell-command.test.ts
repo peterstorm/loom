@@ -7,7 +7,8 @@ import {
   stripComment,
   stripEnvPrefix,
   hasUnbalancedQuotes,
-  shellOperatorAt,
+  OPERATOR_WALK_START,
+  readShellOperator,
 } from "../../src/core/shell-command";
 
 /**
@@ -196,12 +197,22 @@ describe("hasUnbalancedQuotes", () => {
   });
 });
 
+/** The operator at `index` as a walk that has read nothing before it sees it. */
+const operatorAt = (text: string, index: number) => readShellOperator(text, index, OPERATOR_WALK_START).operator;
+
+/** The operator at `index` as a walk that has just read the `>` before it unquoted. */
+const operatorAfterUnquotedGt = (text: string, index: number) => {
+  expect(text[index - 1]).toBe(">");
+  return readShellOperator(text, index, readShellOperator(text, index - 1, OPERATOR_WALK_START).walk).operator;
+};
+
 /**
- * shellOperatorAt is the ONE operator table: the segment splitter and the
- * heredoc opener-line group walk both consume it, so this pins what each
- * operator does in both (the group walk cuts on every separator but `|`).
+ * readShellOperator is the ONE operator table and the one walk that reads it:
+ * the segment splitter and the heredoc opener-line group walk both consume it,
+ * so this pins what each operator does in both (the group walk cuts on every
+ * separator but `|`).
  */
-describe("shellOperatorAt", () => {
+describe("readShellOperator", () => {
   it.each([
     ["&&", "a && b", 2, { separator: "&&", width: 2 }],
     ["||", "a || b", 2, { separator: "||", width: 2 }],
@@ -214,7 +225,7 @@ describe("shellOperatorAt", () => {
     ["each ; of ;; is its own separator", "a;; b", 2, { separator: ";", width: 1 }],
     ["newline", "a\nb", 1, { separator: ";", width: 1 }],
   ] as const)("%s", (_name, text, index, operator) => {
-    expect(shellOperatorAt(text, index, false)).toEqual(operator);
+    expect(operatorAt(text, index)).toEqual(operator);
   });
 
   it.each([
@@ -225,7 +236,22 @@ describe("shellOperatorAt", () => {
     ["a | after >> is a pipe (a syntax error bash runs nothing for)", "a >>| b", 4, { separator: "|", width: 1 }],
     ["a | after &> is a pipe", "a &>| b", 4, { separator: "|", width: 1 }],
   ] as const)("after an unquoted >: %s", (_name, text, index, operator) => {
-    expect(shellOperatorAt(text, index, true)).toEqual(operator);
+    expect(operatorAfterUnquotedGt(text, index)).toEqual(operator);
+  });
+
+  it("binds only right after a > the walk itself read: a skipped or earlier > arms nothing", () => {
+    // The walk read `>` at 2, then the space at 3: the `&` at 4 is background.
+    const pastSpace = readShellOperator("a > & b", 3, readShellOperator("a > & b", 2, OPERATOR_WALK_START).walk).walk;
+    expect(readShellOperator("a > & b", 4, pastSpace).operator).toEqual({ separator: "&", width: 1 });
+    // A walk that never read the `>` before the `&` (a skipped span) does not bind it.
+    expect(readShellOperator("a 2>&1", 4, readShellOperator("a 2>&1", 2, OPERATOR_WALK_START).walk).operator)
+      .toEqual({ separator: "&", width: 1 });
+  });
+
+  it("arms the walk past an operator that ends in >: the & after &> binds", () => {
+    const pastRedirect = readShellOperator("a &>&2", 2, OPERATOR_WALK_START);
+    expect(pastRedirect.operator).toEqual({ separator: null, width: 2 });
+    expect(readShellOperator("a &>&2", 4, pastRedirect.walk).operator).toEqual({ separator: null, width: 1 });
   });
 
   it.each([
@@ -233,7 +259,7 @@ describe("shellOperatorAt", () => {
     ["a redirect", "a > f", 2],
     ["past the end", "a", 5],
   ])("is null at %s", (_name, text, index) => {
-    expect(shellOperatorAt(text, index, false)).toBeNull();
+    expect(operatorAt(text, index)).toBeNull();
   });
 
   it("keeps a binding operator's characters in the segment it belongs to", () => {
@@ -256,7 +282,7 @@ describe("the splitter and env-prefix strip read the one quote lexer", () => {
       segments.forEach(({ text, opBefore }, k) => {
         if (k > 0) {
           // A separator never follows an unquoted `>` it would bind to.
-          const operator = shellOperatorAt(command, at, false);
+          const operator = operatorAt(command, at);
           expect(operator?.separator).toBe(opBefore);
           at += operator!.width;
         } else {

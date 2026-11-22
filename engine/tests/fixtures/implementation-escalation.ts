@@ -1,5 +1,6 @@
 import {
   createImplementationAttemptAuthority,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
@@ -44,7 +45,7 @@ const settle = (
     proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     active_implementation_attempt: attempt,
     implementation_attempt_history: history,
-  }, attempt, attempt, observation(observedAt), { kind: "accepted" });
+  }, attempt, attempt, observation(observedAt), observedByteScope([]));
   if (!result.ok || result.value.kind === "ignored") {
     throw new Error("implementation escalation fixture settlement failed");
   }
@@ -66,6 +67,5 @@ export function implementationEscalatedTaskFields(): Readonly<Record<string, unk
     implementation_attempt_history: Object.freeze([retry, escalation]),
     implementation_retry_protocol: 2,
     implementation_retry_history_start: 0,
-    terminal_receipt: escalation.receiptId,
   });
 }

@@ -1,6 +1,7 @@
 import { derivePendingTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
 import {
   createImplementationAttemptAuthority,
+  observedByteScope,
   settleImplementationAttempt,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
@@ -45,7 +46,7 @@ export function semanticAttemptReceipt(
       newTestEvidence: "waived",
     }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-  }, { kind: "accepted" });
+  }, observedByteScope([]));
   if (!result.ok || result.value.kind === "ignored") throw new Error("implementation settlement fixture failed");
   return result.value.receipt;
 }

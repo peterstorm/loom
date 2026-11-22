@@ -29,8 +29,9 @@ import {
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import type { AcceptedWaveCompletionReceipt } from "../../src/core/completion-suite";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
-import type { ActiveWaveGateRegistration, TaskGraph } from "../../src/types";
+import type { ActiveWaveGateRegistration } from "../../src/types";
 import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
+import type { ManifestedTaskGraph } from "../../src/core/manifested-task-graph";
 
 /** The engine default's digest before this feature: every read-time fallback
  *  for a TaskGraph that carries no `verification_manifest` checks receipts
@@ -188,7 +189,7 @@ describe("wave-completion-suite-readiness under a graph frozen with the pre-feat
     return evaluated.receipt;
   }
 
-  const preFeatureGraph = (receipt: AcceptedWaveCompletionReceipt): TaskGraph => ({
+  const preFeatureGraph = (receipt: AcceptedWaveCompletionReceipt): ManifestedTaskGraph => ({
     current_phase: "execute",
     current_wave: 1,
     verification_manifest: preI6DefaultVerificationManifest(),

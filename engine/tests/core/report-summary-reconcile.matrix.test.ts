@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { TestFileResult, TestReportFiles } from "../../src/core/red-then-green-types";
 import {
-  declaredSummary,
+  testRunSummary,
   mergeSummaries,
   parseReportSummary,
   readTestReportText,
@@ -196,8 +196,8 @@ type EntryPoint = Readonly<{
 }>;
 
 const ENTRY_POINTS: readonly EntryPoint[] = [
-  { name: "parseVitestJson", sources: ["vitest-json"], run: (fixture) => declaredSummary(readTestReportText(vitestJson(fixture)), "vitest-json") },
-  { name: "parseJunitXml", sources: ["junit-xml"], run: (fixture) => declaredSummary(readTestReportText(junitXml(fixture)), "junit-xml") },
+  { name: "parseVitestJson", sources: ["vitest-json"], run: (fixture) => testRunSummary(readTestReportText(vitestJson(fixture)), "vitest-json") },
+  { name: "parseJunitXml", sources: ["junit-xml"], run: (fixture) => testRunSummary(readTestReportText(junitXml(fixture)), "junit-xml") },
   { name: "mergeSummaries", sources: ["junit-xml", "vitest-json"], run: merged },
   { name: "parseReportField (ledger read-back)", sources: ["junit-xml", "vitest-json"], run: readBack },
   { name: "findReport (capture)", sources: ["junit-xml", "vitest-json"], run: captured },

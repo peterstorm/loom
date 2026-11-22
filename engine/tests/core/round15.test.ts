@@ -28,6 +28,7 @@ import {
 import {
   parseMachineSummary,
   reviewResolutionLog,
+  type FindingsBlockStatus,
 } from "../../src/core/review-output";
 import {
   defaultRefutationThreshold,
@@ -438,6 +439,26 @@ describe("chooseSource keeps claim identity and marker severity in lockstep", ()
     expect(parsed.blockStatus.kind).toBe("superseded");
     expect(parsed.advisory).toContain("a nit only the block named");
     expect(parsed.blockStatus).toMatchObject({ carriedOver: 1 });
+  });
+
+  it("the absent, used and rejected arms carry no carriedOver count", () => {
+    const summary = (...tail: string[]) => parseMachineSummary([
+      "### Machine Summary",
+      "CRITICAL_COUNT: 1",
+      "ADVISORY_COUNT: 0",
+      "CRITICAL: the one blocker",
+      ...tail,
+    ].join("\n"))!;
+    // `toEqual` pins the exact arm: a stray `carriedOver` key fails it.
+    expect(summary().blockStatus).toEqual({ kind: "absent" });
+    expect(summary(block([{ severity: "critical", file: "src/a.ts", line: 1, claim: "the one blocker" }])).blockStatus)
+      .toEqual({ kind: "used" });
+    expect(summary(["```findings", "not json", "```"].join("\n")).blockStatus)
+      .toEqual({ kind: "rejected", reason: expect.any(String) });
+    // And the type refuses to construct one: the count belongs to the two arms that carry claims.
+    // @ts-expect-error -- `absent` carries nothing over
+    const absentWithCount: FindingsBlockStatus = { kind: "absent", carriedOver: 0 };
+    expect(absentWithCount.kind).toBe("absent");
   });
 });
 

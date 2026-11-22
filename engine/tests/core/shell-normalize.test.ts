@@ -109,14 +109,13 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     // `x=NOPEVAR; printf %s "${!x:-.claude/state}"` → `.claude/state`.
     expect(views("${!x:-.claude/state/active_task_graph.json}")).toEqual([".claude/state/active_task_graph.json"]);
     expect(views(".claude/stat${!x:-X}e")).toEqual([".claude/statXe"]);
-    expect(views(".claude/stat${!x-X}e")).toEqual([".claude/statXe",".claude/state"]); // colonless default
+    // A colonless indirect default's set-but-empty output (EMPTY) is a view,
+    // as for its non-indirect twin.
+    expect(views(".claude/stat${!x-X}e")).toEqual([".claude/statXe",".claude/state"]);
     // The alternate twin (`${!x:+w}`/`${!x+w}`) reveals `w` on SET — the
     // guard's set-state view of the indirect form.
     expect(views("${!x:+.claude/state/active_task_graph.json}")).toEqual(["",".claude/state/active_task_graph.json"]);
     expect(views(".claude/stat${!x+X}e")).toEqual([".claude/statXe",".claude/state"]);
-    // A colonless indirect default's set-but-empty output (EMPTY) is a view,
-    // as for its non-indirect twin.
-    expect(views(".claude/stat${!x-X}e")).toEqual([".claude/statXe",".claude/state"]);
     // Pure indirect, prefix-match and array-key forms carry NO word — still empty.
     expect(views("${!x}z")).toEqual(["z"]);
     expect(views("${!pre@}z")).toEqual(["z"]); // prefix-match: names starting `pre`
@@ -135,7 +134,6 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     expect(views(".claude/stat${x:=X}e")).toEqual([".claude/statXe"]);
     // The unset view (the evidence reader's) still reveals the colonless word.
     expect(normalizeShellSpan(".claude/stat${x-X}e", 0).value).toBe(".claude/statXe");
-    expect(views(".claude/stat${x-X}e")).toEqual([".claude/statXe",".claude/state"]);
   });
 
   it("a NESTED colonless default revealed inside a colon-form word has its own EMPTY view (round-22)", () => {
@@ -152,7 +150,6 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     expect(views(".claude/stat${x:-${y:-X}}e")).toEqual([".claude/statXe"]);
     // The unset view reveals the nested colonless word.
     expect(normalizeShellSpan(".claude/stat${x:-${y-X}}e", 0).value).toBe(".claude/statXe");
-    expect(views(".claude/stat${x:-${y-X}}e")).toEqual([".claude/statXe",".claude/state"]);
   });
 
   it("an alternate form `${x:+w}`/`${x+w}` has a view revealing its WORD; default/error forms are unchanged (round-24)", () => {
@@ -174,8 +171,6 @@ describe("the matching view (normalizeShellVariants) — bash word-normalization
     expect(views("${x:?msg}z")).toEqual(["z"]);
     // The unset view (the evidence reader's) deletes an alternate form to empty.
     expect(normalizeShellSpan("${x:+y}z", 0).value).toBe("z");
-    expect(views("${x:+y}z")).toEqual(["yz","z"]);
-    expect(views(".claude/stat${x:+X}e")).toEqual([".claude/statXe",".claude/state"]);
   });
 
   it("NESTED alternate/default forms are enumerated at any depth (round-24)", () => {

@@ -17,6 +17,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { KNOWN_HANDLERS, routeConsumesStdin } from "../../src/handler-routes";
+import { parseOrchestrationOperation } from "../../src/handlers/helpers/orchestration-operations";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { aSeed } from "../security/fixtures";
 
@@ -67,6 +68,13 @@ describe("routeConsumesStdin", () => {
       expect(routeConsumesStdin("helper", "orchestration", [operation]), operation).toBe(false);
     }
     expect(routeConsumesStdin("helper", "orchestration", [])).toBe(false);
+  });
+
+  it("reads no stdin for the retired `complete` operation, exactly as for any unknown operation", () => {
+    expect(parseOrchestrationOperation("complete")).toBeNull();
+    expect(routeConsumesStdin("helper", "orchestration", ["complete"])).toBe(false);
+    expect(routeConsumesStdin("helper", "orchestration", ["complete"]))
+      .toBe(routeConsumesStdin("helper", "orchestration", ["no-such-operation"]));
   });
 
   it("keeps every other known route on stdin", () => {
