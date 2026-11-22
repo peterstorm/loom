@@ -30,7 +30,7 @@ Hooks act only while a run is active: most shims read the run's State File first
 
 | Matcher | Script → handler | What it does | Crash |
 |---|---|---|---|
-| — | `cleanup-stale-subagents.sh` → `session-start cleanup-stale-subagents` | Sweeps subagent state idle past the shared TTL; never deletes the starting session or one whose TaskGraph still exists | non-blocking |
+| — | `cleanup-stale-subagents.sh` → `session-start cleanup-stale-subagents` | Sweeps subagent state idle past the shared TTL; never deletes the starting session or one whose TaskGraph still exists, and keeps one whose run binding names an open run for up to seven days more | non-blocking |
 | `clear` | `resume-after-clear.sh` → `session-start resume-after-clear` | Re-injects the active run's context after `/clear` | non-blocking |
 | `startup\|clear` | `lint-coverage.sh` → `session-start lint-coverage` | Reports the project's lint coverage state at session start | non-blocking |
 
