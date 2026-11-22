@@ -114,3 +114,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0098](ADR-0098-legacy-state-file-shapes-are-refused-at-load.md) | Legacy State File shapes are refused at load | Accepted (2026-11-20) | amends ADR-0004, ADR-0052, ADR-0096 |
 | [ADR-0099](ADR-0099-one-reader-for-request-markers-and-one-issuing-run-rule.md) | One reader for request markers and one issuing-run rule | Accepted (2026-11-20) | amends ADR-0017 |
 | [ADR-0100](ADR-0100-a-testrun-passes-only-when-a-test-executed.md) | A TestRun passes only when a test executed | Accepted (2026-11-22) | — |
+| [ADR-0101](ADR-0101-the-stale-sweep-keeps-a-session-while-its-bound-run-is-open.md) | The stale sweep keeps a session while its bound run is open | Accepted (2026-11-22) | — |

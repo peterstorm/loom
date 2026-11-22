@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, afterAll } from "vitest";
+import * as fc from "fast-check";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -18,10 +19,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  entriesWithinOpenRunGrace,
   isDeadStatFailure,
   runCleanupStaleSubagents,
   staleEntries,
   startingSessionOf,
+  sweepCutoffs,
   sweepStaleSessions,
 } from "../../../src/handlers/session-start/cleanup-stale-subagents";
 import {
@@ -36,12 +39,19 @@ import {
   type SessionId,
 } from "../../../src/machine";
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../fixtures/pi-session";
-import { PERSISTENT_SUBAGENT_DIR_ENTRIES, PERSISTENT_SUBAGENT_STORES } from "../../../src/config";
+import { OPEN_RUN_GRACE_MS, PERSISTENT_SUBAGENT_DIR_ENTRIES, PERSISTENT_SUBAGENT_STORES } from "../../../src/config";
+import type { BoundRunObservation } from "../../../src/orchestration/bound-run-liveness";
+import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
+import type { SessionRunBinding } from "../../../src/orchestration/session-run-bindings";
 
 const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
 
-/** Injected operations for a directory holding no readable TaskGraph pointer. */
-const NO_POINTERS = { readText: () => null, exists: () => false } as const;
+/** Injected operations for a directory holding no readable TaskGraph pointer and binding no run. */
+const NO_POINTERS = {
+  readText: () => null,
+  exists: () => false,
+  observeBoundRun: (): BoundRunObservation => ({ kind: "absent" }),
+} as const;
 
 const session = (raw: string): SessionId => {
   const parsed = parseSessionId(raw);
@@ -181,6 +191,64 @@ describe("staleEntries (pure) — group max mtime governs", () => {
   });
 });
 
+describe("sweepCutoffs and the open-run grace window (pure)", () => {
+  const SESSIONS = ["s-a", "s-b", "s-c"] as const;
+  const SUFFIXES = [".machine", ".evidence.jsonl", ".orchestration-runs.json"] as const;
+  /** Tracking dirs of a few sessions plus ungrouped strays, at arbitrary mtimes. */
+  const anyMtimes = fc.dictionary(
+    fc.oneof(
+      fc.tuple(fc.constantFrom(...SESSIONS), fc.constantFrom(...SUFFIXES)).map(([name, suffix]) => `${name}${suffix}`),
+      fc.constantFrom("stray-a", "stray-b"),
+    ),
+    fc.integer({ min: 0, max: 1_000 }),
+  ).map((record) => new Map(Object.entries(record)));
+  const anyCutoffs = fc.tuple(fc.integer({ min: 0, max: 1_000 }), fc.integer({ min: 0, max: 1_000 }))
+    .map(([idle, grace]) => sweepCutoffs(idle, grace));
+  const anyProtected = fc.subarray([...SESSIONS]).map((names) => new Set(names.map(sessionGroupKey)));
+
+  it("the open-run cutoff is the idle cutoff less the grace, the configured grace by default", () => {
+    expect(sweepCutoffs(100, 30)).toMatchObject({ idleMs: 100, openRunMs: 70 });
+    expect(sweepCutoffs(100)).toMatchObject({ idleMs: 100, openRunMs: 100 - OPEN_RUN_GRACE_MS });
+  });
+
+  it("refuses a grace that would put the open-run cutoff past the idle cutoff, or nowhere", () => {
+    for (const grace of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => sweepCutoffs(100, grace), String(grace)).toThrow(RangeError);
+    }
+  });
+
+  it("an entry exactly at the open-run cutoff is inside the window; one exactly at the idle cutoff is outside", () => {
+    const cutoffs = sweepCutoffs(100, 30);
+    expect(entriesWithinOpenRunGrace(new Map([["s-a.machine", 70]]), cutoffs)).toEqual(["s-a.machine"]);
+    expect(entriesWithinOpenRunGrace(new Map([["s-a.machine", 69]]), cutoffs)).toEqual([]);
+    expect(entriesWithinOpenRunGrace(new Map([["s-a.machine", 100]]), cutoffs)).toEqual([]);
+  });
+
+  it("the window and the entries past the grace partition exactly what the idle cutoff would sweep", () => {
+    fc.assert(fc.property(anyMtimes, anyCutoffs, anyProtected, (mtimes, cutoffs, protectedSessions) => {
+      const window = entriesWithinOpenRunGrace(mtimes, cutoffs, protectedSessions);
+      const pastGrace = staleEntries(mtimes, cutoffs.openRunMs, protectedSessions);
+      expect(window.filter((entry) => pastGrace.includes(entry))).toEqual([]);
+      expect([...window, ...pastGrace].sort()).toEqual(staleEntries(mtimes, cutoffs.idleMs, protectedSessions).sort());
+    }));
+  });
+
+  it("never offers a protected session's registry for reading", () => {
+    fc.assert(fc.property(anyMtimes, anyCutoffs, anyProtected, (mtimes, cutoffs, protectedSessions) => {
+      for (const entry of entriesWithinOpenRunGrace(mtimes, cutoffs, protectedSessions)) {
+        const session = sessionGroupOfTrackingFile(entry);
+        expect(session === null || !protectedSessions.has(session), entry).toBe(true);
+      }
+    }));
+  });
+
+  it("with no grace, no registry is worth reading", () => {
+    fc.assert(fc.property(anyMtimes, fc.integer({ min: 0, max: 1_000 }), (mtimes, idle) => {
+      expect(entriesWithinOpenRunGrace(mtimes, sweepCutoffs(idle, 0))).toEqual([]);
+    }));
+  });
+});
+
 describe("isDeadStatFailure (pure)", () => {
   const errno = (code: string) => Object.assign(new Error(code), { code });
 
@@ -230,7 +298,7 @@ describe("sweepStaleSessions (fs)", () => {
     oldms(join(subDir, "stray-old.txt"));
     writeFileSync(join(subDir, "stray-new.txt"), "x\n");
 
-    sweepStaleSessions(subDir, Date.now() - 1_800_000);
+    sweepStaleSessions(subDir, sweepCutoffs(Date.now() - 1_800_000));
 
     // Live group survives ENTIRELY — the fresh .machine anchors the group.
     expect(existsSync(join(subDir, "live.machine"))).toBe(true);
@@ -250,7 +318,7 @@ describe("sweepStaleSessions (fs)", () => {
 
   it("a stat failure protects readable siblings in the same session while unrelated stale sessions are swept", () => {
     const removed: string[] = [];
-    const diagnostics = sweepStaleSessions("/tracking", 100, {
+    const diagnostics = sweepStaleSessions("/tracking", sweepCutoffs(100), {
       ...NO_POINTERS,
       probeDirectory: () => ({
         kind: "present",
@@ -273,7 +341,7 @@ describe("sweepStaleSessions (fs)", () => {
 
   it("removes provably-dead entries, surfacing only failed removals", () => {
     const removed: string[] = [];
-    const diagnostics = sweepStaleSessions("/tracking", 100, {
+    const diagnostics = sweepStaleSessions("/tracking", sweepCutoffs(100), {
       ...NO_POINTERS,
       probeDirectory: () => ({
         kind: "present",
@@ -306,7 +374,7 @@ describe("sweepStaleSessions (fs)", () => {
 
   it("returns stat and remove diagnostics with operation, exact path, and cause", () => {
     const removed: string[] = [];
-    const diagnostics = sweepStaleSessions("/tracking", 100, {
+    const diagnostics = sweepStaleSessions("/tracking", sweepCutoffs(100), {
       ...NO_POINTERS,
       probeDirectory: () => ({ kind: "present", entries: ["unstatable.active", "stale.active"] }),
       mtime: (path) => {
@@ -335,14 +403,14 @@ describe("sweepStaleSessions (fs)", () => {
   });
 
   it("distinguishes ENOENT absence from a directory probe failure", () => {
-    expect(sweepStaleSessions("/missing", 100, {
+    expect(sweepStaleSessions("/missing", sweepCutoffs(100), {
       ...NO_POINTERS,
       probeDirectory: () => ({ kind: "absent" }),
       mtime: () => { throw new Error("must not stat an absent directory"); },
       remove: () => { throw new Error("must not remove from an absent directory"); },
     })).toEqual([]);
 
-    const diagnostics = sweepStaleSessions("/unreadable", 100, {
+    const diagnostics = sweepStaleSessions("/unreadable", sweepCutoffs(100), {
       ...NO_POINTERS,
       probeDirectory: () => ({ kind: "unavailable", cause: "EACCES readdir" }),
       mtime: () => { throw new Error("must not stat an unreadable directory"); },
@@ -438,7 +506,7 @@ describe("sweepStaleSessions (fs)", () => {
         `s-resumed.agent1${STOP_CHECK_NOTE_SUFFIX}`];
       for (const name of [...kept, "s-other.evidence.jsonl"]) writeOld(dir, name);
 
-      expect(sweepStaleSessions(dir, Date.now() - 3_600_000, undefined, session("s-resumed"))).toEqual([]);
+      expect(sweepStaleSessions(dir, sweepCutoffs(Date.now() - 3_600_000), undefined, session("s-resumed"))).toEqual([]);
 
       for (const name of kept) expect(existsSync(join(dir, name)), name).toBe(true);
       expect(existsSync(join(dir, "s-other.evidence.jsonl"))).toBe(false);
@@ -456,7 +524,7 @@ describe("sweepStaleSessions (fs)", () => {
       writeOld(dir, attempt);
       writeOld(dir, note);
 
-      expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([]);
+      expect(sweepStaleSessions(dir, sweepCutoffs(Date.now() - 3_600_000))).toEqual([]);
 
       for (const name of ["s.bound.task_graph", "s.bound.machine", attempt, note]) {
         expect(existsSync(join(dir, name)), name).toBe(true);
@@ -476,7 +544,7 @@ describe("sweepStaleSessions (fs)", () => {
       writeOld(dir, "s-garbled.task_graph", "relative/not-canonical.json");
 
       // The malformed pointer binds nothing, and says so.
-      expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([{
+      expect(sweepStaleSessions(dir, sweepCutoffs(Date.now() - 3_600_000))).toEqual([{
         operation: "parse",
         path: join(dir, "s-garbled.task_graph"),
         cause: "TaskGraph pointer must be one exact canonical absolute path",
@@ -492,11 +560,12 @@ describe("sweepStaleSessions (fs)", () => {
 
     it("an unreadable pointer protects its session and is reported", () => {
       const removed: string[] = [];
-      const diagnostics = sweepStaleSessions("/tracking", 100, {
+      const diagnostics = sweepStaleSessions("/tracking", sweepCutoffs(100), {
         probeDirectory: () => ({ kind: "present", entries: ["s-maybe.task_graph", "s-maybe.evidence.jsonl", "s-dead.evidence.jsonl"] }),
         mtime: () => 10,
         readText: () => { throw new Error("EACCES read"); },
         exists: () => { throw new Error("must not probe a graph it could not read"); },
+        observeBoundRun: () => { throw new Error("no run registry here to observe"); },
         remove: (path) => { removed.push(path); },
       });
 
@@ -526,6 +595,148 @@ describe("sweepStaleSessions (fs)", () => {
     });
   });
 
+  // A standalone review's subagents resolve their issuing run through the
+  // session's run binding registry; sweeping it an hour into an idle wait
+  // refused the run's completion ("cannot bind completed result for
+  // unregistered run"). The registry now keeps its session while a run it
+  // names is open, for at most OPEN_RUN_GRACE_MS past the idle TTL.
+  describe("a session whose run binding names an open run", () => {
+    const REGISTRY = "s-run.orchestration-runs.json";
+    const LEDGER = "s-run.evidence.jsonl";
+    const registryText = (runs: readonly string[], harness = "claude-code"): string => JSON.stringify({
+      schemaVersion: 1, kind: "session-run-bindings", harness, sessionId: "s-run",
+      bindings: runs.map((run) => ({
+        runId: run, runsRoot: "/runs", runDirectory: join("/runs", run), requestIds: ["req-1"], resultDigest: null,
+      })),
+    });
+    const sweepWith = (
+      text: string | Error,
+      observe: (binding: SessionRunBinding) => BoundRunObservation,
+      mtime = 10,
+    ) => {
+      const removed: string[] = [];
+      const observed: string[] = [];
+      const diagnostics = sweepStaleSessions("/tracking", sweepCutoffs(100), {
+        probeDirectory: () => ({ kind: "present", entries: [REGISTRY, LEDGER, "s-idle.evidence.jsonl"] }),
+        mtime: () => mtime,
+        readText: (path) => {
+          if (!path.endsWith(REGISTRY)) return null;
+          if (text instanceof Error) throw text;
+          return text;
+        },
+        exists: () => false,
+        observeBoundRun: (binding) => { observed.push(binding.runId); return observe(binding); },
+        remove: (path) => { removed.push(path); },
+      });
+      return { removed: removed.map((path) => path.slice("/tracking/".length)).sort(), observed, diagnostics };
+    };
+    const OPEN: BoundRunObservation = { kind: "observed", liveness: { kind: "open" } };
+    const FINISHED: BoundRunObservation = { kind: "observed", liveness: { kind: "finished", because: "terminal-state" } };
+
+    it("keeps the whole session while any run it names is open", () => {
+      const swept = sweepWith(registryText(["run-a", "run-b"]), (binding) => binding.runId === "run-b" ? OPEN : FINISHED);
+      expect(swept.removed).toEqual(["s-idle.evidence.jsonl"]);
+      expect(swept.observed).toEqual(["run-a", "run-b"]);
+      expect(swept.diagnostics).toEqual([]);
+    });
+
+    it("reads a registry either harness published", () => {
+      expect(sweepWith(registryText(["run-a"], "pi"), () => OPEN).removed).toEqual(["s-idle.evidence.jsonl"]);
+    });
+
+    it("releases the session once every run is finished or gone", () => {
+      const swept = sweepWith(registryText(["run-a", "run-b"]), (binding) => binding.runId === "run-a" ? FINISHED : { kind: "absent" });
+      expect(swept.removed).toEqual([LEDGER, REGISTRY, "s-idle.evidence.jsonl"].sort());
+      expect(swept.diagnostics).toEqual([]);
+    });
+
+    it("an unreadable run keeps the session and is reported; every binding is still observed", () => {
+      const swept = sweepWith(registryText(["run-a", "run-b"]), () => ({ kind: "unreadable", cause: "EACCES checkpoint" }));
+      expect(swept.removed).toEqual(["s-idle.evidence.jsonl"]);
+      expect(swept.diagnostics).toEqual([
+        { operation: "read", path: join("/runs", "run-a"), cause: "EACCES checkpoint" },
+        { operation: "read", path: join("/runs", "run-b"), cause: "EACCES checkpoint" },
+      ]);
+    });
+
+    it("an unreadable registry keeps the session and is reported", () => {
+      const swept = sweepWith(new Error("EACCES read"), () => { throw new Error("must not observe an unread registry"); });
+      expect(swept.removed).toEqual(["s-idle.evidence.jsonl"]);
+      expect(swept.diagnostics).toEqual([{ operation: "read", path: join("/tracking", REGISTRY), cause: "EACCES read" }]);
+    });
+
+    it("a malformed registry binds nothing and is reported", () => {
+      for (const text of ["x\n", JSON.stringify({ kind: "session-run-bindings", harness: "emacs" })]) {
+        const swept = sweepWith(text, () => { throw new Error("must not observe a malformed registry"); });
+        expect(swept.removed, text).toEqual([LEDGER, REGISTRY, "s-idle.evidence.jsonl"].sort());
+        expect(swept.diagnostics, text).toHaveLength(1);
+        expect(swept.diagnostics[0]).toMatchObject({ operation: "parse", path: join("/tracking", REGISTRY) });
+      }
+    });
+
+    it("an open run keeps its session no longer than the grace bound", () => {
+      const swept = sweepWith(registryText(["run-a"]), () => { throw new Error("must not observe past the grace"); }, 100 - OPEN_RUN_GRACE_MS - 1);
+      expect(swept.removed).toEqual([LEDGER, REGISTRY, "s-idle.evidence.jsonl"].sort());
+    });
+
+    it("an open run still keeps its session idle exactly at the grace cutoff", () => {
+      const swept = sweepWith(registryText(["run-a"]), () => OPEN, 100 - OPEN_RUN_GRACE_MS);
+      expect(swept.observed).toEqual(["run-a"]);
+      expect(swept.removed).toEqual(["s-idle.evidence.jsonl"]);
+      expect(swept.diagnostics).toEqual([]);
+    });
+
+    it("never reads the registry of a session the idle cutoff keeps anyway", () => {
+      const removed: string[] = [];
+      const diagnostics = sweepStaleSessions("/tracking", sweepCutoffs(100), {
+        probeDirectory: () => ({
+          kind: "present",
+          entries: ["s-fresh.orchestration-runs.json", "s-start.orchestration-runs.json", "s-idle.evidence.jsonl"],
+        }),
+        // s-fresh is idle exactly at the idle cutoff, so it is not stale.
+        mtime: (path) => path.endsWith("s-fresh.orchestration-runs.json") ? 100 : 10,
+        readText: (path) => { throw new Error(`must not read ${path}`); },
+        exists: () => false,
+        observeBoundRun: () => { throw new Error("must not observe a run of a kept session"); },
+        remove: (path) => { removed.push(path); },
+      }, session("s-start"));
+      expect(diagnostics).toEqual([]);
+      expect(removed).toEqual([join("/tracking", "s-idle.evidence.jsonl")]);
+    });
+
+    it("on real files: the open run's session survives, the finished run's is swept", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "loom-sweep-runs-"));
+      const runs = mkdtempSync(join(tmpdir(), "loom-sweep-runs-root-"));
+      try {
+        const open = createRunDirectory(runs, "run-open");
+        const done = createRunDirectory(runs, "run-done");
+        if (!open.ok || !done.ok) throw new Error("fixture runs did not open");
+        await open.value.registerProgram({ kind: "standalone-review" });
+        await done.value.registerProgram({ kind: "standalone-review" });
+        await done.value.writeCheckpoint(JSON.stringify({ kind: "done" }));
+        const old = new Date(Date.now() - 12 * 3_600_000);
+        for (const [session, run] of [["s-open", "run-open"], ["s-done", "run-done"]] as const) {
+          writeFileSync(join(dir, `${session}.orchestration-runs.json`), JSON.stringify({
+            schemaVersion: 1, kind: "session-run-bindings", harness: "claude-code", sessionId: session,
+            bindings: [{ runId: run, runsRoot: runs, runDirectory: join(runs, run), requestIds: ["req-1"], resultDigest: null }],
+          }));
+          writeFileSync(join(dir, `${session}.evidence.jsonl`), "x\n");
+          for (const name of [`${session}.orchestration-runs.json`, `${session}.evidence.jsonl`]) utimesSync(join(dir, name), old, old);
+        }
+
+        expect(sweepStaleSessions(dir, sweepCutoffs(Date.now() - 3_600_000))).toEqual([]);
+
+        expect(existsSync(join(dir, "s-open.orchestration-runs.json"))).toBe(true);
+        expect(existsSync(join(dir, "s-open.evidence.jsonl"))).toBe(true);
+        expect(existsSync(join(dir, "s-done.orchestration-runs.json"))).toBe(false);
+        expect(existsSync(join(dir, "s-done.evidence.jsonl"))).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(runs, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("SessionStart input that names no usable session is reported, and the sweep still runs", () => {
     const dir = mkdtempSync(join(tmpdir(), "loom-sweep-unusable-"));
     try {
@@ -542,7 +753,7 @@ describe("sweepStaleSessions (fs)", () => {
   });
 
   it("a missing dir is a no-op, and a clean injected handler wrapper passes through without diagnostics", () => {
-    expect(sweepStaleSessions(join(subDir, "nope"), Date.now())).toEqual([]);
+    expect(sweepStaleSessions(join(subDir, "nope"), sweepCutoffs(Date.now()))).toEqual([]);
     const cleanDir = join(subDir, "clean-wrapper");
     mkdirSync(cleanDir);
     const result = runCleanupStaleSubagents(cleanDir, Date.now());

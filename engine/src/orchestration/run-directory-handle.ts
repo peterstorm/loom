@@ -1115,15 +1115,35 @@ function readEventsOperation(directory: string) {
   };
 }
 
+/** The checkpoint text, or null when none was written; any other failure throws. */
+function checkpointTextOrNull(directory: string, maximumBytes?: number): string | null {
+  try {
+    return readRunBytesNoFollow(join(directory, CHECKPOINT_FILE), maximumBytes).toString("utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 function readCheckpointOperation(directory: string) {
-  return async (maximumBytes?: number): Promise<string | null> => {
-    try {
-      return readRunBytesNoFollow(join(directory, CHECKPOINT_FILE), maximumBytes).toString("utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
-  };
+  return async (maximumBytes?: number): Promise<string | null> => checkpointTextOrNull(directory, maximumBytes);
+}
+
+/**
+ * The checkpoint projection read synchronously, for the one caller that must
+ * not await: the SessionStart sweep, which Pi runs as a synchronous startup
+ * sweep. `success(null)` = no checkpoint was written; a failure = one exists
+ * but cannot be read.
+ */
+export function readCheckpointNow(
+  handle: Pick<RunDirHandle, "runDirectory">,
+  maximumBytes?: number,
+): DomainResult<string | null, RunDirectoryError> {
+  try {
+    return success(checkpointTextOrNull(handle.runDirectory, maximumBytes));
+  } catch (error) {
+    return failure("checkpoint", `run checkpoint is unreadable: ${errorDetail(error)}`);
+  }
 }
 
 function writeCheckpointOperation(directory: string) {

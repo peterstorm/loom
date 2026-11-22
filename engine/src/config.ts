@@ -309,6 +309,16 @@ export const PERSISTENT_SUBAGENT_DIR_ENTRIES: ReadonlySet<string> =
  */
 export const STALE_SUBAGENT_TTL_MS = 60 * 60_000;
 
+/**
+ * How much longer than `STALE_SUBAGENT_TTL_MS` an idle session survives the
+ * SessionStart sweep while a run its Session Run Binding names is still open
+ * (`core/run-liveness.ts`). The bound exists because some runs never prove
+ * their end in a file the sweep reads (a panel finishes in its journal; a
+ * blocked run waits on an operator who may never return): without it, such a
+ * run would keep its session's files forever.
+ */
+export const OPEN_RUN_GRACE_MS = 7 * 24 * 60 * 60_000;
+
 /** The Guarded Skill Machine definitions Loom ships (`machines/` at the plugin root). */
 export const SHIPPED_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
 

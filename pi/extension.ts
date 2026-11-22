@@ -70,7 +70,7 @@ import { validateTemplateSubstitution } from "../engine/src/core/validate-templa
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
 import { taskGraphPath, subagentDir, guardedLocations, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
-import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
+import { sweepCutoffs, sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
 import { fsSessionRegistry, parseSessionId } from "../engine/src/machine";
@@ -243,7 +243,7 @@ export const registerLoomEmissionReadiness = (pi: PiEmissionReadinessHost): PiEm
 const productionPiStartupSweeps: PiStartupSweepSource = () => Object.freeze([
   Object.freeze({
     name: "sweepStaleSessions",
-    run: (): void => { sweepStaleSessions(subagentDir(), Date.now() - STALE_SUBAGENT_TTL_MS); },
+    run: (): void => { sweepStaleSessions(subagentDir(), sweepCutoffs(Date.now() - STALE_SUBAGENT_TTL_MS)); },
   }),
   Object.freeze({ name: "sweepExpiredPiWriteGrants", run: (): void => sweepExpiredPiWriteGrants() }),
 ]);

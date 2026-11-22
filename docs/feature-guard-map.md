@@ -59,13 +59,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 616 src files / ~169.0k lines TS; `engine/tests/` holds 955 TS files / ~262.2k lines (fixtures and helpers included), of which 834 test files are executed (810 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 618 src files / ~169.3k lines TS; `engine/tests/` holds 957 TS files / ~262.7k lines (fixtures and helpers included), of which 836 test files are executed (812 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 128 docs incl. **99 ADRs** (index test-enforced) | — |
+| `docs/` | 129 docs incl. **100 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -350,7 +350,9 @@ security-hunter). Key mechanics:
   SessionStart sweep); a gated agent dying without its stop hook cannot gate the
   session forever. The sweep deletes a session group only when everything idled past
   TTL, never the starting session, and never a session whose TaskGraph pointer still
-  exists — an orchestration paused overnight keeps its ledger.
+  exists — an orchestration paused overnight keeps its ledger. A session whose run
+  binding registry names an open run is kept for up to `OPEN_RUN_GRACE_MS` past the
+  TTL (ADR-0101), so a standalone run's captures still bind after an idle wait.
 
 ### 4.6 Proof, attempts, and settlement
 
@@ -958,9 +960,9 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **834 executed test files / ~262.2k lines** — 810 under `engine/tests/` (955 TS files there
-  including fixtures and helpers; core 309 test files, handlers 189, pi 50,
-  linter 47, orchestration 38, utils 35, machine 31, acceptance 20, security 20, …)
+- **836 executed test files / ~262.7k lines** — 812 under `engine/tests/` (957 TS files there
+  including fixtures and helpers; core 310 test files, handlers 189, pi 50,
+  linter 47, orchestration 39, utils 35, machine 31, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
@@ -968,7 +970,7 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (99 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (100 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, orchestration facades, Pi resources, task-graph
   validation — real CLI processes, not mocks.
