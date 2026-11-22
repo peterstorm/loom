@@ -24,6 +24,9 @@ import {
   ACCEPTANCE_BLOCK_HEADING,
   AFFECTED_BLOCK_HEADING,
   AFFECTED_EXCUSED_HEADING,
+  AFFECTED_STOP_CHECK_SUBJECT,
+  capReachedNote,
+  counterUnreadableNote,
   MUTATION_BLOCK_HEADING,
   OWNER_BLOCK_HEADING,
   STOP_CHECK_NAMES,
@@ -116,7 +119,12 @@ function perCheck<C extends StopCheckPayloads>(at: <K extends StopCheckName>(nam
   return freeze({ acceptance: at("acceptance"), affected: at("affected"), mutation: at("mutation"), owner: at("owner") });
 }
 
-/** The slots, one per check, each from `at`. */
+/**
+ * The slots, one per check, each from `at`. It returns the named
+ * `StopCheckSlots<C>`, not `perCheck`'s mapped record, so `someChecks` can
+ * infer its payloads from the result; through `perCheck` alone the caller
+ * would spell the slot type twice.
+ */
 const slotsOf = <C extends StopCheckPayloads>(at: <K extends StopCheckName>(name: K) => C[K] | null): StopCheckSlots<C> =>
   perCheck<StopCheckSlots<C>>(at);
 
@@ -157,27 +165,27 @@ export type StopCheckBlockDecision<C extends StopCheckPayloads> =
 
 /**
  * What a stop says of one check: the heading of its part of a block message,
- * and the subject its fail-open notes name it by ("<subject> reached its
- * N-block cap", "<subject>'s block counter is unreadable: <reason>"). The
- * affected check's two notes are also CT-2's `AFFECTED_NOTE_TEXT` entries,
- * which its tests pin equal.
+ * and the subject its fail-open notes name it by. The note wording itself is
+ * `capReachedNote` and `counterUnreadableNote`, which CT-2's
+ * `AFFECTED_NOTE_TEXT` also builds from, so the affected check's notes have
+ * one source.
  */
 type StopCheckDescriptor = Readonly<{ heading: string; subject: string }>;
 
 /** One descriptor per stop check. */
 const STOP_CHECKS: { readonly [K in StopCheckName]: StopCheckDescriptor } = freeze({
   acceptance: freeze({ heading: ACCEPTANCE_BLOCK_HEADING, subject: "the acceptance stop check" }),
-  affected: freeze({ heading: AFFECTED_BLOCK_HEADING, subject: "the affected stop check" }),
+  affected: freeze({ heading: AFFECTED_BLOCK_HEADING, subject: AFFECTED_STOP_CHECK_SUBJECT }),
   mutation: freeze({ heading: MUTATION_BLOCK_HEADING, subject: "the Task mutation check" }),
   owner: freeze({ heading: OWNER_BLOCK_HEADING, subject: "the Task owner check" }),
 });
 
 /** A check's cap note, stating the cap it was given: each typed cap is the one its note may state. */
 const capNote = <K extends StopCheckName>(name: K, cap: StopCheckBlockCaps[K]): string =>
-  `${STOP_CHECKS[name].subject} reached its ${cap}-block cap`;
+  capReachedNote(STOP_CHECKS[name].subject, cap);
 
 const unreadableCounterNote = (name: StopCheckName, reason: string): string =>
-  `${STOP_CHECKS[name].subject}'s block counter is unreadable: ${reason}`;
+  `${counterUnreadableNote(STOP_CHECKS[name].subject)}: ${reason}`;
 
 /** The last line of every runner and record check's part of a block message. */
 export const blocksRemainingLine = (blocksRemaining: number): string =>

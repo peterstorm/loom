@@ -86,8 +86,9 @@
  *    never writes a quote loop.
  *  - redirectsOf (core/shell-redirects) — THE output-redirect scan, a typed
  *    union per redirect. hasOutputRedirect, outputRedirectTargets and the
- *    evidence scanner's redirect targets are projections of it, so the guard
- *    and the ledger cannot disagree on which redirects a segment has.
+ *    evidence reader's redirectTargetsOf are projections of it by kind, so
+ *    the guard and the ledger cannot disagree on which redirects a segment
+ *    has.
  *  - scanSubstitutions (core/shell-substitution) — the ONE shared substitution
  *    traversal (quote state `'"' | "'" | null`; a `'` inside `"…"` is literal;
  *    `$(…)`/backticks stay LIVE inside double quotes; `<(…)`/`>(…)` is live

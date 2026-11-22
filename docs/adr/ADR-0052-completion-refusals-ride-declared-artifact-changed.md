@@ -6,6 +6,10 @@ Accepted (2026-11-07). Records AD-5 of the G2 skeletons plan
 FR-012 through FR-021, interview Q10a). Shipped on branch `feat/g2-skeletons` by T12, building on the
 conformance judge of T8 (ADR-0058) and the skeleton records of T10 and T11 (ADR-0051).
 
+Amended by [ADR-0098](ADR-0098-legacy-state-file-shapes-are-refused-at-load.md) (2026-11-20): the
+authority-free Pi untrusted stop and its LEGACY_STOP_CONFORMANCE constant are deleted, so exact settlement
+and reconcile are the only paths that observe conformance.
+
 ## Context
 
 G2 has the engine write a deterministic skeleton at every not-yet-existing bound path of an

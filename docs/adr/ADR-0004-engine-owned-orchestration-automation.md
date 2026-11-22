@@ -6,7 +6,10 @@ Accepted
 Amended by [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md)
 (2026-11-20): the manual standalone-review and review-panel helpers and their unversioned formats are
 retired, so "historical helpers/formats remain behind core/legacy-archive.ts" no longer holds for them.
-The archive keeps only the Wave Gate compatibility migration.
+The archive kept only the Wave Gate compatibility migration.
+
+Amended by [ADR-0098](ADR-0098-legacy-state-file-shapes-are-refused-at-load.md) (2026-11-20): that last
+migration is retired and core/legacy-archive.ts is deleted, so no historical format is read behind it.
 
 ## Context
 

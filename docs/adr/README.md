@@ -18,7 +18,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0001](ADR-0001-linter-module-within-engine.md) | Linter as Module within Engine | Accepted | — |
 | [ADR-0002](ADR-0002-defense-in-depth-redos-protection.md) | Defense-in-Depth ReDoS Protection | Accepted | — |
 | [ADR-0003](ADR-0003-fail-closed-error-handling.md) | Fail-Closed Error Handling | Accepted | — |
-| [ADR-0004](ADR-0004-engine-owned-orchestration-automation.md) | Engine-Owned Orchestration Automation | Accepted | amended by ADR-0096 |
+| [ADR-0004](ADR-0004-engine-owned-orchestration-automation.md) | Engine-Owned Orchestration Automation | Accepted | amended by ADR-0096, ADR-0098 |
 | [ADR-0005](ADR-0005-per-program-facade-drivers.md) | Program façade drivers stay per-program; no shared driver framework | Accepted | — |
 | [ADR-0006](ADR-0006-lc1-reaches-production-by-projection.md) | LC-1 reaches production by projection, not by checkpoint | Accepted | — |
 | [ADR-0007](ADR-0007-curated-public-surface.md) | A facade publishes a curated Public Surface, not the union of its volumes | Accepted | — |
@@ -51,7 +51,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0034](ADR-0034-family-scope-keeps-changesfamily-selection-has-one-owner.md) | Family scope keeps G5a's changesFamily; selection has one owner | Accepted (2026-10-23) | amended by ADR-0063 |
 | [ADR-0035](ADR-0035-sibling-coverage-is-direct-imports-closed-under-re-exports.md) | Sibling coverage is direct imports closed under re-exports | Accepted (2026-10-23) | amended by ADR-0063 |
 | [ADR-0036](ADR-0036-deterministic-mutation-plan-over-changed-owner-lines.md) | Deterministic mutation plan over changed owner lines | Accepted (2026-10-23) | — |
-| [ADR-0037](ADR-0037-outcome-classification-reads-only-the-structured-report.md) | Outcome classification reads only the structured report | Accepted (2026-10-23) | — |
+| [ADR-0037](ADR-0037-outcome-classification-reads-only-the-structured-report.md) | Outcome classification reads only the structured report | Accepted (2026-10-23) | amended in place by the complexity trim (`reportTestcases`) |
 | [ADR-0038](ADR-0038-isolation-via-one-detached-worktree-per-invariant.md) | Isolation via one detached worktree per Invariant | Accepted (2026-10-23) | — |
 | [ADR-0039](ADR-0039-the-second-copy-lens-is-an-engine-issued-packet-section.md) | The second-copy lens is an engine-issued packet section | Accepted (2026-10-23) | amended by ADR-0047 |
 | [ADR-0040](ADR-0040-brief-duties-and-status-projection.md) | Brief duties and status projection | Accepted (2026-10-23) | — |
@@ -66,7 +66,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0049](ADR-0049-skeletons-freeze-only-consumer-facing-signatures-and-adts.md) | Skeletons freeze only consumer-facing signatures and ADTs | Accepted (2026-11-07) | — |
 | [ADR-0050](ADR-0050-binding-grammar-contract-qualified-export-bindings-list.md) | Binding grammar as a contract-qualified Export bindings list in File Structure | Accepted (2026-11-07) | — |
 | [ADR-0051](ADR-0051-persistence-bindings-stamped-skeleton-records-content-addressed.md) | Export bindings are stamped at population, skeleton records carry engine digests, and an untouched skeleton is recognized by content | Accepted (2026-11-07) | — |
-| [ADR-0052](ADR-0052-completion-refusals-ride-declared-artifact-changed.md) | Completion refusals ride the existing declared-artifact-changed obligation | Accepted (2026-11-07) | — |
+| [ADR-0052](ADR-0052-completion-refusals-ride-declared-artifact-changed.md) | Completion refusals ride the existing declared-artifact-changed obligation | Accepted (2026-11-07) | amended by ADR-0098 |
 | [ADR-0053](ADR-0053-typescript-surface-third-parse-only-compiler-seam.md) | TypeScript enters through a third parse-only compiler seam | Accepted (2026-11-07) | amends ADR-0042 |
 | [ADR-0054](ADR-0054-java-restricted-lexer-frozen-holder-and-static-final-constant.md) | Java restricted lexer, frozen holder shape and typed static final constant per binding | Accepted (2026-11-07) | — |
 | [ADR-0055](ADR-0055-canonical-skeleton-bytes-deterministic-and-unformatted.md) | Canonical skeleton bytes are deterministic and unformatted | Accepted (2026-11-07) | — |
@@ -110,6 +110,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0093](ADR-0093-a-reopen-names-what-the-finding-needs.md) | A reopen names what the Finding needs | Accepted (2026-11-18) | — |
 | [ADR-0094](ADR-0094-a-re-reviewed-tasks-roster-follows-what-changed.md) | A re-reviewed Task's roster follows what changed | Accepted (2026-11-18) | extends ADR-0091 |
 | [ADR-0095](ADR-0095-the-linter-measures-functions-through-a-lazy-compiler-seam.md) | The linter measures functions through a lazy compiler seam | Accepted (2026-11-18) | amends ADR-0042 |
-| [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md) | Each panel has one driver, and the manual review helpers retire | Accepted (2026-11-20) | partly supersedes ADR-0030; amends ADR-0004, ADR-0018, ADR-0029 |
-| [ADR-0098](ADR-0098-legacy-state-file-shapes-are-refused-at-load.md) | Legacy State File shapes are refused at load | Accepted (2026-11-20) | — |
+| [ADR-0096](ADR-0096-each-panel-has-one-driver-and-the-manual-review-helpers-retire.md) | Each panel has one driver, and the manual review helpers retire | Accepted (2026-11-20) | partly supersedes ADR-0030; amends ADR-0004, ADR-0018, ADR-0029; amended by ADR-0098 |
+| [ADR-0098](ADR-0098-legacy-state-file-shapes-are-refused-at-load.md) | Legacy State File shapes are refused at load | Accepted (2026-11-20) | amends ADR-0004, ADR-0052, ADR-0096 |
 | [ADR-0099](ADR-0099-one-reader-for-request-markers-and-one-issuing-run-rule.md) | One reader for request markers and one issuing-run rule | Accepted (2026-11-20) | amends ADR-0017 |
+| [ADR-0100](ADR-0100-a-testrun-passes-only-when-a-test-executed.md) | A TestRun passes only when a test executed | Accepted (2026-11-22) | — |

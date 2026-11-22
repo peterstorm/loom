@@ -68,8 +68,8 @@ A read-only statement of which project checks are configured, independent of whe
 _Avoid_: Test coverage, project-check pass, verification waiver, persisted coverage flag
 
 **Test Report Read**:
-The one read of a structured test report's bytes (`readTestReport`), from which every reader projects what it needs: the declared count (every declared testcase, skipped included, with per-file results) a TestRun fact's summary carries; the executed count (only testcases that ran) a Completion Check Result's counts carry; and a JUnit report's testcases. The two counting rules accept different reports and can disagree, so neither is derived from the other.
-_Avoid_: Legacy parser, strict parser, report summary (alone — that is the declared-count projection)
+The one read of a structured test report's bytes (`readTestReport`), from which every reader projects what it needs: the TestRun summary a TestRun fact carries (the declared count, every declared testcase with skipped ones included and per-file results, held to the executed count wherever that rule reads the report, so it never proves a test ran that did not); the executed count (only testcases that ran) a Completion Check Result's counts carry; and a JUnit report's testcases. The two counting rules accept different reports, so neither is derived from the other.
+_Avoid_: Legacy parser, strict parser, report summary (alone — that is the TestRun summary projection)
 
 ### Test-first proof
 

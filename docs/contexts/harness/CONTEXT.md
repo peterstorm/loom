@@ -45,7 +45,7 @@ The request id and Context Packet digest a spawned task's two authority markers 
 _Avoid_: Request marker (one of the two lines), prompt metadata, request id (alone — the digest is half the identity)
 
 **Issuing Run**:
-The orchestration run that issued a task's identity: the explicit run the `LOOM_ORCHESTRATION_*` pair names (both or neither), otherwise the one session run binding whose run issued every named request under its exact digest. None or several is a refusal, never "unrelated". One rule (`resolveIssuingRun`) answers it for Claude Code and Pi.
+The orchestration run that issued a task's identity: the explicit run the `LOOM_ORCHESTRATION_*` pair names (both or neither), otherwise the one session run binding whose run issued every named request under its exact digest. None or several is a refusal, never "unrelated". One rule answers it for Claude Code and Pi: `resolveIssuingRun` gives its location, and `resolveIssuingSessionBinding` (its session half) gives the binding Pi keeps.
 _Avoid_: Bound run (a run a session binding lists, whether or not it issued this request), current run
 
 **Write Grant**:

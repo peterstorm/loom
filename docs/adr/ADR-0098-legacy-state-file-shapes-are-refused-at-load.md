@@ -1,7 +1,7 @@
 # ADR-0098: Legacy State File shapes are refused at load
 
 ## Status
-Accepted (2026-11-20). Retires the read-time migrations for State Files written before attempt authority, frozen Proof, the Verification Manifest and the Wave completion suite.
+Accepted (2026-11-20). Amends ADR-0004, ADR-0052 and ADR-0096. Retires the read-time migrations for State Files written before attempt authority, frozen Proof, the Verification Manifest and the Wave completion suite.
 
 ## Context
 The State File parser still migrated shapes no current writer produces:
@@ -35,9 +35,9 @@ Refused:
 
 Deleted with them: Task.legacy_execution_reservation, the legacy_missing_proof lifecycle arm, the authority-free Stop path on Claude Code (`update-task-status`) and on Pi (`subagent-result`, `subagent-settlement`, and the Pi Task guess from a parent's spawn prompt), UntrustedStopResolution, applyUntrustedStopResolution, applyCompletionInfrastructureFailure, core/task-attribution.ts, the legacy positive migration in `reconcile-implementation-proof` (a recovered Task is now pending with a satisfied Proof and `revalidation_required`), the legacyDefaultVerificationManifest read-time fallbacks, the Wave completion suite's legacy not-required disposition, the schema-1 completed Wave Gate arm, the complete-wave-gate helper (its gate observers remain in `wave-gate-observers.ts`) and the legacy Wave Gate compatibility migration (legacy archive Section C).
 
-An implementation Agent that stops with no attempt authority now settles nothing: nothing can be executing without an attempt, so there is nothing to release or quarantine.
+An implementation Agent that stops with no sidecar and nothing executing now settles nothing: nothing can be executing without an attempt, so there is nothing to release or quarantine. A sidecar that exists but cannot be read stays an error even then, because the attempt it named may already have been released.
 
-Kept, because a graph a current engine loads still reaches them: the pre-I6 era (a frozen manifest without `testFiles`, ADR-0025 / FR-005); Forward Fix history (ADR-0086); `new_tests_required`, its waiver and the `newTestsRequired` Proof Obligation input (population still writes the flag); the spec-check's manual route for a graph that is not yet executing; the `legacy-unavailable` completion suite readiness of a graph with no manifest (every phase before `execute`); and the historical attempt records that predate versioned attempts.
+Kept, because a graph a current engine loads still reaches them: the pre-I6 era (a frozen manifest without `testFiles`, ADR-0025 / FR-005); Forward Fix history (ADR-0086); `new_tests_required`, its waiver and the `newTestsRequired` Proof Obligation input (population still writes the flag); the spec-check's manual route for a graph that is not yet executing; a graph with no manifest (every phase before `execute`), whose completion suite readiness status reports `unavailable` (the Wave Gate seams parse a `ManifestedTaskGraph`, `core/manifested-task-graph.ts`, so no readiness value represents a missing manifest); and the historical attempt records that predate versioned attempts.
 
 ## Consequences
 
@@ -47,3 +47,13 @@ Kept, because a graph a current engine loads still reaches them: the pre-I6 era 
 
 **Negative:**
 - A State File from an older engine cannot be resumed; its run is finished on that engine or started again.
+
+## Addendum: the loaded graph is built from parsed fields only
+
+The PR #252 review found that `parseTaskGraph` still spread the raw document under its parsed sections, and the stored-Task parser spread the raw Task under its parsed fields (behind a `Partial<TaskCommonMetadata>` cast). A field no parser covered therefore loaded as raw JSON with only the type the cast gave it: `test_evidence`, `start_sha`, `failure_reason`, `retry_count`, `reserved_at` and the Requirement trace arrays on a Task, and any stray key at either level.
+
+Both are now assembled from parsed values only. Every Task and TaskGraph field has a parser, and two compile-time checks hold it: a table keyed by every field of `Task` (and of `TaskGraph`) lists the keys a State File may carry, and the assembler demands, as `never`, any field no parser installs. A stored key outside the table is refused at load with one message naming it (`unknown Task field "…"`, `unknown TaskGraph field "…"`), judged after every other rule so a field's own refusal still wins. Dropping the key instead would lose it silently on the next write. The pre-refactor `tests_passed` Task field is one such key: legacyTestsPassedNote, which explained it on a loaded Task, could no longer fire and is deleted.
+
+Assembly also fixes key order. A loaded TaskGraph and its Tasks carry their keys in the parser's order, not the file's, so a digest over the loaded graph (`waveGateAuthorityDigest`) does not depend on how the file was written, and the first engine write of a hand-ordered file may reorder its keys. A refusal that must leave the file's bytes untouched hands the loaded graph back to `updateAndReturn` unchanged rather than a fresh copy of it, which is what `store-test-evidence` now does.
+
+The one value installed by assertion is `review_run`: `reviewRunError` and `slotAuthorityError` judge every field of both Review Run arms, and the State File boundary installs the record they proved rather than rebuilding its nested evidence records field by field.

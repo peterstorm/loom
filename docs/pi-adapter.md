@@ -126,7 +126,7 @@ When adding a writer role, update the role-driven artifact-scope policy (`engine
 
 ## Completion and transcript capture
 
-Claude Code's SubagentStop has transcript-path conventions, read by the Claude-only parsers in `engine/src/parsers/`. Pi produces structured messages and tool results, which `pi/transcript-adapter.ts` reads in one pass: `parsePiMessages` parses the harness payload, `piTranscriptToolCalls` projects it to the tool calls the child made (each a `HarnessToolCall` paired with its result, or unfinished), and settlement folds that one projection:
+Claude Code's SubagentStop has transcript-path conventions, read by the Claude-only parsers in `engine/src/parsers/`. Pi produces structured messages and tool results, which `pi/transcript-adapter.ts` reads in one pass: `parsePiMessages` parses the harness payload, `piTranscriptToolCalls` projects it to the tool calls the child made (each a `HarnessToolCall` paired with its result, or unfinished), and settlement folds that one projection. Implementation settlement crosses one message-level entry point, `piTranscriptEvidence(messages, cwd)`, which composes the three steps in that order and returns the write targets, the structured test verdict and its diagnostics:
 
 - `piWriteTargets` is every `write`, `edit` and `multi_edit` target, read with the write guard's path keys (`path`, `file_path`, `filePath`, then each `edits[]` target), whatever the call's result. It feeds `files_modified` and the phase written-path check.
 - `piStructuredTestResult` is the latest classified, exit-attributable Bash test run. When there is none, the Task records no test result (`test-result-missing`); there is no regex fallback on the Pi path.

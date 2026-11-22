@@ -24,7 +24,7 @@
 
 import { hasExactKeys, isRecord, type UnknownRecord } from "./plain-record";
 import {
-  declaredSummary,
+  testRunSummary,
   parseReportSource,
   parseReportSummary,
   readTestReportText,
@@ -161,7 +161,7 @@ export function parseEngineTestRunReceipt(stdout: string): EngineTestRunReceiptP
  */
 export function engineRunReport(files: readonly string[], exit: number, reportText: string | null): TestReportSummary | null {
   const read = reportText === null ? null : readTestReportText(reportText);
-  const parsed = read === null ? null : declaredSummary(read, "junit-xml") ?? declaredSummary(read, "vitest-json");
+  const parsed = read === null ? null : testRunSummary(read, "junit-xml") ?? testRunSummary(read, "vitest-json");
   if (parsed !== null) return parsed;
   return exit === 0 ? null : runnerCrashSummary(files);
 }

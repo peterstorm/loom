@@ -59,13 +59,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 616 src files / ~168.3k lines TS; `engine/tests/` holds 948 TS files / ~260.8k lines (fixtures and helpers included), of which 829 test files are executed (805 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
-| `pi/` | Pi adapter: 40 modules / 13.3k lines | — |
+| `engine/` | The engine: 616 src files / ~169.0k lines TS; `engine/tests/` holds 955 TS files / ~262.2k lines (fixtures and helpers included), of which 834 test files are executed (810 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 127 docs incl. **98 ADRs** (index test-enforced) | — |
+| `docs/` | 128 docs incl. **99 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -281,11 +281,11 @@ the evidence ledger build on — the guard *sees* and the ledger *mints* the sam
 | `shell-substitution.ts` | THE one substitution traversal (`scanSubstitutions`: quote state `'"/null`, `'` inside `"…"` literal, `$(…)`/backticks live in double quotes) | the round-20 double-quoted-apostrophe regression, round-21's incomplete fix |
 | `shell-normalize.ts` | THE one word normalizer: quote stripping, backslash escapes, line continuation, ANSI-C decode (NUL truncates), `$"…"`, parameter expansion — including the **default** forms (`${x:-w}` yields `w`) and the **alternate** forms (`${x:+w}`/`${x+w}`: empty on unset, `w` on set — the round-24 fail-open). Two entry points: `normalizeShellSpan` (the evidence reader's redirect word, every variable unset) and `normalizeShellVariants` (the guard's matching view: every reveal/empty combination of the optional word forms, null past the bound) | guard vs evidence scanner disagreeing about what a word *is* |
 | `shell-ansi-c.ts` | shared `$'…'` decode | `\x2e`-spelled paths seen by one scanner and not the other |
-| `shell-command.ts` / `shell-command-head.ts` | segment splitting (an `&` or `\|` binds to a redirect only after a `>` the lexer read unquoted: `>&`, `>\|`), tokenizer (`( ) { }` standalone so compound syntax never hides a head), wrapper unwrap (`sudo env timeout …`), the read-only head | truncated-body analysis; `echo \>& rm <state>` read as one `echo` |
-| `shell-redirects.ts` | THE one output-redirect scan (`redirectsOf`: file-write, fd-dup, stderr-discard, and the targets a guard cannot name — file-dup, read-write, process-substitution, missing-target); `hasOutputRedirect`, `outputRedirectTargets` and the evidence reader's redirect targets are its projections | `>\|` named to the guard, minted as nothing |
+| `shell-command.ts` / `shell-command-head.ts` | segment splitting (an `&` or `\|` binds to a redirect only after a `>` the walk read unquoted: `>&`, `>\|`; `readShellOperator` owns that walk for the splitter and the heredoc group walk alike), tokenizer (`( ) { }` standalone so compound syntax never hides a head), wrapper unwrap (`sudo env timeout …`), the read-only head | truncated-body analysis; `echo \>& rm <state>` read as one `echo` |
+| `shell-redirects.ts` | THE one output-redirect scan (`redirectsOf`: file-write, fd-dup, stderr-discard, and the targets a guard cannot name — file-dup, read-write, process-substitution, missing-target); `hasOutputRedirect`, `outputRedirectTargets` and the evidence reader's `redirectTargetsOf` are its projections, each by an exhaustive per-kind table | `>\|` named to the guard, minted as nothing |
 | `shell-heredoc.ts` | opener-line groups (compound-tracking), body data-vs-executed judgment | the heredoc inline-program gap |
 | `shell-match-views.ts` | reveal-monotonic matching views + glob intersection vs a directory | guards missing brace/class/parameter spellings of a path |
-| `shell-write-targets.ts` | the ledger-side reader: redirect targets (read from `redirectsOf`, valued by the normalizer), `tee`, `mv`/`git mv`/`cp` destinations (device streams never targets) | evidence missing writes the guard would see |
+| `shell-write-targets.ts` | the ledger-side reader: redirect targets (`redirectTargetsOf`: by kind, valued by the normalizer), `tee`, `mv`/`git mv`/`cp` destinations (device streams never targets) | evidence missing writes the guard would see |
 
 `tests/core/guard-state-file-walkers.test.ts` pins the walker contracts so any future
 drift is caught by an independent reference expectation. **Why it works:** the guard's
@@ -335,8 +335,9 @@ security-hunter). Key mechanics:
      command or the last segment after `&&`/`;`/`&`/`|` (with backgrounded tests and
      `$(…)`/`<(…)` nested runners never owning it). `npm test || true` yields
      `exit: null` ⇒ untrusted.
-  A zero-exit run counts as a pass only with a parsed report showing ≥ 1 test and no
-  failures; zero tests is a trusted **non-pass**. A later file write demotes an
+  A zero-exit run counts as a pass only with a parsed report showing ≥ 1 executed test
+  and no failures; zero executed tests (none declared, or all skipped, pending or todo)
+  is a trusted **non-pass** (ADR-0100). A later file write demotes an
   earlier pass. Untrusted verdicts carry a label naming how weak they are
   (`low-trust`, `degraded`, `fallback`, `snapshot-read-failed`, `helper-reported`).
 - **Attribution** (pure `attributeEvidence`): a call with `agent_id` records only
@@ -696,7 +697,7 @@ killed" — both engine-observed.
 ### 4.13 Persistence
 
 **The State File.** `state-manager.ts` + `state-file-wire.ts` (4.1k lines of pure
-`(unknown → ParseResult)` wire parsers — the whole graph is parsed before use,
+`(unknown → LineParseResult)` wire parsers — the whole graph is parsed before use,
 "parse, do not cast"):
 
 1. mode `0444` at rest;
@@ -957,9 +958,9 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **829 executed test files / ~260.8k lines** — 805 under `engine/tests/` (948 TS files there
-  including fixtures and helpers; core 306 test files, handlers 189, pi 50,
-  linter 47, orchestration 38, utils 35, machine 30, acceptance 20, security 20, …)
+- **834 executed test files / ~262.2k lines** — 810 under `engine/tests/` (955 TS files there
+  including fixtures and helpers; core 309 test files, handlers 189, pi 50,
+  linter 47, orchestration 38, utils 35, machine 31, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
@@ -967,10 +968,10 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (98 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (99 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
-- **Smoke suites**: panel mode, review panel, standalone review, orchestration
-  facades, Pi resources, task-graph validation — real CLI processes, not mocks.
+- **Smoke suites**: panel mode, orchestration facades, Pi resources, task-graph
+  validation — real CLI processes, not mocks.
 - **Probes** are frozen evidence: the emission-readiness barrier's feasibility proof
   (counting provider substitute, negative controls) is retained and re-runnable.
 - **Calibration**: a corpus + preregistration/window/blinded-assessment discipline for

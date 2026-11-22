@@ -20,8 +20,8 @@ on their own. Three readers disagreed about what the same task text meant:
 The rule that picks the run a marker belongs to ("the explicit `LOOM_ORCHESTRATION_*` run, both variables
 or neither, else exactly one session binding issued the request") was also written twice. The two copies
 differed: Pi matched the context digest as well, Claude only the request id. Request ids are not unique
-across runs (a legacy panel request id is caller-chosen; a security verifier's derives from finding
-fingerprints), so the digest is what separates two bound runs issuing the same id. The Claude path could
+across runs (a security verifier's derives from finding fingerprints, and the registered panel driver,
+retired by ADR-0096, let its caller choose them), so the digest is what separates two bound runs issuing the same id. The Claude path could
 neither tell them apart nor refuse a prompt naming the right request under the wrong context.
 
 ## Options Considered
@@ -53,10 +53,13 @@ for the run that issued them.**
   contradictory, and the reader never picks one. Each value goes through `parseRequestId` /
   `parseContextDigest`.
 - `explicitRun(environment, harness)` decides the explicit run: both variables or neither, half is a
-  fault. `resolveIssuingRun(explicit, reads, identities, harness)` returns the explicit run unchanged when
-  set; otherwise exactly one session binding must list every request id and its run must have issued each
-  one under the exact digest named. None or several fail closed. It is pure over two lazy reads (the
-  session's bindings and a run's issued identities), so the shells supply only I/O.
+  fault. `resolveIssuingRun(explicit, reads, identities, harness)` returns the run's location: the explicit
+  run unchanged when set; otherwise the run of the one session binding `resolveIssuingSessionBinding`
+  proves issued them. That binding must list every request id and its run must have issued each one under
+  the exact digest named. None or several fail closed. Both are pure over two lazy reads (the session's
+  bindings and a run's issued identities), so the shells supply only I/O. Claude reads the location; Pi
+  (`piIssuingRun`) keeps the binding itself, because its reservations and review witnesses carry it, and
+  opens the issuing run once, reusing the open its issued-identities read made.
 - Claude's correlator write (`recordClaudeSpawnCorrelator`) refuses an issued request whose digest differs
   from the prompt's, so an explicit run, which resolution does not open, is held to the same identity.
 - Every reader crosses this seam: Claude's PostToolUse correlator and SubagentStop, Pi's spawn admission,

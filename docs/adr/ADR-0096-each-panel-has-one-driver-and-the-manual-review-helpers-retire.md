@@ -4,7 +4,8 @@
 Accepted (2026-11-20). Partly supersedes ADR-0030: its premise that `/loom --panel` runs the registered
 driver. Amends ADR-0029 (the registered panel bullet, its crash-window test, and the threshold rule's
 mention of the review-panel tally), ADR-0018 (the legacy panel verdict path) and ADR-0004 (its consequence that
-historical helpers and formats remain behind core/legacy-archive.ts).
+historical helpers and formats remain behind core/legacy-archive.ts). Amended by ADR-0098, which retires
+the Section C migration this ADR kept, and with it core/legacy-archive.ts.
 
 ## Context
 Panels had more than one driver each. Only one driver per panel had a caller.

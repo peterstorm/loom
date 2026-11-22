@@ -701,6 +701,14 @@ export function salvageFindingsFromMalformedRefutations(raw: unknown): readonly 
 /** The repair a rejected task graph needs, named in the diagnostic itself. */
 const REPAIR_HINT = "repair and install atomically with: helper repair-task-graph";
 
+/** The first entry equal to an earlier one, with its index, or null when every entry is distinct. */
+function firstRepeated<T>(values: readonly T[]): Readonly<{ index: number; value: T }> | null {
+  for (const [index, value] of values.entries()) {
+    if (values.indexOf(value) !== index) return { index, value };
+  }
+  return null;
+}
+
 /**
  * Load-boundary check for `Task.findings`. Returns the first error, or null.
  *
@@ -733,11 +741,10 @@ export function parseStoredFindingsField(raw: unknown, label: string): DomainRes
   // where one was adjudicated, and attach the panel's reasoning to the wrong
   // claim — the exact failure `nextOrdinal` is built to foreclose on the
   // minting side. Minting is guarded; a hand-edited or drifted file is not.
-  const ids = findings.map(({ id }) => id);
-  const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
-  return duplicate < 0
+  const repeated = firstRepeated(findings.map(({ id }) => id));
+  return repeated === null
     ? { ok: true, value: Object.freeze(findings) }
-    : { ok: false, error: `${label}[${duplicate}] repeats finding id '${ids[duplicate]}' (${REPAIR_HINT})` };
+    : { ok: false, error: `${label}[${repeated.index}] repeats finding id '${repeated.value}' (${REPAIR_HINT})` };
 }
 
 /**
@@ -819,11 +826,10 @@ function parseRetiredFindingsField<T extends Readonly<{ finding: Finding }>>(
   const index = parsed.findIndex((entry) => entry === null);
   if (index >= 0) return { ok: false, error: `${label}[${index}] is not a well-formed ${recordKind} record (${REPAIR_HINT})` };
   const records = parsed.filter((entry): entry is T => entry !== null);
-  const ids = records.map((entry) => entry.finding.id);
-  const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
-  return duplicate < 0
+  const repeated = firstRepeated(records.map((entry) => entry.finding.id));
+  return repeated === null
     ? { ok: true, value: Object.freeze(records) }
-    : { ok: false, error: `${label}[${duplicate}] repeats ${findingKind} finding id '${ids[duplicate]}' (${REPAIR_HINT})` };
+    : { ok: false, error: `${label}[${repeated.index}] repeats ${findingKind} finding id '${repeated.value}' (${REPAIR_HINT})` };
 }
 
 /** The load boundary's parse of `Task.refuted_findings`: absent, or well-formed records under distinct finding ids. */
@@ -1146,8 +1152,8 @@ export function evidenceFailureError(
     if (!Array.isArray(raw) || raw.some((agent) => typeof agent !== "string" || agent.trim() === "")) {
       return `${label}: review_evidence_failures must be an array of non-empty strings when present`;
     }
-    const duplicate = raw.findIndex((agent, at) => raw.indexOf(agent) !== at);
-    if (duplicate >= 0) return `${label}: review_evidence_failures repeats '${raw[duplicate]}'`;
+    const repeated = firstRepeated(raw);
+    if (repeated !== null) return `${label}: review_evidence_failures repeats '${repeated.value}'`;
     const run = isRecord(t.review_run)
       ? t.review_run as Record<string, unknown>
       : null;

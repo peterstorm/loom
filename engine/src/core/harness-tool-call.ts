@@ -42,6 +42,7 @@
  *   every other `tool_result` handler, so it reads the tool's own result.
  */
 
+import { parseErr, parseOk, type LineParseResult } from "./parse-result";
 import { isRecord } from "./plain-record";
 import type {
   BashToolOutcome,
@@ -297,63 +298,85 @@ export function piTranscriptTool(name: string): HarnessToolCall["tool"] {
  * and the transcript's write targets (`pi/transcript-adapter.ts`), so the
  * paths a guard verified and the paths a settlement attributes cannot drift.
  */
-export const WRITE_TARGET_KEYS: readonly string[] = Object.freeze(["path", "file_path", "filePath"]);
+export const WRITE_TARGET_KEYS = Object.freeze(["path", "file_path", "filePath"] as const);
 
 /**
- * The first NON-NULLISH value among `WRITE_TARGET_KEYS` as a non-empty string,
- * or `null` when no key proves one. The `??=`-assignment defers only nullish
- * values (`undefined`/`null`) to a later key; the first non-nullish value WINS
- * the probe, and a winner that is not a non-empty string fails the string test
- * — it does not defer to a later key either.
+ * What one tool input says of its own write target, the one reading both
+ * `writeTargetPathOf` and `piWriteTargetPaths` share:
+ * - `absent`: no `WRITE_TARGET_KEYS` key is present at all;
+ * - `named`: the value of the first key, in probe order, whose value is not
+ *   nullish is a non-empty string;
+ * - `unnamed`: a key is present, but that first non-nullish value is not a
+ *   non-empty string, or every present key holds `null`/`undefined`. A later
+ *   key never stands in for an earlier non-nullish value that is not a path,
+ *   so the target a guard verifies is the one the tool reads.
  */
-export function writeTargetPathOf(args: unknown): string | null {
-  if (!isRecord(args)) return null;
-  let value: unknown;
-  for (const key of WRITE_TARGET_KEYS) value ??= args[key];
-  return typeof value === "string" && value.length > 0 ? value : null;
+type OwnWriteTarget =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "named"; path: string }>
+  | Readonly<{ kind: "unnamed" }>;
+
+const ABSENT_TARGET: OwnWriteTarget = Object.freeze({ kind: "absent" });
+const UNNAMED_TARGET: OwnWriteTarget = Object.freeze({ kind: "unnamed" });
+
+function ownWriteTargetOf(input: Readonly<Record<string, unknown>>): OwnWriteTarget {
+  if (!WRITE_TARGET_KEYS.some((key) => key in input)) return ABSENT_TARGET;
+  const key = WRITE_TARGET_KEYS.find((candidate) => input[candidate] != null);
+  const value = key === undefined ? undefined : input[key];
+  return typeof value === "string" && value.length > 0 ? Object.freeze({ kind: "named", path: value }) : UNNAMED_TARGET;
 }
 
-export type PiWriteTargetPathsResult =
-  | Readonly<{ ok: true; value: readonly [string, ...string[]] }>
-  | Readonly<{ ok: false; error: string }>;
+/** The input's own write target when it names one (`ownWriteTargetOf`), else `null`. */
+export function writeTargetPathOf(args: unknown): string | null {
+  if (!isRecord(args)) return null;
+  const target = ownWriteTargetOf(args);
+  return target.kind === "named" ? target.path : null;
+}
 
-const writeTarget = (input: Readonly<Record<string, unknown>>, path: string): PiWriteTargetPathsResult => {
-  const target = writeTargetPathOf(input);
-  return target !== null
-    ? Object.freeze({ ok: true, value: Object.freeze([target]) as readonly [string] })
-    : Object.freeze({ ok: false, error: `${path} must name one non-empty path, file_path, or filePath target` });
+export type PiWriteTargetPathsResult = LineParseResult<readonly [string, ...string[]]>;
+
+/** A frozen success or refusal; the value type comes from the caller's declared result. */
+const accepted = <T>(value: T): LineParseResult<T> => Object.freeze(parseOk(value));
+const refused = <T>(error: string): LineParseResult<T> => Object.freeze(parseErr<T>(error));
+
+const unnamedTargetError = (path: string): string => `${path} must name one non-empty path, file_path, or filePath target`;
+
+/** One `edits[]` entry's target: an entry must name its own. */
+const editTarget = (edit: unknown, index: number): LineParseResult<string> => {
+  const at = `write input.edits[${index}]`;
+  if (!isRecord(edit)) return refused(`${at} must be a plain object`);
+  const target = ownWriteTargetOf(edit);
+  return target.kind === "named" ? accepted(target.path) : refused(unnamedTargetError(at));
 };
-
-const editTarget = (edit: unknown, index: number): PiWriteTargetPathsResult =>
-  isRecord(edit)
-    ? writeTarget(edit, `write input.edits[${index}]`)
-    : Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
 
 /**
  * Every target one Pi write-tool input names: its own target, or else each of
- * its `edits[]` targets (deduplicated, in order). All or nothing: one target
- * that cannot be proven fails the whole input, so no partial batch exists.
+ * its `edits[]` targets (deduplicated, in order). A target key that is
+ * present, even holding `null`, commits the input to its own target
+ * (`ownWriteTargetOf`): `edits[]` is read only when no target key is present,
+ * so `{ path: null, edits: [...] }` fails rather than reading the edits. All
+ * or nothing: one target that cannot be proven fails the whole input, so no
+ * partial batch exists.
  */
 export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
-  if (!isRecord(raw)) {
-    return Object.freeze({ ok: false, error: "write input must be a plain object" });
-  }
-  if (WRITE_TARGET_KEYS.some((key) => key in raw)) return writeTarget(raw, "write input");
+  if (!isRecord(raw)) return refused("write input must be a plain object");
+  const own = ownWriteTargetOf(raw);
+  if (own.kind === "named") return accepted(Object.freeze([own.path] as const));
+  if (own.kind === "unnamed") return refused(unnamedTargetError("write input"));
   if (!Array.isArray(raw.edits) || raw.edits.length === 0) {
-    return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
+    return refused("write input must contain a target or a non-empty edits array");
   }
   // Head first: the first edit's target makes the list non-empty by type.
   const [firstEdit, ...restEdits] = raw.edits as readonly unknown[];
   const first = editTarget(firstEdit, 0);
   if (!first.ok) return first;
-  const paths: [string, ...string[]] = [first.value[0]];
+  const paths: [string, ...string[]] = [first.value];
   for (const [offset, edit] of restEdits.entries()) {
     const parsed = editTarget(edit, offset + 1);
     if (!parsed.ok) return parsed;
-    const target = parsed.value[0];
-    if (!paths.includes(target)) paths.push(target);
+    if (!paths.includes(parsed.value)) paths.push(parsed.value);
   }
-  return Object.freeze({ ok: true, value: Object.freeze(paths) });
+  return accepted(Object.freeze(paths));
 }
 
 /** The `tool_result` event fields the adapter reads, all untrusted. */
