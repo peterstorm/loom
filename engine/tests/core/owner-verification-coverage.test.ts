@@ -16,7 +16,11 @@ import {
 } from "../../src/core/owner-verification/coverage";
 import { moduleEdges } from "../../src/core/owner-verification/import-graph";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
-import type { PathAliases, ReadModule } from "../../src/core/owner-verification/types";
+import { failure, success } from "../../src/core/orchestration-contract/identity";
+import type { LoadAliases, PathAliases, ReadModule } from "../../src/core/owner-verification/types";
+
+/** The alias port over aliases already resolved. */
+const loaded = (aliases: PathAliases): LoadAliases => () => success(aliases);
 
 const OWNER = "src/rules/owner.ts";
 const SIBLING_A = "src/rules/sibling-a.ts";
@@ -372,7 +376,7 @@ describe("siblingCoverage: the walk drives its own reads", () => {
       "src/unrelated.ts": "export {};\n",
     };
     const port = recordingPort(repo);
-    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: ALIASES, read: port.read })).toEqual({ kind: "covered" });
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: loaded(ALIASES), read: port.read })).toEqual({ kind: "covered" });
     expect(port.reads[0]).toBe(MATRIX);
     expect(new Set(port.reads).size).toBe(port.reads.length);
     expect(port.reads.filter((path) => path in repo).sort()).toEqual([MATRIX, "src/rules/index.ts", OWNER, SIBLING_A, SIBLING_B].sort());
@@ -383,7 +387,7 @@ describe("siblingCoverage: the walk drives its own reads", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 12 }), fc.constantFrom<"reexport" | "import">("reexport", "import"), (hops, edge) => {
       const repo = chainFiles(hops, edge);
       const port = recordingPort(repo);
-      expect(siblingCoverage({ matrixTest: MATRIX, due: targetDue, aliases: [], read: port.read }))
+      expect(siblingCoverage({ matrixTest: MATRIX, due: targetDue, aliases: loaded([]), read: port.read }))
         .toEqual(referenceCoverage(repo, targetDue, []));
       expect(new Set(port.reads).size).toBe(port.reads.length);
     }));
@@ -392,7 +396,7 @@ describe("siblingCoverage: the walk drives its own reads", () => {
   it("FR-007: the self-driven walk decides exactly as an independent whole-repository reach does, over aliases, fallbacks, indexes and ladder order", () => {
     fc.assert(fc.property(layoutRepository, ({ repo, due: declared }) => {
       const port = recordingPort(repo);
-      expect(siblingCoverage({ matrixTest: MATRIX, due: declared, aliases: LAYOUT_ALIASES, read: port.read }))
+      expect(siblingCoverage({ matrixTest: MATRIX, due: declared, aliases: loaded(LAYOUT_ALIASES), read: port.read }))
         .toEqual(referenceCoverage(repo, declared, LAYOUT_ALIASES));
       expect(new Set(port.reads).size).toBe(port.reads.length);
       expect(port.reads[0]).toBe(MATRIX);
@@ -406,7 +410,7 @@ describe("siblingCoverage: the walk drives its own reads", () => {
       "src/m0/index.ts": "export const later = 0;\n",
     };
     const port = recordingPort(repo);
-    siblingCoverage({ matrixTest: MATRIX, due: due([], "src/m0.ts"), aliases: [], read: port.read });
+    siblingCoverage({ matrixTest: MATRIX, due: due([], "src/m0.ts"), aliases: loaded([]), read: port.read });
     expect(port.reads).toEqual([MATRIX, "src/m0", "src/m0.ts"]);
   });
 
@@ -418,21 +422,21 @@ describe("siblingCoverage: the walk drives its own reads", () => {
       "src/m1.ts": 'export * from "@m/m0";\n',
     };
     const port = recordingPort(repo);
-    expect(siblingCoverage({ matrixTest: MATRIX, due: due(["src/m1.ts"], "gen/m0.ts"), aliases: LAYOUT_ALIASES, read: port.read }))
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due(["src/m1.ts"], "gen/m0.ts"), aliases: loaded(LAYOUT_ALIASES), read: port.read }))
       .toEqual({ kind: "covered" });
     expect(port.reads).toContain("gen/m0.ts");
   });
 
   it("a missing matrix test reads only the matrix test and reaches nothing", () => {
     const port = recordingPort({});
-    expect(siblingCoverage({ matrixTest: MATRIX, due: due([]), aliases: [], read: port.read })).toEqual({ kind: "missing", paths: [OWNER] });
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due([]), aliases: loaded([]), read: port.read })).toEqual({ kind: "missing", paths: [OWNER] });
     expect(port.reads).toEqual([MATRIX]);
   });
 
   it("a refused read the walk needs is that read's infrastructure failure, never a missing path, and stops the reads", () => {
     const repo = { ...SOURCES, [MATRIX]: importing("../src/rules/owner", "../src/rules/sibling-a", "../src/rules/sibling-b") };
     const port = recordingPort(repo, new Set([SIBLING_A]));
-    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: [], read: port.read })).toEqual({
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: loaded([]), read: port.read })).toEqual({
       kind: "infrastructure",
       failure: { kind: "repository-file-unreadable", detail: `${SIBLING_A} cannot be read: EACCES` },
     });
@@ -442,17 +446,141 @@ describe("siblingCoverage: the walk drives its own reads", () => {
   it("a refused file the walk never needs is never read, so it never fails coverage", () => {
     const repo = { ...SOURCES, [MATRIX]: importing("../src/rules/owner", "../src/rules/sibling-a", "../src/rules/sibling-b"), "src/locked.ts": "" };
     const port = recordingPort(repo, new Set(["src/locked.ts"]));
-    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: [], read: port.read })).toEqual({ kind: "covered" });
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: loaded([]), read: port.read })).toEqual({ kind: "covered" });
     expect(port.reads).not.toContain("src/locked.ts");
   });
 
   it("reading past the bound is a coverage-bound-exceeded infrastructure failure, and the walk reads no further", () => {
     const repo = chainFiles(COVERAGE_READ_BOUND + 5, "reexport");
     const port = recordingPort(repo);
-    const verdict = siblingCoverage({ matrixTest: MATRIX, due: targetDue, aliases: [], read: port.read });
+    const verdict = siblingCoverage({ matrixTest: MATRIX, due: targetDue, aliases: loaded([]), read: port.read });
     expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "coverage-bound-exceeded" } });
     if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain(String(COVERAGE_READ_BOUND));
     expect(port.reads.filter((path) => path in repo)).toHaveLength(COVERAGE_READ_BOUND + 1);
     expect(COVERAGE_READ_BOUND).toBe(512);
+  });
+});
+
+describe("sibling coverage over a Java family (issue #254)", () => {
+  const OWNER = "billing/src/main/java/p/q/C.java";
+  const SIBLING = "billing/src/main/java/p/q/S.java";
+  const MATRIX = "billing/src/test/java/t/Matrix.java";
+  const JAVA_SOURCES: ReadonlyMap<string, string> = new Map([
+    [OWNER, "package p.q;\n\nfinal class C { static void of() {} }\n"],
+    [SIBLING, "package p.q;\n\nfinal class S { static void of() {} }\n"],
+  ]);
+  const javaCoverage = (matrixText: string, duePaths: NonEmpty<string> = [OWNER, SIBLING], sources = JAVA_SOURCES) =>
+    coverageOverFiles({ matrixTest: MATRIX, due: duePaths, files: new Map([...sources, [MATRIX, matrixText]]), aliases: [] });
+  const javaTest = (...imports: readonly string[]): string =>
+    ["package t;", "", ...imports, "", "final class Matrix {", "  void matrix() { C.of(); S.of(); }", "}", ""].join("\n");
+
+  it("is covered when the matrix test imports the owner and every due sibling", () => {
+    expect(javaCoverage(javaTest("import p.q.C;", "import p.q.S;"))).toEqual({ kind: "covered" });
+  });
+
+  it("names every due path the test does not reach, in declared order, the owner first", () => {
+    expect(javaCoverage(javaTest("import p.q.C;"))).toEqual({ kind: "missing", paths: [SIBLING] });
+    expect(javaCoverage(javaTest("import java.util.List;"))).toEqual({ kind: "missing", paths: [OWNER, SIBLING] });
+  });
+
+  it("reads the matrix test and each due path once, and decides reach from the test's names alone", () => {
+    const reads: string[] = [];
+    const read: ReadModule = (path) => {
+      reads.push(path);
+      const text = path === MATRIX ? javaTest("import p.q.C;", "import p.q.S;") : JAVA_SOURCES.get(path);
+      return text === undefined ? { kind: "absent" } : { kind: "text", text };
+    };
+    expect(siblingCoverage({ matrixTest: MATRIX, due: [OWNER, SIBLING], aliases: loaded([]), read })).toEqual({ kind: "covered" });
+    expect(reads).toEqual([MATRIX, OWNER, SIBLING]);
+  });
+
+  it("reports a due path the test names but the workspace does not have as missing", () => {
+    // The test imports the owner, but the owner is not a file: a name is not coverage.
+    const verdict = coverageOverFiles({
+      matrixTest: MATRIX,
+      due: [OWNER, SIBLING],
+      files: new Map([[SIBLING, JAVA_SOURCES.get(SIBLING)!], [MATRIX, javaTest("import p.q.C;", "import p.q.S;")]]),
+      aliases: [],
+    });
+    expect(verdict).toEqual({ kind: "missing", paths: [OWNER] });
+  });
+
+  it("keeps a due path the filesystem refuses as that read's infrastructure failure, never a missing path", () => {
+    const read: ReadModule = (path) => {
+      if (path === MATRIX) return { kind: "text", text: javaTest("import p.q.C;", "import p.q.S;") };
+      if (path === OWNER) return { kind: "unreadable", failure: { kind: "repository-file-unreadable", detail: `${OWNER} cannot be read: EACCES` } };
+      return { kind: "text", text: JAVA_SOURCES.get(path)! };
+    };
+    const verdict = siblingCoverage({ matrixTest: MATRIX, due: [OWNER, SIBLING], aliases: loaded([]), read });
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "repository-file-unreadable" } });
+  });
+
+  it("keeps an unreadable Java matrix test as that read's infrastructure failure", () => {
+    const read: ReadModule = (path) => path === MATRIX
+      ? { kind: "unreadable", failure: { kind: "repository-file-unreadable", detail: `${MATRIX} cannot be read: EACCES` } }
+      : { kind: "text", text: JAVA_SOURCES.get(path)! };
+    const verdict = siblingCoverage({ matrixTest: MATRIX, due: [OWNER, SIBLING], aliases: loaded([]), read });
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "repository-file-unreadable" } });
+  });
+
+  it("refuses a family that mixes languages as unsupported-language, never as a missing path", () => {
+    const verdict = javaCoverage(javaTest("import p.q.C;", "import p.q.S;"), [OWNER, "src/rules/sibling-a.ts"]);
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+    if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain("src/rules/sibling-a.ts");
+  });
+
+  it("refuses a matrix test no reader reads as unsupported-language", () => {
+    const kotlin = coverageOverFiles({ matrixTest: "src/test/kotlin/Matrix.kt", due: [OWNER], files: new Map([[OWNER, ""]]), aliases: [] });
+    expect(kotlin).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+  });
+
+  it("reports a Java matrix test that does not parse as owner-unparseable, never as a missing sibling", () => {
+    const verdict = javaCoverage("package t;\nfinal class Matrix { void f() { if ( } }\n");
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "owner-unparseable" } });
+    if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain(MATRIX);
+  });
+
+  it("an absent Java matrix test reaches nothing, so every due path is missing", () => {
+    const verdict = coverageOverFiles({ matrixTest: MATRIX, due: [OWNER, SIBLING], files: new Map(JAVA_SOURCES), aliases: [] });
+    expect(verdict).toEqual({ kind: "missing", paths: [OWNER, SIBLING] });
+  });
+
+  it("reaches a due path in a package with a contextual-keyword segment the test imports, never a false missing", () => {
+    const owner = "billing/src/main/java/p/record/C.java";
+    const verdict = coverageOverFiles({
+      matrixTest: MATRIX,
+      due: [owner],
+      files: new Map([[owner, "package p.record;\n\nfinal class C { static void of() {} }\n"], [MATRIX, "package t;\n\nimport p.record.C;\n\nfinal class Matrix { void f() { C.of(); } }\n"]]),
+      aliases: [],
+    });
+    expect(verdict).toEqual({ kind: "covered" });
+  });
+});
+
+describe("sibling coverage loads aliases only for a TypeScript family", () => {
+  const BROKEN: LoadAliases = () => failure({ kind: "alias-config-unresolvable", detail: "the tsconfig does not parse" });
+  const JAVA_OWNER = "src/main/java/p/C.java";
+  const JAVA_MATRIX = "src/test/java/p/CTest.java";
+
+  it("never asks the alias port for a Java family, so a broken tsconfig cannot block it", () => {
+    let asked = 0;
+    const counting: LoadAliases = () => {
+      asked += 1;
+      return BROKEN();
+    };
+    const read: ReadModule = (path) =>
+      path === JAVA_MATRIX ? { kind: "text", text: "package p;\n\nfinal class CTest { void f() { C.of(); } }\n" } : { kind: "text", text: "package p;\n\nfinal class C {}\n" };
+    expect(siblingCoverage({ matrixTest: JAVA_MATRIX, due: [JAVA_OWNER], aliases: counting, read })).toEqual({ kind: "covered" });
+    expect(asked).toBe(0);
+  });
+
+  it("reports a mixed family as unsupported-language before any alias load, so a broken tsconfig cannot mask it", () => {
+    const verdict = siblingCoverage({ matrixTest: MATRIX, due: [JAVA_OWNER], aliases: BROKEN, read: () => ({ kind: "absent" }) });
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+  });
+
+  it("reports a TypeScript family's alias failure as that family's infrastructure failure", () => {
+    const verdict = siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: BROKEN, read: recordingPort(SOURCES).read });
+    expect(verdict).toEqual({ kind: "infrastructure", failure: { kind: "alias-config-unresolvable", detail: "the tsconfig does not parse" } });
   });
 });

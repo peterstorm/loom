@@ -9,7 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
@@ -40,10 +40,12 @@ import {
 import { RUN_ROOT } from "../fixtures/mocha-report";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import {
+  buildJavaOwnerVerificationRepo as buildJava,
   buildOwnerVerificationRepo as build,
   canonicalRoot,
   cleanupOwnerVerificationRepos,
   HANGING_RUNNER_TIMEOUT_MS,
+  JAVA_OWNER_FIXTURE,
   OWNER_FIXTURE,
   type OwnerVerificationRepo,
   type StampedGraph,
@@ -552,4 +554,95 @@ describe("runPlan", () => {
     expect(evidence).toMatchObject({ kind: "infrastructure", failure: { kind: "spawn-failed" } });
     expect(port.asked).toHaveLength(3);
   });
+});
+
+describe("runOwnerVerification over a Java family (issue #254)", () => {
+  it("AS-007: a Java owner under a Java matrix test that imports it is covered and every Java mutant is killed", async () => {
+    const repo = buildJava();
+    const observation = await verify(repo);
+    const verdict = onlyVerdict(observation);
+    expect(verdict).toMatchObject({
+      invariant: JAVA_OWNER_FIXTURE.invariant,
+      owner: JAVA_OWNER_FIXTURE.owner,
+      matrixTest: JAVA_OWNER_FIXTURE.matrixTests.discriminating,
+      coverage: { kind: "covered" },
+      // condition-negation, comparison-flip, logical-swap, the boolean-literal
+      // flip of `true` and its return-value replacement `!(true)`, on the Wave's
+      // changed lines; every one re-parses as Java.
+      mutation: { kind: "verified", generated: 5, killed: 5, timedOut: 0, invalid: 0, survivors: [], unmutated: 0, ownerChangedInWave: true },
+    });
+    const launches = repo.runnerLaunches();
+    expect(launches).toHaveLength(6);
+    expect(launches[0]?.files).toEqual([JAVA_OWNER_FIXTURE.matrixTests.discriminating]);
+    expect(launches[0]?.owner).toBe(repo.ownerDigest);
+    for (const launch of launches.slice(1)) expect(launch.owner).not.toBe(repo.ownerDigest);
+  }, TIMEOUT_MS);
+
+  it("AS-008: a red Java baseline runs zero mutants and is the red-baseline verdict, never a survivor", async () => {
+    const repo = buildJava({ runner: "red" });
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toEqual({ kind: "covered" });
+    expect(verdict.mutation).toMatchObject({ kind: "red-baseline" });
+    expect(repo.runnerLaunches()).toHaveLength(1);
+  }, TIMEOUT_MS);
+
+  it("a Java matrix test that reaches no due path is coverage-missing, never a parse failure", async () => {
+    const repo = buildJava();
+    const matrixTest = JAVA_OWNER_FIXTURE.matrixTests.discriminating;
+    writeFileSync(join(repo.root, matrixTest), "package dk.example.decision;\n\n// fixture-runner: discriminating\n\nfinal class GatedDecisionTest {\n  void nothing() { assert true; }\n}\n");
+    // The same-package owner is still reachable by name only while the test uses it; dropping every use drops the reach.
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toMatchObject({ kind: "missing", paths: [JAVA_OWNER_FIXTURE.owner, ...JAVA_OWNER_FIXTURE.siblings] });
+  }, TIMEOUT_MS);
+
+  it("a Java family neither reads nor is blocked by a tsconfig, whose paths are a TypeScript concern", async () => {
+    const repo = buildJava();
+    writeFileSync(join(repo.root, "tsconfig.json"), "{ \"compilerOptions\": { \"paths\": ");
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toEqual({ kind: "covered" });
+  }, TIMEOUT_MS);
+
+  it("reports a due Java sibling the workspace does not have as missing, never as covered by its name", async () => {
+    const repo = buildJava();
+    rmSync(join(repo.root, JAVA_OWNER_FIXTURE.siblings[0]!));
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toMatchObject({ kind: "missing", paths: [JAVA_OWNER_FIXTURE.siblings[0]] });
+  }, TIMEOUT_MS);
+
+  it("FR-016: a Java owner the grammar cannot parse is the owner-unparseable infrastructure failure, and no matrix test runs", async () => {
+    const repo = buildJava();
+    writeFileSync(join(repo.root, JAVA_OWNER_FIXTURE.owner), "package dk.example.decision;\n\npublic final class GatedDecision {\n  public static boolean blocks( {\n}\n");
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.mutation).toMatchObject({
+      kind: "infrastructure",
+      failure: { kind: "owner-unparseable", detail: expect.stringContaining("Java parsing failed") },
+    });
+    expect(repo.runnerLaunches()).toEqual([]);
+  }, TIMEOUT_MS);
+
+  it("refuses a Kotlin owner as unsupported-language, never as a parse failure of a language it never read", async () => {
+    const repo = buildJava();
+    const graph = repo.manager.load() as StampedGraph;
+    const kotlin = "billing/src/main/kotlin/dk/example/decision/Gated.kt";
+    mkdirSync(join(repo.root, "billing/src/main/kotlin/dk/example/decision"), { recursive: true });
+    writeFileSync(join(repo.root, kotlin), "package dk.example.decision\n\nobject Gated\n");
+    // A broken tsconfig beside the mixed family must not mask the language refusal.
+    writeFileSync(join(repo.root, "tsconfig.json"), "{ \"compilerOptions\": { \"paths\": ");
+    const obligation = ownerObligation({
+      invariant: JAVA_OWNER_FIXTURE.invariant,
+      title: "Only a verified member is admitted",
+      statement: null,
+      owner: kotlin,
+      siblings: [],
+      matrixTest: JAVA_OWNER_FIXTURE.matrixTests.discriminating,
+      mutation: { kind: "verify" },
+    });
+    const owed = owedOf(graph.owner_obligations, [obligation]);
+    // The Wave must list the owner, or the run has no mutation half to plan.
+    const listed: StampedGraph = { ...graph, tasks: graph.tasks.map((task, index) => (index === 0 ? { ...task, file_list: [kotlin] } : task)) };
+    const verdict = onlyVerdict(await verify(repo, { graph: listed, owed }));
+    expect(verdict.coverage).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+    expect(verdict.mutation).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+    expect(repo.runnerLaunches()).toEqual([]);
+  }, TIMEOUT_MS);
 });

@@ -21,7 +21,7 @@ import {
   isPureModule,
   type PurityScope,
 } from "../../../src/linter/programmatic/no-io-in-pure-modules";
-import { grantedPackages, LOOM_PURITY_SCOPE, REPO_ROOT, TYPESCRIPT_COMPILER_API_SEAMS } from "../loom-project-config";
+import { grantedPackages, JAVA_GRAMMAR_SEAMS, LOOM_PURITY_SCOPE, REPO_ROOT, TYPESCRIPT_COMPILER_API_SEAMS } from "../loom-project-config";
 
 /** The rule run against exactly one file, for bytes that are not Loom source (audited package runtimes, probes). */
 const only = (mod: string): PurityScope => ({ pureModules: [mod], impureModules: [] });
@@ -262,6 +262,8 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
         if (entry !== undefined) queue.push(entry);
       } else if (TYPESCRIPT_COMPILER_API_SEAMS.includes(mod) && specifier === "typescript") {
         // The granted compiler API (ADR-0042), per seam like the zod/jsonc grants: a capability, not a walked closure.
+      } else if (JAVA_GRAMMAR_SEAMS.includes(mod) && specifier === "java-parser") {
+        // The granted Java grammar (ADR-0102), per seam like the compiler: a capability, not a walked closure.
       } else if ((runtime === undefined && specifier === "saxes" && grantedPackages(mod).includes("saxes")) || runtime?.dependencies.includes(specifier)) {
         queue.push(specifier);
       } else if (runtime !== undefined) {
@@ -269,8 +271,8 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
       } else if (specifier === "node:zlib" && grantedPackages(mod).includes("node:zlib")) {
         // In-memory inflation under an explicit output bound, granted per file by the
         // core boundary (predecessor-archive): deterministic bytes in, bytes out.
-      } else if (specifier === "node:module" && TYPESCRIPT_COMPILER_API_SEAMS.includes(mod) && grantedPackages(mod).includes("node:module")) {
-        // createRequire, granted per file to a compiler seam that loads the compiler on first use (ADR-0095).
+      } else if (specifier === "node:module" && (TYPESCRIPT_COMPILER_API_SEAMS.includes(mod) || JAVA_GRAMMAR_SEAMS.includes(mod)) && grantedPackages(mod).includes("node:module")) {
+        // createRequire, granted per file to a seam that loads its grammar or compiler on first use (ADR-0095, ADR-0102).
       } else if (["node:crypto", "crypto", "node:util", "util"].includes(specifier)) {
         // The same shipped rule must prove the narrow named capability, not a module waiver.
         errors.push(...noIoHandler(text, mod, only(mod)).map((v) => `${mod}: ${v.fixHint}`));
@@ -395,6 +397,19 @@ describe("functional core — executable purity closure", () => {
     expect(refused.errors).toContain(`${sibling}: unaudited package typescript`);
     const widened = auditClosure([SKELETON_SEAM], new Map([[SKELETON_SEAM, `${readSource(SKELETON_SEAM)}\nimport "typescript/lib/tsserverlibrary";`]]));
     expect(widened.errors).toContain(`${SKELETON_SEAM}: unaudited package typescript/lib/tsserverlibrary`);
+  });
+
+  it("ADR-0102: the Java grammar enters through one seam, which alone may createRequire it", () => {
+    const JAVA_SEAM = "engine/src/core/owner-verification/java-syntax.ts";
+    expect(JAVA_GRAMMAR_SEAMS).toEqual([JAVA_SEAM]);
+    expect(isLoomPure(JAVA_SEAM)).toBe(true);
+    expect(auditClosure([JAVA_SEAM]).errors).toEqual([]);
+    expect(auditClosure([JAVA_SEAM]).visited).toContain("engine/src/core/owner-verification/types.ts");
+    const reader = "engine/src/core/owner-verification/java-reach.ts";
+    const refused = auditClosure([reader], new Map([[reader, `${readSource(reader)}\nimport "java-parser";`]]));
+    expect(refused.errors).toContain(`${reader}: unaudited package java-parser`);
+    const widened = auditClosure([JAVA_SEAM], new Map([[JAVA_SEAM, `${readSource(JAVA_SEAM)}\nimport "chevrotain";`]]));
+    expect(widened.errors).toContain(`${JAVA_SEAM}: unaudited package chevrotain`);
   });
 
   it("ADR-0095: the rule reaches the linter's lazy compiler seam, which alone may createRequire", () => {

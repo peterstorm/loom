@@ -24,6 +24,7 @@
     "vitest": "^3.0.0"
   },
   "dependencies": {
+    "java-parser": "3.0.1",
     "jsonc-parser": "3.3.1",
     "saxes": "6.0.0",
     "ts-pattern": "^5.9.0",

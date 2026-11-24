@@ -147,8 +147,17 @@ export type ModuleRead =
 /** The port sibling coverage pulls repository files through, one path at a time. */
 export type ReadModule = (path: string) => ModuleRead;
 
-/** Sibling coverage's input: the matrix test the walk starts from, the due family paths it must reach (`duePaths`, owner first), the aliases, and the port. */
-export type SiblingCoverageInput = Readonly<{ matrixTest: string; due: NonEmpty<string>; aliases: PathAliases; read: ReadModule }>;
+/**
+ * The port sibling coverage loads the matrix test's tsconfig aliases through:
+ * the aliases, or the failure that resolving them is. Coverage calls it only
+ * for a TypeScript family, after the family's language is decided, so a
+ * tsconfig can neither block a Java family nor mask an `unsupported-language`
+ * refusal.
+ */
+export type LoadAliases = () => DomainResult<PathAliases, OwnerInfrastructureFailure>;
+
+/** Sibling coverage's input: the matrix test the walk starts from, the due family paths it must reach (`duePaths`, owner first), the alias port, and the read port. */
+export type SiblingCoverageInput = Readonly<{ matrixTest: string; due: NonEmpty<string>; aliases: LoadAliases; read: ReadModule }>;
 
 /** `coverage.ts`'s entry point: it drives its own traversal through the port and decides. */
 export type SiblingCoverageFn = (input: SiblingCoverageInput) => CoverageVerdict;
@@ -165,6 +174,14 @@ export type MutationOperator =
   | "boolean-literal-flip"
   | "return-value-replacement"
   | "statement-removal";
+
+/**
+ * Every operator a mutation plan can apply: the Wave Gate's six and
+ * `guard-removal`, which only the Task mutation check's set includes.
+ * Declared here so both operator sets and the Java seam's site vocabulary
+ * name one union.
+ */
+export type TaskMutationOperator = "guard-removal" | MutationOperator;
 
 /**
  * One mutant: one operator applied to one site of the owner. `[start, end)`
@@ -240,14 +257,24 @@ export type MutationPlanInput = Readonly<{
 }>;
 
 /**
- * Why the owner's text yields no trustworthy mutation plan: the TypeScript
- * parser reported syntax errors (`line:column message`), so the sites it
- * would offer come from a recovered, possibly garbled tree.
+ * Why the owner's text yields no trustworthy mutation plan: its parser (the
+ * TypeScript compiler's or the Java grammar's) reported syntax errors, so the
+ * sites it would offer would come from a recovered, possibly garbled tree.
  */
 export type OwnerUnparseable = Readonly<{ kind: "owner-unparseable"; diagnostics: NonEmpty<string> }>;
 
+/**
+ * Why the owner has no plan at all: its language is not one owner verification
+ * reads. The detail names the path and the reason (`language.ts` decides), so
+ * an unsupported owner is never reported as a parse error.
+ */
+export type UnsupportedOwnerLanguage = Readonly<{ kind: "unsupported-language"; detail: string }>;
+
+/** Why the owner's bytes yield no plan: a syntax error, or a language no reader reads. */
+export type MutationPlanRefusal = OwnerUnparseable | UnsupportedOwnerLanguage;
+
 /** `mutation-plan.ts`'s entry point: a pure function of owner bytes, changed lines and cap. */
-export type MutationPlanFn = (input: MutationPlanInput) => DomainResult<MutationPlan, OwnerUnparseable>;
+export type MutationPlanFn = (input: MutationPlanInput) => DomainResult<MutationPlan, MutationPlanRefusal>;
 
 // ---------------------------------------------------------------------------
 // Matrix-test runs and their outcomes
@@ -287,6 +314,10 @@ export type MatrixTestRun =
  *   names the step and the error.
  * - `owner-unparseable`: the owner module has syntax errors, so its
  *   mutation sites cannot be trusted.
+ * - `unsupported-language`: the obligation's owner, matrix test or a due
+ *   sibling is in a language owner verification does not read (or the family
+ *   mixes languages), so no reader exists for it. Never reported as
+ *   `owner-unparseable`.
  * - `no-valid-mutants`: mutants were generated, but every one only failed to
  *   collect, so the run carries no mutation evidence.
  * - `alias-config-unresolvable`: the tsconfig chain governing the matrix
@@ -312,6 +343,7 @@ export type OwnerInfrastructureFailureKind =
   | "repository-file-unreadable"
   | "unexpected-error"
   | "owner-unparseable"
+  | "unsupported-language"
   | "no-valid-mutants"
   | "alias-config-unresolvable";
 

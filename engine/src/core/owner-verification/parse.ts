@@ -68,7 +68,7 @@ const OWNER_INFRASTRUCTURE_KINDS = {
   "matrix-test-not-collected": true, "exit-unexplained-by-report": true, "baseline-timed-out": true,
   "missing-wave-base": true, "coverage-bound-exceeded": true, "real-workspace-changed": true,
   "repository-file-unreadable": true, "unexpected-error": true, "owner-unparseable": true, "no-valid-mutants": true,
-  "alias-config-unresolvable": true,
+  "alias-config-unresolvable": true, "unsupported-language": true,
 } as const satisfies Record<OwnerInfrastructureFailureKind, true>;
 
 /** The fixed mutation operators; the record keeps the set exhaustive. */

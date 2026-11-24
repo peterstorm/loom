@@ -42,6 +42,10 @@ _Avoid_: Duplicate (says nothing about the rule), divergent copy (only one of th
 One owned invariant of the plan as population stamps it into the TaskGraph: its id, title, statement, **Invariant Owner**, **Sibling Entry Points**, **Matrix Test** and mutation policy. Every path plays exactly one role. A Wave owes Owner Verification for an obligation when one of its Tasks, other than a Contract Task, changed the owner or a sibling; a change to the matrix test alone does not count. A TaskGraph with no stamp owes nothing.
 _Avoid_: Ownership duty (informal), owned invariant (that is the plan declaration; the obligation is its stamped form)
 
+**Family Language**:
+The one source language an **Owner Obligation**'s family paths share, TypeScript or Java, decided from the paths alone. Its owner, **Matrix Test** and due siblings must all read the same way; a family that mixes languages, or names a path no reader reads (Kotlin or Scala, a TypeScript declaration file, a Java file outside a src/main/java or src/test/java root), is refused as an unsupported language, never reported as a parse failure.
+_Avoid_: Parser (that is the seam that reads the language), file type, extension
+
 **Mutation Exemption**:
 An owned invariant's declared, reasoned opt-out of mutation verification, written in its plan block. It disables only the mutation half; sibling coverage still runs. One with a blank or placeholder reason, or on an unowned invariant, is refused, so it is never a silent opt-out.
 _Avoid_: Waiver (that is a Verification Policy arm), skip
@@ -62,6 +66,7 @@ _Avoid_: Duplication count, lint (it blocks nothing)
 - A plan invariant has at most one **Invariant Owner**; an owned one has zero or more **Sibling Entry Points** and exactly one **Matrix Test**
 - Population stamps exactly one **Owner Obligation** per owned invariant
 - An **Owner Obligation** has at most one **Mutation Exemption**
+- An **Owner Obligation** reads exactly one **Family Language**
 - A Task touching an owned family gets one **Owner Map** in each of its code-reviewer and architecture-tech-lead packets
 - A reviewer reports each **Second Copy** against the **Owner Map**
 - The **Matrix Test** lands no later than the first Wave that owes Owner Verification for its invariant

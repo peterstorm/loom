@@ -41,6 +41,20 @@ export const TYPESCRIPT_COMPILER_API_SEAMS: readonly string[] = Object.freeze(
     .sort(),
 );
 
+/**
+ * ADR-0102 (issue #254): the only module through which a Java grammar enters
+ * engine code. Like the compiler seams above, the list is the boundary grants
+ * in config.json — every file granted the exact `java-parser` specifier — and
+ * machine-purity's closure audit derives from it: the grammar is a capability
+ * per seam, never a package-prefix allowance.
+ */
+export const JAVA_GRAMMAR_SEAMS: readonly string[] = Object.freeze(
+  LOOM_BOUNDARIES.flatMap((boundary) => Object.entries(boundary.perFileExactAllow ?? {}))
+    .filter(([, grant]) => grant.allow.includes("java-parser"))
+    .map(([file]) => file)
+    .sort(),
+);
+
 /** Every specifier a file is granted beyond its boundary's allowlist — exact and prefix grants, node builtins included. */
 export function grantedPackages(file: string): readonly string[] {
   return LOOM_BOUNDARIES.flatMap((boundary) => [

@@ -10,9 +10,11 @@ import {
   mutantTimeoutMs,
   mutationPlan,
   mutationPlanOf,
+  mutationPlanRefusalText,
   parseMutantCap,
   taskMutants,
 } from "../../src/core/owner-verification/mutation-plan";
+import { parseJava } from "../../src/core/owner-verification/java-syntax";
 import { sha256Hex } from "../../src/core/digest";
 import type { MutationOperator, MutationPlan } from "../../src/core/owner-verification/types";
 import { capOf } from "../fixtures/owner-obligation";
@@ -24,7 +26,7 @@ const lines = (from: number, to: number): ReadonlySet<number> =>
 
 const planAt = (ownerPath: string, ownerText: string, changedLines: ReadonlySet<number>, cap = 24): MutationPlan => {
   const plan = mutationPlan({ ownerPath, ownerText, changedLines, cap: capOf(cap) });
-  if (!plan.ok) throw new Error(`owner does not parse: ${plan.error.diagnostics.join("; ")}`);
+  if (!plan.ok) throw new Error(`owner has no plan: ${mutationPlanRefusalText(plan.error)}`);
   return plan.value;
 };
 
@@ -141,8 +143,7 @@ describe("mutationPlan", () => {
   it("FR-010: an owner with syntax errors has no plan: it is owner-unparseable with every diagnostic, never a silent plan", () => {
     const refused = mutationPlan({ ownerPath: OWNER, ownerText: "export function decide( {\n  return x >= 18;\n", changedLines: lines(1, 2), cap: capOf(24) });
     expect(refused.ok).toBe(false);
-    if (refused.ok) return;
-    expect(refused.error.kind).toBe("owner-unparseable");
+    if (refused.ok || refused.error.kind !== "owner-unparseable") throw new Error(`expected owner-unparseable, got ${JSON.stringify(refused)}`);
     expect(refused.error.diagnostics.length).toBeGreaterThan(0);
     expect(refused.error.diagnostics[0]).toMatch(/^\d+:\d+ \S/);
   });
@@ -394,5 +395,100 @@ describe("taskMutants", () => {
         expect(mutated.slice(0, mutant.start) + mutated.slice(mutant.start + mutant.replacement.length)).toBe(text.slice(0, mutant.start) + text.slice(mutant.end));
       }
     }), { seed: 6_103, numRuns: 60 });
+  });
+});
+
+describe("a Java owner's plan (issue #254)", () => {
+  const JAVA_OWNER = "billing/src/main/java/p/q/C.java";
+  const JAVA_SOURCE = [
+    "package p.q;",
+    "",
+    "final class C {", // 3
+    "  static boolean blocks(int score, String reason) {", // 4
+    "    if (score < 20 && !reason.isEmpty()) {", // 5
+    "      return true;", // 6
+    "    }", // 7
+    "    return false;", // 8
+    "  }", // 9
+    "}", // 10
+    "",
+  ].join("\n");
+
+  it("offers the Wave Gate's operators with Java text, on the changed lines only", () => {
+    const plan = planAt(JAVA_OWNER, JAVA_SOURCE, lines(5, 6));
+    expect(plan.mutants.map(({ operator, line, original, replacement }) => [operator, line, original, replacement])).toEqual([
+      ["condition-negation", 5, "score < 20 && !reason.isEmpty()", "!(score < 20 && !reason.isEmpty())"],
+      ["comparison-flip", 5, "<", ">="],
+      ["logical-swap", 5, "&&", "||"],
+      ["boolean-literal-flip", 6, "true", "false"],
+      ["return-value-replacement", 6, "true", "!(true)"],
+    ]);
+  });
+
+  it("reports the column a Java site starts at, which the survivor diagnostic prints", () => {
+    const plan = planAt(JAVA_OWNER, JAVA_SOURCE, lines(5, 5));
+    expect(plan.mutants.map(({ operator, line, column }) => [operator, line, column])).toEqual([
+      ["condition-negation", 5, 9],
+      ["comparison-flip", 5, 15],
+      ["logical-swap", 5, 20],
+    ]);
+  });
+
+  it("applies each Java mutant to Java that still parses, so none is born invalid", () => {
+    const plan = planAt(JAVA_OWNER, JAVA_SOURCE, lines(1, 10));
+    for (const mutant of plan.mutants) {
+      const mutated = applyMutant(JAVA_SOURCE, mutant);
+      expect(parseJava(mutated).ok, `${mutant.operator}: ${mutant.original} → ${mutant.replacement}`).toBe(true);
+    }
+  });
+
+  it("refuses a Java owner the grammar cannot parse as owner-unparseable with the grammar's diagnostic, never a plan", () => {
+    const refused = mutationPlan({ ownerPath: JAVA_OWNER, ownerText: "final class C { void f( {\n", changedLines: lines(1, 1), cap: capOf(24) });
+    expect(refused).toMatchObject({ ok: false, error: { kind: "owner-unparseable" } });
+    if (refused.ok || refused.error.kind !== "owner-unparseable") throw new Error(`expected owner-unparseable, got ${JSON.stringify(refused)}`);
+    expect(refused.error.diagnostics[0]).toMatch(/^Java parsing failed/u);
+    expect(mutationPlanRefusalText(refused.error)).toContain("does not parse");
+  });
+
+  it("refuses a Java path outside a source root as unsupported-language, never as a parse error", () => {
+    const refused = mutationPlan({ ownerPath: "p/q/C.java", ownerText: JAVA_SOURCE, changedLines: lines(5, 6), cap: capOf(24) });
+    expect(refused).toMatchObject({ ok: false, error: { kind: "unsupported-language" } });
+    if (refused.ok || refused.error.kind !== "unsupported-language") throw new Error("a path outside every source root was planned");
+    expect(refused.error.detail).toContain("src/main/java");
+    expect(mutationPlanRefusalText(refused.error)).toContain("cannot be mutated");
+  });
+
+  it("refuses a language no reader reads as unsupported-language, never as owner-unparseable", () => {
+    for (const ownerPath of ["src/main/kotlin/C.kt", "src/main/scala/C.scala", "src/C.rs", "src/c.d.ts"]) {
+      const refused = mutationPlan({ ownerPath, ownerText: "class C {}\n", changedLines: lines(1, 1), cap: capOf(24) });
+      expect(refused, ownerPath).toMatchObject({ ok: false, error: { kind: "unsupported-language" } });
+    }
+  });
+
+  it("a Task's mutants cover Java files too, guard-removal included", () => {
+    const guard = [
+      "package p.q;",
+      "",
+      "final class G {",
+      "  void guard(int score) {",
+      "    if (score < 0) {",
+      "      throw new IllegalArgumentException();",
+      "    }",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+    const mutants = taskMutantsOf([[JAVA_OWNER, guard]]);
+    expect(mutants.mutants.map(({ operator }) => operator)).toEqual(
+      expect.arrayContaining(["guard-removal", "condition-negation", "comparison-flip"]),
+    );
+    for (const mutant of mutants.mutants) {
+      expect(parseJava(applyMutant(guard, mutant)).ok, mutant.operator).toBe(true);
+    }
+  });
+
+  it("refuses a Task file no reader reads, naming the file and the reason", () => {
+    const refused = taskMutants([{ path: "src/main/kotlin/C.kt", text: "class C\n", changedLines: lines(1, 1) }], capOf(8));
+    expect(refused).toMatchObject({ ok: false, error: { kind: "unsupported-language", path: "src/main/kotlin/C.kt" } });
   });
 });

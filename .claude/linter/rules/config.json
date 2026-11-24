@@ -240,6 +240,13 @@
         }
       },
       "perFileExactAllow": {
+        "engine/src/core/owner-verification/java-syntax.ts": {
+          "allow": [
+            "java-parser",
+            "node:module"
+          ],
+          "reason": "ADR-0102 Java syntax seam (issue #254): the one pure reader of Java text, through the audited java-parser grammar and no other Java dependency; createRequire loads the grammar on first use, so an edit's lint hook never pays for it"
+        },
         "engine/src/core/reviewer-contract.ts": {
           "allow": [
             "zod/v4"
