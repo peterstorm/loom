@@ -199,6 +199,16 @@ function rulesNamed(root: CstNode, name: string): readonly CstNode[] {
   return found;
 }
 
+/** The first rule in a subtree with this name, in pre-order (the outermost on its path), or undefined. */
+function firstRuleNamed(root: CstNode, name: string): CstNode | undefined {
+  if (root.name === name) return root;
+  for (const child of ruleChildren(root)) {
+    const found = firstRuleNamed(child, name);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 /** A node's or token's span in the text, its location's inclusive end made exclusive. */
 const spanOf = (element: CstNode | IToken): Readonly<{ start: number; end: number }> =>
   isToken(element)
@@ -437,10 +447,12 @@ function guardSites(node: CstNode, context: Context): readonly Site[] {
 }
 
 function operatorSites(node: CstNode): readonly Site[] {
+  const binaryOperators = tokensUnder(node, "BinaryOperator");
   // `o instanceof String s && s.isEmpty()` uses `s` where `&&` has matched it;
-  // `||` would leave it not definitely matched there.
-  const swaps = !declaresPattern(node);
-  const operatorTokens = tokensUnder(node, "BinaryOperator").flatMap((token): readonly Site[] => {
+  // `||` would leave it not definitely matched there. The subtree is walked
+  // only when the node has a logical operator to swap.
+  const swaps = !binaryOperators.some((token) => LOGICAL_SWAPS.has(token.image)) || !declaresPattern(node);
+  const operatorTokens = binaryOperators.flatMap((token): readonly Site[] => {
     const flipped = COMPARISON_FLIPS.get(token.image);
     const swapped = swaps ? LOGICAL_SWAPS.get(token.image) : undefined;
     return [
@@ -461,7 +473,7 @@ const PLAIN_NAME = /^[\p{L}_$][\p{L}\p{N}_$]*$/u;
 
 /** The target an expression statement assigns with a plain `=`, as written; null for any other statement. */
 function assignedTargetOf(statement: CstNode, text: string): string | null {
-  const [expression] = rulesNamed(statement, "binaryExpression");
+  const expression = firstRuleNamed(statement, "binaryExpression");
   if (expression === undefined || !tokensUnder(expression, "AssignmentOperator").some((token) => token.image === "=")) return null;
   const target = rulesUnder(expression, "unaryExpression")[0];
   return target === undefined ? null : textOf(target, text).trim();
