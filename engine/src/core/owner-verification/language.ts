@@ -201,12 +201,12 @@ const languageFailure = (detail: string): DomainResult<never, OwnerInfrastructur
 export const obligationLanguageOf = ({ owner, matrixTest, due }: ObligationLanguagePaths): DomainResult<OwnerLanguage, OwnerInfrastructureFailure> => {
   const ownerSource = ownerLanguageOf(owner);
   if (ownerSource.kind === "unsupported") {
-    return languageFailure(`the owner ${owner} is ${UNSUPPORTED_SOURCE_REASON_TEXT[ownerSource.reason]}, which owner verification cannot read`);
+    return languageFailure(`the owner ${unsupportedPathText(owner, ownerSource.reason)}`);
   }
   for (const path of [matrixTest, ...due.filter((candidate) => candidate !== owner)]) {
     const source = ownerLanguageOf(path);
     if (source.kind === "unsupported") {
-      return languageFailure(`${path} is ${UNSUPPORTED_SOURCE_REASON_TEXT[source.reason]}, which owner verification cannot read; it reads TypeScript sources and Java sources under a src/main/java or src/test/java root`);
+      return languageFailure(`${unsupportedPathText(path, source.reason)}; it reads TypeScript sources and Java sources under a src/main/java or src/test/java root`);
     }
     if (source.language !== ownerSource.language) {
       return languageFailure(`the owner ${owner} is ${OWNER_LANGUAGE_TEXT[ownerSource.language]} but ${path} is ${OWNER_LANGUAGE_TEXT[source.language]}; owner verification reads one language per obligation`);
