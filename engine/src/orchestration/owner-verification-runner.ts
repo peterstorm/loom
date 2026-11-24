@@ -8,10 +8,11 @@
  *
  * 1. The real workspace's digest is observed before anything runs.
  * 2. Per owed obligation, in stamp order:
- *    - coverage: the matrix test's tsconfig `paths` are resolved by
- *      `pathAliasesOf` over this shell's reads and `jsonc-parser`, then
- *      `siblingCoverage` walks the import graph itself, pulling each file
- *      it needs from the real workspace through `readRepositoryText`;
+ *    - coverage: `siblingCoverage` decides the family's language and walks
+ *      the import graph itself, pulling each file it needs from the real
+ *      workspace through `readRepositoryText`; for a TypeScript family only,
+ *      it loads the matrix test's tsconfig `paths` through this shell's
+ *      `pathAliasesOf` adapter over its reads and `jsonc-parser`;
  *    - mutation, unless the obligation is exempt: `waveBaseOf` chooses the
  *      owner's Wave base, this shell resolves it with Git and reads the
  *      owner there, `changedHeadLines` and `mutationPlan` fix the mutants,
@@ -51,7 +52,6 @@ import type { ArtifactDigest } from "../core/orchestration-contract";
 import { siblingCoverage } from "../core/owner-verification/coverage";
 import { mutationPlan, mutationPlanRefusalText, applyMutant, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
 import { duePaths, implementationTasks } from "../core/owner-verification/obligations";
-import { obligationLanguageOf } from "../core/owner-verification/language";
 import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
 import { waveBaseOf } from "../core/owner-verification/wave-base";
 import { verificationRuns, type ObligationRun, type OwedVerification } from "../core/owner-verification/owed-verification";
@@ -124,12 +124,11 @@ const parseJsoncText: ParseJsonc = (text) => {
 // Coverage
 // ---------------------------------------------------------------------------
 
-const coverageInfrastructure = (failure: OwnerInfrastructureFailure): CoverageVerdict => ({ kind: "infrastructure", failure });
-
-/** The aliases a reader that resolves nothing reads (`coverage.ts`'s Java arm never touches them). */
-const NO_ALIASES: PathAliases = Object.freeze([]);
-
-/** The matrix test's tsconfig aliases. A refused config is that read's infrastructure failure, never a config that is not there. */
+/**
+ * The matrix test's tsconfig aliases: the `LoadAliases` port's adapter, which
+ * coverage calls only for a TypeScript family. A refused config is that read's
+ * infrastructure failure, never a config that is not there.
+ */
 function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): DomainResult<PathAliases, OwnerInfrastructureFailure> {
   const aliases = pathAliasesOf(matrixTest, (path) => readRepositoryText(root, path), parseJsoncText);
   if (aliases.ok) return aliases;
@@ -140,17 +139,10 @@ function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): Dom
 
 /** The matrix test's reach over the family paths its run says are due. */
 function coverage(scope: ObligationRunScope, { run: { obligation }, due }: ScopedRun): CoverageVerdict {
-  // A Java family's reach is decided by names, so no tsconfig is consulted: a
-  // broken `paths` chain is a TypeScript resolution concern and cannot be the
-  // reason a Java obligation fails coverage (`coverage.ts` never reads aliases).
-  const javaFamily = obligationLanguageOf({ owner: obligation.owner, matrixTest: obligation.matrixTest, due });
-  const aliases: DomainResult<PathAliases, OwnerInfrastructureFailure> =
-    javaFamily.ok && javaFamily.value === "java" ? success(NO_ALIASES) : coverageAliases(scope.root, obligation.matrixTest);
-  if (!aliases.ok) return coverageInfrastructure(aliases.error);
   return siblingCoverage({
     matrixTest: obligation.matrixTest,
     due,
-    aliases: aliases.value,
+    aliases: () => coverageAliases(scope.root, obligation.matrixTest),
     read: (path) => readRepositoryText(scope.root, path),
   });
 }

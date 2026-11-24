@@ -70,7 +70,6 @@ export const OWNER_FIXTURE = Object.freeze({
 export type FamilyPaths = Readonly<{
   owner: string;
   siblings: readonly [string, string];
-  barrel: string | null;
   matrixTests: Readonly<Record<MatrixTestKind, string>>;
   unrelated: string;
   runner: string;
@@ -88,7 +87,6 @@ export const JAVA_OWNER_FIXTURE: FamilyPaths = Object.freeze({
     "billing/src/main/java/dk/example/admission/AdmitMember.java",
     "billing/src/main/java/dk/example/admission/AdmitGuest.java",
   ] as const),
-  barrel: null,
   matrixTests: Object.freeze({
     discriminating: "billing/src/test/java/dk/example/decision/GatedDecisionTest.java",
     vacuous: "billing/src/test/java/dk/example/decision/VacuousTest.java",
@@ -223,14 +221,13 @@ const SIBLING_B = 'import { decide } from "./owner";\nexport const admitGuest = 
 const BARREL = 'export { admitGuest } from "./sibling-b";\n';
 const TSCONFIG = `${JSON.stringify({ compilerOptions: { baseUrl: ".", paths: { "@rules/*": ["src/rules/*"] } } }, null, 2)}\n`;
 
-/** One fixture family: its paths and the bytes of every file it writes. */
+/** One fixture family: its paths and the bytes of every file it writes; a barrel's path and text come together or not at all. */
 type Family = FamilyPaths & Readonly<{
-  language: "typescript" | "java";
   baseOwner: string;
   waveOwner: string;
   siblingTexts: readonly [string, string];
   siblingChange: string;
-  barrelText: string | null;
+  barrel: Readonly<{ path: string; text: string }> | null;
   unrelatedBase: string;
   unrelatedWave: string;
   extraFiles: readonly (readonly [string, string])[];
@@ -239,12 +236,11 @@ type Family = FamilyPaths & Readonly<{
 
 const TS_FAMILY: Family = Object.freeze({
   ...OWNER_FIXTURE,
-  language: "typescript",
   baseOwner: BASE_OWNER,
   waveOwner: WAVE_OWNER,
   siblingTexts: Object.freeze([SIBLING_A, SIBLING_B] as const),
   siblingChange: 'export const memberAge = 18;\n',
-  barrelText: BARREL,
+  barrel: Object.freeze({ path: OWNER_FIXTURE.barrel, text: BARREL }),
   unrelatedBase: "export const other = 1;\n",
   unrelatedWave: "export const other = 2;\n",
   extraFiles: Object.freeze([Object.freeze(["tsconfig.json", TSCONFIG] as const)]),
@@ -262,7 +258,7 @@ const JAVA_BASE_OWNER = [
   "",
 ].join("\n");
 
-/** The Java owner the Wave writes: lines 4-9 are its changed lines against the base. */
+/** The Java owner the Wave writes: lines 5-7 (the guard and its `return true;`) are its changed lines against the base. */
 const JAVA_WAVE_OWNER = [
   "package dk.example.decision;",
   "",
@@ -334,12 +330,11 @@ function javaMatrixTest(kind: MatrixTestKind): string {
 
 const JAVA_FAMILY: Family = Object.freeze({
   ...JAVA_OWNER_FIXTURE,
-  language: "java",
   baseOwner: JAVA_BASE_OWNER,
   waveOwner: JAVA_WAVE_OWNER,
   siblingTexts: Object.freeze([JAVA_SIBLING_MEMBER, JAVA_SIBLING_GUEST] as const),
   siblingChange: "// member age 18\n",
-  barrelText: null,
+  barrel: null,
   unrelatedBase: "package dk.example;\n\nfinal class Other {}\n",
   unrelatedWave: "package dk.example;\n\nfinal class Other { static final int V = 2; }\n",
   extraFiles: Object.freeze([]),
@@ -573,7 +568,7 @@ function commitBase(
   write(root, family.owner, family.baseOwner);
   write(root, family.siblings[0], family.siblingTexts[0]);
   write(root, family.siblings[1], family.siblingTexts[1]);
-  if (family.barrelText !== null && family.barrel !== null) write(root, family.barrel, family.barrelText);
+  if (family.barrel !== null) write(root, family.barrel.path, family.barrel.text);
   write(root, family.unrelated, family.unrelatedBase);
   for (const kind of Object.keys(family.matrixTests) as MatrixTestKind[]) {
     write(root, family.matrixTests[kind], family.matrixTest(kind));

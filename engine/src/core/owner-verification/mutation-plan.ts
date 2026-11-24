@@ -16,7 +16,10 @@
  *
  * The engine fixes the Wave Gate's operator set (`WAVE_GATE_OPERATORS`), in
  * this order. Each operator is a syntax-neutral name with one text per
- * language; a Java site is the text its grammar makes valid:
+ * language; a Java site is the text its grammar makes valid, and the Java
+ * seam withholds every site it knows javac rejects (`java-syntax.ts` lists
+ * them: pattern variables, final-field and blank-local assignments, endless
+ * loops, `try` blocks with handlers):
  * 1. `condition-negation`: an `if`/`while`/`do`/`for`/`?:` condition becomes
  *    `!(…)`. A Java condition that declares a pattern variable offers none:
  *    negating it would put the variable out of scope in the guarded body.

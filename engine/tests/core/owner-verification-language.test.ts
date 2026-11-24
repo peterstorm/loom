@@ -6,9 +6,9 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 import {
   javaFileIdentityOf,
-  javaSourceRootOf,
   obligationLanguageOf,
   ownerLanguageOf,
   UNSUPPORTED_SOURCE_REASON_TEXT,
@@ -37,6 +37,14 @@ describe("ownerLanguageOf", () => {
     ["src/main/java", "unsupported:other-extension"], ["src/main/java/", "unsupported:other-extension"],
   ])("refuses %s as %s, never as a parse error", (path, refusal) => {
     expect(languageOf(path)).toBe(refusal);
+  });
+
+  it("carries a Java path's identity on its classification, so no reader splits the path again", () => {
+    expect(ownerLanguageOf("billing/src/test/java/p/CTest.java")).toEqual({
+      kind: "supported",
+      language: "java",
+      identity: { root: { modulePrefix: "billing", sourceRoot: "test" }, packageName: "p", simpleName: "CTest", fqn: "p.CTest" },
+    });
   });
 
   it("names each refusal in the line an infrastructure diagnostic carries", () => {
@@ -69,7 +77,6 @@ describe("javaFileIdentityOf", () => {
   it("has no identity for a path no source root holds", () => {
     expect(javaFileIdentityOf("p/C.java")).toBeNull();
     expect(javaFileIdentityOf("src/main/java/C.kt")).toBeNull();
-    expect(javaSourceRootOf("src/main/java/C.kt")).toBeNull();
   });
 
   it("property: a Java path's fully-qualified name is its package, a dot and its file name", () => {
@@ -95,14 +102,22 @@ describe("obligationLanguageOf", () => {
   const OWNER = "billing/src/main/java/p/q/C.java";
   const MATRIX = "billing/src/test/java/p/q/CTest.java";
 
-  it("reads a family whose every path needs the same reader", () => {
-    expect(obligationLanguageOf({ owner: OWNER, matrixTest: MATRIX, due: [OWNER] })).toEqual({ ok: true, value: "java" });
-    expect(obligationLanguageOf({ owner: "src/a.ts", matrixTest: "tests/a.test.ts", due: ["src/a.ts", "src/b.ts"] }))
-      .toEqual({ ok: true, value: "typescript" });
+  it("reads a family whose every path needs the same reader, a Java family with every path's identity, the owner first", () => {
+    const sibling = "billing/src/main/java/p/r/S.java";
+    expect(obligationLanguageOf({ matrixTest: MATRIX, due: [OWNER, sibling] })).toEqual({
+      ok: true,
+      value: {
+        language: "java",
+        matrixTest: { path: MATRIX, identity: javaFileIdentityOf(MATRIX) },
+        due: [{ path: OWNER, identity: javaFileIdentityOf(OWNER) }, { path: sibling, identity: javaFileIdentityOf(sibling) }],
+      },
+    });
+    expect(obligationLanguageOf({ matrixTest: "tests/a.test.ts", due: ["src/a.ts", "src/b.ts"] }))
+      .toEqual({ ok: true, value: { language: "typescript" } });
   });
 
   it("refuses a family that mixes languages, naming both", () => {
-    const refused = obligationLanguageOf({ owner: OWNER, matrixTest: "tests/a.test.ts", due: [OWNER] });
+    const refused = obligationLanguageOf({ matrixTest: "tests/a.test.ts", due: [OWNER] });
     expect(refused).toMatchObject({ ok: false, error: { kind: "unsupported-language" } });
     if (refused.ok) throw new Error("a mixed family was read");
     expect(refused.error.detail).toContain(OWNER);
@@ -110,13 +125,15 @@ describe("obligationLanguageOf", () => {
   });
 
   it("refuses a path no reader reads, whatever its role", () => {
-    for (const paths of [
-      { owner: "src/main/kotlin/C.kt", matrixTest: "src/main/kotlin/CTest.kt", due: ["src/main/kotlin/C.kt"] },
-      { owner: "src/a.ts", matrixTest: "tests/a.spec.rs", due: ["src/a.ts"] },
-      { owner: "src/a.ts", matrixTest: "tests/a.test.ts", due: ["src/a.ts", "src/main/kotlin/S.kt"] },
-    ]) {
+    const families: readonly Readonly<{ matrixTest: string; due: NonEmpty<string> }>[] = [
+      { matrixTest: "src/main/kotlin/CTest.kt", due: ["src/main/kotlin/C.kt"] },
+      { matrixTest: "tests/a.spec.rs", due: ["src/a.ts"] },
+      { matrixTest: "tests/a.test.ts", due: ["src/a.ts", "src/main/kotlin/S.kt"] },
+      { matrixTest: MATRIX, due: [OWNER, "billing/src/main/kotlin/S.kt"] },
+    ];
+    for (const paths of families) {
       const refused = obligationLanguageOf(paths);
-      expect(refused, paths.owner).toMatchObject({ ok: false, error: { kind: "unsupported-language" } });
+      expect(refused, paths.due[0]).toMatchObject({ ok: false, error: { kind: "unsupported-language" } });
       if (!refused.ok) expect(refused.error.detail).toContain("which owner verification cannot read");
     }
   });

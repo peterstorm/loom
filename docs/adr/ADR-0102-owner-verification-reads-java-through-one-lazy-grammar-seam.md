@@ -63,28 +63,43 @@ proves a non-seam module that imports `java-parser` is refused.**
 
 - **One projection.** `parseJava(text)` returns the file's package, its imports (`class`, `static-member`,
   `static-wildcard`, `class-wildcard`), the identifiers and dotted names used outside `package`/`import`
-  declarations, and every mutation site as `(operator, start, end, replacement)`. It is total: a refusal is
-  one `java-syntax-error` diagnostic, never a throw, and an identifier or keyword spelled with `\uXXXX`
-  escapes is refused because javac decodes escapes before lexing and the grammar reads raw text.
-- **Language picks the reader.** `language.ts`'s `ownerLanguageOf` classifies a path from its bytes: the
-  TypeScript and JavaScript extensions, `.java` under a Maven main or test source root (module prefixes
-  allowed), and one unsupported reason otherwise. `javaFileIdentityOf` derives a Java path's package,
-  simple name and fully-qualified name, which is what an import is compared against. One obligation reads
-  one language; a mixed family, or a path no reader reads, is `unsupported-language`, never
-  `owner-unparseable`.
+  declarations, and every mutation site as `(operator, start, end, replacement)`. A grammar refusal is one
+  `java-syntax-error` diagnostic, never a throw; a grammar that cannot load, or any other internal error,
+  throws, and the shell reports it as `unexpected-error`, so a broken install is never the owner's syntax.
+  An identifier or keyword spelled with `\uXXXX` escapes is refused because javac decodes escapes before
+  lexing and the grammar reads raw text. A name is every token the grammar files under its `Identifier`
+  category, contextual keywords included, so a package such as p.record or p.module keeps every segment.
+- **Language picks the reader.** `language.ts`'s `ownerLanguageOf` classifies a path from the path alone:
+  the TypeScript and JavaScript extensions, `.java` under a Maven main or test source root (module prefixes
+  allowed), and one unsupported reason otherwise. A Java classification carries the file's identity
+  (`javaFileIdentityOf`: its source root, package, simple name and fully-qualified name, which is what an
+  import is compared against). One obligation reads one language; `obligationLanguageOf` decides it once
+  from the matrix test and the due paths (the owner first), and a mixed family, or a path no reader reads,
+  is `unsupported-language`, never `owner-unparseable`. A Java family's reading carries every path's
+  identity, so the reach rule is never handed a path it cannot read.
 - **Java's reach rule has its own home.** `java-reach.ts` decides reach by naming: an explicit import of the
   file or a nested class of it, a static import of one of its members, a wildcard-imported package with its
   simple name used, the same package with its simple name used, or its fully-qualified name written out.
-  `coverage.ts` asks it for a Java family and reads only the matrix test.
+  For a Java family, `coverage.ts` reads the matrix test's bytes for reach and checks that each due path
+  exists and is readable (an absent path is missing, an unreadable one is that read's infrastructure
+  failure); it never walks imports and never loads the tsconfig. The aliases reach coverage through a lazy
+  port the TypeScript arm alone calls, after the language is decided, so a broken tsconfig can neither block
+  a Java family nor mask an `unsupported-language` refusal.
 - **The plan stays language-blind.** `mutation-plan.ts` keeps the operator sets, the changed-line filter,
   the cap and the mutant id; it dispatches to the reader and maps both readers' sites to the same
   `ReportedSite`. The Task mutation check's `isMutableSource` asks the language predicate and, for Java,
   accepts only a `main` source root, because the frozen test-file classification cannot see a Java test.
 - **Operator texts are per language.** `return-value-replacement` is `!(e)`, `0` or `null` by the method's
   declared return type, and offers nothing in a `void` method; `comparison-flip` has no `===`; a condition
-  that declares a pattern variable offers no `condition-negation`, because negating it would put the
-  variable out of scope in the guard's body. Every reported site, applied to its file, is still Java — a
-  property test holds the seam to it.
+  that declares a pattern variable offers no `condition-negation`, `guard-removal` or `logical-swap`,
+  because each would put the variable out of scope, or leave it not definitely matched, where it is used.
+- **What the seam can prove.** It resolves no symbol and runs no compiler, so it proves only that every
+  mutant still parses (a property test holds it to that), and it withholds every site it knows javac
+  rejects: the constant-`true` loop conditions, every site inside a `try` block whose handlers catch, the
+  pattern-variable sites above, a removed plain assignment in a constructor or initializer (a final field's
+  one assignment) or to a local declared without an initializer (its definite assignment), and a removed
+  `break` guard inside a loop whose condition is absent or the constant `true`. A mutant javac still
+  rejects for a reason no rule reads is an invalid run, never a kill.
 
 ## Consequences
 
@@ -94,8 +109,10 @@ proves a non-seam module that imports `java-parser` is refused.**
   spans from a grammar instead of failing to parse at all.
 - The Java grammar is paid for only by an obligation that reads Java, and the purity audit keeps it out of
   every other module, exactly as the compiler seams are held.
-- The seam is total and deterministic: same bytes, same projection; a refused file is data, so a broken
-  matrix test names its diagnostics instead of reaching nothing silently.
+- The seam is deterministic: same bytes, same projection; a refused file is data, so a broken matrix test
+  names its diagnostics instead of reaching nothing silently. Only a grammar that cannot load, or an
+  internal error, throws, and the shell names it `unexpected-error`. A test in a fresh process pins that the
+  grammar loads only when Java text is parsed.
 
 **Negative:**
 - A new runtime dependency (ten packages) whose closure the purity audit treats as a capability rather than

@@ -30,18 +30,23 @@
 
 import { match } from "ts-pattern";
 import { failure, success, type DomainResult } from "../orchestration-contract/identity";
-import { javaFileIdentityOf, type JavaFileIdentity } from "./language";
+import type { JavaFamilyPath, JavaFileIdentity } from "./language";
 import { parseJava, type JavaFile } from "./java-syntax";
 import { normalizeRepoPath } from "./repo-path";
 import type { OwnerUnparseable } from "./types";
 
+/**
+ * The reach rule's input. Every path is a Java family path, identity included
+ * (`obligationLanguageOf` reads them), so a path this rule cannot read cannot
+ * be handed to it.
+ */
 export type JavaReachInput = Readonly<{
-  /** The matrix test's repository-relative path: its package comes from it. */
-  matrixTest: string;
+  /** The matrix test: its package comes from its declaration, else its path. */
+  matrixTest: JavaFamilyPath;
   /** The matrix test's bytes, already read. */
   matrixTestText: string;
   /** The due family paths (the owner first). */
-  due: readonly string[];
+  due: readonly JavaFamilyPath[];
 }>;
 
 /**
@@ -50,16 +55,15 @@ export type JavaReachInput = Readonly<{
  * that sits in one directory and declares another compiles into the declared
  * one, and its same-package reach follows that.
  */
-const testPackageOf = (test: JavaFile, testIdentity: JavaFileIdentity | null): string | null =>
-  test.packageName ?? testIdentity?.packageName ?? null;
+const testPackageOf = (test: JavaFile, testIdentity: JavaFileIdentity): string => test.packageName ?? testIdentity.packageName;
 
 /** Whether `owner`'s file is loaded by the test's imports, package or qualified names. */
-const reachedBy = (owner: JavaFileIdentity, test: JavaFile, testPackage: string | null): boolean => {
+const reachedBy = (owner: JavaFileIdentity, test: JavaFile, testPackage: string): boolean => {
   const ownerOrNested = (name: string): boolean => name === owner.fqn || name.startsWith(`${owner.fqn}.`);
   const wildcardImports = test.imports.some(
     (entry) => entry.kind === "class-wildcard" && entry.packageName === owner.packageName,
   );
-  const samePackage = testPackage !== null && testPackage === owner.packageName;
+  const samePackage = testPackage === owner.packageName;
   if ((samePackage || wildcardImports) && test.identifiers.has(owner.simpleName)) return true;
   if ([...test.qualifiedNames].some(ownerOrNested)) return true;
   return test.imports.some((entry) =>
@@ -73,21 +77,17 @@ const reachedBy = (owner: JavaFileIdentity, test: JavaFile, testPackage: string 
 };
 
 /**
- * The due paths the matrix test reaches, in the order given. A due path whose
- * language is not Java is never reached here; the coverage decision refuses a
- * mixed family before asking (`language.ts`).
+ * The due paths the matrix test reaches, in the order given, each normalized
+ * as `decideCoverage` looks it up.
  */
 export const javaReachedDue = ({ matrixTest, matrixTestText, due }: JavaReachInput): DomainResult<ReadonlySet<string>, OwnerUnparseable> => {
   const parsed = parseJava(matrixTestText);
   if (!parsed.ok) return failure({ kind: "owner-unparseable", diagnostics: parsed.error.diagnostics });
   const test = parsed.value;
-  const testIdentity = javaFileIdentityOf(matrixTest);
-  const testPackage = testPackageOf(test, testIdentity);
+  const testPackage = testPackageOf(test, matrixTest.identity);
   const reached = new Set<string>();
-  for (const path of due) {
-    const owner = javaFileIdentityOf(path);
-    if (owner === null || !reachedBy(owner, test, testPackage)) continue;
-    reached.add(normalizeRepoPath(path) ?? path);
+  for (const { path, identity } of due) {
+    if (reachedBy(identity, test, testPackage)) reached.add(normalizeRepoPath(path) ?? path);
   }
-  return success(reached as ReadonlySet<string>);
+  return success(reached);
 };

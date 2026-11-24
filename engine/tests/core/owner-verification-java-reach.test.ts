@@ -2,11 +2,13 @@
  * Java's reach rule (issue #254): whether a Java matrix test reaches each due
  * family path. Java has no re-exports, so reach is decided by naming — the
  * test's package, its imports and the names it uses — and this suite pins each
- * way a test can name a file.
+ * way a test can name a file. Every path it is handed is a Java family path,
+ * identity included, so a path it cannot read cannot reach it.
  */
 
 import { describe, expect, it } from "vitest";
 import { javaReachedDue } from "../../src/core/owner-verification/java-reach";
+import { javaFileIdentityOf, type JavaFamilyPath } from "../../src/core/owner-verification/language";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 
 const OWNER = "src/main/java/p/q/C.java";
@@ -16,12 +18,19 @@ const DUE: NonEmpty<string> = [OWNER, SIBLING];
 
 const MATRIX = "src/test/java/t/Matrix.java";
 
+/** A Java family path as `obligationLanguageOf` reads it. */
+const javaPath = (path: string): JavaFamilyPath => {
+  const identity = javaFileIdentityOf(path);
+  if (identity === null) throw new Error(`fixture path is not a Java source-root path: ${path}`);
+  return { path, identity };
+};
+
 /** A Java test in package `t` with the given imports and body. */
 const testIn = (body: string, imports: readonly string[] = [], packageName = "t"): string =>
   [`package ${packageName};`, "", ...imports, "", "final class Matrix {", "  void matrix() {", ...body.split("\n").map((line) => `    ${line}`), "  }", "}", ""].join("\n");
 
 const reached = (matrixTestText: string, matrixTest = MATRIX, due: NonEmpty<string> = DUE): readonly string[] => {
-  const result = javaReachedDue({ matrixTest, matrixTestText, due });
+  const result = javaReachedDue({ matrixTest: javaPath(matrixTest), matrixTestText, due: due.map(javaPath) });
   if (!result.ok) throw new Error(`the matrix test was refused: ${result.error.diagnostics.join("; ")}`);
   return [...result.value];
 };
@@ -72,12 +81,16 @@ describe("javaReachedDue", () => {
     expect(reached(testIn("new Object();", ["import java.util.List;"]))).toEqual([]);
   });
 
-  it("is not reached by a path that is not Java at all", () => {
-    expect(reached(testIn("C.of();", ["import p.q.C;"]), MATRIX, [OWNER, "src/q/S.ts"])).toEqual([OWNER]);
+  it("reaches a file whose package has a contextual-keyword segment, through the import javac honours", () => {
+    const owner = "src/main/java/p/record/C.java";
+    expect(reached(testIn("C.of();", ["import p.record.C;"]), MATRIX, [owner])).toEqual([owner]);
+    expect(reached(testIn("new p.module.D();"), MATRIX, ["src/main/java/p/module/D.java"])).toEqual(["src/main/java/p/module/D.java"]);
+    // The truncated name `p.C` must not reach an unrelated `p.C` either.
+    expect(reached(testIn("C.of();", ["import p.record.C;"]), MATRIX, ["src/main/java/p/C.java"])).toEqual([]);
   });
 
   it("refuses a matrix test the grammar cannot parse as owner-unparseable, never as unreached", () => {
-    const refused = javaReachedDue({ matrixTest: MATRIX, matrixTestText: "final class Matrix { void f() { if ( } }", due: DUE });
+    const refused = javaReachedDue({ matrixTest: javaPath(MATRIX), matrixTestText: "final class Matrix { void f() { if ( } }", due: DUE.map(javaPath) });
     expect(refused).toMatchObject({ ok: false, error: { kind: "owner-unparseable" } });
     if (!refused.ok) expect(refused.error.diagnostics.length).toBeGreaterThan(0);
   });

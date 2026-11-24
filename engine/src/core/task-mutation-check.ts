@@ -39,7 +39,7 @@ import type { AffectedRunVerdict } from "./affected-stop-check-types";
 import { taskRolePolicy } from "./distill-task";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { failure, isNonEmpty, mapNonEmpty, nonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
-import { javaSourceRootOf, ownerLanguageOf } from "./owner-verification/language";
+import { ownerLanguageOf } from "./owner-verification/language";
 import { TASK_MUTATION_OPERATORS, type TaskMutant } from "./owner-verification/mutation-plan";
 import type { TaskMutationOperator } from "./owner-verification/types";
 import { contractTaskIdsOf } from "./owner-verification/obligations";
@@ -81,7 +81,7 @@ import type { TaskGraph } from "../types";
 export const isMutableSource = (path: string): boolean => {
   const language = ownerLanguageOf(path);
   if (language.kind === "unsupported") return false;
-  return language.language === "typescript" || javaSourceRootOf(path)?.sourceRoot === "main";
+  return language.language === "typescript" || language.identity.root.sourceRoot === "main";
 };
 
 /** Why a Task owes no mutation check. Exactly one applies, in this precedence. */

@@ -10,10 +10,10 @@ import {
   mutantTimeoutMs,
   mutationPlan,
   mutationPlanOf,
+  mutationPlanRefusalText,
   parseMutantCap,
   taskMutants,
 } from "../../src/core/owner-verification/mutation-plan";
-import { mutationPlanRefusalText } from "../../src/core/owner-verification/mutation-plan";
 import { parseJava } from "../../src/core/owner-verification/java-syntax";
 import { sha256Hex } from "../../src/core/digest";
 import type { MutationOperator, MutationPlan } from "../../src/core/owner-verification/types";
@@ -440,6 +440,14 @@ describe("a Java owner's plan (issue #254)", () => {
       const mutated = applyMutant(JAVA_SOURCE, mutant);
       expect(parseJava(mutated).ok, `${mutant.operator}: ${mutant.original} → ${mutant.replacement}`).toBe(true);
     }
+  });
+
+  it("refuses a Java owner the grammar cannot parse as owner-unparseable with the grammar's diagnostic, never a plan", () => {
+    const refused = mutationPlan({ ownerPath: JAVA_OWNER, ownerText: "final class C { void f( {\n", changedLines: lines(1, 1), cap: capOf(24) });
+    expect(refused).toMatchObject({ ok: false, error: { kind: "owner-unparseable" } });
+    if (refused.ok || refused.error.kind !== "owner-unparseable") throw new Error(`expected owner-unparseable, got ${JSON.stringify(refused)}`);
+    expect(refused.error.diagnostics[0]).toMatch(/^Java parsing failed/u);
+    expect(mutationPlanRefusalText(refused.error)).toContain("does not parse");
   });
 
   it("refuses a Java path outside a source root as unsupported-language, never as a parse error", () => {

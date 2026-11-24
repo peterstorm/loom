@@ -147,8 +147,17 @@ export type ModuleRead =
 /** The port sibling coverage pulls repository files through, one path at a time. */
 export type ReadModule = (path: string) => ModuleRead;
 
-/** Sibling coverage's input: the matrix test the walk starts from, the due family paths it must reach (`duePaths`, owner first), the aliases, and the port. */
-export type SiblingCoverageInput = Readonly<{ matrixTest: string; due: NonEmpty<string>; aliases: PathAliases; read: ReadModule }>;
+/**
+ * The port sibling coverage loads the matrix test's tsconfig aliases through:
+ * the aliases, or the failure that resolving them is. Coverage calls it only
+ * for a TypeScript family, after the family's language is decided, so a
+ * tsconfig can neither block a Java family nor mask an `unsupported-language`
+ * refusal.
+ */
+export type LoadAliases = () => DomainResult<PathAliases, OwnerInfrastructureFailure>;
+
+/** Sibling coverage's input: the matrix test the walk starts from, the due family paths it must reach (`duePaths`, owner first), the alias port, and the read port. */
+export type SiblingCoverageInput = Readonly<{ matrixTest: string; due: NonEmpty<string>; aliases: LoadAliases; read: ReadModule }>;
 
 /** `coverage.ts`'s entry point: it drives its own traversal through the port and decides. */
 export type SiblingCoverageFn = (input: SiblingCoverageInput) => CoverageVerdict;
@@ -248,9 +257,9 @@ export type MutationPlanInput = Readonly<{
 }>;
 
 /**
- * Why the owner's text yields no trustworthy mutation plan: the TypeScript
- * parser reported syntax errors (`line:column message`), so the sites it
- * would offer come from a recovered, possibly garbled tree.
+ * Why the owner's text yields no trustworthy mutation plan: its parser (the
+ * TypeScript compiler's or the Java grammar's) reported syntax errors, so the
+ * sites it would offer would come from a recovered, possibly garbled tree.
  */
 export type OwnerUnparseable = Readonly<{ kind: "owner-unparseable"; diagnostics: NonEmpty<string> }>;
 

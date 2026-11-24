@@ -566,8 +566,9 @@ describe("runOwnerVerification over a Java family (issue #254)", () => {
       owner: JAVA_OWNER_FIXTURE.owner,
       matrixTest: JAVA_OWNER_FIXTURE.matrixTests.discriminating,
       coverage: { kind: "covered" },
-      // condition-negation, comparison-flip, logical-swap and both boolean
-      // literal flips of the Wave's changed lines; every one re-parses as Java.
+      // condition-negation, comparison-flip, logical-swap, the boolean-literal
+      // flip of `true` and its return-value replacement `!(true)`, on the Wave's
+      // changed lines; every one re-parses as Java.
       mutation: { kind: "verified", generated: 5, killed: 5, timedOut: 0, invalid: 0, survivors: [], unmutated: 0, ownerChangedInWave: true },
     });
     const launches = repo.runnerLaunches();
@@ -608,12 +609,25 @@ describe("runOwnerVerification over a Java family (issue #254)", () => {
     expect(verdict.coverage).toMatchObject({ kind: "missing", paths: [JAVA_OWNER_FIXTURE.siblings[0]] });
   }, TIMEOUT_MS);
 
+  it("FR-016: a Java owner the grammar cannot parse is the owner-unparseable infrastructure failure, and no matrix test runs", async () => {
+    const repo = buildJava();
+    writeFileSync(join(repo.root, JAVA_OWNER_FIXTURE.owner), "package dk.example.decision;\n\npublic final class GatedDecision {\n  public static boolean blocks( {\n}\n");
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.mutation).toMatchObject({
+      kind: "infrastructure",
+      failure: { kind: "owner-unparseable", detail: expect.stringContaining("Java parsing failed") },
+    });
+    expect(repo.runnerLaunches()).toEqual([]);
+  }, TIMEOUT_MS);
+
   it("refuses a Kotlin owner as unsupported-language, never as a parse failure of a language it never read", async () => {
     const repo = buildJava();
     const graph = repo.manager.load() as StampedGraph;
     const kotlin = "billing/src/main/kotlin/dk/example/decision/Gated.kt";
     mkdirSync(join(repo.root, "billing/src/main/kotlin/dk/example/decision"), { recursive: true });
     writeFileSync(join(repo.root, kotlin), "package dk.example.decision\n\nobject Gated\n");
+    // A broken tsconfig beside the mixed family must not mask the language refusal.
+    writeFileSync(join(repo.root, "tsconfig.json"), "{ \"compilerOptions\": { \"paths\": ");
     const obligation = ownerObligation({
       invariant: JAVA_OWNER_FIXTURE.invariant,
       title: "Only a verified member is admitted",
