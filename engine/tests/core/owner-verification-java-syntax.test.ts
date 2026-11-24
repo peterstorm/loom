@@ -191,12 +191,29 @@ describe("parseJava", () => {
     if (refused.ok) throw new Error("a broken file parsed");
     expect(refused.error.kind).toBe("java-syntax-error");
     expect(refused.error.diagnostics).toHaveLength(1);
-    expect(refused.error.diagnostics[0]).toMatch(/line: \d+, column: \d+/);
+    expect(refused.error.diagnostics[0]).toMatch(/^Java parsing failed at line \d+, column \d+: found /u);
+  });
+
+  it("keeps the parser's token dump out of the diagnostic", () => {
+    const refused = parseJava("final class A {\n  void f() { int x = ; }\n}\n");
+    if (refused.ok) throw new Error("a broken file parsed");
+    const [diagnostic] = refused.error.diagnostics;
+    expect(diagnostic.length).toBeLessThanOrEqual(300);
+    expect(diagnostic).toContain("found ';'");
+    expect(diagnostic).not.toContain("->classDeclaration");
+  });
+
+  it("names the end of the input where the parser reports no position", () => {
+    const refused = parseJava("final class A {\n");
+    if (refused.ok) throw new Error("a truncated file parsed");
+    expect(refused.error.diagnostics[0]).toContain("at the end of the input");
   });
 
   it("refuses unicode escapes in an identifier, which javac would decode before lexing", () => {
     const refused = parseJava("final class A { int \\u0061 = 1; }\n");
     expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error("a file with a unicode escape parsed");
+    expect(refused.error.diagnostics[0]).toContain("unexpected character");
   });
 
   it("reads the Java 21 surface the engine's own Java projects use: sealed types, records, switch expressions and text blocks", () => {

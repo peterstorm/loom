@@ -412,9 +412,41 @@ function sitesOf(root: CstNode, text: string): readonly Site[] {
 // The entry point
 // ---------------------------------------------------------------------------
 
+/** How much of the parser's own wording one gate diagnostic carries: a position and what failed, not a token dump. */
+const DIAGNOSTIC_LIMIT = 300;
+
+/** The parser's position, or the end of the input where the parser itself reports `NaN`. */
+const positionText = (line: string | undefined, column: string | undefined): string =>
+  line === undefined || column === undefined || line === "NaN" || column === "NaN"
+    ? "at the end of the input"
+    : `at line ${line}, column ${column}`;
+
+/**
+ * A parsing refusal as one bounded line: the position, the token found, and how
+ * many alternatives the grammar offered — not the enumeration itself (a hundred
+ * bracket tokens for one stray character) and not the rule stack behind it.
+ */
+const parsingDiagnosticOf = (flat: string): string => {
+  const position = /line: (\d+|NaN), column: (\d+|NaN)/u.exec(flat);
+  const found = /but found[^']*'([^']*)'/u.exec(flat);
+  const alternatives = new Set(flat.match(/\b\d+\. [^\d][^[]*\[[^\]]*\]/gu) ?? []).size;
+  const where = positionText(position?.[1], position?.[2]);
+  const at = found === null ? "" : `: found '${found[1]}'`;
+  const offered = alternatives === 0 ? "" : ` (${alternatives} alternative token sequences)`;
+  return `Java parsing failed ${where}${at}${offered}`;
+};
+
+/**
+ * The parser's message as one diagnostic: a lexing refusal keeps its own
+ * wording (it names the character and the offset), a parsing refusal is
+ * composed from its position and its found token, and either is bounded so a
+ * gate message stays readable.
+ */
 const diagnosticOf = (cause: unknown): string => {
   const message = cause instanceof Error ? cause.message : String(cause);
-  return message.replace(/\s*\n\s*/gu, " ").trim();
+  const flat = message.replace(/\s*\n\s*/gu, " ").trim();
+  const text = /lexing errors detected/u.test(flat) ? flat : parsingDiagnosticOf(flat);
+  return text.length <= DIAGNOSTIC_LIMIT ? text : `${text.slice(0, DIAGNOSTIC_LIMIT - 1).trimEnd()}\u2026`;
 };
 
 /**
