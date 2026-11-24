@@ -34,7 +34,7 @@
  * TypeScript. `coverageOverFiles` is the same decision over a file map.
  */
 
-import { success, type NonEmpty } from "../orchestration-contract/identity";
+import { mapNonEmpty, success, type NonEmpty } from "../orchestration-contract/identity";
 import { moduleEdges, type EdgeKind, type ModuleEdges } from "./import-graph";
 import { javaReachedDue } from "./java-reach";
 import { obligationLanguageOf, type ObligationReading } from "./language";
@@ -263,8 +263,9 @@ function typescriptCoverage(matrixTest: string, due: NonEmpty<string>, aliases: 
  * strength of a name alone. An absent test reaches nothing; an unreadable or
  * unparseable one is the infrastructure failure its read or parse is.
  */
-function javaCoverage(family: JavaReading, due: NonEmpty<string>, read: ReadModule): CoverageVerdict {
+function javaCoverage(family: JavaReading, read: ReadModule): CoverageVerdict {
   const matrixTest = family.matrixTest.path;
+  const due = mapNonEmpty(family.due, ({ path }) => path);
   const test = read(matrixTest);
   if (test.kind === "unreadable") return { kind: "infrastructure", failure: test.failure };
   if (test.kind === "absent") return decideCoverage(new Set(), due);
@@ -298,19 +299,20 @@ type JavaReading = Extract<ObligationReading, { language: "java" }>;
 function coverageThrough(matrixTest: string, due: NonEmpty<string>, aliases: LoadAliases, read: ReadModule): CoverageVerdict {
   const reading = obligationLanguageOf({ matrixTest, due });
   if (!reading.ok) return { kind: "infrastructure", failure: reading.error };
-  if (reading.value.language === "java") return javaCoverage(reading.value, due, read);
+  if (reading.value.language === "java") return javaCoverage(reading.value, read);
   const loaded = aliases();
   return loaded.ok ? typescriptCoverage(matrixTest, due, loaded.value, read) : { kind: "infrastructure", failure: loaded.error };
 }
 
 /**
- * Sibling coverage, driving its own traversal (#133): it pulls each file it
- * needs through `read`, at most once and in resolution order, so it reads
- * exactly the matrix test, then for each specifier its ladder candidates up
- * to the first present one, closed under re-exports. A refused read stops the
- * walk as that read's infrastructure failure, never a missing path; more than
- * `COVERAGE_READ_BOUND` present files is `coverage-bound-exceeded`. The
- * aliases are loaded through their port only for a TypeScript family.
+ * Sibling coverage, driving its own reads (#133) through `read`, each path at
+ * most once. For a TypeScript family it reads exactly the matrix test, then
+ * for each specifier its ladder candidates up to the first present one,
+ * closed under re-exports; more than `COVERAGE_READ_BOUND` present files is
+ * `coverage-bound-exceeded`, and the aliases are loaded through their port.
+ * For a Java family it reads the matrix test and each due path once, walks no
+ * imports and has no bound (`javaCoverage`). Either way a refused read is that
+ * read's infrastructure failure, never a missing path.
  */
 export const siblingCoverage: SiblingCoverageFn = ({ matrixTest, due, aliases, read }) =>
   coverageThrough(matrixTest, due, aliases, read);

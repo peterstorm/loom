@@ -242,8 +242,8 @@ const pickJava = (path: string, source: SupportedSource): JavaFamilyPath | null 
 /**
  * How an obligation's family reads, or the `unsupported-language` failure that
  * refuses it: a path neither reader reads, or a family whose paths do not all
- * read the same way. The matrix test is checked first, then the siblings in
- * declared order. Path-only and pure; the caller decides what to do with the
+ * read the same way. The owner is classified first, then the matrix test,
+ * then the siblings in declared order. Path-only and pure; the caller decides what to do with the
  * refusal, never a parse.
  */
 export const obligationLanguageOf = ({ matrixTest, due }: ObligationLanguagePaths): DomainResult<ObligationReading, OwnerInfrastructureFailure> => {

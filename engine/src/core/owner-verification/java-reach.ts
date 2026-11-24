@@ -18,6 +18,8 @@
  *   for that), where the test's package is the one it declares, or the one its
  *   path names when it declares none;
  * - writes its fully-qualified name without an import.
+ * A file in the default package is reached only by a test in the default
+ * package that uses its simple name: nothing else can name it.
  *
  * A name the test uses is an identifier outside its `package` and `import`
  * declarations, or a dotted chain that spells the qualified name: both come
@@ -57,8 +59,14 @@ export type JavaReachInput = Readonly<{
  */
 const testPackageOf = (test: JavaFile, testIdentity: JavaFileIdentity): string => test.packageName ?? testIdentity.packageName;
 
-/** Whether `owner`'s file is loaded by the test's imports, package or qualified names. */
+/**
+ * Whether `owner`'s file is loaded by the test's imports, package or qualified
+ * names. A class in the default package has no qualified name another package
+ * can import or write (JLS 7.5), so only a default-package test that uses its
+ * simple name reaches it; `Gate.of()` in a named package is some other `Gate`.
+ */
 const reachedBy = (owner: JavaFileIdentity, test: JavaFile, testPackage: string): boolean => {
+  if (owner.packageName === "") return testPackage === "" && test.identifiers.has(owner.simpleName);
   const ownerOrNested = (name: string): boolean => name === owner.fqn || name.startsWith(`${owner.fqn}.`);
   const wildcardImports = test.imports.some(
     (entry) => entry.kind === "class-wildcard" && entry.packageName === owner.packageName,

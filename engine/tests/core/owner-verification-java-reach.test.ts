@@ -89,6 +89,14 @@ describe("javaReachedDue", () => {
     expect(reached(testIn("C.of();", ["import p.record.C;"]), MATRIX, ["src/main/java/p/C.java"])).toEqual([]);
   });
 
+  it("reaches a default-package file only from a default-package test that uses its simple name", () => {
+    const owner = "src/main/java/Gate.java";
+    // In a named package `Gate` is some other class: a default-package class cannot be imported or written qualified.
+    expect(reached(testIn("Gate.of();", ["import other.Gate;"]), MATRIX, [owner])).toEqual([]);
+    expect(reached(testIn("Gate.of();"), MATRIX, [owner])).toEqual([]);
+    expect(reached("final class Matrix { void matrix() { Gate.of(); } }\n", "src/test/java/Matrix.java", [owner])).toEqual([owner]);
+  });
+
   it("refuses a matrix test the grammar cannot parse as owner-unparseable, never as unreached", () => {
     const refused = javaReachedDue({ matrixTest: javaPath(MATRIX), matrixTestText: "final class Matrix { void f() { if ( } }", due: DUE.map(javaPath) });
     expect(refused).toMatchObject({ ok: false, error: { kind: "owner-unparseable" } });

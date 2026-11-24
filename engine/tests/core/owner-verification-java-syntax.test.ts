@@ -201,7 +201,7 @@ describe("parseJava", () => {
     ]);
   });
 
-  it("gives a void method no return site, a numeric one 0, a reference one null, and a lambda's return none at all", () => {
+  it("replaces a numeric return with 0 and a reference return with null, a returned lambda included, and offers no site for the lambda's own bare return", () => {
     const replacements = sites(MODERN).filter(([operator]) => operator === "return-value-replacement");
     expect(replacements).toEqual([
       ["return-value-replacement", "switch (shape) {\n      case Circle circle -> 3.14 * circle.radius();\n      case Square square -> square.side() * square.side();\n    }", "0"],
@@ -380,6 +380,12 @@ describe("parseJava", () => {
     expect(operators).not.toContain("condition-negation");
     expect(operators).not.toContain("guard-removal");
     expect(operators).not.toContain("logical-swap");
+  });
+
+  it("withholds the negation of a component-less record pattern, whose only declaring rule is the record pattern itself", () => {
+    // `Point()` nests no type pattern, so only the recordPattern rule can withhold its negation.
+    const source = "final class P {\n  boolean f(Object o) {\n    if (o instanceof Point()) { return true; }\n    return false;\n  }\n}\n\nrecord Point() {}\n";
+    expect(operatorsOf(source)).not.toContain("condition-negation");
   });
 
   it("offers no statement-removal inside a try block whose handlers catch a checked exception", () => {
