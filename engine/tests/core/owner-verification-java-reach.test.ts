@@ -44,12 +44,23 @@ describe("javaReachedDue", () => {
     expect(reached(testIn("C.of();", ["import p.q.*;"]))).toEqual([OWNER]);
     expect(reached(testIn("S.of();", ["import p.q.*;"]))).toEqual([SIBLING]);
     expect(reached(testIn("new Object();", ["import p.q.*;"]))).toEqual([]);
+    // A wildcard over the owner's own class imports its member types, so it names the owner.
+    expect(reached(testIn("new Object();", ["import p.q.C.*;"]))).toEqual([OWNER]);
   });
 
   it("reaches a same-package file by its simple name, with no import at all", () => {
     const samePackage = "src/test/java/p/q/Matrix.java";
-    expect(reached(testIn("C.of();"), samePackage)).toEqual([OWNER]);
-    expect(reached(testIn("new Object();"), samePackage)).toEqual([]);
+    expect(reached(testIn("C.of();", [], "p.q"), samePackage)).toEqual([OWNER]);
+    expect(reached(testIn("new Object();", [], "p.q"), samePackage)).toEqual([]);
+  });
+
+  it("decides the same package by the declaration the test writes, not the directory it sits in", () => {
+    // javac compiles a source into its declared package whatever directory holds it.
+    expect(reached(testIn("C.of();", [], "p.q"), "src/test/java/t/Matrix.java")).toEqual([OWNER]);
+    const looksSame = "src/test/java/p/q/Matrix.java";
+    expect(reached(testIn("C.of();", [], "other"), looksSame)).toEqual([]);
+    // With no declaration, the path's package is the one javac would name.
+    expect(reached("final class Matrix { void matrix() { C.of(); } }\n", looksSame)).toEqual([OWNER]);
   });
 
   it("reaches a file whose fully-qualified name the test writes out without an import", () => {

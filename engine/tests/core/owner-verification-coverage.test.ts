@@ -479,7 +479,7 @@ describe("sibling coverage over a Java family (issue #254)", () => {
     expect(javaCoverage(javaTest("import java.util.List;"))).toEqual({ kind: "missing", paths: [OWNER, SIBLING] });
   });
 
-  it("decides a Java family without reading any file but the matrix test", () => {
+  it("reads the matrix test and each due path once, and decides reach from the test's names alone", () => {
     const reads: string[] = [];
     const read: ReadModule = (path) => {
       reads.push(path);
@@ -487,7 +487,36 @@ describe("sibling coverage over a Java family (issue #254)", () => {
       return text === undefined ? { kind: "absent" } : { kind: "text", text };
     };
     expect(siblingCoverage({ matrixTest: MATRIX, due: [OWNER, SIBLING], aliases: [], read })).toEqual({ kind: "covered" });
-    expect(reads).toEqual([MATRIX]);
+    expect(reads).toEqual([MATRIX, OWNER, SIBLING]);
+  });
+
+  it("reports a due path the test names but the workspace does not have as missing", () => {
+    // The test imports the owner, but the owner is not a file: a name is not coverage.
+    const verdict = coverageOverFiles({
+      matrixTest: MATRIX,
+      due: [OWNER, SIBLING],
+      files: new Map([[SIBLING, JAVA_SOURCES.get(SIBLING)!], [MATRIX, javaTest("import p.q.C;", "import p.q.S;")]]),
+      aliases: [],
+    });
+    expect(verdict).toEqual({ kind: "missing", paths: [OWNER] });
+  });
+
+  it("keeps a due path the filesystem refuses as that read's infrastructure failure, never a missing path", () => {
+    const read: ReadModule = (path) => {
+      if (path === MATRIX) return { kind: "text", text: javaTest("import p.q.C;", "import p.q.S;") };
+      if (path === OWNER) return { kind: "unreadable", failure: { kind: "repository-file-unreadable", detail: `${OWNER} cannot be read: EACCES` } };
+      return { kind: "text", text: JAVA_SOURCES.get(path)! };
+    };
+    const verdict = siblingCoverage({ matrixTest: MATRIX, due: [OWNER, SIBLING], aliases: [], read });
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "repository-file-unreadable" } });
+  });
+
+  it("keeps an unreadable Java matrix test as that read's infrastructure failure", () => {
+    const read: ReadModule = (path) => path === MATRIX
+      ? { kind: "unreadable", failure: { kind: "repository-file-unreadable", detail: `${MATRIX} cannot be read: EACCES` } }
+      : { kind: "text", text: JAVA_SOURCES.get(path)! };
+    const verdict = siblingCoverage({ matrixTest: MATRIX, due: [OWNER, SIBLING], aliases: [], read });
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "repository-file-unreadable" } });
   });
 
   it("refuses a family that mixes languages as unsupported-language, never as a missing path", () => {

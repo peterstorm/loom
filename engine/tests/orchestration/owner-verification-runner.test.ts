@@ -9,7 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
@@ -592,5 +592,43 @@ describe("runOwnerVerification over a Java family (issue #254)", () => {
     // The same-package owner is still reachable by name only while the test uses it; dropping every use drops the reach.
     const verdict = onlyVerdict(await verify(repo));
     expect(verdict.coverage).toMatchObject({ kind: "missing", paths: [JAVA_OWNER_FIXTURE.owner, ...JAVA_OWNER_FIXTURE.siblings] });
+  }, TIMEOUT_MS);
+
+  it("a Java family neither reads nor is blocked by a tsconfig, whose paths are a TypeScript concern", async () => {
+    const repo = buildJava();
+    writeFileSync(join(repo.root, "tsconfig.json"), "{ \"compilerOptions\": { \"paths\": ");
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toEqual({ kind: "covered" });
+  }, TIMEOUT_MS);
+
+  it("reports a due Java sibling the workspace does not have as missing, never as covered by its name", async () => {
+    const repo = buildJava();
+    rmSync(join(repo.root, JAVA_OWNER_FIXTURE.siblings[0]!));
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toMatchObject({ kind: "missing", paths: [JAVA_OWNER_FIXTURE.siblings[0]] });
+  }, TIMEOUT_MS);
+
+  it("refuses a Kotlin owner as unsupported-language, never as a parse failure of a language it never read", async () => {
+    const repo = buildJava();
+    const graph = repo.manager.load() as StampedGraph;
+    const kotlin = "billing/src/main/kotlin/dk/example/decision/Gated.kt";
+    mkdirSync(join(repo.root, "billing/src/main/kotlin/dk/example/decision"), { recursive: true });
+    writeFileSync(join(repo.root, kotlin), "package dk.example.decision\n\nobject Gated\n");
+    const obligation = ownerObligation({
+      invariant: JAVA_OWNER_FIXTURE.invariant,
+      title: "Only a verified member is admitted",
+      statement: null,
+      owner: kotlin,
+      siblings: [],
+      matrixTest: JAVA_OWNER_FIXTURE.matrixTests.discriminating,
+      mutation: { kind: "verify" },
+    });
+    const owed = owedOf(graph.owner_obligations, [obligation]);
+    // The Wave must list the owner, or the run has no mutation half to plan.
+    const listed: StampedGraph = { ...graph, tasks: graph.tasks.map((task, index) => (index === 0 ? { ...task, file_list: [kotlin] } : task)) };
+    const verdict = onlyVerdict(await verify(repo, { graph: listed, owed }));
+    expect(verdict.coverage).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+    expect(verdict.mutation).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+    expect(repo.runnerLaunches()).toEqual([]);
   }, TIMEOUT_MS);
 });

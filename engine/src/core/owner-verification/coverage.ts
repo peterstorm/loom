@@ -253,15 +253,24 @@ function typescriptCoverage(matrixTest: string, due: NonEmpty<string>, aliases: 
 }
 
 /**
- * A Java matrix test's coverage: it reads the test itself and decides reach by
- * names (`java-reach.ts`), so no other file is read and the bound does not
- * apply. An absent test reaches nothing; an unreadable or unparseable one is
- * the infrastructure failure its read or parse is.
+ * A Java matrix test's coverage: the test's bytes decide reach by names
+ * (`java-reach.ts`), so no import walk runs and the read bound does not apply.
+ * The due paths themselves are still read, once each: a path that is not there
+ * cannot be reached, and one the filesystem refuses is that read's
+ * infrastructure failure — a family path is never reported covered on the
+ * strength of a name alone. An absent test reaches nothing; an unreadable or
+ * unparseable one is the infrastructure failure its read or parse is.
  */
 function javaCoverage(matrixTest: string, due: NonEmpty<string>, read: ReadModule): CoverageVerdict {
   const test = read(matrixTest);
   if (test.kind === "unreadable") return { kind: "infrastructure", failure: test.failure };
   if (test.kind === "absent") return decideCoverage(new Set(), due);
+  const absent = new Set<string>();
+  for (const path of due) {
+    const file = read(path);
+    if (file.kind === "unreadable") return { kind: "infrastructure", failure: file.failure };
+    if (file.kind === "absent") absent.add(path);
+  }
   const reached = javaReachedDue({ matrixTest, matrixTestText: test.text, due });
   if (!reached.ok) {
     return {
@@ -272,7 +281,7 @@ function javaCoverage(matrixTest: string, due: NonEmpty<string>, read: ReadModul
       },
     };
   }
-  return decideCoverage(reached.value, due);
+  return decideCoverage(new Set([...reached.value].filter((path) => !absent.has(path))), due);
 }
 
 /**

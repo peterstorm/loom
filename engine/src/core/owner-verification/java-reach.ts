@@ -11,10 +11,12 @@
  *   nested class loads the enclosing one;
  * - imports one of its static members or all of them
  *   (`import static p.C.m;`, `import static p.C.*;`), which loads `p.C`;
+ * - imports its member types (`import p.C.*;`), which names `p.C` itself;
  * - imports its package as a wildcard and uses its simple name
  *   (`import p.*;` with `C` used);
  * - sits in the same package and uses its simple name (Java needs no import
- *   for that);
+ *   for that), where the test's package is the one it declares, or the one its
+ *   path names when it declares none;
  * - writes its fully-qualified name without an import.
  *
  * A name the test uses is an identifier outside its `package` and `import`
@@ -42,13 +44,22 @@ export type JavaReachInput = Readonly<{
   due: readonly string[];
 }>;
 
+/**
+ * The package the test compiles into: the `package` declaration it writes,
+ * else the directory its path names. javac reads the declaration, so a file
+ * that sits in one directory and declares another compiles into the declared
+ * one, and its same-package reach follows that.
+ */
+const testPackageOf = (test: JavaFile, testIdentity: JavaFileIdentity | null): string | null =>
+  test.packageName ?? testIdentity?.packageName ?? null;
+
 /** Whether `owner`'s file is loaded by the test's imports, package or qualified names. */
-const reachedBy = (owner: JavaFileIdentity, test: JavaFile, testIdentity: JavaFileIdentity | null): boolean => {
+const reachedBy = (owner: JavaFileIdentity, test: JavaFile, testPackage: string | null): boolean => {
   const ownerOrNested = (name: string): boolean => name === owner.fqn || name.startsWith(`${owner.fqn}.`);
   const wildcardImports = test.imports.some(
     (entry) => entry.kind === "class-wildcard" && entry.packageName === owner.packageName,
   );
-  const samePackage = testIdentity !== null && testIdentity.packageName === owner.packageName;
+  const samePackage = testPackage !== null && testPackage === owner.packageName;
   if ((samePackage || wildcardImports) && test.identifiers.has(owner.simpleName)) return true;
   if ([...test.qualifiedNames].some(ownerOrNested)) return true;
   return test.imports.some((entry) =>
@@ -56,7 +67,8 @@ const reachedBy = (owner: JavaFileIdentity, test: JavaFile, testIdentity: JavaFi
       .with({ kind: "class" }, ({ name }) => ownerOrNested(name))
       .with({ kind: "static-member" }, ({ owner: named }) => ownerOrNested(named))
       .with({ kind: "static-wildcard" }, ({ owner: named }) => ownerOrNested(named))
-      .with({ kind: "class-wildcard" }, () => false)
+      // `import p.C.*;` imports C's member types: it names the class file it loads.
+      .with({ kind: "class-wildcard" }, ({ packageName }) => ownerOrNested(packageName))
       .exhaustive());
 };
 
@@ -70,10 +82,11 @@ export const javaReachedDue = ({ matrixTest, matrixTestText, due }: JavaReachInp
   if (!parsed.ok) return failure({ kind: "owner-unparseable", diagnostics: parsed.error.diagnostics });
   const test = parsed.value;
   const testIdentity = javaFileIdentityOf(matrixTest);
+  const testPackage = testPackageOf(test, testIdentity);
   const reached = new Set<string>();
   for (const path of due) {
     const owner = javaFileIdentityOf(path);
-    if (owner === null || !reachedBy(owner, test, testIdentity)) continue;
+    if (owner === null || !reachedBy(owner, test, testPackage)) continue;
     reached.add(normalizeRepoPath(path) ?? path);
   }
   return success(reached as ReadonlySet<string>);
