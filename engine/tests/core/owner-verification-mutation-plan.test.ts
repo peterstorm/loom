@@ -425,6 +425,15 @@ describe("a Java owner's plan (issue #254)", () => {
     ]);
   });
 
+  it("reports the column a Java site starts at, which the survivor diagnostic prints", () => {
+    const plan = planAt(JAVA_OWNER, JAVA_SOURCE, lines(5, 5));
+    expect(plan.mutants.map(({ operator, line, column }) => [operator, line, column])).toEqual([
+      ["condition-negation", 5, 9],
+      ["comparison-flip", 5, 15],
+      ["logical-swap", 5, 20],
+    ]);
+  });
+
   it("applies each Java mutant to Java that still parses, so none is born invalid", () => {
     const plan = planAt(JAVA_OWNER, JAVA_SOURCE, lines(1, 10));
     for (const mutant of plan.mutants) {

@@ -28,8 +28,21 @@
  *   of this seam: `guard-removal` is reported here too, and the Task mutation
  *   check's set alone selects it.
  *
+ * Every site's replacement must compile, or a run observes the compiler instead
+ * of the owner's behaviour. Three constructs therefore offer no site: the
+ * condition of a `while` or `for` that is the constant `true` (a negated or
+ * flipped literal makes the body unreachable, which javac rejects); a statement
+ * directly inside a `try` block whose handlers catch a checked exception
+ * (removing it can leave a handler unreachable); and a return whose replacement
+ * the text already spells (`return null;` in a reference method), which would
+ * mutate the owner into itself and report a survivor nothing can kill.
+ *
  * An input the grammar refuses is one `java-syntax-error` diagnostic, never a
  * recovered tree: the caller reports `owner-unparseable` and mutates nothing.
+ * Only the grammar's own verdict becomes that refusal: a grammar that cannot
+ * load, and any other internal error, escapes as a throw the shell names
+ * `unexpected-error`, so a broken install is never reported as the owner's
+ * syntax.
  * A Java source that spells an identifier or keyword with `\uXXXX` escapes is
  * refused the same way (javac decodes the escapes before lexing, and the
  * grammar reads raw text), so failing closed never turns a real file into a
@@ -52,8 +65,9 @@ export type JavaSyntaxError = Readonly<{ kind: "java-syntax-error"; diagnostics:
  * One Java import, as the reach rule reads it:
  * - `class`: `import p.C;` (a nested class stays in the same file);
  * - `static-member`: `import static p.C.m;`, whose owner is `p.C`;
- * - `class-wildcard`: `import p.*;`, which reaches a class only when its
- *   simple name is used;
+ * - `class-wildcard`: `import p.*;` (a package, which reaches a class only when
+ *   its simple name is used) or `import p.C.*;` (a type's member types, which
+ *   names `p.C` itself);
  * - `static-wildcard`: `import static p.C.*;`, which names `p.C` itself.
  */
 export type JavaImport =
@@ -91,6 +105,13 @@ export type JavaFile = Readonly<{
 const require = createRequire(import.meta.url);
 
 type ParserModule = Readonly<{ parse: (text: string) => CstNode }>;
+
+/**
+ * The grammar's own refusal, as `java-parser` composes it. Anything else thrown
+ * out of `parse` is not a verdict on the text: loading a module cannot fail
+ * because a file has a syntax error, and a parser bug is not one either.
+ */
+const isGrammarRefusal = (message: string): boolean => /(?:parsing|lexing) errors detected/u.test(message);
 
 /**
  * `java-parser` as the parser module. The cast is the one place the pinned
@@ -221,6 +242,9 @@ function usesOf(unit: CstNode): Uses {
   };
   for (const token of ordered) {
     if (isIdentifier(token)) {
+      // Two identifiers side by side are separate names (`String d()` is a type and
+      // a method), never one dotted chain: only a `.` joins two.
+      if (chain.length > 0 && !afterDot) flush();
       chain.push(token.image);
       afterDot = false;
     } else if (token.image === "." && chain.length > 0 && !afterDot) {
@@ -387,21 +411,69 @@ function statementSites(node: CstNode, context: Context, text: string): readonly
   if (node.name !== "returnStatement" || context.kind !== "method") return [];
   const expression = oneRule(node, "expression");
   if (expression === undefined) return [];
-  const replacement = returnReplacement(context.result, textOf(expression, text));
-  return replacement === null ? [] : [{ operator: "return-value-replacement", ...spanOf(expression), replacement }];
+  const original = textOf(expression, text);
+  const replacement = returnReplacement(context.result, original);
+  // A replacement the owner already spells mutates nothing: it would report a
+  // survivor no matrix test could ever kill.
+  return replacement === null || replacement === original.trim()
+    ? []
+    : [{ operator: "return-value-replacement", ...spanOf(expression), replacement }];
 }
 
+/** The rules that declare a method whose body a `return` sits in, class or interface. */
+const METHOD_DECLARATIONS: ReadonlySet<string> = new Set(["methodDeclaration", "interfaceMethodDeclaration"]);
+
 const contextOf = (node: CstNode, parent: Context): Context =>
-  node.name === "methodDeclaration" ? Object.freeze({ kind: "method", result: returnKindOf(node) })
+  METHOD_DECLARATIONS.has(node.name) ? Object.freeze({ kind: "method", result: returnKindOf(node) })
   : node.name === "lambdaExpression" ? LAMBDA
   : parent;
 
-/** Every mutation site of one file, in source order. */
+/** A span of the original text, `[start, end)`; a site must start outside the excluded ones. */
+type Span = Readonly<{ start: number; end: number }>;
+
+const withinSpans = (spans: readonly Span[], offset: number): boolean =>
+  spans.some((span) => offset >= span.start && offset < span.end);
+
+/** Whether a condition is the constant `true` (parens and negations aside), which a loop cannot flip. */
+const isConstantTrue = (text: string): boolean => /^[()!\s]*true[()\s]*$/u.test(text);
+
+/**
+ * The spans no site may open in, because its mutant would not compile: a
+ * `while` or `for` condition that is the constant `true` (the negated or
+ * flipped body is unreachable), and the body of a `try` whose handlers catch a
+ * checked exception (a removed statement can make a handler unreachable).
+ */
+function exclusionSpansOf(root: CstNode, text: string): readonly Span[] {
+  const spans: Span[] = [];
+  const visit = (node: CstNode): void => {
+    if (node.name === "whileStatement" || node.name === "basicForStatement") {
+      const condition = oneRule(node, "expression");
+      if (condition !== undefined && isConstantTrue(textOf(condition, text))) spans.push(spanOf(condition));
+    }
+    const isTry = node.name === "tryStatement" || node.name === "tryWithResourcesStatement";
+    if (isTry && childrenOf(node, "catches").length > 0) {
+      const block = oneRule(node, "block");
+      if (block !== undefined) spans.push(spanOf(block));
+    }
+    for (const child of ruleChildren(node)) visit(child);
+  };
+  visit(root);
+  return spans;
+}
+
+/** Every mutation site of one file, in source order, that compiles as a mutant. */
 function sitesOf(root: CstNode, text: string): readonly Site[] {
+  const excluded = exclusionSpansOf(root, text);
   const sites: Site[] = [];
   const visit = (node: CstNode, context: Context): void => {
     const inner = contextOf(node, context);
-    sites.push(...conditionSites(node, text), ...operatorSites(node), ...statementSites(node, inner, text), ...guardSites(node));
+    const offered = [
+      ...conditionSites(node, text),
+      ...operatorSites(node),
+      ...statementSites(node, inner, text),
+      ...guardSites(node),
+    ];
+    sites.push(...offered.filter((site) => !withinSpans(excluded, site.start)));
     for (const child of ruleChildren(node)) visit(child, inner);
   };
   visit(root, OTHER);
@@ -451,14 +523,18 @@ const diagnosticOf = (cause: unknown): string => {
 
 /**
  * The one Java read: the file's package, imports, used identifiers and
- * mutation sites, or the grammar's refusal. Total: a refused input is data,
- * never a throw.
+ * mutation sites, or the grammar's own refusal. A refused input is data; a
+ * grammar that could not be loaded, and any other internal error, throws so the
+ * shell names it `unexpected-error` (ADR-0102).
  */
 export const parseJava = (text: string): DomainResult<JavaFile, JavaSyntaxError> => {
+  const parser = parserModule();
   let root: CstNode;
   try {
-    root = parserModule().parse(text);
+    root = parser.parse(text);
   } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    if (!isGrammarRefusal(message)) throw cause;
     return failure(Object.freeze({ kind: "java-syntax-error", diagnostics: nonEmptyOf(diagnosticOf(cause)) }));
   }
   const unit = ordinaryUnitOf(root) ?? root;

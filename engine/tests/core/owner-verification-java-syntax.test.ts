@@ -128,6 +128,19 @@ const sites = (text: string): readonly (readonly [string, string, string])[] =>
 
 const operatorsOf = (text: string): readonly string[] => parsed(text).sites.map((site) => site.operator);
 
+const BODY_STATEMENTS = [
+  "x = x + 1;",
+  "if (x < 0) { x = 0; }",
+  "if (x > 0 && b) { x = x - 1; } else { x = 1; }",
+  "while (b) { x = x - 1; }",
+  "do { x = x + 1; } while (b);",
+  "for (int i = 0; i < x; i++) { x = x - 1; }",
+  "int y = b ? 1 : 2;",
+  "boolean ok = x != 3 && b;",
+  "if (s instanceof String t) { s = t; }",
+  "try { x = x + 1; } catch (RuntimeException e) { x = 0; }",
+] as const;
+
 describe("parseJava", () => {
   it("reads the package, every import form and the names used outside them", () => {
     const file = parsed(GATE);
@@ -171,6 +184,85 @@ describe("parseJava", () => {
       ["return-value-replacement", "() -> {\n      return;\n    }", "null"],
     ]);
     expect(operatorsOf(MODERN)).not.toContain("boolean-literal-flip");
+  });
+
+  it("offers no return site whose replacement is the value already there, which would mutate the owner into itself", () => {
+    const source = [
+      "final class Already {",
+      "  String find(int x) {",
+      "    if (x > 0) return null;",
+      "    return null;",
+      "  }",
+      "  int count() {",
+      "    return 0;",
+      "  }",
+      "  boolean flag() {",
+      "    return false;",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+    const replacements = sites(source).filter(([operator]) => operator === "return-value-replacement");
+    // The boolean return still offers one: `!(false)` is a different value.
+    expect(replacements).toEqual([["return-value-replacement", "false", "!(false)"]]);
+  });
+
+  it("reads a return inside an interface's default, static or private method as a method body", () => {
+    const source = [
+      "interface Sized {",
+      "  default int size() { return 1; }",
+      "  static void go() { sink(); }",
+      "  private int hidden() { return 2; }",
+      "}",
+      "",
+    ].join("\n");
+    expect(sites(source)).toEqual([
+      ["return-value-replacement", "1", "0"],
+      ["statement-removal", "sink();", ";"],
+      ["return-value-replacement", "2", "0"],
+    ]);
+  });
+
+  it("offers no boolean site on a `while` or `for` condition that is the constant true, whose flipped body javac rejects", () => {
+    const loops = ["final class Loops {", "  void spin() {", "    while (true) { tick(); }", "    for (; true; ) { tock(); }", "    do { done(); } while (true);", "  }", "}", ""].join("\n");
+    const sites = parsed(loops).sites;
+    const negations = sites.filter((site) => site.operator === "condition-negation").length;
+    const flips = sites.filter((site) => site.operator === "boolean-literal-flip").length;
+    // Only the `do … while (true)`, whose negation and flip still compile.
+    expect([negations, flips]).toEqual([1, 1]);
+    expect(sites.filter((site) => site.operator === "statement-removal")).toHaveLength(3);
+  });
+
+  it("offers no statement-removal inside a try block whose handlers catch a checked exception", () => {
+    const source = [
+      "final class Guarded {",
+      "  void read() throws Exception {",
+      "    try {",
+      "      work();",
+      "    } catch (java.io.IOException e) {",
+      "      log(e);",
+      "    }",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+    const removed = sites(source).filter(([operator]) => operator === "statement-removal").map(([, original]) => original);
+    // `work();` can leave the handler unreachable; the catch block's own statement is fine.
+    expect(removed).toEqual(["log(e);"]);
+  });
+
+  it("reads a dotted chain only where the text writes a dot, never two identifiers side by side", () => {
+    const file = parsed('final class Chain {\n  String d() { return new p.q.Thing().render(); }\n}\n');
+    expect([...file.qualifiedNames]).toContain("p.q.Thing");
+    // `String d` is a type and a method, not the chain `String.d`.
+    expect([...file.qualifiedNames].some((name) => name.startsWith("String."))).toBe(false);
+  });
+
+  it("refuses a Java 25 module import the Java 21 grammar does not know, rather than inventing sites for it", () => {
+    const refused = parseJava("import module java.base;\nfinal class A {}\n");
+    expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error("a module import parsed");
+    expect(refused.error.kind).toBe("java-syntax-error");
   });
 
   it("offers guard-removal only for an if with no else whose body only exits", () => {
@@ -228,12 +320,16 @@ describe("parseJava", () => {
     expect(twice.sites).toEqual(once.sites);
   });
 
-  it("reports each site's span as a non-empty slice of the text it read", () => {
+  it("reports each site's span as a different, non-empty slice of the text it read", () => {
     for (const source of [GATE, GUARDS, MODERN]) {
-      for (const site of parsed(source).sites) {
+      const reported = parsed(source).sites;
+      expect(reported.length, source.slice(0, 20)).toBeGreaterThan(0);
+      for (const site of reported) {
         expect(site.start, `${site.operator} of ${source.slice(0, 20)}`).toBeLessThan(site.end);
         expect(source.slice(site.start, site.end)).not.toBe("");
-        expect(site.replacement).not.toBe("");
+        expect(site.replacement, `${site.operator} of ${source.slice(0, 20)}`).not.toBe("");
+        // A site that writes the bytes it replaced is not a mutant.
+        expect(site.replacement, `${site.operator} of ${source.slice(0, 20)}`).not.toBe(source.slice(site.start, site.end));
       }
     }
   });
@@ -248,6 +344,31 @@ describe("parseJava", () => {
         }
       }),
       { numRuns: 20 },
+    );
+  });
+
+  const javaOwnerOf = (statements: readonly string[]): string => [
+    "package p.q;",
+    "",
+    "final class Generated {",
+    "  int f(int x, String s, boolean b) {",
+    ...statements.map((statement) => `    ${statement}`),
+    "    return x;",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+
+  it("property: over generated owners, every site's mutant is still Java and no site writes the bytes it replaces", () => {
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom(...BODY_STATEMENTS), { minLength: 1, maxLength: 12 }).map(javaOwnerOf), (source) => {
+        for (const site of parsed(source).sites) {
+          expect(source.slice(site.start, site.end), site.operator).not.toBe(site.replacement);
+          const reparsed = parseJava(applyMutant(source, site));
+          expect(reparsed.ok, `${site.operator}: ${source.slice(site.start, site.end)} → ${site.replacement}`).toBe(true);
+        }
+      }),
+      { seed: 25_401, numRuns: 80 },
     );
   });
 
