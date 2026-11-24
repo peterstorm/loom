@@ -24,7 +24,7 @@
 import { match } from "ts-pattern";
 import { graphAcceptanceExpectation, type AcceptanceExpectation } from "../core/acceptance-contract";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
-import { applyMutant, MUTANT_CAP_PER_TASK, taskMutants, type TaskMutants } from "../core/owner-verification/mutation-plan";
+import { applyMutant, mutationPlanRefusalText, MUTANT_CAP_PER_TASK, taskMutants, type TaskMutants } from "../core/owner-verification/mutation-plan";
 import type { MatrixTestRun } from "../core/owner-verification/types";
 import { parseReviewPath } from "../core/review-packet";
 import {
@@ -130,7 +130,7 @@ function planTaskMutants({ root, duty }: TaskMutationRunInput): DomainResult<Pla
   const selected = taskMutants(changes, MUTANT_CAP_PER_TASK);
   return selected.ok
     ? success({ selected: selected.value, texts })
-    : failure(`${selected.error.path} does not parse, so its mutation sites cannot be trusted: ${selected.error.diagnostics.join("; ")}`);
+    : failure(`${selected.error.path} ${mutationPlanRefusalText(selected.error)}`);
 }
 
 /** One file's runs in its own isolated worktree, or why they could not decide. */

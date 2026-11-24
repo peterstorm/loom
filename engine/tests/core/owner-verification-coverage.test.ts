@@ -456,3 +456,59 @@ describe("siblingCoverage: the walk drives its own reads", () => {
     expect(COVERAGE_READ_BOUND).toBe(512);
   });
 });
+
+describe("sibling coverage over a Java family (issue #254)", () => {
+  const OWNER = "billing/src/main/java/p/q/C.java";
+  const SIBLING = "billing/src/main/java/p/q/S.java";
+  const MATRIX = "billing/src/test/java/t/Matrix.java";
+  const JAVA_SOURCES: ReadonlyMap<string, string> = new Map([
+    [OWNER, "package p.q;\n\nfinal class C { static void of() {} }\n"],
+    [SIBLING, "package p.q;\n\nfinal class S { static void of() {} }\n"],
+  ]);
+  const javaCoverage = (matrixText: string, duePaths: NonEmpty<string> = [OWNER, SIBLING], sources = JAVA_SOURCES) =>
+    coverageOverFiles({ matrixTest: MATRIX, due: duePaths, files: new Map([...sources, [MATRIX, matrixText]]), aliases: [] });
+  const javaTest = (...imports: readonly string[]): string =>
+    ["package t;", "", ...imports, "", "final class Matrix {", "  void matrix() { C.of(); S.of(); }", "}", ""].join("\n");
+
+  it("is covered when the matrix test imports the owner and every due sibling", () => {
+    expect(javaCoverage(javaTest("import p.q.C;", "import p.q.S;"))).toEqual({ kind: "covered" });
+  });
+
+  it("names every due path the test does not reach, in declared order, the owner first", () => {
+    expect(javaCoverage(javaTest("import p.q.C;"))).toEqual({ kind: "missing", paths: [SIBLING] });
+    expect(javaCoverage(javaTest("import java.util.List;"))).toEqual({ kind: "missing", paths: [OWNER, SIBLING] });
+  });
+
+  it("decides a Java family without reading any file but the matrix test", () => {
+    const reads: string[] = [];
+    const read: ReadModule = (path) => {
+      reads.push(path);
+      const text = path === MATRIX ? javaTest("import p.q.C;", "import p.q.S;") : JAVA_SOURCES.get(path);
+      return text === undefined ? { kind: "absent" } : { kind: "text", text };
+    };
+    expect(siblingCoverage({ matrixTest: MATRIX, due: [OWNER, SIBLING], aliases: [], read })).toEqual({ kind: "covered" });
+    expect(reads).toEqual([MATRIX]);
+  });
+
+  it("refuses a family that mixes languages as unsupported-language, never as a missing path", () => {
+    const verdict = javaCoverage(javaTest("import p.q.C;", "import p.q.S;"), [OWNER, "src/rules/sibling-a.ts"]);
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+    if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain("src/rules/sibling-a.ts");
+  });
+
+  it("refuses a matrix test no reader reads as unsupported-language", () => {
+    const kotlin = coverageOverFiles({ matrixTest: "src/test/kotlin/Matrix.kt", due: [OWNER], files: new Map([[OWNER, ""]]), aliases: [] });
+    expect(kotlin).toMatchObject({ kind: "infrastructure", failure: { kind: "unsupported-language" } });
+  });
+
+  it("reports a Java matrix test that does not parse as owner-unparseable, never as a missing sibling", () => {
+    const verdict = javaCoverage("package t;\nfinal class Matrix { void f() { if ( } }\n");
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "owner-unparseable" } });
+    if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain(MATRIX);
+  });
+
+  it("an absent Java matrix test reaches nothing, so every due path is missing", () => {
+    const verdict = coverageOverFiles({ matrixTest: MATRIX, due: [OWNER, SIBLING], files: new Map(JAVA_SOURCES), aliases: [] });
+    expect(verdict).toEqual({ kind: "missing", paths: [OWNER, SIBLING] });
+  });
+});

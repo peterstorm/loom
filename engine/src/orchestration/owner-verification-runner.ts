@@ -49,7 +49,7 @@ import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc
 import { failure, mapNonEmpty, nonEmptyOf, success, type DomainResult, type NonEmpty } from "../core/orchestration-contract/identity";
 import type { ArtifactDigest } from "../core/orchestration-contract";
 import { siblingCoverage } from "../core/owner-verification/coverage";
-import { mutationPlan, applyMutant, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
+import { mutationPlan, mutationPlanRefusalText, applyMutant, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
 import { duePaths, implementationTasks } from "../core/owner-verification/obligations";
 import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
 import { waveBaseOf } from "../core/owner-verification/wave-base";
@@ -227,7 +227,7 @@ function planMutation(input: ObligationRunScope, obligation: OwnerObligation): D
     cap: MUTANT_CAP_PER_INVARIANT,
   });
   if (!plan.ok) {
-    return failure(infrastructure("owner-unparseable", `the owner ${obligation.owner} does not parse, so its mutation sites cannot be trusted: ${plan.error.diagnostics.join("; ")}`));
+    return failure(infrastructure(plan.error.kind, `the owner ${obligation.owner} ${mutationPlanRefusalText(plan.error)}`));
   }
   return success({ ownerText, plan: plan.value });
 }

@@ -167,6 +167,14 @@ export type MutationOperator =
   | "statement-removal";
 
 /**
+ * Every operator a mutation plan can apply: the Wave Gate's six and
+ * `guard-removal`, which only the Task mutation check's set includes.
+ * Declared here so both operator sets and the Java seam's site vocabulary
+ * name one union.
+ */
+export type TaskMutationOperator = "guard-removal" | MutationOperator;
+
+/**
  * One mutant: one operator applied to one site of the owner. `[start, end)`
  * is the replaced span of the owner text (UTF-16 offsets), `original` its
  * text and `replacement` what replaces it; `line` and `column` are the
@@ -246,8 +254,18 @@ export type MutationPlanInput = Readonly<{
  */
 export type OwnerUnparseable = Readonly<{ kind: "owner-unparseable"; diagnostics: NonEmpty<string> }>;
 
+/**
+ * Why the owner has no plan at all: its language is not one owner verification
+ * reads. The detail names the path and the reason (`language.ts` decides), so
+ * an unsupported owner is never reported as a parse error.
+ */
+export type UnsupportedOwnerLanguage = Readonly<{ kind: "unsupported-language"; detail: string }>;
+
+/** Why the owner's bytes yield no plan: a syntax error, or a language no reader reads. */
+export type MutationPlanRefusal = OwnerUnparseable | UnsupportedOwnerLanguage;
+
 /** `mutation-plan.ts`'s entry point: a pure function of owner bytes, changed lines and cap. */
-export type MutationPlanFn = (input: MutationPlanInput) => DomainResult<MutationPlan, OwnerUnparseable>;
+export type MutationPlanFn = (input: MutationPlanInput) => DomainResult<MutationPlan, MutationPlanRefusal>;
 
 // ---------------------------------------------------------------------------
 // Matrix-test runs and their outcomes
@@ -287,6 +305,10 @@ export type MatrixTestRun =
  *   names the step and the error.
  * - `owner-unparseable`: the owner module has syntax errors, so its
  *   mutation sites cannot be trusted.
+ * - `unsupported-language`: the obligation's owner, matrix test or a due
+ *   sibling is in a language owner verification does not read (or the family
+ *   mixes languages), so no reader exists for it. Never reported as
+ *   `owner-unparseable`.
  * - `no-valid-mutants`: mutants were generated, but every one only failed to
  *   collect, so the run carries no mutation evidence.
  * - `alias-config-unresolvable`: the tsconfig chain governing the matrix
@@ -312,6 +334,7 @@ export type OwnerInfrastructureFailureKind =
   | "repository-file-unreadable"
   | "unexpected-error"
   | "owner-unparseable"
+  | "unsupported-language"
   | "no-valid-mutants"
   | "alias-config-unresolvable";
 

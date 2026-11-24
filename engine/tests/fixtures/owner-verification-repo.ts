@@ -62,7 +62,50 @@ export const OWNER_FIXTURE = Object.freeze({
   statement: "Every entry point admits through decide().",
 });
 
+/**
+ * The paths of one fixture family. A Java family's siblings live in their own
+ * package so the matrix test must import them, and its matrix test sits in the
+ * owner's package so the same-package reach rule is exercised too.
+ */
+export type FamilyPaths = Readonly<{
+  owner: string;
+  siblings: readonly [string, string];
+  barrel: string | null;
+  matrixTests: Readonly<Record<MatrixTestKind, string>>;
+  unrelated: string;
+  runner: string;
+  report: string;
+  plan: string;
+  invariant: string;
+  title: string;
+  statement: string;
+}>;
+
+/** The paths of the Java family (issue #254): a module-prefixed Maven layout. */
+export const JAVA_OWNER_FIXTURE: FamilyPaths = Object.freeze({
+  owner: "billing/src/main/java/dk/example/decision/GatedDecision.java",
+  siblings: Object.freeze([
+    "billing/src/main/java/dk/example/admission/AdmitMember.java",
+    "billing/src/main/java/dk/example/admission/AdmitGuest.java",
+  ] as const),
+  barrel: null,
+  matrixTests: Object.freeze({
+    discriminating: "billing/src/test/java/dk/example/decision/GatedDecisionTest.java",
+    vacuous: "billing/src/test/java/dk/example/decision/VacuousTest.java",
+    "sibling-omitting": "billing/src/test/java/dk/example/decision/OmittingTest.java",
+  } satisfies Record<MatrixTestKind, string>),
+  unrelated: "billing/src/main/java/dk/example/Other.java",
+  runner: "scripts/matrix-runner.mjs",
+  report: ".loom/completion-reports/owner-matrix.junit.xml",
+  plan: ".claude/plans/owner-fixture.md",
+  invariant: "INV-1",
+  title: "A decision is gated only by the owner",
+  statement: "Every entry point gates through GatedDecision.blocks().",
+});
+
 export type OwnerVerificationRepoOptions = Readonly<{
+  /** The family's language: the TypeScript fixture (default) or the Java one. */
+  language?: "typescript" | "java";
   /** The one file the Wave's Task changed (uncommitted), and so lists. */
   waveChanges: "owner" | "sibling" | "matrix-test" | "unrelated";
   /** The matrix test the plan and the stamp name. */
@@ -180,6 +223,129 @@ const SIBLING_B = 'import { decide } from "./owner";\nexport const admitGuest = 
 const BARREL = 'export { admitGuest } from "./sibling-b";\n';
 const TSCONFIG = `${JSON.stringify({ compilerOptions: { baseUrl: ".", paths: { "@rules/*": ["src/rules/*"] } } }, null, 2)}\n`;
 
+/** One fixture family: its paths and the bytes of every file it writes. */
+type Family = FamilyPaths & Readonly<{
+  language: "typescript" | "java";
+  baseOwner: string;
+  waveOwner: string;
+  siblingTexts: readonly [string, string];
+  siblingChange: string;
+  barrelText: string | null;
+  unrelatedBase: string;
+  unrelatedWave: string;
+  extraFiles: readonly (readonly [string, string])[];
+  matrixTest: (kind: MatrixTestKind) => string;
+}>;
+
+const TS_FAMILY: Family = Object.freeze({
+  ...OWNER_FIXTURE,
+  language: "typescript",
+  baseOwner: BASE_OWNER,
+  waveOwner: WAVE_OWNER,
+  siblingTexts: Object.freeze([SIBLING_A, SIBLING_B] as const),
+  siblingChange: 'export const memberAge = 18;\n',
+  barrelText: BARREL,
+  unrelatedBase: "export const other = 1;\n",
+  unrelatedWave: "export const other = 2;\n",
+  extraFiles: Object.freeze([Object.freeze(["tsconfig.json", TSCONFIG] as const)]),
+  matrixTest: matrixTestText,
+});
+
+const JAVA_BASE_OWNER = [
+  "package dk.example.decision;",
+  "",
+  "public final class GatedDecision {",
+  "  public static boolean blocks(int score, String reason) {",
+  "    return false;",
+  "  }",
+  "}",
+  "",
+].join("\n");
+
+/** The Java owner the Wave writes: lines 4-9 are its changed lines against the base. */
+const JAVA_WAVE_OWNER = [
+  "package dk.example.decision;",
+  "",
+  "public final class GatedDecision {",
+  "  public static boolean blocks(int score, String reason) {",
+  "    if (score < 20 && !reason.isEmpty()) {",
+  "      return true;",
+  "    }",
+  "    return false;",
+  "  }",
+  "}",
+  "",
+].join("\n");
+
+const JAVA_SIBLING_MEMBER = [
+  "package dk.example.admission;",
+  "",
+  "import dk.example.decision.GatedDecision;",
+  "",
+  "public final class AdmitMember {",
+  "  public static boolean admits(int score) {",
+  '    return GatedDecision.blocks(score, "");',
+  "  }",
+  "}",
+  "",
+].join("\n");
+
+const JAVA_SIBLING_GUEST = [
+  "package dk.example.admission;",
+  "",
+  "import dk.example.decision.GatedDecision;",
+  "",
+  "public final class AdmitGuest {",
+  "  public static boolean admits(int score) {",
+  '    return GatedDecision.blocks(score, "");',
+  "  }",
+  "}",
+  "",
+].join("\n");
+
+/** A Java matrix test in the owner's package: same-package reach, plus explicit imports of both siblings. */
+function javaMatrixTest(kind: MatrixTestKind): string {
+  const marker = kind === "vacuous" ? "vacuous" : "discriminating";
+  const imports = [
+    "import dk.example.admission.AdmitMember;",
+    ...(kind === "sibling-omitting" ? [] : ["import dk.example.admission.AdmitGuest;"]),
+  ];
+  const body = kind === "vacuous"
+    ? ["    assert true;"]
+    : [
+        "    assert AdmitMember.admits(18);",
+        "    assert !GatedDecision.blocks(17, \"\");",
+        ...(kind === "sibling-omitting" ? [] : ["    assert !AdmitGuest.admits(17);"]),
+      ];
+  return [
+    "package dk.example.decision;",
+    "",
+    ...imports,
+    `// fixture-runner: ${marker}`,
+    "",
+    "final class GatedDecisionTest {",
+    "  void decidesAdmissionThroughEveryEntryPoint() {",
+    ...body,
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+}
+
+const JAVA_FAMILY: Family = Object.freeze({
+  ...JAVA_OWNER_FIXTURE,
+  language: "java",
+  baseOwner: JAVA_BASE_OWNER,
+  waveOwner: JAVA_WAVE_OWNER,
+  siblingTexts: Object.freeze([JAVA_SIBLING_MEMBER, JAVA_SIBLING_GUEST] as const),
+  siblingChange: "// member age 18\n",
+  barrelText: null,
+  unrelatedBase: "package dk.example;\n\nfinal class Other {}\n",
+  unrelatedWave: "package dk.example;\n\nfinal class Other { static final int V = 2; }\n",
+  extraFiles: Object.freeze([]),
+  matrixTest: javaMatrixTest,
+});
+
 function matrixTestText(kind: MatrixTestKind): string {
   const marker = kind === "vacuous" ? "vacuous" : "discriminating";
   const imports = [
@@ -229,16 +395,16 @@ const MOCHA_REPORT_SNIPPET = `if (MODE === "mocha") {
  * owner's bytes differ from `original`, otherwise faithful. `mocha`: faithful,
  * in Mocha's xunit shape with absolute files. Every launch is logged first.
  */
-function runnerScript(log: string, original: string, mode: Exclude<RunnerMode, "unstartable">): string {
+function runnerScript(family: FamilyPaths, log: string, original: string, mode: Exclude<RunnerMode, "unstartable">): string {
   return `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 
 const LOG = ${JSON.stringify(log)};
-const OWNER = ${JSON.stringify(OWNER_FIXTURE.owner)};
+const OWNER = ${JSON.stringify(family.owner)};
 const ORIGINAL = ${JSON.stringify(original)};
 const MODE = ${JSON.stringify(mode)};
-const REPORT = ${JSON.stringify(OWNER_FIXTURE.report)};
+const REPORT = ${JSON.stringify(family.report)};
 
 const files = process.argv.slice(2);
 const owner = existsSync(OWNER) ? createHash("sha256").update(readFileSync(OWNER)).digest("hex") : null;
@@ -279,24 +445,24 @@ function invariantBlock(heading: string, fields: readonly string[]): readonly st
   return [`### ${heading}`, "", ...fields, ""];
 }
 
-function planText(options: OwnerVerificationRepoOptions): string {
+function planText(family: FamilyPaths, options: OwnerVerificationRepoOptions): string {
   const exemption = options.plan === "malformed"
     ? ["**Mutation exemption:**"]
     : options.exemption === undefined ? [] : [`**Mutation exemption:** ${options.exemption}`];
-  const owned = invariantBlock(`${OWNER_FIXTURE.invariant}: ${OWNER_FIXTURE.title}`, [
+  const owned = invariantBlock(`${family.invariant}: ${family.title}`, [
     "**Tier:** advisory",
-    `**Owner module:** \`${OWNER_FIXTURE.owner}\``,
+    `**Owner module:** \`${family.owner}\``,
     "**Sibling entry points:**",
-    `- \`${OWNER_FIXTURE.siblings[0]}\` — admits members`,
-    `- \`${OWNER_FIXTURE.siblings[1]}\` — admits guests`,
-    `**Matrix test:** \`${OWNER_FIXTURE.matrixTests[options.matrixTest]}\``,
-    `**Statement:** ${OWNER_FIXTURE.statement}`,
+    `- \`${family.siblings[0]}\` — admits members`,
+    `- \`${family.siblings[1]}\` — admits guests`,
+    `**Matrix test:** \`${family.matrixTests[options.matrixTest]}\``,
+    `**Statement:** ${family.statement}`,
     ...exemption,
   ]);
   const drifted = options.plan === "drift"
     ? invariantBlock("INV-2: Other values come only from other.ts", [
         "**Tier:** advisory",
-        `**Owner module:** \`${OWNER_FIXTURE.unrelated}\``,
+        `**Owner module:** \`${family.unrelated}\``,
         "**Sibling entry points:** none",
         "**Matrix test:** `tests/other.matrix.test.ts`",
         "**Statement:** Every other value is read from other.ts.",
@@ -312,39 +478,39 @@ function mutationPolicyOf(options: OwnerVerificationRepoOptions): MutationPolicy
     : { kind: "exempt", reason: options.exemption };
 }
 
-function obligationOf(options: OwnerVerificationRepoOptions): OwnerObligation {
+function obligationOf(family: FamilyPaths, options: OwnerVerificationRepoOptions): OwnerObligation {
   return ownerObligation({
-    invariant: OWNER_FIXTURE.invariant,
-    title: OWNER_FIXTURE.title,
-    statement: OWNER_FIXTURE.statement,
-    owner: OWNER_FIXTURE.owner,
+    invariant: family.invariant,
+    title: family.title,
+    statement: family.statement,
+    owner: family.owner,
     siblings: [
-      { path: OWNER_FIXTURE.siblings[0], note: "admits members" },
-      { path: OWNER_FIXTURE.siblings[1], note: "admits guests" },
+      { path: family.siblings[0], note: "admits members" },
+      { path: family.siblings[1], note: "admits guests" },
     ],
-    matrixTest: OWNER_FIXTURE.matrixTests[options.matrixTest],
+    matrixTest: family.matrixTests[options.matrixTest],
     mutation: mutationPolicyOf(options),
   });
 }
 
 /** The file the Wave's Task lists and the bytes the Wave leaves in it. */
-function waveChange(options: OwnerVerificationRepoOptions): Readonly<{ path: string; text: string }> {
+function waveChange(family: Family, options: OwnerVerificationRepoOptions): Readonly<{ path: string; text: string }> {
   switch (options.waveChanges) {
     case "owner":
-      return { path: OWNER_FIXTURE.owner, text: WAVE_OWNER };
+      return { path: family.owner, text: family.waveOwner };
     case "sibling":
-      return { path: OWNER_FIXTURE.siblings[0], text: `${SIBLING_A}export const memberAge = 18;\n` };
+      return { path: family.siblings[0], text: `${family.siblingTexts[0]}${family.siblingChange}` };
     case "matrix-test":
-      return { path: OWNER_FIXTURE.matrixTests[options.matrixTest], text: `${matrixTestText(options.matrixTest)}// reviewed\n` };
+      return { path: family.matrixTests[options.matrixTest], text: `${family.matrixTest(options.matrixTest)}// reviewed\n` };
     case "unrelated":
-      return { path: OWNER_FIXTURE.unrelated, text: "export const other = 2;\n" };
+      return { path: family.unrelated, text: family.unrelatedWave };
   }
 }
 
 /** The frozen runner time limit of the hanging runner modes: long enough for a faithful baseline, short enough to end each hanging run quickly. */
 export const HANGING_RUNNER_TIMEOUT_MS = 3_000;
 
-function manifestOf(runner: RunnerMode): FrozenVerificationManifest {
+function manifestOf(family: FamilyPaths, runner: RunnerMode): FrozenVerificationManifest {
   const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 2,
     kind: "loom-verification-manifest",
@@ -352,10 +518,10 @@ function manifestOf(runner: RunnerMode): FrozenVerificationManifest {
     affectedRunner: {
       // `.loom/bin/` is ignored and never created: an allowlisted basename that cannot start.
       executable: runner === "unstartable" ? ".loom/bin/node" : "node",
-      args: [OWNER_FIXTURE.runner, "{files}"],
+      args: [family.runner, "{files}"],
       cwd: ".",
       timeoutMs: runner === "hang" || runner === "hang-mutants" ? HANGING_RUNNER_TIMEOUT_MS : 30_000,
-      report: { kind: "required-file", path: OWNER_FIXTURE.report },
+      report: { kind: "required-file", path: family.report },
     },
   })));
   if (!frozen.ok) throw new Error(`fixture manifest refused: ${frozen.error.errors.join("; ")}`);
@@ -392,6 +558,7 @@ function freshLaunchLog(): string {
 
 /** Commit the base: the family, its matrix tests, the runner and the agreeing plan. */
 function commitBase(
+  family: Family,
   root: string,
   log: string,
   options: OwnerVerificationRepoOptions,
@@ -402,26 +569,26 @@ function commitBase(
   git(root, "config", "user.email", "loom-tests@example.invalid");
   git(root, "config", "user.name", "Loom Tests");
   write(root, ".gitignore", ".loom/bin/\n.loom/completion-reports/\n");
-  write(root, "tsconfig.json", TSCONFIG);
-  write(root, OWNER_FIXTURE.owner, BASE_OWNER);
-  write(root, OWNER_FIXTURE.siblings[0], SIBLING_A);
-  write(root, OWNER_FIXTURE.siblings[1], SIBLING_B);
-  write(root, OWNER_FIXTURE.barrel, BARREL);
-  write(root, OWNER_FIXTURE.unrelated, "export const other = 1;\n");
-  for (const kind of Object.keys(OWNER_FIXTURE.matrixTests) as MatrixTestKind[]) {
-    write(root, OWNER_FIXTURE.matrixTests[kind], matrixTestText(kind));
+  for (const [path, text] of family.extraFiles) write(root, path, text);
+  write(root, family.owner, family.baseOwner);
+  write(root, family.siblings[0], family.siblingTexts[0]);
+  write(root, family.siblings[1], family.siblingTexts[1]);
+  if (family.barrelText !== null && family.barrel !== null) write(root, family.barrel, family.barrelText);
+  write(root, family.unrelated, family.unrelatedBase);
+  for (const kind of Object.keys(family.matrixTests) as MatrixTestKind[]) {
+    write(root, family.matrixTests[kind], family.matrixTest(kind));
   }
-  write(root, OWNER_FIXTURE.runner, runnerScript(log, sha256(ownerAfterWave), runner === "unstartable" ? "faithful" : runner));
-  write(root, OWNER_FIXTURE.plan, planText({ ...options, plan: "agreeing" }));
+  write(root, family.runner, runnerScript(family, log, sha256(ownerAfterWave), runner === "unstartable" ? "faithful" : runner));
+  write(root, family.plan, planText(family, { ...options, plan: "agreeing" }));
   git(root, "add", "-A");
   git(root, "commit", "-qm", "fixture base");
   return git(root, "rev-parse", "HEAD");
 }
 
 /** The Wave's work and any plan or worktree defect, uncommitted as at a real gate. */
-function applyWave(root: string, options: OwnerVerificationRepoOptions, change: WaveChange): void {
+function applyWave(family: FamilyPaths, root: string, options: OwnerVerificationRepoOptions, change: WaveChange): void {
   write(root, change.path, change.text);
-  if (options.plan === "malformed" || options.plan === "drift") write(root, OWNER_FIXTURE.plan, planText(options));
+  if (options.plan === "malformed" || options.plan === "drift") write(root, family.plan, planText(family, options));
   if (options.worktree === "blocked") writeFileSync(join(root, ".git", "worktrees"), "");
 }
 
@@ -459,12 +626,13 @@ function activeGate(root: string, layout: Layout): ActiveWaveGateRegistration {
 }
 
 /** The plan file the graph names: none, a missing one, or the fixture's plan. */
-function namedPlanFile(root: string, options: OwnerVerificationRepoOptions): string | null {
+function namedPlanFile(family: FamilyPaths, root: string, options: OwnerVerificationRepoOptions): string | null {
   if (options.plan === "unnamed") return null;
-  return join(root, options.plan === "missing" ? ".claude/plans/missing.md" : OWNER_FIXTURE.plan);
+  return join(root, options.plan === "missing" ? ".claude/plans/missing.md" : family.plan);
 }
 
 function stampedGraph(
+  family: Family,
   root: string,
   options: OwnerVerificationRepoOptions,
   manifest: FrozenVerificationManifest,
@@ -476,12 +644,12 @@ function stampedGraph(
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
-    plan_file: namedPlanFile(root, options),
+    plan_file: namedPlanFile(family, root, options),
     tasks: [task],
     wave_gates: {},
     verification_manifest: manifest,
     active_wave_gate: activeGate(root, options.layout ?? "claude"),
-    owner_obligations: [obligationOf(options)],
+    owner_obligations: [obligationOf(family, options)],
   };
 }
 
@@ -558,20 +726,25 @@ function readWorktrees(root: string): readonly string[] {
 
 /** A fixture repository whose Wave changed the owner under the discriminating matrix test, unless `options` says otherwise. */
 export const buildOwnerVerificationRepo = (options: Partial<OwnerVerificationRepoOptions> = {}): OwnerVerificationRepo =>
-  ownerVerificationRepo({ waveChanges: "owner", matrixTest: "discriminating", ...options });
+  ownerVerificationRepo({ language: "typescript", waveChanges: "owner", matrixTest: "discriminating", ...options });
+
+/** The Java family's fixture repository (issue #254), built like the TypeScript one. */
+export const buildJavaOwnerVerificationRepo = (options: Partial<OwnerVerificationRepoOptions> = {}): OwnerVerificationRepo =>
+  ownerVerificationRepo({ language: "java", waveChanges: "owner", matrixTest: "discriminating", ...options });
 
 /** Build one fixture repository; `cleanupOwnerVerificationRepos` removes it. */
 export function ownerVerificationRepo(options: OwnerVerificationRepoOptions): OwnerVerificationRepo {
+  const family = options.language === "java" ? JAVA_FAMILY : TS_FAMILY;
   const root = canonicalTempDir("loom-owner-verification-");
   created.push(root);
   const log = freshLaunchLog();
-  const change = waveChange(options);
-  const ownerAfterWave = change.path === OWNER_FIXTURE.owner ? change.text : BASE_OWNER;
+  const change = waveChange(family, options);
+  const ownerAfterWave = change.path === family.owner ? change.text : family.baseOwner;
   const runner = options.runner ?? "faithful";
-  const base = commitBase(root, log, options, ownerAfterWave, runner);
-  applyWave(root, options, change);
-  const manifest = manifestOf(runner);
-  const { manager, handle } = installGraph(root, stampedGraph(root, options, manifest, waveTask(change, manifest, base)), options.layout ?? "claude");
+  const base = commitBase(family, root, log, options, ownerAfterWave, runner);
+  applyWave(family, root, options, change);
+  const manifest = manifestOf(family, runner);
+  const { manager, handle } = installGraph(root, stampedGraph(family, root, options, manifest, waveTask(change, manifest, base)), options.layout ?? "claude");
   return Object.freeze({
     root,
     manager,

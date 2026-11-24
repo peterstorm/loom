@@ -59,7 +59,7 @@ describe("parseOwnerVerificationObservation", () => {
     "matrix-test-not-collected": true, "exit-unexplained-by-report": true, "baseline-timed-out": true,
     "missing-wave-base": true, "coverage-bound-exceeded": true, "real-workspace-changed": true,
     "repository-file-unreadable": true, "unexpected-error": true, "owner-unparseable": true, "no-valid-mutants": true,
-    "alias-config-unresolvable": true,
+    "alias-config-unresolvable": true, "unsupported-language": true,
   } satisfies Record<OwnerInfrastructureFailureKind, true>) as OwnerInfrastructureFailureKind[];
 
   it.each(INFRASTRUCTURE_KINDS)("round-trips the %s infrastructure kind, unavailable and as a coverage verdict", (kind) => {

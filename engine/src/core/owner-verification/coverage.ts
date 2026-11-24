@@ -20,6 +20,13 @@
  *   declared order, the owner first. Which paths are due is the family
  *   schedule's decision (`obligations.ts`), never this module's.
  *
+ * One obligation reads one language (`language.ts`). A TypeScript matrix test
+ * reaches its due paths through the import graph above; a Java one through
+ * Java's own reach rule (`java-reach.ts`), which names files instead of
+ * walking edges because Java has no re-exports. A due path no reader reads, or
+ * a family mixing languages, is the `unsupported-language` infrastructure
+ * failure, never a missing path.
+ *
  * `siblingCoverage` drives the traversal itself (#133): it pulls each file it
  * needs through the `ReadModule` port the shell adapts the filesystem to, so
  * no traversal state crosses the seam. `coverageOverFiles` is the same
@@ -28,6 +35,8 @@
 
 import type { NonEmpty } from "../orchestration-contract/identity";
 import { moduleEdges, type EdgeKind, type ModuleEdges } from "./import-graph";
+import { javaReachedDue } from "./java-reach";
+import { obligationLanguageOf } from "./language";
 import { directoryOf, normalizeRepoPath, within } from "./repo-path";
 import type {
   CoverageOverFilesFn,
@@ -236,11 +245,47 @@ export const decideCoverage = (
 };
 
 /** Coverage of the due paths from `matrixTest` over the port, bounded at `COVERAGE_READ_BOUND` present files. */
-function coverageThrough(matrixTest: string, due: NonEmpty<string>, aliases: PathAliases, read: ReadModule): CoverageVerdict {
+function typescriptCoverage(matrixTest: string, due: NonEmpty<string>, aliases: PathAliases, read: ReadModule): CoverageVerdict {
   const reader = boundedEdges(matrixTest, read, COVERAGE_READ_BOUND);
   const reached = walk(matrixTest, reader.edgesOf, aliases);
   const failure = reader.failure();
   return failure === null ? decideCoverage(reached, due) : { kind: "infrastructure", failure };
+}
+
+/**
+ * A Java matrix test's coverage: it reads the test itself and decides reach by
+ * names (`java-reach.ts`), so no other file is read and the bound does not
+ * apply. An absent test reaches nothing; an unreadable or unparseable one is
+ * the infrastructure failure its read or parse is.
+ */
+function javaCoverage(matrixTest: string, due: NonEmpty<string>, read: ReadModule): CoverageVerdict {
+  const test = read(matrixTest);
+  if (test.kind === "unreadable") return { kind: "infrastructure", failure: test.failure };
+  if (test.kind === "absent") return decideCoverage(new Set(), due);
+  const reached = javaReachedDue({ matrixTest, matrixTestText: test.text, due });
+  if (!reached.ok) {
+    return {
+      kind: "infrastructure",
+      failure: {
+        kind: "owner-unparseable",
+        detail: `the matrix test ${matrixTest} does not parse, so the paths it reaches cannot be read: ${reached.error.diagnostics.join("; ")}`,
+      },
+    };
+  }
+  return decideCoverage(reached.value, due);
+}
+
+/**
+ * The coverage decision for one obligation: its language (`language.ts`) picks
+ * the reader; a family no reader reads is `unsupported-language`, never a
+ * missing path.
+ */
+function coverageThrough(matrixTest: string, due: NonEmpty<string>, aliases: PathAliases, read: ReadModule): CoverageVerdict {
+  const language = obligationLanguageOf({ owner: due[0], matrixTest, due });
+  if (!language.ok) return { kind: "infrastructure", failure: language.error };
+  return language.value === "java"
+    ? javaCoverage(matrixTest, due, read)
+    : typescriptCoverage(matrixTest, due, aliases, read);
 }
 
 /**

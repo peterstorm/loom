@@ -40,10 +40,12 @@ import {
 import { RUN_ROOT } from "../fixtures/mocha-report";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import {
+  buildJavaOwnerVerificationRepo as buildJava,
   buildOwnerVerificationRepo as build,
   canonicalRoot,
   cleanupOwnerVerificationRepos,
   HANGING_RUNNER_TIMEOUT_MS,
+  JAVA_OWNER_FIXTURE,
   OWNER_FIXTURE,
   type OwnerVerificationRepo,
   type StampedGraph,
@@ -552,4 +554,43 @@ describe("runPlan", () => {
     expect(evidence).toMatchObject({ kind: "infrastructure", failure: { kind: "spawn-failed" } });
     expect(port.asked).toHaveLength(3);
   });
+});
+
+describe("runOwnerVerification over a Java family (issue #254)", () => {
+  it("AS-007: a Java owner under a Java matrix test that imports it is covered and every Java mutant is killed", async () => {
+    const repo = buildJava();
+    const observation = await verify(repo);
+    const verdict = onlyVerdict(observation);
+    expect(verdict).toMatchObject({
+      invariant: JAVA_OWNER_FIXTURE.invariant,
+      owner: JAVA_OWNER_FIXTURE.owner,
+      matrixTest: JAVA_OWNER_FIXTURE.matrixTests.discriminating,
+      coverage: { kind: "covered" },
+      // condition-negation, comparison-flip, logical-swap and both boolean
+      // literal flips of the Wave's changed lines; every one re-parses as Java.
+      mutation: { kind: "verified", generated: 5, killed: 5, timedOut: 0, invalid: 0, survivors: [], unmutated: 0, ownerChangedInWave: true },
+    });
+    const launches = repo.runnerLaunches();
+    expect(launches).toHaveLength(6);
+    expect(launches[0]?.files).toEqual([JAVA_OWNER_FIXTURE.matrixTests.discriminating]);
+    expect(launches[0]?.owner).toBe(repo.ownerDigest);
+    for (const launch of launches.slice(1)) expect(launch.owner).not.toBe(repo.ownerDigest);
+  }, TIMEOUT_MS);
+
+  it("AS-008: a red Java baseline runs zero mutants and is the red-baseline verdict, never a survivor", async () => {
+    const repo = buildJava({ runner: "red" });
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toEqual({ kind: "covered" });
+    expect(verdict.mutation).toMatchObject({ kind: "red-baseline" });
+    expect(repo.runnerLaunches()).toHaveLength(1);
+  }, TIMEOUT_MS);
+
+  it("a Java matrix test that reaches no due path is coverage-missing, never a parse failure", async () => {
+    const repo = buildJava();
+    const matrixTest = JAVA_OWNER_FIXTURE.matrixTests.discriminating;
+    writeFileSync(join(repo.root, matrixTest), "package dk.example.decision;\n\n// fixture-runner: discriminating\n\nfinal class GatedDecisionTest {\n  void nothing() { assert true; }\n}\n");
+    // The same-package owner is still reachable by name only while the test uses it; dropping every use drops the reach.
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toMatchObject({ kind: "missing", paths: [JAVA_OWNER_FIXTURE.owner, ...JAVA_OWNER_FIXTURE.siblings] });
+  }, TIMEOUT_MS);
 });

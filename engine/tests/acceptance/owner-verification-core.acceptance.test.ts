@@ -23,7 +23,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { coverageOverFiles } from "../../src/core/owner-verification/coverage";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
-import { applyMutant, mutationPlan, mutationPlanOf, parseMutantCap } from "../../src/core/owner-verification/mutation-plan";
+import { applyMutant, mutationPlan, mutationPlanOf, mutationPlanRefusalText, parseMutantCap } from "../../src/core/owner-verification/mutation-plan";
 import { classifyBaseline, classifyMutantRun, verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import type {
   MatrixTestRun,
@@ -204,7 +204,7 @@ const capOf = (raw: number): MutantCap => {
 /** The plan of a well-formed owner; every owner this file plans parses. */
 const planned = (input: MutationPlanInput): MutationPlan => {
   const plan = mutationPlan(input);
-  if (!plan.ok) throw new Error(`owner does not parse: ${plan.error.diagnostics.join("; ")}`);
+  if (!plan.ok) throw new Error(`owner has no plan: ${mutationPlanRefusalText(plan.error)}`);
   return plan.value;
 };
 

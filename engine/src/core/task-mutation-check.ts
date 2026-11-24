@@ -39,7 +39,9 @@ import type { AffectedRunVerdict } from "./affected-stop-check-types";
 import { taskRolePolicy } from "./distill-task";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { failure, isNonEmpty, mapNonEmpty, nonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
-import { TASK_MUTATION_OPERATORS, type TaskMutant, type TaskMutationOperator } from "./owner-verification/mutation-plan";
+import { javaSourceRootOf, ownerLanguageOf } from "./owner-verification/language";
+import { TASK_MUTATION_OPERATORS, type TaskMutant } from "./owner-verification/mutation-plan";
+import type { TaskMutationOperator } from "./owner-verification/types";
 import { contractTaskIdsOf } from "./owner-verification/obligations";
 import type { MatrixTestReport, MatrixTestRun } from "./owner-verification/types";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
@@ -70,12 +72,17 @@ import type { TaskGraph } from "../types";
 // The duty
 // ---------------------------------------------------------------------------
 
-const MUTABLE_SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"] as const;
-const DECLARATION_FILE = /\.d\.[mc]?ts$/;
-
-/** Whether the mutation operators can read `path`: TypeScript or JavaScript source, never a declaration file. */
-export const isMutableSource = (path: string): boolean =>
-  MUTABLE_SOURCE_EXTENSIONS.some((extension) => path.endsWith(extension)) && !DECLARATION_FILE.test(path);
+/**
+ * Whether the mutation operators can read `path` as implementation source.
+ * That is the one owner-verification language question (`language.ts`), plus
+ * Java's own test convention: a `.java` file under src/test/java is a test,
+ * and the frozen classification's suffixes cannot see a Java test otherwise.
+ */
+export const isMutableSource = (path: string): boolean => {
+  const language = ownerLanguageOf(path);
+  if (language.kind === "unsupported") return false;
+  return language.language === "typescript" || javaSourceRootOf(path)?.sourceRoot === "main";
+};
 
 /** Why a Task owes no mutation check. Exactly one applies, in this precedence. */
 export type TaskMutationOffReason =
@@ -92,7 +99,7 @@ export type TaskMutationOffReason =
   | "decision-record-task"
   /** A Contract Task writes the oracle and stubs the engine replaces. */
   | "contract-task"
-  /** No declared implementation file is TypeScript or JavaScript beneath the runner's cwd. */
+  /** No declared implementation file is TypeScript, JavaScript or Java beneath the runner's cwd. */
   | "no-mutable-files";
 
 /** The one line each off reason reads as. */
@@ -104,7 +111,7 @@ export const TASK_MUTATION_OFF_TEXT: Readonly<Record<TaskMutationOffReason, stri
   "exempt-role": "a Distill Task writes no test, so it owes no mutation check",
   "decision-record-task": "an ADR Task writes a decision record, not code",
   "contract-task": "a Contract Task writes the oracle, which nothing mutates",
-  "no-mutable-files": "the Task declares no TypeScript or JavaScript implementation file beneath the affected runner's cwd",
+  "no-mutable-files": "the Task declares no TypeScript, JavaScript or Java implementation file beneath the affected runner's cwd",
 });
 
 /** A Task that owes the check: what is mutated, what the digest covers, and what runs the mutants. */

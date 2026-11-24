@@ -123,8 +123,19 @@ describe("taskMutationDuty", () => {
   it.each([
     ["src/a.ts", true], ["src/a.tsx", true], ["src/a.mts", true], ["src/a.cjs", true], ["src/a.jsx", true],
     ["src/a.d.ts", false], ["src/a.d.mts", false], ["src/A.java", false], ["src/a.rs", false], ["README.md", false], ["src/a.json", false],
+    // Java (issue #254): implementation source under a main source root, never a test or a file outside one.
+    ["src/main/java/p/C.java", true], ["billing/src/main/java/p/C.java", true],
+    ["src/test/java/p/C.java", false], ["src/main/java/p/C.kt", false],
   ])("reads %s as mutable source: %s", (path, mutable) => {
     expect(isMutableSource(path)).toBe(mutable);
+  });
+
+  it("owes the check over a Java implementation file beneath the runner's cwd", () => {
+    const duty = taskMutationDuty(
+      graphOf([task("T2", 2, ["billing/src/main/java/p/C.java", "billing/src/test/java/p/CTest.java"])], { verification_manifest: mutationManifest({ cwd: "billing" }) }),
+      "T2",
+    );
+    expect(duty).toMatchObject({ kind: "owed", mutable: ["billing/src/main/java/p/C.java"] });
   });
 
   it("property: a Task's mutable files are always its own declared TS/JS files that are not tests, in file_list order", () => {
