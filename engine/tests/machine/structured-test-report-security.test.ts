@@ -101,9 +101,16 @@ describe("structural JUnit authorization", () => {
       .toEqual({ ok: true, value: { total: 1, failed: 0, source: "junit-xml" } });
   });
 
+  it("loom#242: testcase elements decide the counts a suite undercounts, failures included", () => {
+    expect(countedReport('<testsuite tests="1" failures="0"><testcase><failure/></testcase></testsuite>'))
+      .toEqual({ ok: true, value: { total: 1, failed: 1, source: "junit-xml" } });
+    expect(countedReport('<testsuite tests="2"><testcase/><testcase/></testsuite>'))
+      .toEqual({ ok: true, value: { total: 2, failed: 0, source: "junit-xml" } });
+  });
+
   it.each([
-    '<testsuite tests="1" failures="0"><testcase><failure/></testcase></testsuite>',
-    '<testsuite tests="2"><testcase/></testsuite>',
+    '<testsuite tests="1" failures="1"><testcase/></testsuite>',
+    '<testsuite tests="1" errors="1"><testcase/></testsuite>',
     '<testsuite tests="1" skipped="invalid"/>',
     '<testsuites tests="2"><testsuite tests="1"/></testsuites>',
     `<testsuites><testcase/>${nodeCounts()}<!-- pass 1 --></testsuites>`,

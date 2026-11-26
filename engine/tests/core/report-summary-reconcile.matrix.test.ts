@@ -12,7 +12,11 @@
  * A fixture is a claim: summary counts plus per-file results. "Inconsistent"
  * means the claimed counts disagree with the per-file results; every entry
  * point renders the claim in its own input form, so the counts an entry point
- * sees are the claim's, never a re-derivation from the files.
+ * sees are the claim's, never a re-derivation from the files. A JUnit suite
+ * that lists testcases is the exception (loom#242): its elements are the
+ * executed facts, so a disagreeing `tests` attribute is metadata, and only a
+ * claimed failure above the failing testcases (or a summary-only count set)
+ * can make the document untrusted.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -62,8 +66,7 @@ const VITEST_RESULTS = [
 
 const FIXTURES: readonly Fixture[] = [
   { name: "junit consistent", consistent: true, source: "junit-xml", total: 5, failed: 2, results: JUNIT_RESULTS },
-  { name: "junit failed sum disagrees", consistent: false, source: "junit-xml", total: 5, failed: 1, results: JUNIT_RESULTS },
-  { name: "junit executed sum disagrees", consistent: false, source: "junit-xml", total: 6, failed: 2, results: JUNIT_RESULTS },
+  { name: "junit claims a failure its testcases do not show", consistent: false, source: "junit-xml", total: 5, failed: 3, results: JUNIT_RESULTS },
   { name: "vitest consistent", consistent: true, source: "vitest-json", total: 4, failed: 1, results: VITEST_RESULTS },
   { name: "vitest failed sum disagrees", consistent: false, source: "vitest-json", total: 4, failed: 2, results: VITEST_RESULTS },
   { name: "vitest executed sum disagrees", consistent: false, source: "vitest-json", total: 5, failed: 1, results: VITEST_RESULTS },
@@ -102,7 +105,9 @@ function junitSuite({ file, executed, failed, collectionError }: TestFileResult)
   return `<testsuite name="${file}" tests="${executed}" failures="${failed}" errors="0" skipped="0">${cases.join("")}</testsuite>`;
 }
 
-/** The suites carry the per-file truth; the root carries the claim. */
+/** The suites carry the per-file truth; the root carries the claim. A root
+ *  `tests` claim above the cases is metadata (loom#242); a `failures` claim
+ *  above the failing testcases is still refused. */
 const junitXml = (fixture: Fixture): string =>
   `<testsuites tests="${fixture.total}" failures="${fixture.failed}" errors="0">${fixture.results.map(junitSuite).join("")}</testsuites>`;
 

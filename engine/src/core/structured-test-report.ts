@@ -544,11 +544,15 @@ function saneJunitCounts(total: number, failed: number, skipped: number): JunitC
     failed + skipped <= total ? { total, failed, skipped } : null;
 }
 
+function addJunitCounts(left: JunitCounts, right: JunitCounts): JunitCounts | null {
+  return saneJunitCounts(left.total + right.total, left.failed + right.failed, left.skipped + right.skipped);
+}
+
 function sumJunitCounts(counts: readonly (JunitCounts | null)[]): JunitCounts | null {
   let sum = noCases;
   for (const count of counts) {
     if (count === null) return null;
-    const next = saneJunitCounts(sum.total + count.total, sum.failed + count.failed, sum.skipped + count.skipped);
+    const next = addJunitCounts(sum, count);
     if (next === null) return null;
     sum = next;
   }
@@ -566,24 +570,45 @@ function testcaseCounts(element: ReportElement): JunitCounts | null {
 const reportChildren = (element: ReportElement): readonly ReportElement[] =>
   element.children.filter((child) => child.name === "testsuite" || child.name === "testcase");
 
-/** Aggregates count descendants once; attributes must agree when cases exist.
- * Summary-only traditional JUnit remains supported, as in the machine API. */
-function parseTraditionalJunit(element: ReportElement): JunitCounts | null {
-  if (element.name === "testcase") return testcaseCounts(element);
+type JunitObservation = Readonly<{ counts: JunitCounts; hasTestcases: boolean }>;
+
+/** Aggregates count descendants once. When a suite's subtree lists testcases,
+ * those elements are the executed facts: Surefire + jqwik writes `tests="7"`
+ * for twelve property invocations, so the suite attributes are runner
+ * metadata, not a summary of the cases. Summary-only traditional JUnit keeps
+ * its attribute accounting, as in the machine API. A suite that claims more
+ * failures or errors than its testcases show is refused: a claimed failure
+ * no element records cannot be excused by an undercount. */
+function parseTraditionalJunit(element: ReportElement): JunitObservation | null {
+  if (element.name === "testcase") {
+    const counts = testcaseCounts(element);
+    return counts === null ? null : { counts, hasTestcases: true };
+  }
   if (element.name !== "testsuite" && element.name !== "testsuites") return null;
   const children = reportChildren(element);
   // Direct testcase children of testsuites are the Node dialect, which needs
   // its root summary; they cannot fall back to traditional suite accounting.
   if (element.name === "testsuites" && children.some((child) => child.name === "testcase")) return null;
   if (element.name === "testsuites" && children.length === 0) return null;
-  const observed = sumJunitCounts(children.map(parseTraditionalJunit));
-  if (observed === null) return null;
+  let observed = noCases;
+  let hasTestcases = false;
+  for (const child of children) {
+    const observation = parseTraditionalJunit(child);
+    if (observation === null) return null;
+    const next = addJunitCounts(observed, observation.counts);
+    if (next === null) return null;
+    observed = next;
+    hasTestcases = hasTestcases || observation.hasTestcases;
+  }
   const total = countAttribute(element, "tests", element.name === "testsuites" ? observed.total : undefined);
   const failures = countAttribute(element, "failures", 0);
   const errors = countAttribute(element, "errors", 0);
   const skipped = countAttribute(element, "skipped", 0);
   const disabled = countAttribute(element, "disabled", 0);
   if (total === null || failures === null || errors === null || skipped === null || disabled === null) return null;
+  if (hasTestcases) {
+    return failures + errors > observed.failed ? null : { counts: observed, hasTestcases: true };
+  }
   const failed = element.attributes.failures === undefined && element.attributes.errors === undefined && children.length > 0
     ? observed.failed : failures + errors;
   const notExecuted = element.attributes.skipped === undefined && element.attributes.disabled === undefined && children.length > 0
@@ -591,7 +616,7 @@ function parseTraditionalJunit(element: ReportElement): JunitCounts | null {
   const counts = saneJunitCounts(total, failed, notExecuted);
   if (counts === null || (children.length > 0 &&
       (counts.total !== observed.total || counts.failed !== observed.failed || counts.skipped !== observed.skipped))) return null;
-  return counts;
+  return { counts, hasTestcases: false };
 }
 
 function nodeLeafCounts(element: ReportElement): JunitCounts | null {
@@ -644,7 +669,7 @@ function readJunitDocument(document: JunitDocument): TestReportRead {
   if (document.kind === "foreign") return FOREIGN_XML;
   if (document.kind === "malformed") return document.recognized ? MALFORMED_JUNIT : UNRECOGNIZED;
   const { root } = document;
-  const traditional = parseTraditionalJunit(root);
+  const traditional = parseTraditionalJunit(root)?.counts ?? null;
   const projected = testcaseElements(root).map(projectTestcase);
   const testcases = Object.freeze(projected.filter((testcase): testcase is ReportTestcase => testcase !== null));
   const unnamedTestcases = projected.length - testcases.length;

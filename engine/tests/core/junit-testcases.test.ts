@@ -81,10 +81,15 @@ describe("reportTestcases — the per-testcase projection of a JUnit report", ()
     expect(reportTestcases(readTestReport(bytes(node)))).toMatchObject({ ok: true, value: [{ name: "todo", outcome: "skipped" }] });
   });
 
+  it("loom#242: an undercounted suite still projects its testcases", () => {
+    expect(reportTestcases(readTestReport(bytes('<testsuite name="s" tests="5" failures="0"><testcase name="a" classname="c"/></testsuite>'))))
+      .toEqual({ ok: true, value: [{ file: "c", classname: "c", name: "a", outcome: "passed", failureType: null }] });
+  });
+
   it.each([
     ["Vitest JSON", JSON.stringify({ numTotalTests: 1, numPassedTests: 1, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0 }), "unrecognized-format"],
     ["malformed XML", "<testsuites><testsuite>", "malformed-counts"],
-    ["counts that disagree with the testcases", `<testsuite name="s" tests="5" failures="0"><testcase name="a" classname="c"/></testsuite>`, "malformed-counts"],
+    ["a claimed failure with no failing testcase", `<testsuite name="s" tests="1" failures="1"><testcase name="a" classname="c"/></testsuite>`, "malformed-counts"],
   ])("refuses %s with a named reason", (_name, text, reason) => {
     expect(reportTestcases(readTestReport(bytes(text)))).toMatchObject({ ok: false, error: { kind: "invalid-structured-test-report", reason } });
   });
