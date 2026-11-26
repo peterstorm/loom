@@ -47,6 +47,8 @@ type Fixture = Readonly<{
   total: number;
   failed: number;
   results: readonly TestFileResult[];
+  /** A root `tests` claim that differs from the accepted total: metadata over testcase-bearing suites (loom#242). */
+  rootTests?: number;
 }>;
 
 const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
@@ -67,6 +69,7 @@ const VITEST_RESULTS = [
 const FIXTURES: readonly Fixture[] = [
   { name: "junit consistent", consistent: true, source: "junit-xml", total: 5, failed: 2, results: JUNIT_RESULTS },
   { name: "junit claims a failure its testcases do not show", consistent: false, source: "junit-xml", total: 5, failed: 3, results: JUNIT_RESULTS },
+  { name: "junit root tests attribute overclaims its testcase-bearing suites", consistent: true, source: "junit-xml", total: 12, failed: 0, results: [result("dk.FooTest", 12, 0)], rootTests: 99 },
   { name: "vitest consistent", consistent: true, source: "vitest-json", total: 4, failed: 1, results: VITEST_RESULTS },
   { name: "vitest failed sum disagrees", consistent: false, source: "vitest-json", total: 4, failed: 2, results: VITEST_RESULTS },
   { name: "vitest executed sum disagrees", consistent: false, source: "vitest-json", total: 5, failed: 1, results: VITEST_RESULTS },
@@ -109,7 +112,7 @@ function junitSuite({ file, executed, failed, collectionError }: TestFileResult)
  *  `tests` claim above the cases is metadata (loom#242); a `failures` claim
  *  above the failing testcases is still refused. */
 const junitXml = (fixture: Fixture): string =>
-  `<testsuites tests="${fixture.total}" failures="${fixture.failed}" errors="0">${fixture.results.map(junitSuite).join("")}</testsuites>`;
+  `<testsuites tests="${fixture.rootTests ?? fixture.total}" failures="${fixture.failed}" errors="0">${fixture.results.map(junitSuite).join("")}</testsuites>`;
 
 const ledgerLine = (fixture: Fixture): string => JSON.stringify({
   epoch: "agent-1:code-implementer-agent",

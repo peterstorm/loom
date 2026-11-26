@@ -335,6 +335,20 @@ describe("JUnit per-file projection", () => {
     expect(junitSummary('<testsuites><testsuite name="a" tests="1" failures="0"><testcase classname="a" name="x"/></testsuite><testsuite name="b" tests="1" failures="2"><testcase classname="b" name="y"/></testsuite></testsuites>')).toBeNull();
   });
 
+  it.each([
+    ["a missing tests attribute", '<testsuite><testcase classname="a" name="x"/></testsuite>'],
+    ["a non-numeric tests attribute", '<testsuite tests="one"><testcase classname="a" name="x"/></testsuite>'],
+    ["a non-numeric failures attribute", '<testsuite tests="1" failures="abc"><testcase classname="a" name="x"/></testsuite>'],
+    ["a non-numeric errors attribute", '<testsuite tests="1" errors="abc"><testcase classname="a" name="x"/></testsuite>'],
+    ["a non-numeric disabled attribute", '<testsuite tests="1" disabled="abc"><testcase classname="a" name="x"/></testsuite>'],
+  ])("loom#242: a testcase-bearing suite is refused with %s — the attributes must still parse", (_name, xml) => {
+    expect(junitSummary(xml)).toBeNull();
+  });
+
+  it("loom#242: failures and errors each within the observed count still refuse when their sum exceeds it", () => {
+    expect(junitSummary('<testsuite tests="2" failures="1" errors="1"><testcase classname="a" name="x"><failure/></testcase></testsuite>')).toBeNull();
+  });
+
   it("AS-002: Maven failsafe's failsafe-summary.xml is not a JUnit report at all, so it is told apart from a refused one", () => {
     // The real failsafe default: written beside TEST-*.xml in target/failsafe-reports.
     const failsafeSummary = `<?xml version="1.0" encoding="UTF-8"?>

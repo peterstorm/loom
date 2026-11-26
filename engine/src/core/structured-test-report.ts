@@ -570,8 +570,6 @@ function testcaseCounts(element: ReportElement): JunitCounts | null {
 const reportChildren = (element: ReportElement): readonly ReportElement[] =>
   element.children.filter((child) => child.name === "testsuite" || child.name === "testcase");
 
-type JunitObservation = Readonly<{ counts: JunitCounts; hasTestcases: boolean }>;
-
 /** Aggregates count descendants once. When a suite's subtree lists testcases,
  * those elements are the executed facts: Surefire + jqwik writes `tests="7"`
  * for twelve property invocations, so the suite's attribute values are runner
@@ -584,22 +582,17 @@ type JunitObservation = Readonly<{ counts: JunitCounts; hasTestcases: boolean }>
  * machine API. A suite that claims more failures or errors than its testcases
  * show is refused: a claimed failure no element records cannot be excused by
  * an undercount. */
-function parseTraditionalJunit(element: ReportElement): JunitObservation | null {
-  if (element.name === "testcase") {
-    const counts = testcaseCounts(element);
-    return counts === null ? null : { counts, hasTestcases: true };
-  }
+function parseTraditionalJunit(element: ReportElement): JunitCounts | null {
+  if (element.name === "testcase") return testcaseCounts(element);
   if (element.name !== "testsuite" && element.name !== "testsuites") return null;
   const children = reportChildren(element);
   // Direct testcase children of testsuites are the Node dialect, which needs
   // its root summary; they cannot fall back to traditional suite accounting.
   if (element.name === "testsuites" && children.some((child) => child.name === "testcase")) return null;
   if (element.name === "testsuites" && children.length === 0) return null;
-  const observations = children.map(parseTraditionalJunit);
-  if (observations.some((observation) => observation === null)) return null;
-  const observed = sumJunitCounts(observations.map((observation) => observation?.counts ?? null));
+  const observed = sumJunitCounts(children.map(parseTraditionalJunit));
   if (observed === null) return null;
-  const hasTestcases = observations.some((observation) => observation?.hasTestcases === true);
+  const hasTestcases = children.some((child) => testcaseElements(child).length > 0);
   const total = countAttribute(element, "tests", element.name === "testsuites" ? observed.total : undefined);
   const failures = countAttribute(element, "failures", 0);
   const errors = countAttribute(element, "errors", 0);
@@ -607,7 +600,7 @@ function parseTraditionalJunit(element: ReportElement): JunitObservation | null 
   const disabled = countAttribute(element, "disabled", 0);
   if (total === null || failures === null || errors === null || skipped === null || disabled === null) return null;
   if (hasTestcases) {
-    return failures + errors > observed.failed ? null : { counts: observed, hasTestcases: true };
+    return failures + errors > observed.failed ? null : observed;
   }
   const failed = element.attributes.failures === undefined && element.attributes.errors === undefined && children.length > 0
     ? observed.failed : failures + errors;
@@ -616,7 +609,7 @@ function parseTraditionalJunit(element: ReportElement): JunitObservation | null 
   const counts = saneJunitCounts(total, failed, notExecuted);
   if (counts === null || (children.length > 0 &&
       (counts.total !== observed.total || counts.failed !== observed.failed || counts.skipped !== observed.skipped))) return null;
-  return { counts, hasTestcases: false };
+  return counts;
 }
 
 function nodeLeafCounts(element: ReportElement): JunitCounts | null {
@@ -669,7 +662,7 @@ function readJunitDocument(document: JunitDocument): TestReportRead {
   if (document.kind === "foreign") return FOREIGN_XML;
   if (document.kind === "malformed") return document.recognized ? MALFORMED_JUNIT : UNRECOGNIZED;
   const { root } = document;
-  const traditional = parseTraditionalJunit(root)?.counts ?? null;
+  const traditional = parseTraditionalJunit(root);
   const projected = testcaseElements(root).map(projectTestcase);
   const testcases = Object.freeze(projected.filter((testcase): testcase is ReportTestcase => testcase !== null));
   const unnamedTestcases = projected.length - testcases.length;
