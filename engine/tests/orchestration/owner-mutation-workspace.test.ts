@@ -178,6 +178,45 @@ describe("withMutationWorkspace", () => {
     expect(repo.worktrees()).toEqual([repo.root]);
   }, TIMEOUT_MS);
 
+  it("replaces a workspace package's node_modules the checkout carries (committed to Git) with the link to the real one, which Git lists only entry by entry", async () => {
+    const repo = build();
+    const real = join(repo.root, "packages", "host", "node_modules");
+    mkdirSync(join(real, "stale"), { recursive: true });
+    writeFileSync(join(real, "stale", "index.js"), "export const stale = true;\n");
+    execFileSync("git", ["-C", repo.root, "add", "-f", "packages/host/node_modules"]);
+    execFileSync("git", ["-C", repo.root, "commit", "-q", "-m", "vendor a partial package node_modules"]);
+    appendFileSync(join(repo.root, ".git", "info", "exclude"), "node_modules/\n");
+    mkdirSync(join(real, "installed"), { recursive: true });
+    writeFileSync(join(real, "installed", "index.js"), "export {};\n");
+    const result = await withMutationWorkspace(specOf(repo), async (workspace) => {
+      const link = join(workspace.root, "packages", "host", "node_modules");
+      return {
+        isLink: lstatSync(link).isSymbolicLink(),
+        target: readlinkSync(link),
+        installedVisible: existsSync(join(link, "installed", "index.js")),
+      };
+    });
+    expect(result).toEqual({ ok: true, value: { isLink: true, target: real, installedVisible: true } });
+    expect(read(repo.root, "packages/host/node_modules/stale/index.js")).toBe("export const stale = true;\n");
+    expect(read(repo.root, "packages/host/node_modules/installed/index.js")).toBe("export {};\n");
+    expect(repo.worktrees()).toEqual([repo.root]);
+  }, TIMEOUT_MS);
+
+  it("refuses, as worktree-failed, a listed node_modules holder whose path is unusable, runs nothing and leaves no worktree", async () => {
+    const repo = build();
+    appendFileSync(join(repo.root, ".git", "info", "exclude"), "node_modules/\n");
+    mkdirSync(join(repo.root, " odd", "node_modules", "pkg"), { recursive: true });
+    let used = false;
+    const result = await withMutationWorkspace(specOf(repo), async () => { used = true; });
+    expect(used).toBe(false);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("worktree-failed");
+    expect(result.error.detail).toMatch(/unusable node_modules directory " odd"/);
+    expect(lstatSync(join(repo.root, " odd", "node_modules", "pkg")).isDirectory()).toBe(true);
+    expect(repo.worktrees()).toEqual([repo.root]);
+  }, TIMEOUT_MS);
+
   it("replaces a node_modules the checkout carries (committed to Git) with the link to the real workspace's", async () => {
     const repo = build();
     mkdirSync(join(repo.root, "node_modules", "stale"), { recursive: true });
