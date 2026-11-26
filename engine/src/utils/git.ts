@@ -692,8 +692,15 @@ const matchingParenthesis = (code: string, open: number): number | null => {
   return null;
 };
 
-const hasTypeScriptTestCall = (code: string): boolean => {
+/** What one projected line says about a runner invocation. `awaiting-title` is
+ *  a call whose open parenthesis ends the line (`test(` with the title on the
+ *  next line, as a formatter prints a long title): the line alone proves
+ *  nothing, so the next non-blank added line of the same file decides it. */
+type TypeScriptTestCallLine = "call" | "awaiting-title" | "none";
+
+const typeScriptTestCallOf = (code: string): TypeScriptTestCallLine => {
   const calls = /(?:^|\s)(?:it|test)(?:\.(?:each|concurrent))*\s*\(/g;
+  let awaitingTitle = false;
   for (const match of code.matchAll(calls)) {
     const start = match.index ?? 0;
     const prefix = code.slice(0, start).trimEnd();
@@ -712,15 +719,23 @@ const hasTypeScriptTestCall = (code: string): boolean => {
       // Multiline runner callbacks commonly close on a later added line. Their
       // title literal is projected away, leaving a leading comma; an unfinished
       // method signature has no argument separator and proves no test call.
-      if (code.slice(open + 1).trimStart().startsWith(",")) return true;
+      const rest = code.slice(open + 1).trim();
+      if (rest.startsWith(",")) return "call";
+      if (rest === "") awaitingTitle = true;
       continue;
     }
     const suffix = code.slice(close + 1).trimStart();
     if (suffix.startsWith("{") || suffix.startsWith(":")) continue;
-    return true;
+    return "call";
   }
-  return false;
+  return awaitingTitle ? "awaiting-title" : "none";
 };
+
+/** An `awaiting-title` call is a runner invocation when the next non-blank
+ *  added line opens with the separator a projected title literal leaves
+ *  behind. A method signature continues with a parameter (`a: string,`) and an
+ *  unrelated line with anything else, so neither becomes evidence. */
+const completesAwaitedTitle = (code: string): boolean => code.trimStart().startsWith(",");
 
 /** Heuristically count added executable test declarations in a diff string (pure). */
 export function countNewTests(diffContent: string): TestCount {
@@ -729,12 +744,26 @@ export function countNewTests(diffContent: string): TestCount {
   let ts = 0;
   let python = 0;
   let rust = 0;
+  // The file whose last non-blank added line ended in an open runner call.
+  let awaitingTitleIn: string | null = null;
 
   for (const { path, code } of lines) {
-    if (!isAttributedPath(path)) continue;
+    if (!isAttributedPath(path)) {
+      awaitingTitleIn = null;
+      continue;
+    }
     const language = languageOfTestSource(path);
     if (language === "java" && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
-    if (language === "ts" && hasTypeScriptTestCall(code)) ts++;
+    if (language === "ts") {
+      const blank = code.trim() === "";
+      if (awaitingTitleIn === path && !blank && completesAwaitedTitle(code)) ts++;
+      if (awaitingTitleIn !== path || !blank) awaitingTitleIn = null;
+      const call = typeScriptTestCallOf(code);
+      if (call === "call") ts++;
+      if (call === "awaiting-title") awaitingTitleIn = path;
+    } else {
+      awaitingTitleIn = null;
+    }
     // Python test classes are only collection containers; executable evidence
     // is a test_* function or method. Counting the class declaration itself
     // accepts an empty helper-only class that pytest collects as zero tests.
