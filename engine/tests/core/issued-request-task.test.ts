@@ -1,10 +1,12 @@
 /**
  * The one composition of an issued request's task text.
  *
- * `issuedRequestInstruction` replaced five call-site instruction literals, and
+ * `issuedRequestInstruction` consolidated the two attempt-1 Wave emission
+ * sites' instruction literals into one function of the request authority, and
  * `taskBindingLine` replaced the Task/Wave suffix the Wave publication appended
- * by hand. Both are now functions of the request authority (and its durable
- * context), so the tests here are about totality and about the two facts a
+ * by hand. The retry, Refutation-Panel and security-verifier seams still spell
+ * their own instruction texts (byte-identical today) and are migrated by the
+ * next slice. The tests here are about totality and about the two facts a
  * reviewer's capture depends on: the instruction it is told to follow, and the
  * Task/Wave binding the capture matcher re-derives from its echoed task.
  */

@@ -105,7 +105,7 @@ async function publishInitialBatch(
     ...action.value,
     requests: Object.freeze(action.value.requests.map((request) => Object.freeze({
       ...request,
-      task: renderIssuedRequestTask(handle, request.authority, emissionAuthority ?? undefined, options).task,
+      task: renderIssuedRequestTask(handle, request.authority, emissionAuthority, options).task,
     }))),
   }) };
 }

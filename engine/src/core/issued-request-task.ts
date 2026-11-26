@@ -14,7 +14,9 @@
  * wave-gate failure the echo-binding suite records.
  *
  * Here both facts are functions of the request authority and its durable
- * context, so issuance and any later re-render cannot disagree about them.
+ * context, so any render through this module — issuance and re-render alike —
+ * cannot disagree about them. The attempt-2 retry and verifier seams still
+ * compose their own text and are migrated by the next slice.
  * Pure module: no I/O, no clock, no randomness.
  */
 import { match } from "ts-pattern";

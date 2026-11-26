@@ -14,6 +14,7 @@
 .claude/specs/*/panel-runs/
 .claude/**/orchestration-runs/
 .claude/**/wave-gate-runs/
-.loom/
+.loom/*
+!.loom/verification-manifest.json
 
 node_modules

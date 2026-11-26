@@ -2,12 +2,14 @@
  * Engine-issued spawn task rendering — the imperative shell. It gathers and
  * verifies every fact one render depends on in a single observation step (the
  * parsed durable registration, the published request and Context Packet, the
- * reader and archive presence, the frozen diff, the Pi parent flag, the issued
- * emission route and the Wave subject the child must echo), converts every
- * refusal into a thrown bounded error, reports an extraction-only route on
- * stderr, and hands the facts to the pure `renderSpawnTaskText`
- * (core/spawn-task-text) plus the request's own instruction and binding
- * (core/issued-request-task).
+ * reader and archive presence, the frozen diff, the Pi parent flag and the
+ * issued emission route), converts every refusal into a thrown bounded error,
+ * reports an extraction-only route on stderr, and hands the facts to the pure
+ * `renderSpawnTaskText` (core/spawn-task-text) plus the request's own
+ * instruction and binding (core/issued-request-task). The Wave subject the
+ * child must echo is read separately, from the request's own Context Packet,
+ * by `observeTaskBinding` — a second read that can still throw after the route
+ * has been projected.
  */
 import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
 import { describeChildLaunchRouteRefusal, routedChildLaunchRoute } from "../../../utils/child-launch-route";
@@ -281,10 +283,13 @@ function observeSpawnTaskFacts(
 function observeTaskBinding(handle: RunDirHandle, authority: AgentRequestAuthority): IssuedTaskBinding {
   if (authority.program !== 'wave-gate') return Object.freeze({ kind: 'none' as const });
   const packet = handle.readContext(authority.contextDigest, CONTEXT_PACKET_MAX_BYTES);
-  if (!packet.ok) throw new Error(`the request's Context Packet is unavailable: ${packet.error.message}`);
+  if (!packet.ok) {
+    throw new Error(`request ${authority.requestId} (context ${authority.contextDigest}) has an unavailable Context Packet: ${packet.error.message}`);
+  }
   const context = readWaveReviewContext([packet.value], authority.contextDigest);
   if (context.kind !== 'loaded') {
-    throw new Error(`the request's Context Packet carries no usable Wave review subject: ${context.kind === 'corrupt' ? context.message : 'no packet'}`);
+    const detail = context.kind === 'corrupt' ? context.message : `the context read as ${context.kind}`;
+    throw new Error(`request ${authority.requestId} (context ${authority.contextDigest}) carries no usable Wave review subject: ${detail}`);
   }
   return context.value.task === null
     ? Object.freeze({ kind: 'spec-check' as const, wave: context.value.wave })
@@ -294,10 +299,9 @@ function observeTaskBinding(handle: RunDirHandle, authority: AgentRequestAuthori
 /**
  * The durable-compatibility render: an emission-eligible request derives its
  * issued claim from the durable registration alone. Its production callers are
- * the ineligible panel/spec-check paths, legacy schema-1 initial batches
- * (`publishLegacyInitialBatch`) and Pi's extraction-only canonical re-render
- * (pi/review-run-authority.ts), which re-derives the same route from the same
- * durable registration. Active review programs use
+ * the ineligible panel/spec-check paths and Pi's extraction-only canonical
+ * re-render (pi/review-run-authority.ts), which re-derives the same route from
+ * the same durable registration. Active review programs use
  * `renderReviewProgramSpawn`, whose registered emission authority is a
  * required parameter, so this interface cannot accidentally accept one.
  */
@@ -327,17 +331,21 @@ export function renderReviewProgramSpawn(
  * The one render of an issued request: its program's instruction, its durable
  * Wave binding, and the verified delivery — so no caller supplies either fact.
  * A caller that composed its own instruction or appended its own binding made
- * the text a property of the code path rather than of the request; every
- * emission site is expected to reach the child through this function alone.
+ * the text a property of the code path rather than of the request. The
+ * attempt-1 Wave emission sites (initial publication and the collection
+ * re-emission) render through this function alone; the attempt-2 retry and
+ * verifier seams still compose their own text and are migrated by the next
+ * slice. `emissionAuthority` is null for the archived extraction-only route,
+ * matching the publication core's convention.
  */
 export function renderIssuedRequestTask(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,
-  emissionAuthority: RegisteredReviewProgram | undefined,
+  emissionAuthority: RegisteredReviewProgram | null,
   options: SpawnTaskRenderOptions = {},
 ): ReviewProgramSpawn {
   const { facts, route } = observeSpawnTaskFacts(
-    handle, authority, issuedRequestInstruction(authority), emissionAuthority, options,
+    handle, authority, issuedRequestInstruction(authority), emissionAuthority ?? undefined, options,
   );
   return Object.freeze({
     task: withTaskBinding(renderSpawnTaskText(facts), observeTaskBinding(handle, authority)),
