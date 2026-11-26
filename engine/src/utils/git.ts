@@ -575,7 +575,11 @@ export interface TestCount {
   readonly total: number;
 }
 
-type AddedExecutableLine = Readonly<{ path: string | null; code: string }>;
+/** One added postimage line, projected to executable code. `followsAdded`
+ *  holds when the postimage line directly before it, in the same diff entry
+ *  and hunk, was itself added; a context line or a hunk header between them
+ *  breaks that adjacency. */
+type AddedExecutableLine = Readonly<{ path: string | null; code: string; followsAdded: boolean }>;
 
 const isTestSourcePath = (path: string): boolean =>
   /(?:^|\/)(?:tests?|__tests__|spec)\//.test(path) ||
@@ -692,8 +696,15 @@ const matchingParenthesis = (code: string, open: number): number | null => {
   return null;
 };
 
-const hasTypeScriptTestCall = (code: string): boolean => {
+/** What one projected line says about a runner invocation. `awaiting-title` is
+ *  a call whose open parenthesis ends the line (`test(` with the title on the
+ *  next line, as a formatter prints a long title): the line alone proves
+ *  nothing, so the next non-blank added line of the same file decides it. */
+type TypeScriptTestCallLine = "call" | "awaiting-title" | "none";
+
+const typeScriptTestCallOf = (code: string): TypeScriptTestCallLine => {
   const calls = /(?:^|\s)(?:it|test)(?:\.(?:each|concurrent))*\s*\(/g;
+  let awaitingTitle = false;
   for (const match of code.matchAll(calls)) {
     const start = match.index ?? 0;
     const prefix = code.slice(0, start).trimEnd();
@@ -712,14 +723,49 @@ const hasTypeScriptTestCall = (code: string): boolean => {
       // Multiline runner callbacks commonly close on a later added line. Their
       // title literal is projected away, leaving a leading comma; an unfinished
       // method signature has no argument separator and proves no test call.
-      if (code.slice(open + 1).trimStart().startsWith(",")) return true;
+      const rest = code.slice(open + 1).trim();
+      if (rest.startsWith(",")) return "call";
+      if (rest === "") awaitingTitle = true;
       continue;
     }
     const suffix = code.slice(close + 1).trimStart();
     if (suffix.startsWith("{") || suffix.startsWith(":")) continue;
-    return true;
+    return "call";
   }
-  return false;
+  return awaitingTitle ? "awaiting-title" : "none";
+};
+
+/** A runner call left open by an earlier added line, waiting for its title. */
+type RunnerCallCarry =
+  | Readonly<{ kind: "idle" }>
+  | Readonly<{ kind: "awaiting-title"; path: string }>;
+
+const IDLE_RUNNER_CALL: RunnerCallCarry = Object.freeze({ kind: "idle" });
+
+/**
+ * One added line of a TypeScript test source: how many runner calls it
+ * completes, and what it leaves open for the next line (pure).
+ *
+ * An open call is a runner invocation when the next non-blank added line of
+ * the same file, with no context line or hunk header between, opens with the
+ * separator a projected title literal leaves behind. Blank lines (including
+ * comment-only lines, projected empty) keep it waiting; any other line decides
+ * it. A method signature continues with a parameter (`a: string,`) and an
+ * unrelated line with anything else, so neither becomes evidence.
+ */
+const stepTypeScriptRunnerCalls = (
+  carry: RunnerCallCarry,
+  path: string,
+  line: AddedExecutableLine,
+): Readonly<{ calls: number; carry: RunnerCallCarry }> => {
+  const pending = carry.kind === "awaiting-title" && carry.path === path && line.followsAdded;
+  if (pending && line.code.trim() === "") return { calls: 0, carry };
+  const completed = pending && line.code.trimStart().startsWith(",") ? 1 : 0;
+  const call = typeScriptTestCallOf(line.code);
+  return {
+    calls: completed + (call === "call" ? 1 : 0),
+    carry: call === "awaiting-title" ? Object.freeze({ kind: "awaiting-title", path }) : IDLE_RUNNER_CALL,
+  };
 };
 
 /** Heuristically count added executable test declarations in a diff string (pure). */
@@ -729,12 +775,18 @@ export function countNewTests(diffContent: string): TestCount {
   let ts = 0;
   let python = 0;
   let rust = 0;
+  let runnerCall = IDLE_RUNNER_CALL;
 
-  for (const { path, code } of lines) {
-    if (!isAttributedPath(path)) continue;
+  for (const line of lines) {
+    const { path, code } = line;
     const language = languageOfTestSource(path);
+    const step = isAttributedPath(path) && language === "ts"
+      ? stepTypeScriptRunnerCalls(runnerCall, path, line)
+      : { calls: 0, carry: IDLE_RUNNER_CALL };
+    runnerCall = step.carry;
+    ts += step.calls;
+    if (!isAttributedPath(path)) continue;
     if (language === "java" && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
-    if (language === "ts" && hasTypeScriptTestCall(code)) ts++;
     // Python test classes are only collection containers; executable evidence
     // is a test_* function or method. Counting the class declaration itself
     // accepts an empty helper-only class that pytest collects as zero tests.
@@ -1056,6 +1108,9 @@ function assertionCodeLine(
 function executableAddedLines(diffContent: string): Readonly<{ lines: readonly AddedExecutableLine[]; unattributableFiles: number }> {
   let entry: DiffEntryScanState = Object.freeze({ kind: "outside" });
   const lines: AddedExecutableLine[] = [];
+  // Removed lines are not in the postimage, so they neither break nor make
+  // adjacency between added lines.
+  let previousWasAdded = false;
   let unattributableFiles = 0;
   const invalidate = (): DiffEntryScanState => {
     unattributableFiles += 1;
@@ -1064,6 +1119,7 @@ function executableAddedLines(diffContent: string): Readonly<{ lines: readonly A
   for (const diffLine of diffContent.split("\n")) {
     if (diffLine.startsWith("diff --git ")) {
       entry = Object.freeze({ kind: "prelude-old" });
+      previousWasAdded = false;
       continue;
     }
     if (entry.kind === "outside" || entry.kind === "invalid") continue;
@@ -1098,16 +1154,21 @@ function executableAddedLines(diffContent: string): Readonly<{ lines: readonly A
       continue;
     }
 
-    if (isHunkHeader(diffLine)) continue;
+    if (isHunkHeader(diffLine)) {
+      previousWasAdded = false;
+      continue;
+    }
     // Lexical state follows the complete postimage: removed lines do not exist
     // there, and each file boundary above starts an independent token stream.
     const isSourceLine = diffLine.startsWith("+") || diffLine.startsWith(" ");
     if (!isSourceLine) continue;
     const parsed = assertionCodeLine(diffLine.slice(1), entry.lexical, entry.path);
     entry = Object.freeze({ ...entry, lexical: parsed.state });
-    if (diffLine.startsWith("+")) {
-      lines.push(Object.freeze({ path: entry.path, code: parsed.code }));
+    const added = diffLine.startsWith("+");
+    if (added) {
+      lines.push(Object.freeze({ path: entry.path, code: parsed.code, followsAdded: previousWasAdded }));
     }
+    previousWasAdded = added;
   }
   return Object.freeze({ lines: Object.freeze(lines), unattributableFiles });
 }
