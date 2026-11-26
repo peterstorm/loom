@@ -1,7 +1,8 @@
 # ADR-0104: A contract writer may hold frozen bytes
 
 ## Status
-Accepted (2026-11-26).
+Accepted (2026-11-26). Amends ADR-0052: the conformance verdict travels inside the one required
+`ContractTaskObservation` instead of as its own field.
 
 ## Context
 An Acceptance Contract has one contract Task: the Task whose `file_list` holds every frozen path (the types
@@ -16,9 +17,8 @@ correct as they are. The brief then tells the writer to re-freeze those files wi
 Each of them fails `declared-artifact-not-changed`, so the Task can never pass. `rescope-task` cannot drop
 the files either: it refuses because a contract's frozen paths must stay with its contract Task.
 
-A real run hit this. Task T1 of the alert-bridge Phase 1 plan failed attempt 1 with exactly
-`proof:declared-artifact-not-changed` on five byte-identical re-frozen acceptance files, and its retry is
-its final attempt.
+A real run hit this. As of 2026-11-26, Task T1 of the alert-bridge Phase 1 plan had failed attempt 1 with
+exactly `proof:declared-artifact-not-changed` on five byte-identical re-frozen acceptance files.
 
 The Proof is not the only thing that judges these bytes. The contract's Wave Gate stamps an `awaiting-red`
 contract's frozen paths and refuses to stamp a path it cannot read (`frozenPathDigests`). For a frozen or
@@ -50,16 +50,19 @@ revised contract it reports every frozen path that is missing, unreadable or cha
 when the bytes changed, or when the path holds a regular file at settlement. The second case is recorded as
 held for the freeze, naming the contract.**
 
-- `ObservedProofFacts` carries a required `heldForFreeze`: the frozen paths of the contracts whose
-  `contractTask` is the settling Task (`writerFrozenPaths`) that hold a regular file. It is required in the
-  same way as `contractConformance`, so no settlement path can drop it by leaving it out.
-- `observeHeldForFreeze` in `engine/src/orchestration/freeze-hold-observation.ts` is the shell. It reads each
-  writer frozen path without following a link (`readRepositoryLeafNoFollow`). A regular file is held. An
-  absent path, or one that holds a link, directory or other kind, is not held, so the obligation fails as
-  `declared-artifact-not-changed` and the freeze refuses the path at the gate. Any other read error is an
-  infrastructure failure: settlement is `infrastructure-blocked` and reconcile refuses without changing
-  state. Both the exact settlement (`observeAttemptEvidence`) and `reconcile-implementation-proof` observe
-  it next to contract conformance.
+- The holds travel with the conformance verdict as one value, `ContractTaskObservation`
+  (`{ conformance, heldForFreeze }`), which `ObservedProofFacts`, the settlement's incoming evidence and
+  `reconcileTaskFromStoredEvidence` each take as one required field. `heldForFreeze` lists the frozen paths
+  of the contracts whose `contractTask` is the settling Task (`writerFrozenPaths`) that hold a regular file.
+  A Task that owes no conformance and writes no contract gets `NO_CONTRACT_TASK_OBSERVATION`.
+- `observeContractTask` in `engine/src/orchestration/contract-task-observation.ts` is the one shell. It
+  resolves the repository root once and reads each leaf once without following a link
+  (`readRepositoryLeafNoFollow`), judging conformance through `judgeOwedConformance` and the holds itself.
+  A regular file is held. An absent path, or one that holds a link, directory or other kind, is not held,
+  so the obligation fails as `declared-artifact-not-changed` and the freeze refuses the path at the gate.
+  Any other read error is an infrastructure failure: settlement is `infrastructure-blocked` and reconcile
+  refuses without changing state. The exact settlement (`observeAttemptEvidence`) and
+  `reconcile-implementation-proof` each make exactly one call, with one failure branch.
 - `evaluateDeclaredArtifactChanged` judges in this order: a conformance violation fails as
   `declared-artifact-contract-violated`; a changed artifact is satisfied with plain evidence; an unchanged
   held artifact is satisfied with `basis: { kind: "held-for-freeze", contract }`; anything else fails as

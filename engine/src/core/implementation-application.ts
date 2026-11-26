@@ -37,7 +37,7 @@ import {
   frozenRedThenGreenEra,
   redThenGreenScope,
   taskRedThenGreenEra,
-  type FreezeHeldArtifact,
+  type ContractTaskObservation,
   type ProofEvaluationPolicy,
   type RedThenGreenEra,
 } from "./proof-obligations";
@@ -45,7 +45,6 @@ import type { RedThenGreenObservation } from "./red-then-green-types";
 import { invalidateTaskReview } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
 import { isUntouchedSkeleton } from "./skeleton/outcomes";
-import type { ContractConformance } from "./skeleton/conformance-verdict";
 import type { SkeletonRecord } from "./skeleton/types";
 import { proofArtifactChanges, taskArtifactScope } from "./task-artifact-expectation";
 import type { FrozenTestFiles } from "./test-file-classification";
@@ -354,16 +353,13 @@ export type IncomingImplementationEvidence = Readonly<{
   /** The I6 judgment over the attempt epoch, present exactly when the Task
    *  owes `red-then-green` and the settlement shell judged its ledger. */
   redThenGreen?: RedThenGreenObservation;
-  /** The settlement shell's conformance decision (AD-5): `not-owed`, or the
-   *  judge's verdict over the Task's in-scope files. Required, so a settlement
-   *  path cannot skip the contract check by omitting it. */
-  contractConformance: ContractConformance;
-  /** The settlement shell's freeze-hold observation (ADR-0104): the frozen
-   *  paths of the contracts this Task writes that hold a regular file, each
-   *  satisfying its `declared-artifact-changed` obligation unchanged.
-   *  Required, as `contractConformance` is: a Task writing no contract passes
-   *  `NO_FREEZE_HOLDS`. */
-  heldForFreeze: readonly FreezeHeldArtifact[];
+  /** The settlement shell's one observation of the Task against the
+   *  Acceptance Contracts: its conformance verdict (AD-5) and the frozen
+   *  paths of the contracts it writes that hold a regular file (ADR-0104).
+   *  Required, so a settlement path cannot skip the contract check by
+   *  omitting it; the observer itself yields the empty observation for a
+   *  Task that owes no conformance and writes no contract. */
+  contractTask: ContractTaskObservation;
   /** Present exactly when the settlement shell wrote a Distill Task's
    *  snapshot back before the byte observation this evidence travels with
    *  (ADR-0068 §5): the failure kinds the attempt's own bytes would have
@@ -771,8 +767,7 @@ export function settleObservedImplementation(
       newTestsWritten: normalized.newTests.written,
       newTestEvidence: normalized.newTests.evidence,
       ...(incoming.redThenGreen === undefined ? {} : { redThenGreen: incoming.redThenGreen }),
-      contractConformance: incoming.contractConformance,
-      heldForFreeze: incoming.heldForFreeze,
+      contractTask: incoming.contractTask,
       ...(incoming.restoredAfter === undefined ? {} : { restoredAfter: incoming.restoredAfter }),
     },
     proofEvaluationPolicy,

@@ -2,7 +2,7 @@ import {
   derivePendingTaskProof,
   evaluateProofObligations,
   evaluateTaskProof,
-  NO_FREEZE_HOLDS,
+  NO_CONTRACT_TASK_OBSERVATION,
   type ObservedArtifactChanges,
   type ObservedProofEvidence,
   type ObservedProofFacts,
@@ -31,7 +31,6 @@ import {
   type TaskGraph,
   type TaskStatus,
 } from "../../src/types";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 import { isDistillTask } from "../../src/core/distill-task";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
@@ -124,22 +123,13 @@ export function shownRedThenGreen(implementationWrite = "src/fixture.ts"): RedTh
   };
 }
 
-/** The shell observations every Task outside an Acceptance Contract settles
- *  with: conformance `not-owed`, and no frozen path held (ADR-0104). */
-const NO_CONTRACT_OBSERVATIONS = Object.freeze({
-  contractConformance: CONFORMANCE_NOT_OWED,
-  heldForFreeze: NO_FREEZE_HOLDS,
-});
-
-type ContractObservationFields = "contractConformance" | "heldForFreeze";
-
-/** Observed Proof evidence whose completion conformance defaults to
- *  `not-owed` and whose freeze holds default to none — what every Task outside
- *  an Acceptance Contract settles with. Pass either field to state another. */
+/** Observed Proof evidence whose contract observation defaults to
+ *  `NO_CONTRACT_TASK_OBSERVATION` — what every Task outside an Acceptance
+ *  Contract settles with. Pass `contractTask` to state another. */
 export function observedEvidence(
-  evidence: Omit<ObservedProofFacts, ContractObservationFields> & Partial<Pick<ObservedProofFacts, ContractObservationFields>> & ObservedArtifactChanges,
+  evidence: Omit<ObservedProofFacts, "contractTask"> & Partial<Pick<ObservedProofFacts, "contractTask">> & ObservedArtifactChanges,
 ): ObservedProofEvidence {
-  return { ...NO_CONTRACT_OBSERVATIONS, ...evidence };
+  return { contractTask: NO_CONTRACT_TASK_OBSERVATION, ...evidence };
 }
 
 /** Observed evidence of an attempt whose scope was not restored: its changed paths, which a test may replace. */
@@ -152,7 +142,7 @@ export function trustedPassEvidence(
   overrides: Partial<ObservedProofFacts> = {},
 ): UnrestoredProofEvidence {
   return {
-    ...NO_CONTRACT_OBSERVATIONS,
+    contractTask: NO_CONTRACT_TASK_OBSERVATION,
     taskCompleted: true,
     testResult: { verdict: "trusted-pass" },
     filesModified: files,

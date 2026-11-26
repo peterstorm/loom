@@ -27,8 +27,7 @@ import { runUpdateTaskStatus } from "../../src/handlers/subagent-stop/update-tas
 import { registerTaskExecutionBatch, rollbackTaskExecutionRegistration } from "../../src/handlers/task-execution";
 import type { ImplementationAuthorityObservation } from "../../src/implementation-attempt-sidecar";
 import { gitDistillSnapshots } from "../../src/orchestration/distill-snapshot";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
-import { NO_FREEZE_HOLDS } from "../../src/core/proof-obligations";
+import { NO_CONTRACT_TASK_OBSERVATION } from "../../src/core/proof-obligations";
 import { preI6DefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { StateManager } from "../../src/state-manager";
 import { parseNewTestEvidence, type Task, type TaskGraph, type TaskTestResult } from "../../src/types";
@@ -536,7 +535,7 @@ describe("Proof reconcile and a Distill Task", () => {
   it("returns a Distill Task unchanged whatever evidence it is handed", () => {
     const undispatched = distillTask();
     const reconciled = reconcileTaskFromStoredEvidence(
-      undispatched, [...SCOPE], parseNewTestEvidence(true, "2 new test methods"), preI6DefaultVerificationManifest(), CONFORMANCE_NOT_OWED, NO_FREEZE_HOLDS,
+      undispatched, [...SCOPE], parseNewTestEvidence(true, "2 new test methods"), preI6DefaultVerificationManifest(), NO_CONTRACT_TASK_OBSERVATION,
     );
     expect(reconciled).toBe(undispatched);
   });

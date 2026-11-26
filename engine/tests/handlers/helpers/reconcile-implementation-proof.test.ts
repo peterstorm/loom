@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
-import { evaluateTaskProof, NO_FREEZE_HOLDS, PI_STRUCTURED_EVIDENCE_POLICY } from "../../../src/core/proof-obligations";
+import { evaluateTaskProof, NO_CONTRACT_TASK_OBSERVATION, PI_STRUCTURED_EVIDENCE_POLICY } from "../../../src/core/proof-obligations";
 import { createReviewPacket, parseBaseSha, parseHeadSha, serializeReviewPacket, type BaseSha, type HeadSha } from "../../../src/core/review-packet";
 
 const base = (hex: string): BaseSha => {
@@ -27,7 +27,6 @@ import {
 import type { Task } from "../../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../../src/types";
 import { taskFixture, observedEvidence } from "../../fixtures/task-lifecycle";
-import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
 import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 import { MANIFEST_ABSENT_REFUSAL } from "../../../src/core/manifested-task-graph";
 
@@ -407,8 +406,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       preI6DefaultVerificationManifest(),
-      CONFORMANCE_NOT_OWED,
-      NO_FREEZE_HOLDS,
+      NO_CONTRACT_TASK_OBSERVATION,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -448,8 +446,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       preI6DefaultVerificationManifest(),
-      CONFORMANCE_NOT_OWED,
-      NO_FREEZE_HOLDS,
+      NO_CONTRACT_TASK_OBSERVATION,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -472,8 +469,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       ["src/a.ts"],
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
       preI6DefaultVerificationManifest(),
-      CONFORMANCE_NOT_OWED,
-      NO_FREEZE_HOLDS,
+      NO_CONTRACT_TASK_OBSERVATION,
     );
     const newTestsWaived = reconcileTaskFromStoredEvidence(
       {
@@ -487,8 +483,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       preI6DefaultVerificationManifest(),
-      CONFORMANCE_NOT_OWED,
-      NO_FREEZE_HOLDS,
+      NO_CONTRACT_TASK_OBSERVATION,
     );
 
     expect(regressionWaived.status).toBe("pending");
@@ -512,8 +507,8 @@ describe("reconcileTaskFromStoredEvidence", () => {
   it("ADR-0104: re-evaluates a contract writer's byte-identical frozen path as held for its freeze", () => {
     const written = parseNewTestEvidence(true, "1 new test method, 2 assertions");
     const held = reconcileTaskFromStoredEvidence(
-      failedTask(), [], written, preI6DefaultVerificationManifest(), CONFORMANCE_NOT_OWED,
-      [{ artifact: "src/a.ts", contract: "CT-1" }],
+      failedTask(), [], written, preI6DefaultVerificationManifest(),
+      { ...NO_CONTRACT_TASK_OBSERVATION, heldForFreeze: [{ artifact: "src/a.ts", contract: "CT-1" }] },
     );
     expect(held.proof?.state).toBe("satisfied");
     expect(held.revalidation_required).toBe(true);
@@ -522,7 +517,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
     });
 
     const unheld = reconcileTaskFromStoredEvidence(
-      failedTask(), [], written, preI6DefaultVerificationManifest(), CONFORMANCE_NOT_OWED, NO_FREEZE_HOLDS,
+      failedTask(), [], written, preI6DefaultVerificationManifest(), NO_CONTRACT_TASK_OBSERVATION,
     );
     expect(unheld.proof?.state === "failed" ? unheld.proof.failures : []).toEqual([
       { kind: "declared-artifact-not-changed", artifact: "src/a.ts" },
@@ -535,8 +530,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       ["src/a.ts"],
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
       preI6DefaultVerificationManifest(),
-      CONFORMANCE_NOT_OWED,
-      NO_FREEZE_HOLDS,
+      NO_CONTRACT_TASK_OBSERVATION,
     );
 
     expect(reconciled.status).toBe("pending");

@@ -12,13 +12,11 @@ import { StateManager } from "../../state-manager";
 import {
   evaluateTaskProof,
   PI_STRUCTURED_EVIDENCE_POLICY,
-  type FreezeHeldArtifact,
+  type ContractTaskObservation,
   type RedThenGreenEra,
 } from "../../core/proof-obligations";
 import type { RedThenGreenObservation } from "../../core/red-then-green-types";
-import type { ContractConformance } from "../../core/skeleton/types";
-import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
-import { observeHeldForFreeze } from "../../orchestration/freeze-hold-observation";
+import { observeContractTask } from "../../orchestration/contract-task-observation";
 import type { FrozenVerificationManifest } from "../../core/verification-manifest";
 import { parseManifestedTaskGraph } from "../../core/manifested-task-graph";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
@@ -296,17 +294,15 @@ const settledOnlyByAttempt = (task: Task): boolean =>
  * facts, and current byte delta. `verificationManifest` is the TaskGraph's
  * frozen manifest, which every graph that holds Tasks carries; whether I6 is
  * owed is the Task's `redThenGreenDuty` under it (see `reconcileEra`).
- * `contractConformance` is the observation's verdict over the Task's current
- * bytes (AD-5), and `heldForFreeze` the frozen paths of the contracts the
- * Task writes that hold a regular file (ADR-0104); both are required so every
- * caller decides them. */
+ * `contractTask` is the shell's one observation of the Task's current bytes
+ * against the Acceptance Contracts: its conformance verdict (AD-5) and the
+ * frozen paths it holds (ADR-0104), required so every caller decides it. */
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
   verificationManifest: FrozenVerificationManifest,
-  contractConformance: ContractConformance,
-  heldForFreeze: readonly FreezeHeldArtifact[],
+  contractTask: ContractTaskObservation,
 ): Task {
   if (task.status === "completed" || settledOnlyByAttempt(task)) return task;
   // The ADT arrives parsed; no legacy-pair re-coercion here.
@@ -327,8 +323,7 @@ export function reconcileTaskFromStoredEvidence(
       newTestsWritten,
       newTestEvidence,
       ...(redThenGreen === undefined ? {} : { redThenGreen }),
-      contractConformance,
-      heldForFreeze,
+      contractTask,
     },
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
@@ -508,23 +503,18 @@ const handler: HookHandler = async (_stdin, args) => {
             describeNewTestObservationError(collectedNewTests.error),
           );
         }
-        // Which files owe conformance is the observation's scope (INV-5); a
-        // read failure aborts the reconcile without changing state.
-        const conformance = observeContractConformance(root, state, sourceTask);
-        if (!conformance.ok) {
-          throw new Error(`cannot observe contract conformance for ${sourceTask.id}: ${conformance.error}`);
-        }
-        const heldForFreeze = observeHeldForFreeze(root, state, sourceTask);
-        if (!heldForFreeze.ok) {
-          throw new Error(`cannot observe the frozen paths ${sourceTask.id} holds: ${heldForFreeze.error}`);
+        // Conformance (INV-5 scope) and freeze holds (ADR-0104), in one read;
+        // a read failure aborts the reconcile without changing state.
+        const contractTask = observeContractTask(root, state, sourceTask);
+        if (!contractTask.ok) {
+          throw new Error(`cannot observe contract conformance for ${sourceTask.id}: ${contractTask.error}`);
         }
         return reconcileTaskFromStoredEvidence(
           sourceTask,
           proofArtifactsChanged,
           collectedNewTests.value,
           verificationManifest,
-          conformance.value,
-          heldForFreeze.value,
+          contractTask.value,
         );
       });
       const resolved: TaskGraph = {
