@@ -40,7 +40,12 @@ and the only workaround was to restructure the test class.
 ## Decision
 **Within one JUnit suite whose subtree lists `<testcase>` elements, those elements are the executed facts:
 total, failed and skipped derive from them, and the suite's `tests`, `failures`, `skipped` and `disabled`
-attributes are runner metadata.**
+attributes are runner metadata in value.**
+
+The attributes must still parse: a traditional testsuite must carry a numeric `tests` attribute (a
+`testsuites` root falls back to the observed total) and `failures`, `errors`, `skipped` and `disabled`
+must be numeric when present. Only the values of `tests`, `skipped` and `disabled` are discarded; the
+`failures + errors` values are still checked against the elements.
 
 In `engine/src/core/structured-test-report.ts`, `parseTraditionalJunit` aggregates the testcase elements
 and returns their counts when the subtree lists any. A suite whose `failures + errors` attribute claims

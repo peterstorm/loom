@@ -324,6 +324,17 @@ describe("JUnit per-file projection", () => {
     }));
   });
 
+  it("loom#242: a testcase-bearing suite's skipped and disabled attributes are metadata in value only and must still be numeric", () => {
+    const metadata = '<testsuite tests="9" skipped="2" disabled="1"><testcase classname="a" name="x"/><testcase classname="a" name="y"/><testcase classname="a" name="z"/></testsuite>';
+    expect(junitSummary(metadata)).toMatchObject({ total: 3, failed: 0 });
+    expect(countedReport(metadata)).toEqual({ ok: true, value: { total: 3, failed: 0, source: "junit-xml" } });
+    expect(junitSummary('<testsuite tests="1" skipped="invalid"><testcase classname="a" name="x"/></testsuite>')).toBeNull();
+  });
+
+  it("loom#242: a nested suite that overclaims failures is refused even under a green root", () => {
+    expect(junitSummary('<testsuites><testsuite name="a" tests="1" failures="0"><testcase classname="a" name="x"/></testsuite><testsuite name="b" tests="1" failures="2"><testcase classname="b" name="y"/></testsuite></testsuites>')).toBeNull();
+  });
+
   it("AS-002: Maven failsafe's failsafe-summary.xml is not a JUnit report at all, so it is told apart from a refused one", () => {
     // The real failsafe default: written beside TEST-*.xml in target/failsafe-reports.
     const failsafeSummary = `<?xml version="1.0" encoding="UTF-8"?>

@@ -574,11 +574,16 @@ type JunitObservation = Readonly<{ counts: JunitCounts; hasTestcases: boolean }>
 
 /** Aggregates count descendants once. When a suite's subtree lists testcases,
  * those elements are the executed facts: Surefire + jqwik writes `tests="7"`
- * for twelve property invocations, so the suite attributes are runner
- * metadata, not a summary of the cases. Summary-only traditional JUnit keeps
- * its attribute accounting, as in the machine API. A suite that claims more
- * failures or errors than its testcases show is refused: a claimed failure
- * no element records cannot be excused by an undercount. */
+ * for twelve property invocations, so the suite's attribute values are runner
+ * metadata there, not a summary of the cases. The attributes must still
+ * parse — a traditional testsuite must carry a numeric `tests` attribute (a
+ * `testsuites` root falls back to the observed total) and `failures`,
+ * `errors`, `skipped` and `disabled` must be numeric when present — and the
+ * `failures + errors` values are still checked against the cases.
+ * Summary-only traditional JUnit keeps its attribute accounting, as in the
+ * machine API. A suite that claims more failures or errors than its testcases
+ * show is refused: a claimed failure no element records cannot be excused by
+ * an undercount. */
 function parseTraditionalJunit(element: ReportElement): JunitObservation | null {
   if (element.name === "testcase") {
     const counts = testcaseCounts(element);
@@ -590,16 +595,11 @@ function parseTraditionalJunit(element: ReportElement): JunitObservation | null 
   // its root summary; they cannot fall back to traditional suite accounting.
   if (element.name === "testsuites" && children.some((child) => child.name === "testcase")) return null;
   if (element.name === "testsuites" && children.length === 0) return null;
-  let observed = noCases;
-  let hasTestcases = false;
-  for (const child of children) {
-    const observation = parseTraditionalJunit(child);
-    if (observation === null) return null;
-    const next = addJunitCounts(observed, observation.counts);
-    if (next === null) return null;
-    observed = next;
-    hasTestcases = hasTestcases || observation.hasTestcases;
-  }
+  const observations = children.map(parseTraditionalJunit);
+  if (observations.some((observation) => observation === null)) return null;
+  const observed = sumJunitCounts(observations.map((observation) => observation?.counts ?? null));
+  if (observed === null) return null;
+  const hasTestcases = observations.some((observation) => observation?.hasTestcases === true);
   const total = countAttribute(element, "tests", element.name === "testsuites" ? observed.total : undefined);
   const failures = countAttribute(element, "failures", 0);
   const errors = countAttribute(element, "errors", 0);
