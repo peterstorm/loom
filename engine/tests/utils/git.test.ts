@@ -474,6 +474,7 @@ describe("countNewTests (pure)", () => {
     ["a string title", ['+  test(', '+    "FR-001: refuses before any network call",', "+    async () => {"]],
     ["a template title", ["+  it.concurrent(", "+    `CT-2 acquisition (${model})`,", "+    () => {"]],
     ["a title after a blank and a comment line", ["+  test(", "+", "+    // FR-028: one decision per gate", "+    'records one approval',", "+    () => {"]],
+    ["a test.each table call", ["+  test.each(rows)(", '+    "case %s",', "+    (row) => {"]],
   ])("counts a runner call whose title opens the next line: %s", (_shape, lines) => {
     const diff = patch("example.test.ts", ...lines, "+      expect(result).toBe(true);", "+    },", "+  );");
 
@@ -509,6 +510,19 @@ describe("countNewTests (pure)", () => {
     ].join("\n");
 
     expect(countNewTests(diff).ts).toBe(0);
+  });
+
+  it.each([
+    ["a hunk header", ["+  test(", "@@ -40,0 +41,1 @@", '+  , "continuation in a later hunk"']],
+    ["an unchanged context line", ["+  test(", '   "an unchanged title",', '+  , "continuation after context"']],
+  ])("does not carry an open call across %s", (_boundary, lines) => {
+    expect(countNewTests(patch("example.test.ts", ...lines)).ts).toBe(0);
+  });
+
+  it("carries an open call over a removed line, which is not in the postimage", () => {
+    const diff = patch("example.test.ts", "+  test(", '-    "old title",', '+    "new title",', "+    () => {},", "+  );");
+
+    expect(countNewTests(diff).ts).toBe(1);
   });
 
   it("does not count a Python test collection class without test methods", () => {
