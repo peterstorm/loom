@@ -21,6 +21,8 @@ import {
   parseProofObligationResult,
   parseTaskProof,
   parseTaskTestResult,
+  NO_CONTRACT_TASK_OBSERVATION,
+  type FreezeHeldArtifact,
   type ObservedProofEvidence,
   type ProofObligationInput,
 } from "../../src/core/proof-obligations";
@@ -42,6 +44,17 @@ const completeEvidence = trustedPassEvidence([...input.declaredArtifacts], {
 
 /** The observation of an attempt that did nothing: not completed, no test run, no writes. */
 const NOTHING_DONE: ObservedProofEvidence = observedEvidence({ taskCompleted: false, filesModified: [] });
+
+/** A completed attempt that changed `filesModified`, under the given contract observation halves. */
+const observed = (
+  filesModified: readonly string[],
+  conformance: ContractConformance = CONFORMANCE_NOT_OWED,
+  heldForFreeze: readonly FreezeHeldArtifact[] = [],
+): ObservedProofEvidence => ({ taskCompleted: true, filesModified, contractTask: { conformance, heldForFreeze } });
+
+/** The `declared-artifact-changed` result a Proof holds for `artifact`. */
+const resultFor = (proof: ReturnType<typeof evaluateTaskProof>, artifact: string) =>
+  proof.results.find(({ obligation }) => obligation.kind === "declared-artifact-changed" && obligation.artifact === artifact);
 
 const ARTIFACT = "src/order/pricing.ts";
 const RELISTED: ConformanceViolation = {
@@ -294,7 +307,7 @@ describe("unknown-input parsers", () => {
       filesModified: ["src/a.ts"],
       newTestsWritten: true,
       newTestEvidence: "one test",
-      contractConformance: { kind: "not-owed" },
+      contractTask: { conformance: { kind: "not-owed" }, heldForFreeze: [] },
     };
     const parsedInput = parseProofObligationInput(rawInput);
     const parsedEvidence = parseObservedProofEvidence(rawEvidence);
@@ -519,6 +532,7 @@ describe("proof properties", () => {
         { kind: "regression-test-pass", provenance: "pi-structured", verdict: "untrusted-pass", label: "pi" },
         { kind: "new-tests", detail: null },
         { kind: "declared-artifact-changed", artifact: "src/a.ts" },
+        { kind: "declared-artifact-changed", artifact: "src/a.ts", basis: { kind: "held-for-freeze", contract: "CT-1" } },
       ].map((value) => ({ parser: parseProofEvidence, value })),
       { parser: parseProofObligationResult, value: pending.results[0] },
       { parser: parseProofObligationResult, value: failed.results[0] },
@@ -537,7 +551,10 @@ describe("proof properties", () => {
           declaredArtifacts: [],
         },
       },
-      { parser: parseObservedProofEvidence, value: { taskCompleted: true, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED } },
+      {
+        parser: parseObservedProofEvidence,
+        value: { taskCompleted: true, filesModified: [], contractTask: NO_CONTRACT_TASK_OBSERVATION },
+      },
       { parser: parseProofEvaluationPolicy, value: { untrustedPass: "reject" } },
     ];
 
@@ -575,13 +592,6 @@ describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
   const RENAMED: ConformanceViolation = { subject: "parseOrder", reason: "renamed", remedy: null };
   const judged = (entries: readonly (readonly [string, readonly [ConformanceViolation, ...ConformanceViolation[]]])[]): ContractConformance =>
     ({ kind: "judged", violations: new Map(entries) });
-  const observed = (filesModified: readonly string[], contractConformance: ContractConformance): ObservedProofEvidence => ({
-    taskCompleted: true,
-    filesModified,
-    contractConformance,
-  });
-  const resultFor = (proof: ReturnType<typeof evaluateTaskProof>, artifact: string) =>
-    proof.results.find(({ obligation }) => obligation.kind === "declared-artifact-changed" && obligation.artifact === artifact);
 
   it("AS-015: an untouched engine skeleton is refused as still unimplemented, never as not-changed", () => {
     const proof = evaluateTaskProof(contractInput, observed([OTHER], judged([[ARTIFACT, [UNIMPLEMENTED]]])));
@@ -691,7 +701,7 @@ describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
   });
 
   it("refuses a filesModified that is no list of non-empty paths, naming each bad element", () => {
-    const base = { taskCompleted: true, contractConformance: { kind: "not-owed" } };
+    const base = { taskCompleted: true, contractTask: { conformance: { kind: "not-owed" }, heldForFreeze: [] } };
     expect(parseObservedProofEvidence({ ...base, filesModified: "src/a.ts" })).toEqual({
       ok: false,
       errors: ["filesModified must be an array when present"],
@@ -710,31 +720,37 @@ describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
       .toMatchObject({ ok: true, value: { filesModified: ["src/b.ts", "src/a.ts"] } });
   });
 
-  it("refuses an observation that has not decided contractConformance (AD-5: required, never judges nothing)", () => {
+  it("refuses an observation that has not decided its contract observation (AD-5: required, never judges nothing)", () => {
     expect(parseObservedProofEvidence({ taskCompleted: true, filesModified: [ARTIFACT] })).toEqual({
       ok: false,
-      errors: ["contractConformance must be decided as not-owed or judged"],
+      errors: ["contractTask must be decided: the conformance verdict and the frozen paths held"],
     });
-    expect(parseObservedProofEvidence({ taskCompleted: true, filesModified: [ARTIFACT], contractConformance: undefined }).ok).toBe(false);
+    expect(parseObservedProofEvidence({ taskCompleted: true, filesModified: [ARTIFACT], contractTask: { heldForFreeze: [] } })).toEqual({
+      ok: false,
+      errors: ["contractTask.conformance must be decided as not-owed or judged"],
+    });
+    expect(parseObservedProofEvidence({
+      taskCompleted: true, filesModified: [ARTIFACT], contractTask: { conformance: { kind: "not-owed" }, heldForFreeze: [], extra: 1 },
+    }).ok).toBe(false);
   });
 
-  it("parses both contractConformance arms into a defensive copy", () => {
+  it("parses both conformance arms into a defensive copy", () => {
     const raw = { taskCompleted: true, filesModified: [ARTIFACT] };
-    expect(parseObservedProofEvidence({ ...raw, contractConformance: { kind: "not-owed" } })).toEqual({
+    expect(parseObservedProofEvidence({ ...raw, contractTask: { conformance: { kind: "not-owed" }, heldForFreeze: [] } })).toEqual({
       ok: true,
-      value: { taskCompleted: true, filesModified: [ARTIFACT], contractConformance: { kind: "not-owed" } },
+      value: { taskCompleted: true, filesModified: [ARTIFACT], contractTask: { conformance: { kind: "not-owed" }, heldForFreeze: [] } },
     });
     const source = new Map<string, unknown>([[ARTIFACT, [UNIMPLEMENTED, RENAMED]]]);
-    const parsed = parseObservedProofEvidence({ ...raw, contractConformance: { kind: "judged", violations: source } });
+    const parsed = parseObservedProofEvidence({ ...raw, contractTask: { conformance: { kind: "judged", violations: source }, heldForFreeze: [] } });
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     source.set(OTHER, [RELISTED]);
-    expect(parsed.value.contractConformance).toEqual({ kind: "judged", violations: new Map([[ARTIFACT, [UNIMPLEMENTED, RENAMED]]]) });
+    expect(parsed.value.contractTask.conformance).toEqual({ kind: "judged", violations: new Map([[ARTIFACT, [UNIMPLEMENTED, RENAMED]]]) });
   });
 
-  it("refuses a malformed contractConformance observation", () => {
+  it("refuses a malformed conformance observation", () => {
     const raw = { taskCompleted: true, filesModified: [] };
-    for (const contractConformance of [
+    for (const conformance of [
       null,
       "not-owed",
       { kind: "owed" },
@@ -747,8 +763,147 @@ describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
       { kind: "judged", violations: new Map([[ARTIFACT, [{ subject: "x", reason: "lost", remedy: null }]]]) },
       { kind: "judged", violations: new Map([[ARTIFACT, [UNIMPLEMENTED]]]), surplus: 1 },
     ]) {
-      expect(parseObservedProofEvidence({ ...raw, contractConformance }).ok, String(contractConformance)).toBe(false);
+      expect(parseObservedProofEvidence({ ...raw, contractTask: { conformance, heldForFreeze: [] } }).ok, String(conformance)).toBe(false);
     }
+  });
+});
+
+describe("a contract writer holds a frozen path for its freeze (ADR-0104)", () => {
+  const ACCEPTANCE = "tests/order.acceptance.test.ts";
+  const TYPES = "src/order/order-contract.ts";
+  const writerInput: ProofObligationInput = {
+    newTestsRequired: false, declaredArtifacts: [TYPES, ACCEPTANCE], declaredArtifactExpectation: "changed",
+  };
+  const HELD: FreezeHeldArtifact = { artifact: ACCEPTANCE, contract: "CT-1" };
+  const heldEvidence = { kind: "declared-artifact-changed", artifact: ACCEPTANCE, basis: { kind: "held-for-freeze", contract: "CT-1" } };
+
+  it("satisfies an unchanged held frozen path on the held-for-freeze basis, naming the contract", () => {
+    const proof = evaluateTaskProof(writerInput, observed([TYPES], CONFORMANCE_NOT_OWED, [HELD]));
+    expect(proof.state).toBe("satisfied");
+    expect(resultFor(proof, ACCEPTANCE)).toEqual({
+      state: "satisfied",
+      obligation: { kind: "declared-artifact-changed", artifact: ACCEPTANCE },
+      evidence: heldEvidence,
+    });
+    // The changed sibling keeps the plain evidence every record before ADR-0104 has.
+    expect(resultFor(proof, TYPES)).toEqual({
+      state: "satisfied",
+      obligation: { kind: "declared-artifact-changed", artifact: TYPES },
+      evidence: { kind: "declared-artifact-changed", artifact: TYPES },
+    });
+    expect(resultFor(proof, TYPES)).not.toHaveProperty("evidence.basis");
+  });
+
+  it("still fails an unchanged path that no contract holds as not changed", () => {
+    const proof = evaluateTaskProof(writerInput, observed([TYPES], CONFORMANCE_NOT_OWED, []));
+    expect(proof.state === "failed" ? proof.failures : []).toEqual([{ kind: "declared-artifact-not-changed", artifact: ACCEPTANCE }]);
+    const elsewhere = evaluateTaskProof(writerInput, observed([TYPES], CONFORMANCE_NOT_OWED, [{ artifact: "tests/other.acceptance.test.ts", contract: "CT-2" }]));
+    expect(elsewhere.state === "failed" ? elsewhere.failures : []).toEqual([{ kind: "declared-artifact-not-changed", artifact: ACCEPTANCE }]);
+  });
+
+  it("records a changed path that is also held as plain changed, with no basis", () => {
+    const proof = evaluateTaskProof(writerInput, observed([TYPES, ACCEPTANCE], CONFORMANCE_NOT_OWED, [HELD]));
+    expect(resultFor(proof, ACCEPTANCE)).toEqual({
+      state: "satisfied",
+      obligation: { kind: "declared-artifact-changed", artifact: ACCEPTANCE },
+      evidence: { kind: "declared-artifact-changed", artifact: ACCEPTANCE },
+    });
+  });
+
+  it("still fails a conformance violation on a held path as contract-violated", () => {
+    const conformance: ContractConformance = { kind: "judged", violations: new Map([[ACCEPTANCE, [UNIMPLEMENTED]]]) };
+    const proof = evaluateTaskProof(writerInput, observed([TYPES], conformance, [HELD]));
+    expect(proof.state === "failed" ? proof.failures : []).toEqual([
+      { kind: "declared-artifact-contract-violated", artifact: ACCEPTANCE, violations: [UNIMPLEMENTED] },
+    ]);
+  });
+
+  it("matches a held path to the declared artifact by the plan-path rule", () => {
+    const proof = evaluateTaskProof(writerInput, observed([TYPES], CONFORMANCE_NOT_OWED, [{ artifact: `./${ACCEPTANCE}`, contract: "CT-1" }]));
+    expect(proof.state).toBe("satisfied");
+  });
+
+  it("round-trips held evidence through the evidence, result and proof parsers", () => {
+    const proof = evaluateTaskProof(writerInput, observed([TYPES], CONFORMANCE_NOT_OWED, [HELD]));
+    expect(parseTaskProof(JSON.parse(JSON.stringify(proof)))).toEqual({ ok: true, value: proof });
+    expect(parseProofEvidence(heldEvidence)).toEqual({ ok: true, value: heldEvidence });
+  });
+
+  it("parses legacy changed evidence, written without a basis, unchanged", () => {
+    const legacy = { kind: "declared-artifact-changed", artifact: ACCEPTANCE };
+    const parsed = parseProofEvidence(legacy);
+    expect(parsed).toEqual({ ok: true, value: legacy });
+    expect(parsed.ok && parsed.value).not.toHaveProperty("basis");
+  });
+
+  it("refuses a malformed basis, and a basis on any other evidence kind", () => {
+    const base = { kind: "declared-artifact-changed", artifact: ACCEPTANCE };
+    for (const basis of [
+      null,
+      "held-for-freeze",
+      {},
+      { kind: "held", contract: "CT-1" },
+      { kind: "held-for-freeze" },
+      { kind: "held-for-freeze", contract: " " },
+      { kind: "held-for-freeze", contract: 1 },
+      { kind: "held-for-freeze", contract: "CT-1", extra: true },
+    ]) {
+      expect(parseProofEvidence({ ...base, basis }).ok, JSON.stringify(basis)).toBe(false);
+    }
+    expect(parseProofEvidence({ kind: "declared-artifact-attested", artifact: ACCEPTANCE, basis: { kind: "held-for-freeze", contract: "CT-1" } }).ok)
+      .toBe(false);
+  });
+
+  it("refuses an observation that has not decided heldForFreeze, or holds a malformed entry", () => {
+    const observation = (heldForFreeze: unknown) =>
+      ({ taskCompleted: true, filesModified: [], contractTask: { conformance: { kind: "not-owed" }, heldForFreeze } });
+    expect(parseObservedProofEvidence(observation(undefined))).toEqual({
+      ok: false,
+      errors: ["contractTask.heldForFreeze must be an array of the frozen paths the Task holds"],
+    });
+    // Every element error, in index order.
+    expect(parseObservedProofEvidence(observation([{ artifact: "" }, { contract: "CT-1", artifact: ACCEPTANCE, x: 1 }]))).toEqual({
+      ok: false,
+      errors: [
+        "contractTask.heldForFreeze[0].artifact must be a non-empty string",
+        "contractTask.heldForFreeze[0].contract must be a non-empty string",
+        "contractTask.heldForFreeze[1] contains unexpected field(s): x",
+      ],
+    });
+    for (const heldForFreeze of [
+      null,
+      "tests/a.ts",
+      [ACCEPTANCE],
+      [{ artifact: ACCEPTANCE }],
+      [{ contract: "CT-1" }],
+      [{ artifact: "", contract: "CT-1" }],
+      [{ artifact: ACCEPTANCE, contract: " " }],
+      [{ artifact: ACCEPTANCE, contract: "CT-1", extra: 1 }],
+    ]) {
+      expect(parseObservedProofEvidence(observation(heldForFreeze)).ok, JSON.stringify(heldForFreeze)).toBe(false);
+    }
+    expect(parseObservedProofEvidence(observation([HELD]))).toMatchObject({ ok: true, value: { contractTask: { heldForFreeze: [HELD] } } });
+  });
+
+  it("PROPERTY: a hold satisfies exactly the unchanged, unviolated held paths and never changes any other verdict", () => {
+    const paths = ["a.ts", "b.ts", "c.ts", "d.ts"] as const;
+    fc.assert(fc.property(fc.subarray([...paths]), fc.subarray([...paths]), fc.subarray([...paths]), (changed, held, violated) => {
+      const source: ProofObligationInput = { newTestsRequired: false, declaredArtifacts: paths, declaredArtifactExpectation: "changed" };
+      const conformance: ContractConformance = { kind: "judged", violations: new Map(violated.map((path) => [path, [UNIMPLEMENTED]] as const)) };
+      const withHolds = evaluateTaskProof(source, observed(changed, conformance, held.map((artifact) => ({ artifact, contract: "CT-1" }))));
+      const withoutHolds = evaluateTaskProof(source, observed(changed, conformance));
+      for (const path of paths) {
+        const holdResult = resultFor(withHolds, path);
+        const plainResult = resultFor(withoutHolds, path);
+        const rescued = held.includes(path) && !changed.includes(path) && !violated.includes(path);
+        if (rescued) {
+          expect(plainResult?.state).toBe("failed");
+          expect(holdResult).toMatchObject({ state: "satisfied", evidence: { basis: { kind: "held-for-freeze", contract: "CT-1" } } });
+        } else {
+          expect(holdResult).toEqual(plainResult);
+        }
+      }
+    }));
   });
 });
 

@@ -470,6 +470,61 @@ describe("countNewTests (pure)", () => {
     expect(countAssertions(diff)).toBe(1);
   });
 
+  it.each([
+    ["a string title", ['+  test(', '+    "FR-001: refuses before any network call",', "+    async () => {"]],
+    ["a template title", ["+  it.concurrent(", "+    `CT-2 acquisition (${model})`,", "+    () => {"]],
+    ["a title after a blank and a comment line", ["+  test(", "+", "+    // FR-028: one decision per gate", "+    'records one approval',", "+    () => {"]],
+    ["a test.each table call", ["+  test.each(rows)(", '+    "case %s",', "+    (row) => {"]],
+  ])("counts a runner call whose title opens the next line: %s", (_shape, lines) => {
+    const diff = patch("example.test.ts", ...lines, "+      expect(result).toBe(true);", "+    },", "+  );");
+
+    expect(countNewTests(diff).ts).toBe(1);
+  });
+
+  it("counts each formatter-wrapped call once beside one-line calls", () => {
+    const diff = patch(
+      "example.test.ts",
+      '+  test("one line", () => {});',
+      "+  test(",
+      '+    "wrapped",',
+      "+    () => {},",
+      "+  );",
+    );
+
+    expect(countNewTests(diff).ts).toBe(2);
+  });
+
+  it.each([
+    ["a multiline method signature", "example.test.ts", ["+class Helper {", "+  test(", "+    value: string,", "+  ): void {}", "+}"]],
+    ["a title held in a variable", "example.test.ts", ["+  test(", "+    title,", "+    () => {},", "+  );"]],
+    ["an open call with no further line", "example.test.ts", ["+  test("]],
+    ["an open call in a non-test source", "src/production.ts", ["+  test(", '+    "title",', "+    () => {},", "+  );"]],
+  ])("does not count %s as a runner call", (_shape, path, lines) => {
+    expect(countNewTests(patch(path, ...lines)).ts).toBe(0);
+  });
+
+  it("does not carry an open call across a file boundary", () => {
+    const diff = [
+      patch("first.test.ts", "+  test("),
+      patch("second.test.ts", '+  , "continuation in another file"'),
+    ].join("\n");
+
+    expect(countNewTests(diff).ts).toBe(0);
+  });
+
+  it.each([
+    ["a hunk header", ["+  test(", "@@ -40,0 +41,1 @@", '+  , "continuation in a later hunk"']],
+    ["an unchanged context line", ["+  test(", '   "an unchanged title",', '+  , "continuation after context"']],
+  ])("does not carry an open call across %s", (_boundary, lines) => {
+    expect(countNewTests(patch("example.test.ts", ...lines)).ts).toBe(0);
+  });
+
+  it("carries an open call over a removed line, which is not in the postimage", () => {
+    const diff = patch("example.test.ts", "+  test(", '-    "old title",', '+    "new title",', "+    () => {},", "+  );");
+
+    expect(countNewTests(diff).ts).toBe(1);
+  });
+
   it("does not count a Python test collection class without test methods", () => {
     const diff = [
       "diff --git a/tests/test_support.py b/tests/test_support.py",

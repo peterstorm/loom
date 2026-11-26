@@ -19,6 +19,23 @@ export function frozenPaths(contract: Pick<AcceptanceContract, "types" | "accept
     : Object.freeze([acceptance[0], ...acceptance.slice(1)]);
 }
 
+/** One frozen path of a contract, named with the contract that freezes it. */
+export type WriterFrozenPath = Readonly<{ path: string; contract: string }>;
+
+/**
+ * Every frozen path of each contract `taskId` writes (its `contractTask`), in
+ * contract order then freeze order: the paths a contract writer may hold
+ * byte-identical when it re-freezes a revised contract (ADR-0104).
+ */
+export function writerFrozenPaths(
+  contracts: readonly Pick<AcceptanceContract, "id" | "contractTask" | "types" | "acceptance">[],
+  taskId: string,
+): readonly WriterFrozenPath[] {
+  return Object.freeze(contracts
+    .filter(({ contractTask }) => contractTask === taskId)
+    .flatMap((contract) => frozenPaths(contract).map((path) => freeze({ path, contract: contract.id }))));
+}
+
 /** The Requirements the contract's acceptance files decide, in declaration order. */
 export function coveredAnchors(contract: Pick<AcceptanceContract, "acceptance">): readonly string[] {
   return Object.freeze([...new Set(contract.acceptance.flatMap(({ anchors }) => anchors))]);

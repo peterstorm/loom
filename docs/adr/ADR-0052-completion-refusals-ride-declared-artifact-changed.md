@@ -10,6 +10,12 @@ Amended by [ADR-0098](ADR-0098-legacy-state-file-shapes-are-refused-at-load.md) 
 authority-free Pi untrusted stop and its LEGACY_STOP_CONFORMANCE constant are deleted, so exact settlement
 and reconcile are the only paths that observe conformance.
 
+Amended by [ADR-0104](ADR-0104-a-contract-writer-may-hold-frozen-bytes.md) (2026-11-26): the
+observed conformance verdict no longer travels as its own field. It is the `conformance` half of the one
+required `ContractTaskObservation` (`contractTask`), beside the frozen paths a contract writer holds, and
+both settlement paths observe it through one call to `observeContractTask`. Where this record names the
+contractConformance field below, read `contractTask.conformance`.
+
 ## Context
 
 G2 has the engine write a deterministic skeleton at every not-yet-existing bound path of an
@@ -74,7 +80,7 @@ That tells the implementer nothing about the frozen signature it still has to fi
 
 ## Decision
 **Completion refusals are a new `declared-artifact-contract-violated` failure variant of the existing
-`declared-artifact-changed` obligation. Every settlement path decides a `contractConformance`
+`declared-artifact-changed` obligation. Every settlement path decides a contractConformance
 observation explicitly, and engine-written bytes are subtracted before the changed test runs.**
 
 - **Failure variant** (`engine/src/core/proof-obligations.ts`). `ProofFailure` gains
@@ -136,7 +142,7 @@ observation explicitly, and engine-written bytes are subtracted before the chang
 
 ### Required, as the plan seed specified
 
-As AD-5 specified, `contractConformance` is a required field of `ObservedProofEvidence`, of
+As AD-5 specified, contractConformance is a required field of `ObservedProofEvidence`, of
 `IncomingImplementationEvidence` and of the `reconcileTaskFromStoredEvidence` parameter. Every
 settlement path must decide it: an observed verdict from `observeContractConformance`, or the named
 `not-owed` constant LEGACY_STOP_CONFORMANCE on the Pi untrusted stop (deleted by ADR-0098). A new settlement path that
@@ -164,7 +170,7 @@ observation that carries no decision.
 - The retry brief lists, for each violated file, every violation that fits the receipt's
   failure-kind bound with its remedy, plus a count of any it omitted. Attempt 2 can fix all of the
   listed ones in one go and knows how many more remain.
-- `contractConformance` is required, so the compiler guarantees that every settlement path decides
+- contractConformance is required, so the compiler guarantees that every settlement path decides
   conformance. No path can pass a Task by forgetting it.
 
 **Negative:**

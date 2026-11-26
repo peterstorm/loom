@@ -156,7 +156,7 @@ The engine derives proof from declared requirements and observed evidence. Depen
 - Agent completion;
 - a passing regression test result;
 - newly written tests, written test-first: a failing run before the first implementation write, then a passing one;
-- every declared artifact changed, with engine-written skeleton bytes subtracted, and, where completion conformance is owed, conforming to the frozen contract (a violation fails as `declared-artifact-contract-violated` before the changed test runs).
+- every declared artifact changed, with engine-written skeleton bytes subtracted, and, where completion conformance is owed, conforming to the frozen contract (a violation fails as `declared-artifact-contract-violated` before the changed test runs). A contract Task re-freezing a revised contract may leave a frozen file it writes byte-identical: a file that is present counts as held for the contract's freeze, which checks its bytes at the Wave Gate ([ADR-0104](adr/ADR-0104-a-contract-writer-may-hold-frozen-bytes.md)).
 
 Evidence retains provenance:
 

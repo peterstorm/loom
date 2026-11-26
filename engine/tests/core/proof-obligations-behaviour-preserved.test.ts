@@ -12,13 +12,15 @@ import {
   parseObservedProofEvidence,
   parseProofObligationInput,
   parseTaskProof,
+  NO_CONTRACT_TASK_OBSERVATION,
+  type ContractTaskObservation,
   type ObservedProofEvidence,
   type ObservedProofFacts,
   type ProofObligationInput,
   type ProofTestResult,
 } from "../../src/core/proof-obligations";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
-import type { ConformanceViolation, ContractConformance } from "../../src/core/skeleton/types";
+import type { ConformanceViolation } from "../../src/core/skeleton/types";
 import { observedEvidence } from "../fixtures/task-lifecycle";
 
 const SCOPE = ["src/price.ts", "src/order.ts"];
@@ -43,7 +45,10 @@ const restoredAttempt = (...reasons: NonEmpty<string>): ObservedProofEvidence =>
   observedEvidence({ taskCompleted: true, filesModified: [], restoredAfter: reasons });
 
 const RETYPED: ConformanceViolation = { subject: "priceOrder", reason: "retyped", remedy: null };
-const violating = (artifact: string): ContractConformance => ({ kind: "judged", violations: new Map([[artifact, [RETYPED]]]) });
+const violating = (artifact: string): ContractTaskObservation => ({
+  ...NO_CONTRACT_TASK_OBSERVATION,
+  conformance: { kind: "judged", violations: new Map([[artifact, [RETYPED]]]) },
+});
 
 const PI_PASS: ProofTestResult = { verdict: "untrusted", passed: true, label: "pi", provenance: "pi-structured" };
 
@@ -106,11 +111,11 @@ describe("behaviour-preserved", () => {
 
   it("fails a changed path that violates its contract even under a trusted pass, and ignores an unchanged one", () => {
     const pass: AttemptOverrides = { filesModified: ["src/price.ts"], testResult: { verdict: "trusted-pass" } };
-    expect(evaluateTaskProof(DISTILL, attempt({ ...pass, contractConformance: violating("src/price.ts") }))).toMatchObject({
+    expect(evaluateTaskProof(DISTILL, attempt({ ...pass, contractTask: violating("src/price.ts") }))).toMatchObject({
       state: "failed",
       failures: [{ kind: "declared-artifact-contract-violated", artifact: "src/price.ts", violations: [RETYPED] }],
     });
-    expect(evaluateTaskProof(DISTILL, attempt({ ...pass, contractConformance: violating("src/order.ts") }))).toMatchObject({
+    expect(evaluateTaskProof(DISTILL, attempt({ ...pass, contractTask: violating("src/order.ts") }))).toMatchObject({
       state: "satisfied",
     });
   });
@@ -148,14 +153,16 @@ describe("behaviour-preserved at the parse boundaries", () => {
   });
 
   it("reads a restoration reason list and refuses an empty one", () => {
-    const base = { taskCompleted: true, filesModified: [], contractConformance: { kind: "not-owed" } };
+    const base = { taskCompleted: true, filesModified: [], contractTask: { conformance: { kind: "not-owed" }, heldForFreeze: [] } };
     expect(parseObservedProofEvidence({ ...base, restoredAfter: ["proof:test-result-missing"] }))
       .toMatchObject({ ok: true, value: { filesModified: [], restoredAfter: ["proof:test-result-missing"] } });
     expect(parseObservedProofEvidence({ ...base, restoredAfter: [] })).toMatchObject({ ok: false });
   });
 
   it("reads a restoration with no filesModified field, and refuses one that names a changed path", () => {
-    const base = { taskCompleted: true, contractConformance: { kind: "not-owed" }, restoredAfter: ["proof:test-result-missing"] };
+    const base = {
+      taskCompleted: true, contractTask: { conformance: { kind: "not-owed" }, heldForFreeze: [] }, restoredAfter: ["proof:test-result-missing"],
+    };
     expect(parseObservedProofEvidence(base))
       .toMatchObject({ ok: true, value: { filesModified: [], restoredAfter: ["proof:test-result-missing"] } });
     expect(parseObservedProofEvidence({ ...base, filesModified: ["src/price.ts"] })).toEqual({
@@ -173,7 +180,7 @@ describe("behaviour-preserved at the parse boundaries", () => {
       (filesModified, restoredAfter) => {
         const parsed = parseObservedProofEvidence({
           taskCompleted: true,
-          contractConformance: { kind: "not-owed" },
+          contractTask: { conformance: { kind: "not-owed" }, heldForFreeze: [] },
           ...(filesModified === undefined ? {} : { filesModified }),
           ...(restoredAfter === undefined ? {} : { restoredAfter }),
         });

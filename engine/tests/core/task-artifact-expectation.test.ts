@@ -22,10 +22,10 @@ import { waveBaseOf } from "../../src/core/owner-verification/wave-base";
 import {
   DECLARED_ARTIFACT_EXPECTATIONS,
   deriveProofObligations,
+  NO_CONTRACT_TASK_OBSERVATION,
   TRUSTED_LEDGER_ONLY_POLICY,
   type DeclaredArtifactExpectation,
 } from "../../src/core/proof-obligations";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 import { proofArtifactChanges, taskArtifactExpectation, taskArtifactScope } from "../../src/core/task-artifact-expectation";
 import { DISTILL_VERIFICATION_POLICY } from "../../src/core/verification-policy";
 import { renderImplementationLifecycleError } from "../../src/handlers/helpers/implementation-lifecycle-errors";
@@ -180,7 +180,7 @@ const settleDistill = (now: string, reported: readonly string[], testResult?: Ta
     "2026-11-11T00:05:00.000Z" as never,
     {
       taskCompleted: true,
-      contractConformance: CONFORMANCE_NOT_OWED,
+      contractTask: NO_CONTRACT_TASK_OBSERVATION,
       newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
       ...(testResult === undefined ? {} : { testResult }),
     },

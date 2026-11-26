@@ -59,13 +59,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 622 src files / ~171.0k lines TS; `engine/tests/` holds 966 TS files / ~265.8k lines (fixtures and helpers included), of which 844 test files are executed (820 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 622 src files / ~171.1k lines TS; `engine/tests/` holds 963 TS files / ~266.0k lines (fixtures and helpers included), of which 842 test files are executed (818 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 131 docs incl. **102 ADRs** (index test-enforced) | — |
+| `docs/` | 132 docs incl. **103 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -960,9 +960,9 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **844 executed test files / ~265.8k lines** — 820 under `engine/tests/` (966 TS files there
-  including fixtures and helpers; core 317 test files, handlers 189, pi 50,
-  linter 47, orchestration 39, utils 35, machine 31, acceptance 20, security 20, …)
+- **842 executed test files / ~266.0k lines** — 818 under `engine/tests/` (963 TS files there
+  including fixtures and helpers; core 315 test files, handlers 188, pi 50,
+  linter 47, orchestration 40, utils 35, machine 31, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
@@ -970,7 +970,7 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (102 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (103 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, orchestration facades, Pi resources, task-graph
   validation — real CLI processes, not mocks.
