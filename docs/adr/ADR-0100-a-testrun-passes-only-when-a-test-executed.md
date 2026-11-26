@@ -1,7 +1,8 @@
 # ADR-0100: A TestRun passes only when a test executed
 
 ## Status
-Accepted (2026-11-22).
+Accepted (2026-11-22). Amended by [ADR-0103](ADR-0103-a-junit-suite-is-counted-from-its-testcases.md)
+(2026-11-26): a JUnit suite that lists testcases is counted from them, not from its summary attributes.
 
 ## Context
 One read of a structured test report (`readTestReport`) yields two counts. The declared-count rule counts

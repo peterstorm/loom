@@ -33,7 +33,7 @@ import {
   type TestRunSummaryRefusal,
 } from "../../src/core/structured-test-report";
 import { judgeTestRun } from "../../src/machine/test-report";
-import { reportSummary, summarizedReport } from "../machine/report-summary";
+import { countedReport, reportSummary, summarizedReport } from "../machine/report-summary";
 
 /** The TestRun summary of a JUnit XML or a Vitest JSON report text, or null. */
 const junitSummary = (xml: string): TestReportSummary | null => summarizedReport(xml, "junit-xml");
@@ -285,8 +285,68 @@ describe("JUnit per-file projection", () => {
     expect(unattributed?.files).toEqual({ kind: "unrecorded" });
   });
 
-  it("AS-002: a JUnit report whose testcases contradict its counts stays untrusted", () => {
-    expect(junitSummary('<testsuite tests="2" failures="0"><testcase classname="a" name="x"/></testsuite>')).toBeNull();
+  it("loom#242: testcase elements govern an undercounted suite, while a claimed failure no testcase shows stays untrusted", () => {
+    expect(junitSummary('<testsuite tests="2" failures="0"><testcase classname="a" name="x"/></testsuite>'))
+      .toMatchObject({ total: 1, failed: 0 });
+    expect(junitSummary('<testsuite tests="1" failures="1"><testcase classname="a" name="x"/></testsuite>')).toBeNull();
+  });
+
+  it("loom#242: a Surefire mixed-engine suite counts its testcase invocations, not its tests attribute", () => {
+    const cases = Array.from({ length: 12 }, (_, index) => `<testcase classname="dk.FooTest" name="case-${index}"/>`).join("");
+    const xml = `<testsuite name="dk.FooTest" tests="7" failures="0" errors="0" skipped="0">${cases}</testsuite>`;
+    const summary = junitSummary(xml);
+    expect(summary).toMatchObject({ total: 12, failed: 0, source: "junit-xml" });
+    expect(summary?.files).toEqual(recorded([result("dk.FooTest", 12, 0)]));
+    expect(judgeTestRun(0, summary)).toEqual({ verdict: "trusted-pass" });
+  });
+
+  it("loom#242: an undercounted outer suite takes its nested suites' testcase counts", () => {
+    const cases = Array.from({ length: 15 }, (_, index) => `<testcase classname="dk.Outer$Inner" name="nested-${index}"/>`).join("");
+    const xml = `<testsuite name="dk.Outer" tests="0" failures="0"><testsuite name="dk.Outer$Inner" tests="15" failures="0">${cases}</testsuite></testsuite>`;
+    expect(junitSummary(xml)).toMatchObject({ total: 15, failed: 0 });
+    expect(junitSummary(xml)?.files).toEqual(recorded([result("dk.Outer$Inner", 15, 0)]));
+  });
+
+  it("loom#242: a JUnit suite's counts always follow its testcases, never its attributes", () => {
+    const outcome = fc.constantFrom("passed", "failed", "skipped");
+    fc.assert(fc.property(fc.array(outcome, { minLength: 1, maxLength: 24 }), fc.nat(24), (outcomes, claimedTests) => {
+      const cases = outcomes.map((value, index) => {
+        const body = value === "failed" ? "<failure/>" : value === "skipped" ? "<skipped/>" : "";
+        return `<testcase classname="dk.FooTest" name="case-${index}">${body}</testcase>`;
+      }).join("");
+      const xml = `<testsuite tests="${claimedTests}" failures="0">${cases}</testsuite>`;
+      const summary = junitSummary(xml);
+      const failed = outcomes.filter((value) => value === "failed").length;
+      const skipped = outcomes.filter((value) => value === "skipped").length;
+      expect(summary).toMatchObject({ total: outcomes.length, failed });
+      expect(summary?.files).toEqual(recorded([result("dk.FooTest", outcomes.length, failed, false, skipped)]));
+      expect(countedReport(xml)).toEqual({ ok: true, value: { total: outcomes.length - skipped, failed, source: "junit-xml" } });
+    }));
+  });
+
+  it("loom#242: a testcase-bearing suite's skipped and disabled attributes are metadata in value only and must still be numeric", () => {
+    const metadata = '<testsuite tests="9" skipped="2" disabled="1"><testcase classname="a" name="x"/><testcase classname="a" name="y"/><testcase classname="a" name="z"/></testsuite>';
+    expect(junitSummary(metadata)).toMatchObject({ total: 3, failed: 0 });
+    expect(countedReport(metadata)).toEqual({ ok: true, value: { total: 3, failed: 0, source: "junit-xml" } });
+    expect(junitSummary('<testsuite tests="1" skipped="invalid"><testcase classname="a" name="x"/></testsuite>')).toBeNull();
+  });
+
+  it("loom#242: a nested suite that overclaims failures is refused even under a green root", () => {
+    expect(junitSummary('<testsuites><testsuite name="a" tests="1" failures="0"><testcase classname="a" name="x"/></testsuite><testsuite name="b" tests="1" failures="2"><testcase classname="b" name="y"/></testsuite></testsuites>')).toBeNull();
+  });
+
+  it.each([
+    ["a missing tests attribute", '<testsuite><testcase classname="a" name="x"/></testsuite>'],
+    ["a non-numeric tests attribute", '<testsuite tests="one"><testcase classname="a" name="x"/></testsuite>'],
+    ["a non-numeric failures attribute", '<testsuite tests="1" failures="abc"><testcase classname="a" name="x"/></testsuite>'],
+    ["a non-numeric errors attribute", '<testsuite tests="1" errors="abc"><testcase classname="a" name="x"/></testsuite>'],
+    ["a non-numeric disabled attribute", '<testsuite tests="1" disabled="abc"><testcase classname="a" name="x"/></testsuite>'],
+  ])("loom#242: a testcase-bearing suite is refused with %s — the attributes must still parse", (_name, xml) => {
+    expect(junitSummary(xml)).toBeNull();
+  });
+
+  it("loom#242: failures and errors each within the observed count still refuse when their sum exceeds it", () => {
+    expect(junitSummary('<testsuite tests="2" failures="1" errors="1"><testcase classname="a" name="x"><failure/></testcase></testsuite>')).toBeNull();
   });
 
   it("AS-002: Maven failsafe's failsafe-summary.xml is not a JUnit report at all, so it is told apart from a refused one", () => {
@@ -309,7 +369,7 @@ describe("JUnit per-file projection", () => {
     const unrecognized = { kind: "unrecognized" } as const;
     for (const [refused, refusal] of [
       ['<testsuite tests="1" failures="2"/>', malformed], // impossible counts
-      ['<testsuite tests="2" failures="0"><testcase classname="a" name="x"/></testsuite>', malformed], // unreconciled
+      ['<testsuite tests="2" failures="1"><testcase classname="a" name="x"/></testsuite>', malformed], // claimed failure, no failing testcase
       ["<testsuite>", malformed], // unterminated
       ["<testcase classname=\"a\" name=\"x\"/>", unrecognized], // a bare testcase root is JUnit-shaped, not foreign
       ["<wrapper><testsuite tests=\"1\"/></wrapper>", malformed], // JUnit content under a foreign root

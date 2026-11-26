@@ -65,7 +65,7 @@ Two persistence domains carry all authority:
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 130 docs incl. **101 ADRs** (index test-enforced) | — |
+| `docs/` | 131 docs incl. **102 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -970,7 +970,7 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (101 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (102 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, orchestration facades, Pi resources, task-graph
   validation — real CLI processes, not mocks.

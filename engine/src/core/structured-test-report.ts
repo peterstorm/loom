@@ -544,11 +544,15 @@ function saneJunitCounts(total: number, failed: number, skipped: number): JunitC
     failed + skipped <= total ? { total, failed, skipped } : null;
 }
 
+function addJunitCounts(left: JunitCounts, right: JunitCounts): JunitCounts | null {
+  return saneJunitCounts(left.total + right.total, left.failed + right.failed, left.skipped + right.skipped);
+}
+
 function sumJunitCounts(counts: readonly (JunitCounts | null)[]): JunitCounts | null {
   let sum = noCases;
   for (const count of counts) {
     if (count === null) return null;
-    const next = saneJunitCounts(sum.total + count.total, sum.failed + count.failed, sum.skipped + count.skipped);
+    const next = addJunitCounts(sum, count);
     if (next === null) return null;
     sum = next;
   }
@@ -566,8 +570,18 @@ function testcaseCounts(element: ReportElement): JunitCounts | null {
 const reportChildren = (element: ReportElement): readonly ReportElement[] =>
   element.children.filter((child) => child.name === "testsuite" || child.name === "testcase");
 
-/** Aggregates count descendants once; attributes must agree when cases exist.
- * Summary-only traditional JUnit remains supported, as in the machine API. */
+/** Aggregates count descendants once. When a suite's subtree lists testcases,
+ * those elements are the executed facts: Surefire + jqwik writes `tests="7"`
+ * for twelve property invocations, so the suite's attribute values are runner
+ * metadata there, not a summary of the cases. The attributes must still
+ * parse — a traditional testsuite must carry a numeric `tests` attribute (a
+ * `testsuites` root falls back to the observed total) and `failures`,
+ * `errors`, `skipped` and `disabled` must be numeric when present — and the
+ * `failures + errors` values are still checked against the cases.
+ * Summary-only traditional JUnit keeps its attribute accounting, as in the
+ * machine API. A suite that claims more failures or errors than its testcases
+ * show is refused: a claimed failure no element records cannot be excused by
+ * an undercount. */
 function parseTraditionalJunit(element: ReportElement): JunitCounts | null {
   if (element.name === "testcase") return testcaseCounts(element);
   if (element.name !== "testsuite" && element.name !== "testsuites") return null;
@@ -578,12 +592,16 @@ function parseTraditionalJunit(element: ReportElement): JunitCounts | null {
   if (element.name === "testsuites" && children.length === 0) return null;
   const observed = sumJunitCounts(children.map(parseTraditionalJunit));
   if (observed === null) return null;
+  const hasTestcases = children.some((child) => testcaseElements(child).length > 0);
   const total = countAttribute(element, "tests", element.name === "testsuites" ? observed.total : undefined);
   const failures = countAttribute(element, "failures", 0);
   const errors = countAttribute(element, "errors", 0);
   const skipped = countAttribute(element, "skipped", 0);
   const disabled = countAttribute(element, "disabled", 0);
   if (total === null || failures === null || errors === null || skipped === null || disabled === null) return null;
+  if (hasTestcases) {
+    return failures + errors > observed.failed ? null : observed;
+  }
   const failed = element.attributes.failures === undefined && element.attributes.errors === undefined && children.length > 0
     ? observed.failed : failures + errors;
   const notExecuted = element.attributes.skipped === undefined && element.attributes.disabled === undefined && children.length > 0
