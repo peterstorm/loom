@@ -190,19 +190,14 @@ export async function reconcileWaveReviewIssuance(
     if (!published.ok) return settled(failed(published.message));
     const action = published.action;
     // A publication that broke index alignment is refused before its Review
-    // Packets are installed, so no run collects for a mispublished batch.
+    // Packets are installed, so no run collects for a mispublished batch. The
+    // Task/Wave binding line is part of the render itself
+    // (core/issued-request-task), so publication's bytes are already the
+    // child's bytes and this site appends nothing.
     const paired = withBatchSubjects(action.requests, batch.subjects);
     if (!paired.ok) return settled(waveBlocked(handle, paired.error.message));
     await installWaveReviewRuns(manager, registration, batch);
-    return settled({ ok: true, action: {
-      ...action,
-      requests: paired.value.map(([request, subject]) => ({
-        ...request,
-        task: subject.taskId === null
-          ? `${request.task}\nSpec-check Wave ${wave}.`
-          : `${request.task}\nReview Task ${subject.taskId}.`,
-      })),
-    } });
+    return settled({ ok: true, action });
   }
 
   let refreshed = manager.load();

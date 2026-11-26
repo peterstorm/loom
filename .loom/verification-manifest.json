@@ -16,6 +16,21 @@
         "kind": "required-file",
         "path": ".loom/completion-reports/verify.junit.xml"
       }
+    },
+    {
+      "id": "project:issued-request-binding-repair",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "tests/issued-request-binding-junit.ts",
+        ".loom/completion-reports/issued-request-binding-repair.xml"
+      ],
+      "cwd": "engine",
+      "timeoutMs": 120000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/issued-request-binding-repair.xml"
+      }
     }
   ],
   "acceptanceRunner": {
