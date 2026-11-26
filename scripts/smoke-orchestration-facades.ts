@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateTaskProof } from "../engine/src/core/proof-obligations";
+import { evaluateTaskProof, NO_CONTRACT_TASK_OBSERVATION } from "../engine/src/core/proof-obligations";
 import { parseContextPacket, type ContextPacket } from "../engine/src/core/context-packets";
 import { CONTEXT_PACKET_BOUNDS, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 import { readWaveReviewContext } from "../engine/src/core/wave-review-authority";
@@ -13,7 +13,6 @@ import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION
 import { PI_AGENT_DIRECTORY_VARIABLE } from "../engine/src/core/pi-agent-directory";
 import { DESKTOP_VLLM_ROUTE } from "../engine/src/core/model-profiles";
 import { startRouteStub } from "./route-stub";
-import { CONFORMANCE_NOT_OWED } from "../engine/src/core/skeleton/conformance-verdict";
 import { parseIssuedTaskIdentity } from "../engine/src/core/spawn-task-text";
 import { preI6DefaultVerificationManifest } from "../engine/src/core/verification-manifest";
 
@@ -706,7 +705,10 @@ function canonicalSpec(cwd: string): string {
 function waveState(planFile: string, specFile: string): Record<string, unknown> {
   const proof = evaluateTaskProof(
     { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
-    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    {
+      contractTask: NO_CONTRACT_TASK_OBSERVATION,
+      taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true,
+    },
   );
   check(proof.state === "satisfied", "Wave fixture proof is not satisfied");
   return {

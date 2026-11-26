@@ -2,6 +2,7 @@ import {
   derivePendingTaskProof,
   evaluateProofObligations,
   evaluateTaskProof,
+  NO_CONTRACT_TASK_OBSERVATION,
   type ObservedArtifactChanges,
   type ObservedProofEvidence,
   type ObservedProofFacts,
@@ -30,7 +31,6 @@ import {
   type TaskGraph,
   type TaskStatus,
 } from "../../src/types";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 import { isDistillTask } from "../../src/core/distill-task";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
@@ -123,13 +123,13 @@ export function shownRedThenGreen(implementationWrite = "src/fixture.ts"): RedTh
   };
 }
 
-/** Observed Proof evidence whose completion conformance defaults to
- *  `not-owed` — the judgment every Task outside a skeleton contract settles
- *  with. Pass `contractConformance` to state a different judgment. */
+/** Observed Proof evidence whose contract observation defaults to
+ *  `NO_CONTRACT_TASK_OBSERVATION` — what every Task outside an Acceptance
+ *  Contract settles with. Pass `contractTask` to state another. */
 export function observedEvidence(
-  evidence: Omit<ObservedProofFacts, "contractConformance"> & Partial<Pick<ObservedProofFacts, "contractConformance">> & ObservedArtifactChanges,
+  evidence: Omit<ObservedProofFacts, "contractTask"> & Partial<Pick<ObservedProofFacts, "contractTask">> & ObservedArtifactChanges,
 ): ObservedProofEvidence {
-  return { contractConformance: CONFORMANCE_NOT_OWED, ...evidence };
+  return { contractTask: NO_CONTRACT_TASK_OBSERVATION, ...evidence };
 }
 
 /** Observed evidence of an attempt whose scope was not restored: its changed paths, which a test may replace. */
@@ -142,7 +142,7 @@ export function trustedPassEvidence(
   overrides: Partial<ObservedProofFacts> = {},
 ): UnrestoredProofEvidence {
   return {
-    contractConformance: CONFORMANCE_NOT_OWED,
+    contractTask: NO_CONTRACT_TASK_OBSERVATION,
     taskCompleted: true,
     testResult: { verdict: "trusted-pass" },
     filesModified: files,

@@ -19,14 +19,15 @@ import {
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
 import {
+  NO_CONTRACT_TASK_OBSERVATION,
   TRUSTED_LEDGER_ONLY_POLICY,
   derivePendingTaskProof,
   parseContractViolatedFailureKind,
+  type ContractTaskObservation,
 } from "../../src/core/proof-obligations";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import type { ConformanceViolation, ContractConformance, SkeletonRecord } from "../../src/core/skeleton/types";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 import { authorizeImplementationSpawn, deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import type { Task, TaskGraph } from "../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../src/types";
@@ -123,7 +124,7 @@ function graph(task: Task): TaskGraph {
 
 const completedEvidence = {
   taskCompleted: true,
-  contractConformance: CONFORMANCE_NOT_OWED,
+  contractTask: NO_CONTRACT_TASK_OBSERVATION,
   newTests: parseNewTestEvidence(false, "verification_policy.new_tests waived: legacy-new-tests-required-false"),
 };
 
@@ -388,7 +389,7 @@ describe("shared evidence preservation", () => {
     const attempt = authority();
     const normalized = normalizeImplementationEvidence(
       pendingTask(attempt),
-      { taskCompleted: true, contractConformance: CONFORMANCE_NOT_OWED },
+      { taskCompleted: true, contractTask: NO_CONTRACT_TASK_OBSERVATION, },
       observedBytes(),
     );
     expect(normalized.newTests).toEqual({ kind: "not-written", written: false, evidence: "" });
@@ -413,7 +414,7 @@ describe("shared evidence preservation", () => {
       });
       const normalized = normalizeImplementationEvidence(task, {
         taskCompleted: true,
-        contractConformance: CONFORMANCE_NOT_OWED,
+        contractTask: NO_CONTRACT_TASK_OBSERVATION,
         testResult: { verdict: "untrusted", passed: true, label: "fallback", provenance: "unverified" },
         testEvidence: "fallback",
       }, bytes);
@@ -536,7 +537,7 @@ describe("exact transition application", () => {
           testResult: { verdict: "trusted-fail" },
           testEvidence: "red",
           newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
-          contractConformance: CONFORMANCE_NOT_OWED,
+          contractTask: NO_CONTRACT_TASK_OBSERVATION,
         },
         TRUSTED_LEDGER_ONLY_POLICY,
         observedBytes(),
@@ -747,7 +748,10 @@ describe("exact transition application", () => {
       })),
       attempt,
       "2026-08-24T00:03:50.000Z" as never,
-      { taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN, contractConformance: CONFORMANCE_NOT_OWED },
+      {
+        taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
+        contractTask: NO_CONTRACT_TASK_OBSERVATION,
+      },
       TRUSTED_LEDGER_ONLY_POLICY,
       observedBytes(),
     ));
@@ -944,7 +948,7 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       graph(retryTask(attempt)),
       attempt,
       "2026-08-24T00:05:00.000Z" as never,
-      { ...completedEvidence, contractConformance: violated([UNIMPLEMENTED, RELISTED]) },
+      { ...completedEvidence, contractTask: { ...NO_CONTRACT_TASK_OBSERVATION, conformance: violated([UNIMPLEMENTED, RELISTED]) } },
       TRUSTED_LEDGER_ONLY_POLICY,
       observedBytes(),
     ));
@@ -968,7 +972,7 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       graph(retryTask(attempt)),
       attempt,
       "2026-08-24T00:05:01.000Z" as never,
-      { ...completedEvidence, contractConformance: violated([UNIMPLEMENTED, RELISTED]) },
+      { ...completedEvidence, contractTask: { ...NO_CONTRACT_TASK_OBSERVATION, conformance: violated([UNIMPLEMENTED, RELISTED]) } },
       TRUSTED_LEDGER_ONLY_POLICY,
       observedBytes(),
     ));
@@ -1002,7 +1006,7 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       graph(retryTask(attempt)),
       attempt,
       "2026-08-24T00:05:02.000Z" as never,
-      { ...completedEvidence, contractConformance: violated(many as unknown as readonly [ConformanceViolation, ...ConformanceViolation[]]) },
+      { ...completedEvidence, contractTask: { ...NO_CONTRACT_TASK_OBSERVATION, conformance: violated(many as unknown as readonly [ConformanceViolation, ...ConformanceViolation[]]) } },
       TRUSTED_LEDGER_ONLY_POLICY,
       observedBytes(),
     ));
@@ -1019,6 +1023,34 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
     // The stored Proof still carries every violation.
     const proof = result.state.tasks[0]?.proof;
     expect(proof?.state === "failed" ? proof.failures[0] : undefined).toMatchObject({ violations: many });
+  });
+
+  it("ADR-0104: a contract writer whose re-frozen file is byte-identical settles implemented, its evidence held for the freeze", () => {
+    const attempt = authority(1, "contract-writer-refreeze");
+    const unchanged = observedBytes({
+      currentAttemptScope: baseline("src/a.ts", digest("a")),
+      currentProofScope: baseline("src/a.ts", digest("a")),
+      parserModifiedPaths: [],
+    });
+    const settle = (contractTask: ContractTaskObservation) => expectApplied(settleObservedImplementation(
+      graph(retryTask(attempt)),
+      attempt,
+      "2026-08-24T00:05:04.000Z" as never,
+      { ...completedEvidence, contractTask },
+      TRUSTED_LEDGER_ONLY_POLICY,
+      unchanged,
+    ));
+
+    const held = settle({ ...NO_CONTRACT_TASK_OBSERVATION, heldForFreeze: [{ artifact: "src/a.ts", contract: "CT-1" }] });
+    expect(held.transition.kind).toBe("implemented");
+    expect(held.state.tasks[0]?.proof).toMatchObject({
+      state: "satisfied",
+      evidence: [
+        { kind: "task-completed" },
+        { kind: "declared-artifact-changed", artifact: "src/a.ts", basis: { kind: "held-for-freeze", contract: "CT-1" } },
+      ],
+    });
+    expect(settle(NO_CONTRACT_TASK_OBSERVATION).state.tasks[0]?.failure_reason).toBe("retry-required: declared-artifact-not-changed");
   });
 
   it("AS-037: a not-owed observation settles exactly as before", () => {

@@ -31,7 +31,7 @@ import type { LedgerObservation, RedThenGreenObservation } from "../../core/red-
 import { classifyTaskFiles } from "../../core/test-file-classification";
 import { testEvidencePolicyAt } from "../../utils/test-evidence-policy-at";
 import { taskVerificationPolicy, type NewTestWaiverReason, type VerificationRequirement } from "../../core/verification-policy";
-import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
+import { observeContractTask } from "../../orchestration/contract-task-observation";
 import type { ParsedTaskGraph } from "../../state-manager";
 import { describeCause } from "../../utils/describe-cause";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
@@ -253,10 +253,10 @@ function observeAttemptBytes(context: SettlementContext): Observed<TaskLocalByte
     : observed(bytes);
 }
 
-/** What the transport did not carry and the shell observes: new tests, I6 and conformance. */
-type ObservedAttemptEvidence = Pick<IncomingImplementationEvidence, "newTests" | "redThenGreen" | "contractConformance">;
+/** What the transport did not carry and the shell observes: new tests, I6 and the contract observation. */
+type ObservedAttemptEvidence = Pick<IncomingImplementationEvidence, "newTests" | "redThenGreen" | "contractTask">;
 
-/** New-test evidence, the I6 judgment and contract conformance over the observed bytes. */
+/** New-test evidence, the I6 judgment and the Task's contract observation (conformance and freeze holds). */
 function observeAttemptEvidence(
   context: SettlementContext,
   bytes: TaskLocalByteObservation,
@@ -277,14 +277,14 @@ function observeAttemptEvidence(
   }
   const redThenGreen = judgeAttemptRedThenGreen(task, duty, facts, ports.repository.root, state.test_evidence);
   if (redThenGreen.kind === "unavailable") return withheld(unavailable(state, facts, redThenGreen.reason, bytes));
-  // Conformance against the frozen contracts (AD-5): which files owe it is
-  // the observation's scope (INV-5); a read failure is infrastructure.
-  const conformance = observeContractConformance(ports.repository.root, state, task);
-  if (!conformance.ok) return withheldBecause(context, "contract conformance observation", conformance.error, bytes);
+  // Conformance against the frozen contracts (AD-5, INV-5) and the frozen
+  // paths a contract writer holds (ADR-0104), in one read; a read failure is infrastructure.
+  const contractTask = observeContractTask(ports.repository.root, state, task);
+  if (!contractTask.ok) return withheldBecause(context, "contract conformance and freeze-hold observation", contractTask.error, bytes);
   return observed({
     newTests: newTests.value,
     ...(redThenGreen.kind === "judged" ? { redThenGreen: redThenGreen.observation } : {}),
-    contractConformance: conformance.value,
+    contractTask: contractTask.value,
   });
 }
 

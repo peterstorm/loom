@@ -66,7 +66,7 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0049](ADR-0049-skeletons-freeze-only-consumer-facing-signatures-and-adts.md) | Skeletons freeze only consumer-facing signatures and ADTs | Accepted (2026-11-07) | — |
 | [ADR-0050](ADR-0050-binding-grammar-contract-qualified-export-bindings-list.md) | Binding grammar as a contract-qualified Export bindings list in File Structure | Accepted (2026-11-07) | — |
 | [ADR-0051](ADR-0051-persistence-bindings-stamped-skeleton-records-content-addressed.md) | Export bindings are stamped at population, skeleton records carry engine digests, and an untouched skeleton is recognized by content | Accepted (2026-11-07) | — |
-| [ADR-0052](ADR-0052-completion-refusals-ride-declared-artifact-changed.md) | Completion refusals ride the existing declared-artifact-changed obligation | Accepted (2026-11-07) | amended by ADR-0098 |
+| [ADR-0052](ADR-0052-completion-refusals-ride-declared-artifact-changed.md) | Completion refusals ride the existing declared-artifact-changed obligation | Accepted (2026-11-07) | amended by ADR-0098, ADR-0104 |
 | [ADR-0053](ADR-0053-typescript-surface-third-parse-only-compiler-seam.md) | TypeScript enters through a third parse-only compiler seam | Accepted (2026-11-07) | amends ADR-0042 |
 | [ADR-0054](ADR-0054-java-restricted-lexer-frozen-holder-and-static-final-constant.md) | Java restricted lexer, frozen holder shape and typed static final constant per binding | Accepted (2026-11-07) | — |
 | [ADR-0055](ADR-0055-canonical-skeleton-bytes-deterministic-and-unformatted.md) | Canonical skeleton bytes are deterministic and unformatted | Accepted (2026-11-07) | — |
@@ -117,3 +117,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0101](ADR-0101-the-stale-sweep-keeps-a-session-while-its-bound-run-is-open.md) | The stale sweep keeps a session while its bound run is open | Accepted (2026-11-22) | — |
 | [ADR-0102](ADR-0102-owner-verification-reads-java-through-one-lazy-grammar-seam.md) | Owner verification reads Java through one lazy grammar seam | Accepted (2026-11-23) | extends ADR-0036 and ADR-0071 to Java; leaves ADR-0054 as it is |
 | [ADR-0103](ADR-0103-a-junit-suite-is-counted-from-its-testcases.md) | A JUnit suite is counted from its testcases | Accepted (2026-11-26) | amends ADR-0100 |
+| [ADR-0104](ADR-0104-a-contract-writer-may-hold-frozen-bytes.md) | A contract writer may hold frozen bytes | Accepted (2026-11-26) | amends ADR-0052 |

@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, type TaskGraph, type WaveSpecCheckDocumentsAuthority } from "../../src/types";
 import { buildTaskLocalByteObservation, NO_ENGINE_SKELETONS, settleObservedImplementation } from "../../src/core/implementation-application";
-import { TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
+import { NO_CONTRACT_TASK_OBSERVATION, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { parseTaskGraph } from "../../src/state-manager";
 import { resolveReviewFindings, reviewResolutionLog, type ReviewResolution } from "../../src/core/review-output";
@@ -41,7 +41,6 @@ import {
   observePhaseTransition,
 } from "../../src/handlers/subagent-stop/advance-phase";
 import { SPEC_ARTIFACT_DIR, parseSpecArtifactDirectory } from "../../src/core/phase-artifact-paths";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const AGENT = "code-reviewer";
 
@@ -166,7 +165,7 @@ describe("renderExactPiSettlement", () => {
     attemptGraph(authority),
     authority,
     observedAt.value,
-    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
+    { contractTask: NO_CONTRACT_TASK_OBSERVATION, taskCompleted: true, newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
     TRUSTED_LEDGER_ONLY_POLICY,
     buildTaskLocalByteObservation({
       attemptBaseline: [],

@@ -88,7 +88,7 @@ describe("settleExactImplementation when contract conformance cannot be observed
   it.each(BREAKAGES)("settles %s as infrastructure, consuming no semantic attempt", async (_name, break_, detail) => {
     const { repo, settled } = await settleBrokenT4(break_);
 
-    expect(settled.infrastructureReason).toContain("Claude contract conformance observation unavailable");
+    expect(settled.infrastructureReason).toContain("Claude contract conformance and freeze-hold observation unavailable");
     expect(settled.infrastructureReason).toContain(TS_CONTRACT.types);
     expect(settled.infrastructureReason).toContain(detail);
     expect(settled.application.kind).toBe("applied");

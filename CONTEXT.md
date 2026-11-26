@@ -163,7 +163,7 @@ _Avoid_: Plan review (plan alignment is also one), design phase, plan-design pha
 ### Proof
 
 **Proof Obligation**:
-An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, test-first evidence where owed, and declared artifacts changed. A **Distill Task** owes completion and preserved behaviour instead.
+An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, test-first evidence where owed, and declared artifacts changed (a contract Task may instead hold a present frozen file of its contract unchanged, for the Acceptance Freeze to judge). A **Distill Task** owes completion and preserved behaviour instead.
 _Avoid_: Checklist item, self-report, completion claim
 
 **Verification Manifest**:
