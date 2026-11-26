@@ -9,9 +9,10 @@
  *   changed, untracked-not-ignored and deleted path that
  *   `git status --porcelain=v2 -z --untracked-files=all` names is copied (or
  *   deleted) exactly, so the matrix test runs against the Wave's bytes.
- * - The repository root's and the runner cwd's `node_modules` are shared by
- *   symlink, never copied, and never written through; one the checkout
- *   carries from HEAD is replaced by the link.
+ * - Every `node_modules` the real workspace has installed is shared by symlink,
+ *   never copied, and never written through: the repository root's, the
+ *   runner cwd's, and each ignored one Git lists (a workspace package's own,
+ *   issue #265). One the checkout carries from HEAD is replaced by the link.
  * - `runWithOwner` rewrites only the owner file, deletes the runner's stale
  *   report and makes sure its directory exists (an ignored report directory
  *   is never overlaid), runs, and restores the owner's original bytes afterwards, even
@@ -45,6 +46,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { ignoredNodeModulesDirectories } from "../core/owner-verification/node-modules-directories";
 import { statusPaths } from "../core/owner-verification/status-paths";
 import type { OwnerInfrastructureFailure } from "../core/owner-verification/types";
 import type { RepositoryRelativePath } from "../core/completion-suite";
@@ -67,7 +69,7 @@ export type MutationWorkspaceSpec = Readonly<{
   ownerPath: ReviewPath;
   /** Deleted before every run, so a stale report can never be read as this run's. */
   reportPath: ReviewPath;
-  /** The runner's cwd, or "."; its `node_modules` is shared beside the root's. */
+  /** The runner's cwd, or "."; its `node_modules` is shared beside the root's and every other installed one. */
   runnerCwd: RepositoryRelativePath;
 }>;
 
@@ -140,18 +142,23 @@ function overlay(source: CanonicalRepositoryRoot, target: string): Step<void> {
 }
 
 /**
- * Symlink each directory's `node_modules` from the real workspace; the links
- * this created, for removal. A `node_modules` the checkout itself carries
- * (committed to Git) is replaced, never kept: the matrix test must resolve the
- * real workspace's installed packages, not a stale committed subset. A
- * directory whose checkout resolves outside the isolated copy (a committed
- * symlink) is refused before anything is removed, so the replacement can never
- * delete the real workspace's dependencies.
+ * Symlink the `node_modules` of the root, the runner cwd and every directory
+ * holding an ignored one (`ignoredNodeModulesDirectories`) from the real
+ * workspace; the links this created, for removal. A `node_modules` the
+ * checkout itself carries (committed to Git) is replaced, never kept: the
+ * matrix test must resolve the real workspace's installed packages, not a
+ * stale committed subset. A directory whose checkout resolves outside the
+ * isolated copy (a committed symlink) is refused before anything is removed,
+ * so the replacement can never delete the real workspace's dependencies.
  */
 function shareNodeModules(source: CanonicalRepositoryRoot, target: string, runnerCwd: string): Step<readonly string[]> {
+  const listed = git(source, ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]);
+  if (!listed.ok) return listed;
+  const installed = ignoredNodeModulesDirectories(listed.value.toString("utf-8"));
+  if (!installed.ok) return installed;
   const links: string[] = [];
   try {
-    for (const directory of [...new Set([".", runnerCwd])]) {
+    for (const directory of [...new Set([".", runnerCwd, ...installed.value])]) {
       const from = join(absolute(source, directory), "node_modules");
       const to = join(absolute(target, directory), "node_modules");
       if (!existsSync(from)) continue;

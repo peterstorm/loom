@@ -141,6 +141,43 @@ describe("withMutationWorkspace", () => {
     expect(existsSync(join(repo.root, "node_modules", "pkg", "index.js"))).toBe(true);
   }, TIMEOUT_MS);
 
+  it("shares each workspace package's own ignored node_modules too, so a test under the package resolves its dependencies (issue #265)", async () => {
+    const repo = build();
+    appendFileSync(join(repo.root, ".git", "info", "exclude"), "node_modules/\ndist/\n");
+    mkdirSync(join(repo.root, "node_modules", "shared"), { recursive: true });
+    for (const pkg of ["host", "framework"]) {
+      mkdirSync(join(repo.root, "packages", pkg, "node_modules", `${pkg}-dep`), { recursive: true });
+      writeFileSync(join(repo.root, "packages", pkg, "node_modules", `${pkg}-dep`, "index.js"), "export {};\n");
+    }
+    mkdirSync(join(repo.root, "packages", "host", "node_modules", "nested", "node_modules"), { recursive: true });
+    mkdirSync(join(repo.root, "dist", "node_modules"), { recursive: true });
+    const linked = ["node_modules", "packages/host/node_modules", "packages/framework/node_modules"] as const;
+    let opened = "";
+    const result = await withMutationWorkspace(specOf(repo), async (workspace) => {
+      opened = workspace.root;
+      const at = (path: string): string => join(workspace.root, ...path.split("/"));
+      return {
+        targets: linked.map((path) => (lstatSync(at(path)).isSymbolicLink() ? readlinkSync(at(path)) : `${path} is not a link`)),
+        hostDependencyVisible: existsSync(at("packages/host/node_modules/host-dep/index.js")),
+        ignoredParentLeftOut: existsSync(at("dist")),
+      };
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        targets: linked.map((path) => join(repo.root, ...path.split("/"))),
+        hostDependencyVisible: true,
+        ignoredParentLeftOut: false,
+      },
+    });
+    expect(existsSync(opened)).toBe(false);
+    for (const pkg of ["host", "framework"]) {
+      expect(read(repo.root, `packages/${pkg}/node_modules/${pkg}-dep/index.js`)).toBe("export {};\n");
+    }
+    expect(lstatSync(join(repo.root, "packages", "host", "node_modules", "nested", "node_modules")).isDirectory()).toBe(true);
+    expect(repo.worktrees()).toEqual([repo.root]);
+  }, TIMEOUT_MS);
+
   it("replaces a node_modules the checkout carries (committed to Git) with the link to the real workspace's", async () => {
     const repo = build();
     mkdirSync(join(repo.root, "node_modules", "stale"), { recursive: true });
