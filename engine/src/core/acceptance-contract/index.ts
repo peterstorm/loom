@@ -55,6 +55,7 @@ export {
   dueWaves,
   frozenPaths,
   redWindowTaskIds,
+  writerFrozenPaths,
   type ContractWriterProblem,
 } from "./tasks";
 export {

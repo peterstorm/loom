@@ -2,6 +2,7 @@ import {
   derivePendingTaskProof,
   evaluateProofObligations,
   evaluateTaskProof,
+  NO_FREEZE_HOLDS,
   type ObservedArtifactChanges,
   type ObservedProofEvidence,
   type ObservedProofFacts,
@@ -123,13 +124,22 @@ export function shownRedThenGreen(implementationWrite = "src/fixture.ts"): RedTh
   };
 }
 
+/** The shell observations every Task outside an Acceptance Contract settles
+ *  with: conformance `not-owed`, and no frozen path held (ADR-0104). */
+const NO_CONTRACT_OBSERVATIONS = Object.freeze({
+  contractConformance: CONFORMANCE_NOT_OWED,
+  heldForFreeze: NO_FREEZE_HOLDS,
+});
+
+type ContractObservationFields = "contractConformance" | "heldForFreeze";
+
 /** Observed Proof evidence whose completion conformance defaults to
- *  `not-owed` — the judgment every Task outside a skeleton contract settles
- *  with. Pass `contractConformance` to state a different judgment. */
+ *  `not-owed` and whose freeze holds default to none — what every Task outside
+ *  an Acceptance Contract settles with. Pass either field to state another. */
 export function observedEvidence(
-  evidence: Omit<ObservedProofFacts, "contractConformance"> & Partial<Pick<ObservedProofFacts, "contractConformance">> & ObservedArtifactChanges,
+  evidence: Omit<ObservedProofFacts, ContractObservationFields> & Partial<Pick<ObservedProofFacts, ContractObservationFields>> & ObservedArtifactChanges,
 ): ObservedProofEvidence {
-  return { contractConformance: CONFORMANCE_NOT_OWED, ...evidence };
+  return { ...NO_CONTRACT_OBSERVATIONS, ...evidence };
 }
 
 /** Observed evidence of an attempt whose scope was not restored: its changed paths, which a test may replace. */
@@ -142,7 +152,7 @@ export function trustedPassEvidence(
   overrides: Partial<ObservedProofFacts> = {},
 ): UnrestoredProofEvidence {
   return {
-    contractConformance: CONFORMANCE_NOT_OWED,
+    ...NO_CONTRACT_OBSERVATIONS,
     taskCompleted: true,
     testResult: { verdict: "trusted-pass" },
     filesModified: files,

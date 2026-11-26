@@ -19,6 +19,7 @@ import {
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
 import {
+  NO_FREEZE_HOLDS,
   TRUSTED_LEDGER_ONLY_POLICY,
   derivePendingTaskProof,
   parseContractViolatedFailureKind,
@@ -124,6 +125,7 @@ function graph(task: Task): TaskGraph {
 const completedEvidence = {
   taskCompleted: true,
   contractConformance: CONFORMANCE_NOT_OWED,
+  heldForFreeze: NO_FREEZE_HOLDS,
   newTests: parseNewTestEvidence(false, "verification_policy.new_tests waived: legacy-new-tests-required-false"),
 };
 
@@ -388,7 +390,7 @@ describe("shared evidence preservation", () => {
     const attempt = authority();
     const normalized = normalizeImplementationEvidence(
       pendingTask(attempt),
-      { taskCompleted: true, contractConformance: CONFORMANCE_NOT_OWED },
+      { taskCompleted: true, contractConformance: CONFORMANCE_NOT_OWED, heldForFreeze: NO_FREEZE_HOLDS },
       observedBytes(),
     );
     expect(normalized.newTests).toEqual({ kind: "not-written", written: false, evidence: "" });
@@ -414,6 +416,7 @@ describe("shared evidence preservation", () => {
       const normalized = normalizeImplementationEvidence(task, {
         taskCompleted: true,
         contractConformance: CONFORMANCE_NOT_OWED,
+        heldForFreeze: NO_FREEZE_HOLDS,
         testResult: { verdict: "untrusted", passed: true, label: "fallback", provenance: "unverified" },
         testEvidence: "fallback",
       }, bytes);
@@ -537,6 +540,7 @@ describe("exact transition application", () => {
           testEvidence: "red",
           newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
           contractConformance: CONFORMANCE_NOT_OWED,
+          heldForFreeze: NO_FREEZE_HOLDS,
         },
         TRUSTED_LEDGER_ONLY_POLICY,
         observedBytes(),
@@ -747,7 +751,10 @@ describe("exact transition application", () => {
       })),
       attempt,
       "2026-08-24T00:03:50.000Z" as never,
-      { taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN, contractConformance: CONFORMANCE_NOT_OWED },
+      {
+        taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
+        contractConformance: CONFORMANCE_NOT_OWED, heldForFreeze: NO_FREEZE_HOLDS,
+      },
       TRUSTED_LEDGER_ONLY_POLICY,
       observedBytes(),
     ));
@@ -1019,6 +1026,34 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
     // The stored Proof still carries every violation.
     const proof = result.state.tasks[0]?.proof;
     expect(proof?.state === "failed" ? proof.failures[0] : undefined).toMatchObject({ violations: many });
+  });
+
+  it("ADR-0104: a contract writer whose re-frozen file is byte-identical settles implemented, its evidence held for the freeze", () => {
+    const attempt = authority(1, "contract-writer-refreeze");
+    const unchanged = observedBytes({
+      currentAttemptScope: baseline("src/a.ts", digest("a")),
+      currentProofScope: baseline("src/a.ts", digest("a")),
+      parserModifiedPaths: [],
+    });
+    const settle = (heldForFreeze: typeof NO_FREEZE_HOLDS) => expectApplied(settleObservedImplementation(
+      graph(retryTask(attempt)),
+      attempt,
+      "2026-08-24T00:05:04.000Z" as never,
+      { ...completedEvidence, heldForFreeze },
+      TRUSTED_LEDGER_ONLY_POLICY,
+      unchanged,
+    ));
+
+    const held = settle([{ artifact: "src/a.ts", contract: "CT-1" }]);
+    expect(held.transition.kind).toBe("implemented");
+    expect(held.state.tasks[0]?.proof).toMatchObject({
+      state: "satisfied",
+      evidence: [
+        { kind: "task-completed" },
+        { kind: "declared-artifact-changed", artifact: "src/a.ts", basis: { kind: "held-for-freeze", contract: "CT-1" } },
+      ],
+    });
+    expect(settle(NO_FREEZE_HOLDS).state.tasks[0]?.failure_reason).toBe("retry-required: declared-artifact-not-changed");
   });
 
   it("AS-037: a not-owed observation settles exactly as before", () => {

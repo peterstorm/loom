@@ -22,6 +22,7 @@ import { waveBaseOf } from "../../src/core/owner-verification/wave-base";
 import {
   DECLARED_ARTIFACT_EXPECTATIONS,
   deriveProofObligations,
+  NO_FREEZE_HOLDS,
   TRUSTED_LEDGER_ONLY_POLICY,
   type DeclaredArtifactExpectation,
 } from "../../src/core/proof-obligations";
@@ -181,6 +182,7 @@ const settleDistill = (now: string, reported: readonly string[], testResult?: Ta
     {
       taskCompleted: true,
       contractConformance: CONFORMANCE_NOT_OWED,
+      heldForFreeze: NO_FREEZE_HOLDS,
       newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
       ...(testResult === undefined ? {} : { testResult }),
     },

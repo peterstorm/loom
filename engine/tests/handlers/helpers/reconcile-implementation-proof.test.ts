@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
-import { evaluateTaskProof, PI_STRUCTURED_EVIDENCE_POLICY } from "../../../src/core/proof-obligations";
+import { evaluateTaskProof, NO_FREEZE_HOLDS, PI_STRUCTURED_EVIDENCE_POLICY } from "../../../src/core/proof-obligations";
 import { createReviewPacket, parseBaseSha, parseHeadSha, serializeReviewPacket, type BaseSha, type HeadSha } from "../../../src/core/review-packet";
 
 const base = (hex: string): BaseSha => {
@@ -408,6 +408,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
+      NO_FREEZE_HOLDS,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -448,6 +449,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
+      NO_FREEZE_HOLDS,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -471,6 +473,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
       preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
+      NO_FREEZE_HOLDS,
     );
     const newTestsWaived = reconcileTaskFromStoredEvidence(
       {
@@ -485,6 +488,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
+      NO_FREEZE_HOLDS,
     );
 
     expect(regressionWaived.status).toBe("pending");
@@ -505,6 +509,26 @@ describe("reconcileTaskFromStoredEvidence", () => {
     ]);
   });
 
+  it("ADR-0104: re-evaluates a contract writer's byte-identical frozen path as held for its freeze", () => {
+    const written = parseNewTestEvidence(true, "1 new test method, 2 assertions");
+    const held = reconcileTaskFromStoredEvidence(
+      failedTask(), [], written, preI6DefaultVerificationManifest(), CONFORMANCE_NOT_OWED,
+      [{ artifact: "src/a.ts", contract: "CT-1" }],
+    );
+    expect(held.proof?.state).toBe("satisfied");
+    expect(held.revalidation_required).toBe(true);
+    expect(held.proof?.state === "satisfied" ? held.proof.evidence : []).toContainEqual({
+      kind: "declared-artifact-changed", artifact: "src/a.ts", basis: { kind: "held-for-freeze", contract: "CT-1" },
+    });
+
+    const unheld = reconcileTaskFromStoredEvidence(
+      failedTask(), [], written, preI6DefaultVerificationManifest(), CONFORMANCE_NOT_OWED, NO_FREEZE_HOLDS,
+    );
+    expect(unheld.proof?.state === "failed" ? unheld.proof.failures : []).toEqual([
+      { kind: "declared-artifact-not-changed", artifact: "src/a.ts" },
+    ]);
+  });
+
   it("never invents completion when the prior proof did not observe it", () => {
     const reconciled = reconcileTaskFromStoredEvidence(
       failedTask(false),
@@ -512,6 +536,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
       preI6DefaultVerificationManifest(),
       CONFORMANCE_NOT_OWED,
+      NO_FREEZE_HOLDS,
     );
 
     expect(reconciled.status).toBe("pending");

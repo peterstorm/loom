@@ -1,5 +1,6 @@
 import { match, P } from "ts-pattern";
 import { canonicalStructuralEquals, concatNonEmpty, mapNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
+import { samePlanPath } from "./plan-path-match";
 import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
 import {
   isViolationReason,
@@ -343,7 +344,24 @@ export interface ObservedProofFacts {
    * `not-owed` — so no path can skip the contract check by omission.
    */
   readonly contractConformance: ContractConformance;
+  /**
+   * The frozen paths of the Acceptance Contracts this Task writes that the
+   * shell found as regular files at settlement (ADR-0104). A contract writer
+   * re-freezing a revised contract may leave such a file byte-identical: its
+   * `declared-artifact-changed` obligation is then satisfied as held for the
+   * freeze, and the contract's own freeze, not this Proof, judges the bytes.
+   * Required, as `contractConformance` is: every settlement path decides it
+   * — the exact settlement and reconcile through `observeHeldForFreeze` —
+   * and a path with no contract context passes `NO_FREEZE_HOLDS`.
+   */
+  readonly heldForFreeze: readonly FreezeHeldArtifact[];
 }
+
+/** One frozen path of a contract the settling Task writes, present as a regular file. */
+export type FreezeHeldArtifact = Readonly<{ artifact: string; contract: string }>;
+
+/** The observation of a Task that writes no Acceptance Contract: it holds nothing. */
+export const NO_FREEZE_HOLDS: readonly FreezeHeldArtifact[] = Object.freeze([]);
 
 /**
  * The default admits only ledger-trusted regression passes. Pi may explicitly
@@ -501,7 +519,10 @@ export type ProofEvidence =
   | Readonly<{ kind: "new-tests"; detail: string | null }>
   | Readonly<{ kind: "red-then-green"; red: RunRef; implementationWrite: string; green: RunRef }>
   | Readonly<{ kind: "attempt-scope-attested" }>
-  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
+  /** The artifact's bytes changed. Every record written before ADR-0104 reads as this arm. */
+  | Readonly<{ kind: "declared-artifact-changed"; artifact: string; basis?: undefined }>
+  /** The artifact is a frozen path of a contract the Task writes, left byte-identical (ADR-0104). */
+  | Readonly<{ kind: "declared-artifact-changed"; artifact: string; basis: FreezeHoldBasis }>
   | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>
   | Readonly<{ kind: "behaviour-preserved"; basis: BehaviourPreservedBasis }>
   /** The declared test files that changed since the reopening, in obligation order. */
@@ -520,6 +541,14 @@ export type BehaviourPreservedBasis =
   | Readonly<{ kind: "unchanged" }>
   | Readonly<{ kind: "restored"; after: NonEmpty<string> }>
   | Readonly<{ kind: "tests-passed"; provenance: "evidence-ledger" | "pi-structured" }>;
+
+/**
+ * Why an unchanged declared artifact still satisfies `declared-artifact-changed`
+ * (ADR-0104): it is a frozen path of `contract`, which the settling Task
+ * writes, and it was present as a regular file at settlement. The contract's
+ * Acceptance Freeze judges its bytes; this Proof does not.
+ */
+export type FreezeHoldBasis = Readonly<{ kind: "held-for-freeze"; contract: string }>;
 
 export type PendingProofResult = Readonly<{
   state: "pending";
@@ -742,39 +771,49 @@ const changedPaths = (observed: ObservedProofEvidence): readonly string[] => obs
 const violationsOf = (conformance: ContractConformance, artifact: string): NonEmpty<ConformanceViolation> | undefined =>
   conformance.kind === "judged" ? conformance.violations.get(artifact) : undefined;
 
+/** The contract that holds `artifact` for its freeze, or undefined; matched by the plan-path rule `contractWriterTask` uses. */
+const holdingContract = (observed: ObservedProofEvidence, artifact: string): string | undefined =>
+  observed.heldForFreeze.find((held) => samePlanPath(held.artifact, artifact))?.contract;
+
 /**
  * The `declared-artifact-changed` arm (AD-5): a contract violation is
  * reported ahead of the changed test, so an untouched engine skeleton is
  * refused as `still unimplemented` rather than as `not-changed`. Then the
- * artifact is satisfied exactly when it changed (engine bytes were already
- * subtracted from `filesModified`, FR-012).
+ * artifact is satisfied when it changed (engine bytes were already
+ * subtracted from `filesModified`, FR-012), or, unchanged, when it is a
+ * frozen path its contract writer holds for the freeze (ADR-0104).
  */
 const evaluateDeclaredArtifactChanged = (
   obligation: Extract<ProofObligation, { kind: "declared-artifact-changed" }>,
   observed: ObservedProofEvidence,
 ): EvaluatedProofResult => {
-  const violations = violationsOf(observed.contractConformance, obligation.artifact);
+  const { artifact } = obligation;
+  const violations = violationsOf(observed.contractConformance, artifact);
   if (violations !== undefined) {
     return Object.freeze({
       state: "failed",
       obligation,
       failure: Object.freeze({
         kind: "declared-artifact-contract-violated",
-        artifact: obligation.artifact,
+        artifact,
         violations: mapNonEmpty(violations, (violation) => Object.freeze({ ...violation })),
       }),
     });
   }
-  return changedPaths(observed).includes(obligation.artifact)
-    ? Object.freeze({
+  if (changedPaths(observed).includes(artifact)) {
+    return Object.freeze({ state: "satisfied", obligation, evidence: Object.freeze({ kind: "declared-artifact-changed", artifact }) });
+  }
+  const contract = holdingContract(observed, artifact);
+  return contract === undefined
+    ? Object.freeze({ state: "failed", obligation, failure: Object.freeze({ kind: "declared-artifact-not-changed", artifact }) })
+    : Object.freeze({
         state: "satisfied",
         obligation,
-        evidence: Object.freeze({ kind: "declared-artifact-changed", artifact: obligation.artifact }),
-      })
-    : Object.freeze({
-        state: "failed",
-        obligation,
-        failure: Object.freeze({ kind: "declared-artifact-not-changed", artifact: obligation.artifact }),
+        evidence: Object.freeze({
+          kind: "declared-artifact-changed",
+          artifact,
+          basis: Object.freeze({ kind: "held-for-freeze", contract }),
+        }),
       });
 };
 
@@ -1343,6 +1382,28 @@ function parseContractConformance(raw: unknown, path = "contractConformance"): P
   });
 }
 
+/** One held frozen path: exactly an artifact and the contract that freezes it. */
+function parseFreezeHeldArtifact(raw: unknown, path: string): ProofParseResult<FreezeHeldArtifact> {
+  if (!isRecord(raw)) return fail([`${path} must be an object`]);
+  return parseExactRecordArm(raw, path, ["artifact", "contract"], () => {
+    const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+    const contract = parseNonEmptyString(raw.contract, `${path}.contract`);
+    return artifact.ok && contract.ok
+      ? ok(Object.freeze({ artifact: artifact.value, contract: contract.value }))
+      : fail([...(artifact.ok ? [] : artifact.errors), ...(contract.ok ? [] : contract.errors)]);
+  });
+}
+
+/** The shell's decided holds (ADR-0104): required, possibly empty, never read as holding nothing by omission. */
+function parseHeldForFreeze(raw: unknown, path = "heldForFreeze"): ProofParseResult<readonly FreezeHeldArtifact[]> {
+  if (!Array.isArray(raw)) return fail([`${path} must be an array of the frozen paths the Task holds`]);
+  const parsed = raw.map((value: unknown, index) => parseFreezeHeldArtifact(value, `${path}[${index}]`));
+  const errors = parsed.flatMap((result) => (result.ok ? [] : result.errors));
+  return errors.length > 0
+    ? fail(errors)
+    : ok(Object.freeze(parsed.flatMap((result) => (result.ok ? [result.value] : []))));
+}
+
 /** The changed paths of a restored scope: none. */
 const NO_FILES_MODIFIED: readonly [] = Object.freeze([]);
 
@@ -1388,7 +1449,10 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
   const exact = parseExactRecordArm(
     raw,
     "observed proof evidence",
-    ["taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence", "redThenGreen", "contractConformance", "restoredAfter"],
+    [
+      "taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence", "redThenGreen",
+      "contractConformance", "heldForFreeze", "restoredAfter",
+    ],
     () => ok(true),
   );
   if (!exact.ok) return fail(exact.errors);
@@ -1405,6 +1469,8 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
   // never read as judging nothing (AD-5).
   const contractConformance = parseContractConformance(raw.contractConformance);
   if (!contractConformance.ok) errors.push(...contractConformance.errors);
+  const heldForFreeze = parseHeldForFreeze(raw.heldForFreeze);
+  if (!heldForFreeze.ok) errors.push(...heldForFreeze.errors);
 
   const changes = parseObservedArtifactChanges(raw.filesModified, raw.restoredAfter);
   if (!changes.ok) errors.push(...changes.errors);
@@ -1417,7 +1483,7 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     errors.push("newTestEvidence must be a string when present");
   }
 
-  if (errors.length > 0 || !contractConformance.ok || !changes.ok) return fail(errors);
+  if (errors.length > 0 || !contractConformance.ok || !heldForFreeze.ok || !changes.ok) return fail(errors);
   return ok(Object.freeze({
     taskCompleted: raw.taskCompleted === true,
     ...(testResult === undefined ? {} : { testResult }),
@@ -1425,6 +1491,7 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     ...(typeof raw.newTestEvidence === "string" ? { newTestEvidence: raw.newTestEvidence } : {}),
     ...(redThenGreen?.ok ? { redThenGreen: redThenGreen.value } : {}),
     contractConformance: contractConformance.value,
+    heldForFreeze: heldForFreeze.value,
     ...changes.value,
   }));
 }
@@ -1543,6 +1610,30 @@ function parseBehaviourPreservedBasis(raw: unknown, path: string): ProofParseRes
   return fail([`${path}.kind must be unchanged, restored, or tests-passed`]);
 }
 
+function parseFreezeHoldBasis(raw: unknown, path: string): ProofParseResult<FreezeHoldBasis> {
+  if (!isRecord(raw)) return fail([`${path} must be an object`]);
+  if (raw.kind !== "held-for-freeze") return fail([`${path}.kind must be held-for-freeze`]);
+  return parseExactRecordArm<FreezeHoldBasis>(raw, path, ["kind", "contract"], () => {
+    const contract = parseNonEmptyString(raw.contract, `${path}.contract`);
+    return contract.ok ? ok(Object.freeze({ kind: "held-for-freeze", contract: contract.value })) : contract;
+  });
+}
+
+/** The `declared-artifact-changed` arm: plain when the bytes changed (every
+ *  record before ADR-0104), or with the freeze-hold `basis`, exactly. */
+function parseDeclaredArtifactChangedEvidence(raw: Record<string, unknown>, path: string): ProofParseResult<ProofEvidence> {
+  return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "artifact", "basis"], () => {
+    const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+    const basis = raw.basis === undefined ? undefined : parseFreezeHoldBasis(raw.basis, `${path}.basis`);
+    if (!artifact.ok || basis?.ok === false) {
+      return fail([...(artifact.ok ? [] : artifact.errors), ...(basis === undefined || basis.ok ? [] : basis.errors)]);
+    }
+    return ok(basis === undefined
+      ? Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value })
+      : Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value, basis: basis.value }));
+  });
+}
+
 export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseResult<ProofEvidence> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
   if (raw.kind === "task-completed" || raw.kind === "attempt-scope-attested" || raw.kind === "implementation-files-unchanged") {
@@ -1564,11 +1655,11 @@ export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseR
       return ok(Object.freeze({ kind: "new-tests", detail: raw.detail === null ? null : raw.detail }));
     });
   }
-  if (raw.kind === "declared-artifact-changed" || raw.kind === "declared-artifact-attested") {
-    const kind = raw.kind;
+  if (raw.kind === "declared-artifact-changed") return parseDeclaredArtifactChangedEvidence(raw, path);
+  if (raw.kind === "declared-artifact-attested") {
     return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "artifact"], () => {
       const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
+      return artifact.ok ? ok(Object.freeze({ kind: "declared-artifact-attested", artifact: artifact.value })) : artifact;
     });
   }
   if (raw.kind === "red-then-green") {

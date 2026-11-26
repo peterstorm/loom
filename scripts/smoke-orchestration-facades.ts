@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateTaskProof } from "../engine/src/core/proof-obligations";
+import { evaluateTaskProof, NO_FREEZE_HOLDS } from "../engine/src/core/proof-obligations";
 import { parseContextPacket, type ContextPacket } from "../engine/src/core/context-packets";
 import { CONTEXT_PACKET_BOUNDS, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 import { readWaveReviewContext } from "../engine/src/core/wave-review-authority";
@@ -706,7 +706,10 @@ function canonicalSpec(cwd: string): string {
 function waveState(planFile: string, specFile: string): Record<string, unknown> {
   const proof = evaluateTaskProof(
     { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
-    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    {
+      contractConformance: CONFORMANCE_NOT_OWED, heldForFreeze: NO_FREEZE_HOLDS,
+      taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true,
+    },
   );
   check(proof.state === "satisfied", "Wave fixture proof is not satisfied");
   return {

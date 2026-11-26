@@ -33,6 +33,7 @@ import {
   evaluateProofObligations,
   evaluateTaskProof,
   isTestsOnlyProof,
+  NO_FREEZE_HOLDS,
   parseTaskProof,
   redThenGreenScope,
   TRUSTED_LEDGER_ONLY_POLICY,
@@ -335,6 +336,7 @@ describe("the tests-only Proof", () => {
   const evaluate = (filesModified: readonly string[], testResult: "trusted-pass" | "trusted-fail" = "trusted-pass") =>
     evaluateProofObligations(OBLIGATIONS, {
       taskCompleted: true, testResult: { verdict: testResult }, filesModified, contractConformance: CONFORMANCE_NOT_OWED,
+      heldForFreeze: NO_FREEZE_HOLDS,
     }, TRUSTED_LEDGER_ONLY_POLICY);
 
   it("owes completion, regression, a changed test file and unchanged implementation files, never I6 or new-tests", () => {
@@ -522,7 +524,10 @@ function registered(
 const settle = (state: TaskGraph, attempt: ImplementationAttemptAuthority, bytes: TaskLocalByteObservation) => {
   const result = settleObservedImplementation(
     state, attempt, `2026-11-18T00:05:0${attempt.semanticAttempt}.000Z` as never,
-    { taskCompleted: true, contractConformance: CONFORMANCE_NOT_OWED, newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN, testResult: { verdict: "trusted-pass" } },
+    {
+      taskCompleted: true, contractConformance: CONFORMANCE_NOT_OWED, heldForFreeze: NO_FREEZE_HOLDS,
+      newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN, testResult: { verdict: "trusted-pass" },
+    },
     TRUSTED_LEDGER_ONLY_POLICY,
     bytes,
   );
@@ -699,7 +704,7 @@ describe("operations beside a tests-only Task", () => {
   it("is left to its attempt by reconcile, however satisfied its stored evidence looks", () => {
     const t1: Task = { ...byId(committed(graph()), "T1"), test_result: { verdict: "trusted-pass" }, files_modified: [TEST] };
     const reconciled = reconcileTaskFromStoredEvidence(
-      t1, [TEST], parseNewTestEvidence(true, "1 new test"), i6RunnerManifest(), CONFORMANCE_NOT_OWED,
+      t1, [TEST], parseNewTestEvidence(true, "1 new test"), i6RunnerManifest(), CONFORMANCE_NOT_OWED, NO_FREEZE_HOLDS,
     );
     expect(reconciled).toBe(t1);
   });

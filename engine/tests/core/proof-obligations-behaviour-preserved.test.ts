@@ -148,14 +148,16 @@ describe("behaviour-preserved at the parse boundaries", () => {
   });
 
   it("reads a restoration reason list and refuses an empty one", () => {
-    const base = { taskCompleted: true, filesModified: [], contractConformance: { kind: "not-owed" } };
+    const base = { taskCompleted: true, filesModified: [], contractConformance: { kind: "not-owed" }, heldForFreeze: [] };
     expect(parseObservedProofEvidence({ ...base, restoredAfter: ["proof:test-result-missing"] }))
       .toMatchObject({ ok: true, value: { filesModified: [], restoredAfter: ["proof:test-result-missing"] } });
     expect(parseObservedProofEvidence({ ...base, restoredAfter: [] })).toMatchObject({ ok: false });
   });
 
   it("reads a restoration with no filesModified field, and refuses one that names a changed path", () => {
-    const base = { taskCompleted: true, contractConformance: { kind: "not-owed" }, restoredAfter: ["proof:test-result-missing"] };
+    const base = {
+      taskCompleted: true, contractConformance: { kind: "not-owed" }, heldForFreeze: [], restoredAfter: ["proof:test-result-missing"],
+    };
     expect(parseObservedProofEvidence(base))
       .toMatchObject({ ok: true, value: { filesModified: [], restoredAfter: ["proof:test-result-missing"] } });
     expect(parseObservedProofEvidence({ ...base, filesModified: ["src/price.ts"] })).toEqual({
@@ -174,6 +176,7 @@ describe("behaviour-preserved at the parse boundaries", () => {
         const parsed = parseObservedProofEvidence({
           taskCompleted: true,
           contractConformance: { kind: "not-owed" },
+          heldForFreeze: [],
           ...(filesModified === undefined ? {} : { filesModified }),
           ...(restoredAfter === undefined ? {} : { restoredAfter }),
         });

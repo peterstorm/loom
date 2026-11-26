@@ -117,3 +117,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0101](ADR-0101-the-stale-sweep-keeps-a-session-while-its-bound-run-is-open.md) | The stale sweep keeps a session while its bound run is open | Accepted (2026-11-22) | — |
 | [ADR-0102](ADR-0102-owner-verification-reads-java-through-one-lazy-grammar-seam.md) | Owner verification reads Java through one lazy grammar seam | Accepted (2026-11-23) | extends ADR-0036 and ADR-0071 to Java; leaves ADR-0054 as it is |
 | [ADR-0103](ADR-0103-a-junit-suite-is-counted-from-its-testcases.md) | A JUnit suite is counted from its testcases | Accepted (2026-11-26) | amends ADR-0100 |
+| [ADR-0104](ADR-0104-a-contract-writer-may-hold-frozen-bytes.md) | A contract writer may hold frozen bytes | Accepted (2026-11-26) | — |

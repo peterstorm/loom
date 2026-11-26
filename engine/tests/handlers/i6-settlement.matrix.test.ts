@@ -37,6 +37,7 @@ import {
 } from "../../src/core/implementation-brief";
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
 import {
+  NO_FREEZE_HOLDS,
   PI_STRUCTURED_EVIDENCE_POLICY,
   TRUSTED_LEDGER_ONLY_POLICY,
   type ProofEvaluationPolicy,
@@ -615,7 +616,7 @@ describe("reconcileTaskFromStoredEvidence carries a satisfied I6 result forward 
 
   it("FR-012: keeps the earlier satisfied red-then-green evidence when another obligation is repaired", () => {
     const { graph, task } = failedOnNewTests();
-    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, manifestedGraphFixture(graph).verification_manifest, CONFORMANCE_NOT_OWED);
+    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, manifestedGraphFixture(graph).verification_manifest, CONFORMANCE_NOT_OWED, NO_FREEZE_HOLDS);
     expect(reconciled.proof?.state).toBe("satisfied");
     expect(reconciled.proof?.state === "satisfied" ? reconciled.proof.evidence : []).toContainEqual({
       kind: "red-then-green",
@@ -629,7 +630,7 @@ describe("reconcileTaskFromStoredEvidence carries a satisfied I6 result forward 
     const settled = settle(i6Graph(), "T1", harnessLedgers([write(LEDGER_IMPL), green()]).claude);
     if (settled.application.kind !== "applied") throw new Error("fixture settlement must apply");
     const graph = settled.application.state;
-    const reconciled = reconcileTaskFromStoredEvidence(taskOf(graph, "T1"), changed, written, manifestedGraphFixture(graph).verification_manifest, CONFORMANCE_NOT_OWED);
+    const reconciled = reconcileTaskFromStoredEvidence(taskOf(graph, "T1"), changed, written, manifestedGraphFixture(graph).verification_manifest, CONFORMANCE_NOT_OWED, NO_FREEZE_HOLDS);
     expect(reconciled.proof).toMatchObject({
       state: "failed",
       failures: expect.arrayContaining([{ kind: "red-then-green-unproven", gap: { kind: "ledger-unavailable" } }]),
@@ -640,13 +641,13 @@ describe("reconcileTaskFromStoredEvidence carries a satisfied I6 result forward 
     const manifest = preFeatureManifest();
     const graph = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], manifest);
     const task: Task = { ...taskOf(graph, "T1"), test_result: { verdict: "trusted-pass" } } as Task;
-    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, manifest, CONFORMANCE_NOT_OWED);
+    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, manifest, CONFORMANCE_NOT_OWED, NO_FREEZE_HOLDS);
     expect(reconciled.proof?.obligations.map(({ kind }) => kind)).not.toContain("red-then-green");
   });
 
   it("keeps a frozen red-then-green obligation even when handed a manifest with no classification, so I6 is never silently dropped", () => {
     const { task } = failedOnNewTests();
-    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, preFeatureManifest(), CONFORMANCE_NOT_OWED);
+    const reconciled = reconcileTaskFromStoredEvidence(task, changed, written, preFeatureManifest(), CONFORMANCE_NOT_OWED, NO_FREEZE_HOLDS);
     expect(reconciled.proof?.obligations.map(({ kind }) => kind)).toContain("red-then-green");
     expect(reconciled.proof?.state).toBe("satisfied");
   });

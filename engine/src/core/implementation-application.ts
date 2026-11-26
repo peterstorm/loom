@@ -37,6 +37,7 @@ import {
   frozenRedThenGreenEra,
   redThenGreenScope,
   taskRedThenGreenEra,
+  type FreezeHeldArtifact,
   type ProofEvaluationPolicy,
   type RedThenGreenEra,
 } from "./proof-obligations";
@@ -357,6 +358,12 @@ export type IncomingImplementationEvidence = Readonly<{
    *  judge's verdict over the Task's in-scope files. Required, so a settlement
    *  path cannot skip the contract check by omitting it. */
   contractConformance: ContractConformance;
+  /** The settlement shell's freeze-hold observation (ADR-0104): the frozen
+   *  paths of the contracts this Task writes that hold a regular file, each
+   *  satisfying its `declared-artifact-changed` obligation unchanged.
+   *  Required, as `contractConformance` is: a Task writing no contract passes
+   *  `NO_FREEZE_HOLDS`. */
+  heldForFreeze: readonly FreezeHeldArtifact[];
   /** Present exactly when the settlement shell wrote a Distill Task's
    *  snapshot back before the byte observation this evidence travels with
    *  (ADR-0068 §5): the failure kinds the attempt's own bytes would have
@@ -765,6 +772,7 @@ export function settleObservedImplementation(
       newTestEvidence: normalized.newTests.evidence,
       ...(incoming.redThenGreen === undefined ? {} : { redThenGreen: incoming.redThenGreen }),
       contractConformance: incoming.contractConformance,
+      heldForFreeze: incoming.heldForFreeze,
       ...(incoming.restoredAfter === undefined ? {} : { restoredAfter: incoming.restoredAfter }),
     },
     proofEvaluationPolicy,

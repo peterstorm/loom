@@ -32,6 +32,7 @@ import { classifyTaskFiles } from "../../core/test-file-classification";
 import { testEvidencePolicyAt } from "../../utils/test-evidence-policy-at";
 import { taskVerificationPolicy, type NewTestWaiverReason, type VerificationRequirement } from "../../core/verification-policy";
 import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
+import { observeHeldForFreeze } from "../../orchestration/freeze-hold-observation";
 import type { ParsedTaskGraph } from "../../state-manager";
 import { describeCause } from "../../utils/describe-cause";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
@@ -253,10 +254,13 @@ function observeAttemptBytes(context: SettlementContext): Observed<TaskLocalByte
     : observed(bytes);
 }
 
-/** What the transport did not carry and the shell observes: new tests, I6 and conformance. */
-type ObservedAttemptEvidence = Pick<IncomingImplementationEvidence, "newTests" | "redThenGreen" | "contractConformance">;
+/** What the transport did not carry and the shell observes: new tests, I6, conformance and freeze holds. */
+type ObservedAttemptEvidence = Pick<
+  IncomingImplementationEvidence,
+  "newTests" | "redThenGreen" | "contractConformance" | "heldForFreeze"
+>;
 
-/** New-test evidence, the I6 judgment and contract conformance over the observed bytes. */
+/** New-test evidence, the I6 judgment, contract conformance and the frozen paths a contract writer holds. */
 function observeAttemptEvidence(
   context: SettlementContext,
   bytes: TaskLocalByteObservation,
@@ -281,10 +285,14 @@ function observeAttemptEvidence(
   // the observation's scope (INV-5); a read failure is infrastructure.
   const conformance = observeContractConformance(ports.repository.root, state, task);
   if (!conformance.ok) return withheldBecause(context, "contract conformance observation", conformance.error, bytes);
+  // The frozen paths a contract writer holds (ADR-0104); a read failure is infrastructure.
+  const heldForFreeze = observeHeldForFreeze(ports.repository.root, state, task);
+  if (!heldForFreeze.ok) return withheldBecause(context, "freeze hold observation", heldForFreeze.error, bytes);
   return observed({
     newTests: newTests.value,
     ...(redThenGreen.kind === "judged" ? { redThenGreen: redThenGreen.observation } : {}),
     contractConformance: conformance.value,
+    heldForFreeze: heldForFreeze.value,
   });
 }
 
