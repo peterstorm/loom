@@ -2,10 +2,12 @@
  * Engine-issued spawn task rendering — the imperative shell. It gathers and
  * verifies every fact one render depends on in a single observation step (the
  * parsed durable registration, the published request and Context Packet, the
- * reader and archive presence, the frozen diff, the Pi parent flag and the
- * issued emission route), converts every refusal into a thrown bounded error,
- * reports an extraction-only route on stderr, and hands the facts to the pure
- * `renderSpawnTaskText` (core/spawn-task-text).
+ * reader and archive presence, the frozen diff, the Pi parent flag, the issued
+ * emission route and the Wave subject the child must echo), converts every
+ * refusal into a thrown bounded error, reports an extraction-only route on
+ * stderr, and hands the facts to the pure `renderSpawnTaskText`
+ * (core/spawn-task-text) plus the request's own instruction and binding
+ * (core/issued-request-task).
  */
 import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
 import { describeChildLaunchRouteRefusal, routedChildLaunchRoute } from "../../../utils/child-launch-route";
@@ -24,6 +26,8 @@ import {
   type ReviewerDelivery,
   type SpawnTaskFacts,
 } from '../../../core/spawn-task-text';
+import { issuedRequestInstruction, withTaskBinding, type IssuedTaskBinding } from '../../../core/issued-request-task';
+import { readWaveReviewContext } from '../../../core/wave-review-authority';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { parseRegisteredFacadeProgram, readObligated, type RegisteredReviewProgram } from './registration';
 import { publishedReviewerRequest } from './durable-requests';
@@ -268,6 +272,26 @@ function observeSpawnTaskFacts(
 }
 
 /**
+ * The subject an issued Wave request reviews, read from its own immutable
+ * Context Packet: the Task it reviews, or — for the spec-check slot — the Wave
+ * whose documents it checks. Every other program reviews a scope, so it carries
+ * no binding. The packet is the one source, so a re-emission cannot lose the
+ * binding the capture matcher re-derives from the child's echo.
+ */
+function observeTaskBinding(handle: RunDirHandle, authority: AgentRequestAuthority): IssuedTaskBinding {
+  if (authority.program !== 'wave-gate') return Object.freeze({ kind: 'none' as const });
+  const packet = handle.readContext(authority.contextDigest, CONTEXT_PACKET_MAX_BYTES);
+  if (!packet.ok) throw new Error(`the request's Context Packet is unavailable: ${packet.error.message}`);
+  const context = readWaveReviewContext([packet.value], authority.contextDigest);
+  if (context.kind !== 'loaded') {
+    throw new Error(`the request's Context Packet carries no usable Wave review subject: ${context.kind === 'corrupt' ? context.message : 'no packet'}`);
+  }
+  return context.value.task === null
+    ? Object.freeze({ kind: 'spec-check' as const, wave: context.value.wave })
+    : Object.freeze({ kind: 'task' as const, taskId: context.value.task.id });
+}
+
+/**
  * The durable-compatibility render: an emission-eligible request derives its
  * issued claim from the durable registration alone. Its production callers are
  * the ineligible panel/spec-check paths, legacy schema-1 initial batches
@@ -297,4 +321,26 @@ export function renderReviewProgramSpawn(
 ): ReviewProgramSpawn {
   const { facts, route } = observeSpawnTaskFacts(handle, authority, instruction, emissionAuthority, options);
   return Object.freeze({ task: renderSpawnTaskText(facts), route });
+}
+
+/**
+ * The one render of an issued request: its program's instruction, its durable
+ * Wave binding, and the verified delivery — so no caller supplies either fact.
+ * A caller that composed its own instruction or appended its own binding made
+ * the text a property of the code path rather than of the request; every
+ * emission site is expected to reach the child through this function alone.
+ */
+export function renderIssuedRequestTask(
+  handle: RunDirHandle,
+  authority: AgentRequestAuthority,
+  emissionAuthority: RegisteredReviewProgram | undefined,
+  options: SpawnTaskRenderOptions = {},
+): ReviewProgramSpawn {
+  const { facts, route } = observeSpawnTaskFacts(
+    handle, authority, issuedRequestInstruction(authority), emissionAuthority, options,
+  );
+  return Object.freeze({
+    task: withTaskBinding(renderSpawnTaskText(facts), observeTaskBinding(handle, authority)),
+    route,
+  });
 }

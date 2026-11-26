@@ -10,7 +10,7 @@ import { applyReviewResolution } from '../../../core/review-output';
 import { specCheckNeedsReapplication } from '../../../core/spec-check';
 import { applyCurrentSpecCheckCaptureRejection, specCheckSlotBelongsToWaveEpoch, waveReviewerSlotProblem } from '../../../core/wave-gate-membership';
 import { durableCaptureRejection } from './durable-requests';
-import { renderReviewProgramSpawn } from './spawn-task';
+import { renderIssuedRequestTask } from './spawn-task';
 import { proceed, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 import { applyWaveFacadeSubmission } from './wave-gate-submission';
 import { issuedWaveProtocol, readWaveRequestContext } from './wave-review-context';
@@ -144,12 +144,16 @@ export async function reconcileCurrentReviewEvidence(
     !captured.has(captureKey(request.slotId, request.attempt)) &&
     !rejectedInitials.has(request.requestId));
   if (uncapturedInitialReviews.length > 0) {
+    // The re-emission renders through the same function publication used, so a
+    // request whose first spawn was lost is re-issued with identical text —
+    // including the Task/Wave binding the capture matcher re-derives from the
+    // child's echo, which this path used to drop.
     return settled({ ok: true, action: {
       kind: "spawn-batch", runId: handle.runId,
       requests: uncapturedInitialReviews.map((authority) => ({
         authority,
         context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
-        task: renderReviewProgramSpawn(handle, authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.", registration).task,
+        task: renderIssuedRequestTask(handle, authority, registration).task,
       })),
     } });
   }
