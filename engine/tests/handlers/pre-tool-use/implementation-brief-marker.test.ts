@@ -157,8 +157,9 @@ afterEach(() => {
 });
 
 /** A protected graph in Wave 2 owing T2, whose dependency T1 passed its gate,
- *  with the plan the execute phase requires. */
-function activeGraph(): string {
+ *  with the plan the execute phase requires. `planContext` is T2's protected
+ *  plan context, when given. */
+function activeGraph(planContext?: string): string {
   const root = canonicalTempDir("loom-brief-marker-");
   roots.push(root);
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
@@ -180,7 +181,7 @@ function activeGraph(): string {
       },
       {
         id: "T2", description: "Use the seam", agent: "code-implementer-agent", wave: 2, depends_on: ["T1"],
-        file_list: ["src/use.ts"], status: "pending",
+        file_list: ["src/use.ts"], status: "pending", ...(planContext === undefined ? {} : { plan_context: planContext }),
       },
     ],
   }));
@@ -194,7 +195,7 @@ describe("validate-task-execution with a brief marker", () => {
   it("runs every veto on the expanded brief and rewrites the admitted call to carry it", async () => {
     activeGraph();
     const seen: string[] = [];
-    const veto = { name: "record", handler: (async (stdin) => { seen.push(stdin); return { kind: "allow" }; }) as HookHandler };
+    const veto = { name: "record", judges: "expanded-brief" as const, handler: (async (stdin) => { seen.push(stdin); return { kind: "allow" }; }) as HookHandler };
     const prompt = "**Task ID:** T2\nUse the seam";
     const result = await createValidateTaskExecutionHandler([veto], rendering(brief(prompt)))(stdinOf(MARKER), []);
     expect(result).toEqual(preToolUseRewriteResult({ subagent_type: "loom:code-implementer-agent", model: "opus", description: "Implement T2", prompt }));
@@ -205,7 +206,7 @@ describe("validate-task-execution with a brief marker", () => {
     const statePath = activeGraph();
     const before = readFileSync(statePath);
     const refusal = { kind: "block", message: "BLOCKED: Prompt doesn't reference required skill(s)." } as const;
-    const handler = createValidateTaskExecutionHandler([{ name: "skill", handler: async () => refusal }], rendering(brief("**Task ID:** T2")));
+    const handler = createValidateTaskExecutionHandler([{ name: "skill", judges: "expanded-brief" as const, handler: async () => refusal }], rendering(brief("**Task ID:** T2")));
     expect(await handler(stdinOf(MARKER), [])).toEqual(refusal);
     expect(readFileSync(statePath).equals(before)).toBe(true);
   });
@@ -213,7 +214,7 @@ describe("validate-task-execution with a brief marker", () => {
   it("blocks a marker that cannot expand before any veto or reservation runs", async () => {
     const statePath = activeGraph();
     const before = readFileSync(statePath);
-    const vetoes = [{ name: "unreached", handler: (async () => { throw new Error("must not run"); }) as HookHandler }];
+    const vetoes = [{ name: "unreached", judges: "expanded-brief" as const, handler: (async () => { throw new Error("must not run"); }) as HookHandler }];
     expect(await createValidateTaskExecutionHandler(vetoes, failing("Task T2 is completed"))(stdinOf(MARKER), [])).toEqual({
       kind: "block",
       message: "validate-task-execution: BLOCKED: the implementation brief marker for T2 cannot expand: Task T2 is completed",
@@ -247,6 +248,38 @@ describe("validate-task-execution with a brief marker", () => {
     expect(result).toMatchObject({ kind: "pre-tool-use-rewrite" });
     if (result.kind !== "pre-tool-use-rewrite") return;
     expect(result.updatedInput.prompt as string).toContain("## Operator Note\n\n- touch handler-routes.ts so the affected check selects its importers\n");
+  });
+});
+
+describe("brace placeholders in protected Task text", () => {
+  // The plan documents key patterns; one even quotes a Loom template
+  // variable's own name. Both are protected text the engine rendered into the
+  // brief, not variables a parent left unfilled.
+  const PLAN_CONTEXT = "Keys: ab:outbox:noc:{key} and ab:outcome:{incidentId}; the spec sits at {spec_file_path}.";
+  const stdinOf = (prompt: string) => JSON.stringify(spawnInput(prompt));
+
+  it("validate-task-execution admits the marker and rewrites the call to the brief carrying them", async () => {
+    activeGraph(PLAN_CONTEXT);
+    const result = await validateTaskExecution(stdinOf(MARKER), []);
+    expect(result).toMatchObject({ kind: "pre-tool-use-rewrite" });
+    if (result.kind !== "pre-tool-use-rewrite") return;
+    expect(result.updatedInput.prompt as string).toContain(PLAN_CONTEXT);
+  });
+
+  it("every sibling spawn veto admits the marker", async () => {
+    activeGraph(PLAN_CONTEXT);
+    for (const { name, handler } of SPAWN_VETOES) {
+      const result = await handler(stdinOf(MARKER), []);
+      expect({ name, kind: result.kind }).not.toMatchObject({ kind: "block" });
+    }
+  });
+
+  it("the template gate still refuses a hand-assembled prompt that left a Loom variable unfilled", async () => {
+    activeGraph(PLAN_CONTEXT);
+    const veto = SPAWN_VETOES.find(({ name }) => name === "validate-template-substitution")!;
+    expect(await veto.handler(stdinOf("**Task ID:** T2\nRead {plan_file_path} first"), [])).toMatchObject({ kind: "block" });
+    // ...but not one that merely quotes a domain key pattern.
+    expect(await veto.handler(stdinOf("**Task ID:** T2\nWrite ab:outcome:{incidentId}"), [])).toEqual({ kind: "allow" });
   });
 });
 

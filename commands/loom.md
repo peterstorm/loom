@@ -75,7 +75,7 @@ There is no `--complete` and no `--abort` flag; both are helper invocations in t
   ```
   Claude Code: pass the emitted `claudeCode.model` in the `Agent`/`Task` call. Pi: the agent definition must contain the emitted `pi.provider/pi.model:pi.thinking` pattern; run `{LOOM_DIR}/scripts/sync-pi-agents.sh` after an install or update.
 - **Pi transport.** Under Pi, spawn `specify-agent`, `clarify-agent`, `architecture-agent` and `arch-interviewer-agent` with the `loom_interactive_subagent` tool, one agent per call; it relays their `AskUserQuestion` dialogs to the parent TUI. The plain `subagent` tool refuses those four roles. Use `subagent` for every other agent. Under Claude Code, use the native Agent/Task tool for all of them.
-- **Templates.** Read the phase's template, replace every variable the Phases table lists for it, and spawn the agent with the result as its prompt. A prompt that still contains a `{name}` variable is refused.
+- **Templates.** Read the phase's template, replace every variable the Phases table lists for it, and spawn the agent with the result as its prompt. A prompt that still contains one of the template's own `{name}` variables is refused; other braces (a key or URL pattern you quote) are text.
 - **Do not answer for the user.** Pass an interactive agent only the paths and values its template asks for. Never put pre-resolved answers into its prompt.
 - **One phase agent at a time.** Phases run in sequence. Only Phase 5 Tasks and panel batches are spawned in parallel, in one message.
 

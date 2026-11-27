@@ -9,11 +9,15 @@
  * (`predecessorOutputs`), the Agent Catalog's declared skill, the binding
  * rule documents its file list selects, the ownership of every plan
  * invariant whose family it changes, and its role in every Acceptance
- * Contract it writes, completes, or runs beside. The renderer then proves the
- * result passes the same spawn-gate checks the harness will apply — no
- * residual template variable, and the canonical `**Task ID:**` binding naming
- * this Task — so a rendered brief is admissible by construction rather than by
- * the orchestrator's care.
+ * Contract it writes, completes, or runs beside. The renderer fills its
+ * template in one pass after proving the template declares exactly the
+ * variables it owns, so no template variable is left unfilled; protected text
+ * spliced in is never re-scanned for variables, because a `{word}` there (a
+ * key pattern such as `ab:outcome:{incidentId}`) is that text. It then proves
+ * the canonical `**Task ID:**` binding names this Task, so a rendered brief is
+ * admissible by construction rather than by the orchestrator's care. The
+ * spawn gates know a marker's brief is engine-rendered and do not re-judge it
+ * for template variables (`validate-template-substitution`).
  *
  * Pure: the shell reads the template, rules, graph and spec and passes them in.
  */
@@ -217,7 +221,6 @@ export type ImplementationBriefError =
   | Readonly<{ kind: "rule-document-missing"; message: string }>
   | Readonly<{ kind: "requirement-text-unavailable"; message: string }>
   | Readonly<{ kind: "predecessor-output-unavailable"; message: string }>
-  | Readonly<{ kind: "residual-placeholders"; message: string }>
   | Readonly<{ kind: "task-id-binding"; message: string }>
   | Readonly<{ kind: "test-file-classification-unavailable"; message: string }>;
 
@@ -1170,19 +1173,12 @@ export function renderImplementationBrief(
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",
   };
-  // One pass over the TEMPLATE only: substituted values are never re-scanned
-  // for variables, so a brace in Task text cannot be mistaken for one.
+  // One pass over the TEMPLATE only: the variables check above proved every
+  // placeholder in it is one of `values`, and substituted values are never
+  // re-scanned, so a brace in protected Task, plan or rule text is never
+  // mistaken for a variable.
   const prompt = template.replace(PLACEHOLDER, (placeholder, name: string) =>
     Object.prototype.hasOwnProperty.call(values, name) ? values[name as BriefVariable] : placeholder);
-
-  const residual = findResidualPlaceholders(prompt);
-  if (residual.length > 0) {
-    return refused(
-      "residual-placeholders",
-      `${task.id}'s brief would carry ${residual.join(" ")}, which the spawn gate refuses as unsubstituted ` +
-        "template variables; they come from protected Task/plan/rule text, so correct that text",
-    );
-  }
   const bound = extractTaskId(prompt);
   if (bound !== task.id) {
     return refused(
@@ -1240,9 +1236,13 @@ const TASK_ID_BINDING = /task id:/i;
 /**
  * One note's text, or why it is refused: non-empty, at most
  * `MAX_OPERATOR_NOTE_LENGTH` characters, and nothing the gates read as engine
- * authority. A `LOOM_*` token could pass for a request or retry marker, a
- * `{variable}` would fail the brief as an unsubstituted template variable, and
- * a `Task ID:` could rebind the brief.
+ * authority. A `LOOM_*` token could pass for a request or retry marker, and
+ * a `Task ID:` could rebind the brief. A note is also the parent's own text,
+ * the one part of a brief the engine did not render, and the spawn gates do
+ * not re-judge an engine-rendered brief, so the template-variable check runs
+ * here instead: a Loom template variable (`{plan_file_path}`) in a note is a
+ * template fragment the parent left unfilled. Any other `{word}` is the note's
+ * own text.
  */
 export function parseOperatorNote(raw: string): DomainResult<OperatorNote, string> {
   const text = raw.trim();
@@ -1255,7 +1255,7 @@ export function parseOperatorNote(raw: string): DomainResult<OperatorNote, strin
   }
   if (LOOM_TOKEN.test(text)) return { ok: false, error: `an operator note may not carry a LOOM_ token: ${JSON.stringify(text)}` };
   if (findResidualPlaceholders(text).length > 0) {
-    return { ok: false, error: `an operator note may not carry a {template variable}: ${JSON.stringify(text)}` };
+    return { ok: false, error: `an operator note may not carry an unfilled Loom template variable: ${JSON.stringify(text)}` };
   }
   if (TASK_ID_BINDING.test(text)) return { ok: false, error: `an operator note may not carry a Task ID binding: ${JSON.stringify(text)}` };
   return { ok: true, value: text as OperatorNote };

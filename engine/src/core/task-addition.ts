@@ -39,7 +39,6 @@ import { parseTaskId, TASK_ID_PATTERN, type TaskId } from "./task-id";
 import { pathAdmissionRefusal } from "./task-rescope";
 import { reopenableWave, waveReopeningRefusalMessage, type ReopenableWave, type WaveReopeningRefusal } from "./task-revalidation";
 import { renderTaskScopeProblem, taskTestFileProblem } from "./task-scope-rules";
-import { findResidualPlaceholders } from "./validate-template-substitution";
 import { serializeVerificationPolicy, type VerificationPolicy } from "./verification-policy";
 import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
 import { retireUnownedWaveReviewAuthority } from "./wave-gate-registration";
@@ -110,17 +109,15 @@ const isAddedTaskAgent = (value: string): value is AddedTaskAgent =>
 
 /**
  * `value` if the added Task's brief can carry it, or why not. The text lands
- * in the Task's description or plan context, which the spawn gate reads: a
- * line break or a `{variable}` would fail the brief, a `LOOM_` token could
- * pass for engine authority, and a `Task ID:` could rebind the brief. A
- * refused text never reaches protected state, where it could not be corrected.
+ * in the Task's description or plan context, which the brief carries: a line
+ * break would break its one-line field, a `LOOM_` token could pass for engine
+ * authority, and a `Task ID:` could rebind the brief. A `{word}` is fine: the
+ * brief is engine-rendered, so the spawn gates never read protected text as a
+ * template variable. A refused text never reaches protected state, where it
+ * could not be corrected.
  */
 function briefSafeText(value: string, flag: string): DomainResult<string, string> {
   if (/[\r\n]/.test(value)) return failWith(`${flag} must be one line`);
-  const placeholders = findResidualPlaceholders(value);
-  if (placeholders.length > 0) {
-    return failWith(`${flag} may not carry a {template variable} (${placeholders.join(", ")}); the Task's brief would be refused`);
-  }
   if (/\bLOOM_[A-Z_]+/.test(value)) return failWith(`${flag} may not carry a LOOM_ token`);
   return /task id:/i.test(value) ? failWith(`${flag} may not carry a Task ID binding`) : okWith(value);
 }

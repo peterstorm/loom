@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkAgentSkillPrompt } from "../src/core/agent-skills";
-import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
+import { findResidualPlaceholders, placeholderTokens } from "../src/core/validate-template-substitution";
 import { architectureCriterion, candidateFilename, parseJudgeVerdict, serializeJudgeVerdict } from "../src/core/panel-contract";
 import { describeMarkdownError, markdown, rowWhere, tableWithColumns, type Table, type TableRow } from "../src/linter/markdown";
 import { orFail } from "./support/or-fail";
@@ -24,10 +24,11 @@ import { orFail } from "./support/or-fail";
  * refuses; a variable the table lists and the template lacks is an instruction
  * the orchestrator cannot follow.
  *
- * The residual-placeholder check imports the real detector
- * (findResidualPlaceholders) from validate-template-substitution so the two can
- * never drift: strip `${shell}` expansions, then match `{identifier}` minus the
- * {type}/{id}/{name} false-positive set.
+ * The checks import the real detectors from validate-template-substitution so
+ * the two can never drift: `placeholderTokens` (every `{identifier}` in
+ * placeholder position, whatever its name) finds what a template uses, and
+ * `findResidualPlaceholders` (those tokens a Loom template declares) is what
+ * the spawn gate refuses.
  */
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -101,7 +102,7 @@ describe("phase template placeholder audit", () => {
 
   for (const file of PHASE_TEMPLATES) {
     it(`${file} — the template's placeholders equal the variables its substitution table declares`, () => {
-      const used = [...new Set(findResidualPlaceholders(readTemplate(file)).map((token) => token.slice(1, -1)))].sort();
+      const used = [...new Set(placeholderTokens(readTemplate(file)).map((token) => token.slice(1, -1)))].sort();
       expect(used).toEqual([...new Set(declaredVariables(file))].sort());
     });
 

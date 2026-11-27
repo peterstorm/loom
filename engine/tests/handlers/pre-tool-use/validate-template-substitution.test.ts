@@ -4,11 +4,17 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import {
-  FALSE_POSITIVES,
+  ENGINE_RENDERED_BRIEF,
   findResidualPlaceholders,
+  LOOM_TEMPLATE_VARIABLES,
+  parentAssembled,
+  placeholderTokens,
   validateTemplateSubstitution,
 } from "../../../src/core/validate-template-substitution";
-import validateTemplateSubstitutionHandler from "../../../src/handlers/pre-tool-use/validate-template-substitution";
+import validateTemplateSubstitutionHandler, {
+  createValidateTemplateSubstitutionHandler,
+} from "../../../src/handlers/pre-tool-use/validate-template-substitution";
+import type { ImplementationBrief, RenderTaskBrief } from "../../../src/core/implementation-brief";
 import { ACCEPTANCE_RUNNER_FILES_PLACEHOLDER } from "../../../src/core/verification-manifest";
 
 /**
@@ -19,26 +25,34 @@ import { ACCEPTANCE_RUNNER_FILES_PLACEHOLDER } from "../../../src/core/verificat
  * assertions below cannot silently drift from the shipped detector.
  */
 
-/** The core allow/block decision, driven by the real placeholder detector. */
+/** The core allow/block decision over a parent-assembled prompt. */
 function validateTemplate(prompt: string): "allow" | "block" {
-  if (!prompt) return "allow";
-  return findResidualPlaceholders(prompt).length === 0 ? "allow" : "block";
+  return validateTemplateSubstitution(parentAssembled(prompt), true).kind === "block" ? "block" : "allow";
 }
 
-/** Exempt names the generator grammar can actually produce — the collision
- *  carve, derived from the detector's own set so a new whitelist entry is one
- *  edit, not two. Case-variant coverage is retained by construction: an entry
- *  whose bare name is not grammar-producible ({builtAt}) leaves its generated
- *  lowercase near-misses in the property space, where they must block. */
-const exemptGeneratedNames = [...FALSE_POSITIVES]
-  .map((token) => token.slice(1, -1))
-  .filter((name) => /^[a-z][a-z0-9_]{3,15}$/.test(name));
+const REPO_ROOT = join(__dirname, "../../../..");
+const VOCABULARY = [...LOOM_TEMPLATE_VARIABLES].sort();
+
+describe("the vocabulary is exactly the variables Loom's prompt templates declare", () => {
+  it("equals the placeholder names of commands/templates/*.md", () => {
+    // A template that adopts a new variable fails here until the name joins
+    // the vocabulary; a name no template uses any more fails here until it
+    // leaves, so the gate never guards a dead name.
+    const dir = join(REPO_ROOT, "commands", "templates");
+    const files = readdirSync(dir).filter((file) => file.endsWith(".md"));
+    expect(files.length).toBeGreaterThan(8);
+    const names = new Set(files.flatMap((file) => placeholderTokens(readFileSync(join(dir, file), "utf-8")).map((token) => token.slice(1, -1))));
+    expect(VOCABULARY).toEqual([...names].sort());
+  });
+});
 
 describe("validate-template-substitution — property tests", () => {
+  const notVocabulary = fc.stringMatching(/^[a-zA-Z_][a-zA-Z0-9_]{0,20}$/).filter((name) => !LOOM_TEMPLATE_VARIABLES.has(name));
+
   it("shell ${var} patterns never trigger block", () => {
     fc.assert(
       fc.property(
-        fc.array(fc.stringMatching(/^[a-zA-Z_][a-zA-Z0-9_]{0,20}$/), { minLength: 1, maxLength: 5 }),
+        fc.array(fc.constantFrom(...VOCABULARY), { minLength: 1, maxLength: 5 }),
         (varNames) => {
           const prompt = varNames.map((v) => `\${${v}}`).join(" ");
           expect(validateTemplate(prompt)).toBe("allow");
@@ -47,18 +61,35 @@ describe("validate-template-substitution — property tests", () => {
     );
   });
 
-  it("unsubstituted {var} patterns always trigger block (except false positives)", () => {
+  it("an unfilled Loom template variable always blocks", () => {
     fc.assert(
-      fc.property(
-        fc.stringMatching(/^[a-z][a-z0-9_]{3,15}$/).filter(
-          (s) => !exemptGeneratedNames.includes(s),
-        ),
-        (varName) => {
-          const prompt = `Do something with {${varName}}`;
-          expect(validateTemplate(prompt)).toBe("block");
-        },
-      ),
+      fc.property(fc.constantFrom(...VOCABULARY), fc.constantFrom("", "Read ", "path /x/", "(", "`"), (name, before) => {
+        expect(validateTemplate(`${before}{${name}} next`)).toBe("block");
+      }),
     );
+  });
+
+  it("a {name} no Loom template declares never blocks: it is the prompt's own text", () => {
+    fc.assert(
+      fc.property(notVocabulary, (name) => {
+        expect(validateTemplate(`Store under ab:outcome:{${name}} and /api/{${name}}`)).toBe("allow");
+      }),
+    );
+  });
+});
+
+describe("validate-template-substitution — domain brace patterns are text", () => {
+  it("Redis key, URL and path patterns → allow", () => {
+    expect(validateTemplate("Keys: ab:outbox:noc:{key} and ab:outcome:{incidentId}")).toBe("allow");
+    expect(validateTemplate("GET /users/{userId}/orders/{id}, files under infra/{system}/")).toBe("allow");
+  });
+
+  it("the names the old whitelist carried are text without one", () => {
+    expect(validateTemplate("{type} {id} {name} {system} {revision} {builtAt} {hot}")).toBe("allow");
+  });
+
+  it("a domain pattern beside an unfilled Loom variable still blocks, naming only the variable", () => {
+    expect(findResidualPlaceholders("write ab:outcome:{incidentId} to {plan_file_path}")).toEqual(["{plan_file_path}"]);
   });
 });
 
@@ -67,7 +98,7 @@ describe("validate-template-substitution — identifier-glued braces are express
     fc.assert(
       fc.property(
         fc.stringMatching(/^[A-Za-z0-9_-]{0,12}[A-Za-z0-9_]$/),
-        fc.stringMatching(/^[a-z][a-z0-9_]{0,15}$/),
+        fc.constantFrom(...VOCABULARY),
         (head, field) => {
           expect(validateTemplate(`ProofFailure += ${head}{${field}}`)).toBe("allow");
         },
@@ -75,46 +106,97 @@ describe("validate-template-substitution — identifier-glued braces are express
     );
   });
 
-  it("the plan's ADT notation red-then-green-unproven{gap} → allow", () => {
-    expect(
-      validateTemplate("ProofFailure += red-then-green-unproven{gap}; ProofEvidence += red-then-green{red,implementationWrite,green}"),
-    ).toBe("allow");
+  it("ADT union notation {wave}|{some T} → allow; a lone {wave} still blocks", () => {
+    expect(validateTemplate("parsed to {wave}|{some NonEmpty<RepositoryRelativePath>}")).toBe("allow");
+    expect(validateTemplate("a|{task_id} or {task_id}|b")).toBe("allow");
+    expect(validateTemplate("parsed to {wave} here")).toBe("block");
   });
 
-  it("ADT union notation {none}|{some NonEmpty<Path>} → allow; a lone {none} still blocks", () => {
-    expect(validateTemplate("parsed to {none}|{some NonEmpty<RepositoryRelativePath>}")).toBe("allow");
-    expect(validateTemplate("a|{tag} or {tag}|b")).toBe("allow");
-    expect(validateTemplate("parsed to {none} here")).toBe("block");
-  });
-
-  it("spaced union notation null | {revision} and {tag} | other → allow; a pipe without a union still blocks", () => {
-    expect(validateTemplate("stale null | {revision}}). task.skeleton_outcomes")).toBe("allow");
-    expect(validateTemplate("stale: {revision} | null")).toBe("allow");
-    expect(validateTemplate("a |\t{tag} or {tag}  | b")).toBe("allow");
+  it("spaced union notation null | {wave} and {wave} | other → allow; a pipe without a union still blocks", () => {
+    expect(validateTemplate("stale null | {wave}}). task.skeleton_outcomes")).toBe("allow");
+    expect(validateTemplate("stale: {wave} | null")).toBe("allow");
+    expect(validateTemplate("a |\t{wave} or {wave}  | b")).toBe("allow");
     expect(validateTemplate("run | then use {task_id} here")).toBe("block");
   });
 
-  it("intersection notation FrozenSurface & {typesSha256}, A&{b}, {b} & C → allow; a lone & elsewhere still blocks", () => {
-    expect(validateTemplate("returns FrozenSurface & {typesSha256}. Content-addressed adoption")).toBe("allow");
-    expect(validateTemplate("A&{b} or {b}&C or {b} & C")).toBe("allow");
-    expect(validateTemplate("build & then read {plan_file}")).toBe("block");
+  it("intersection notation A & {wave}, A&{wave}, {wave} & C → allow; a lone & elsewhere still blocks", () => {
+    expect(validateTemplate("returns FrozenSurface & {wave}. Content-addressed adoption")).toBe("allow");
+    expect(validateTemplate("A&{wave} or {wave}&C or {wave} & C")).toBe("allow");
+    expect(validateTemplate("build & then read {plan_file_path}")).toBe("block");
   });
 
-  it("a placeholder after a non-identifier character still blocks: loom-{task_id}, ({wave}), /{plan_file}", () => {
+  it("a placeholder after a non-identifier character still blocks: loom-{task_id}, ({wave}), /{plan_file_path}", () => {
     expect(validateTemplate("/tmp/loom-{task_id}-bun.xml")).toBe("block");
     expect(validateTemplate("Wave ({wave})")).toBe("block");
-    expect(validateTemplate("Available at: /{plan_file}")).toBe("block");
+    expect(validateTemplate("Available at: /{plan_file_path}")).toBe("block");
   });
 
-  it("a placeholder glued to a stripped shell expansion still blocks: x${done}{leftover}", () => {
-    expect(validateTemplate("x${done}{leftover}")).toBe("block");
+  it("a placeholder glued to a stripped shell expansion still blocks: x${done}{task_id}", () => {
+    expect(validateTemplate("x${done}{task_id}")).toBe("block");
   });
 });
 
-describe("validate-template-substitution — active graph boundary", () => {
+describe("validate-template-substitution — where the prompt came from", () => {
+  it("an engine-rendered brief is never judged: its template was filled before protected text was spliced in", () => {
+    expect(validateTemplateSubstitution(ENGINE_RENDERED_BRIEF, true)).toEqual({ kind: "allow" });
+  });
+
   it("keeps the core decision pure over a pre-gathered graph-existence fact", () => {
-    expect(validateTemplateSubstitution("Use {task_id}", false)).toEqual({ kind: "allow" });
-    expect(validateTemplateSubstitution("Use {task_id}", true)).toMatchObject({ kind: "block" });
+    expect(validateTemplateSubstitution(parentAssembled("Use {task_id}"), false)).toEqual({ kind: "allow" });
+    expect(validateTemplateSubstitution(parentAssembled("Use {task_id}"), true)).toMatchObject({ kind: "block" });
+  });
+});
+
+describe("validate-template-substitution — the Claude Code hook", () => {
+  const brief = (prompt: string): ImplementationBrief => ({
+    taskId: "T2",
+    agent: "code-implementer-agent",
+    dispatch: { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
+    prompt,
+  });
+  const spawn = (prompt: string) => JSON.stringify({
+    tool_name: "Agent",
+    tool_input: { subagent_type: "loom:code-implementer-agent", prompt },
+    session_id: "session",
+  });
+
+  function withState<T>(run: () => Promise<T>): Promise<T> {
+    const temp = mkdtempSync(join(tmpdir(), "loom-template-state-"));
+    const statePath = join(temp, "active_task_graph.json");
+    const previous = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = statePath;
+    writeFileSync(statePath, "{}\n");
+    return run().finally(() => {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(temp, { recursive: true, force: true });
+    });
+  }
+
+  it("admits a brief marker whose rendered brief quotes any brace text, even a Loom variable's name", async () => {
+    const render: RenderTaskBrief = () => ({ ok: true, value: brief("**Task ID:** T2\nab:outcome:{incidentId} at {spec_file_path}") });
+    await withState(async () => {
+      expect(await createValidateTemplateSubstitutionHandler(render)(spawn("LOOM_IMPLEMENTATION_BRIEF: T2"), [])).toEqual({ kind: "allow" });
+    });
+  });
+
+  it("refuses a brief marker that cannot render, naming itself", async () => {
+    const render: RenderTaskBrief = () => ({ ok: false, error: "Task T2 is completed" });
+    await withState(async () => {
+      expect(await createValidateTemplateSubstitutionHandler(render)(spawn("LOOM_IMPLEMENTATION_BRIEF: T2"), [])).toEqual({
+        kind: "block",
+        message: "validate-template-substitution: BLOCKED: the implementation brief marker for T2 cannot expand: Task T2 is completed",
+      });
+    });
+  });
+
+  it("judges a hand-assembled prompt's bytes, never rendering anything", async () => {
+    const render: RenderTaskBrief = () => { throw new Error("must not render"); };
+    await withState(async () => {
+      const handler = createValidateTemplateSubstitutionHandler(render);
+      expect(await handler(spawn("Implement at {spec_file_path}"), [])).toMatchObject({ kind: "block" });
+      expect(await handler(spawn("Implement ab:outcome:{incidentId}"), [])).toEqual({ kind: "allow" });
+    });
   });
 
   it("resolves LOOM_STATE_PATH in the shell after module import", async () => {
@@ -122,11 +204,7 @@ describe("validate-template-substitution — active graph boundary", () => {
     const statePath = join(temp, "active_task_graph.json");
     const previous = process.env.LOOM_STATE_PATH;
     process.env.LOOM_STATE_PATH = statePath;
-    const stdin = JSON.stringify({
-      tool_name: "Agent",
-      tool_input: { prompt: "Use {task_id}" },
-      session_id: "session",
-    });
+    const stdin = spawn("Use {task_id}");
     try {
       expect(await validateTemplateSubstitutionHandler(stdin, [])).toEqual({ kind: "allow" });
       writeFileSync(statePath, "{}\n");
@@ -144,23 +222,10 @@ describe("validate-template-substitution — edge cases", () => {
     expect(validateTemplate("")).toBe("allow");
   });
 
-  it("whitelisted false positives → allow", () => {
-    expect(validateTemplate("Use {type} and {id} and {name}")).toBe("allow");
-  });
-
-  it("{system} → allow — the binding rules' directory-diagram literal, not a template variable", () => {
-    // The /loom implementation prompts inline the loom rules wholesale, and
-    // the rules' package-structure diagrams contain literal `infra/{system}/`
-    // and `└── {system}/`. Those are content, not unsubstituted variables.
-    expect(validateTemplate("Adapter lives in infra/{system}/ under └── {system}/")).toBe("allow");
-  });
-
-  it("every Loom rules file passes the gate — the briefs inline them wholesale", () => {
-    // The brief carries the rules for its Task's language, and the spawn gate
-    // judges the expanded brief. A `{word}` in a rules file (a diagram root, a
-    // Rust format capture) would refuse every brief for that language, so the
-    // rules text avoids the form instead of the gate whitelisting it.
-    const rulesDir = join(__dirname, "../../../../rules");
+  it("every Loom rules file passes the gate — a hand-assembled prompt may quote them", () => {
+    // The rules carry diagram roots and format captures (`infra/{system}/`),
+    // none of which is a Loom template variable.
+    const rulesDir = join(REPO_ROOT, "rules");
     const rules = readdirSync(rulesDir).filter((file) => file.endsWith(".md"));
     expect(rules).toContain("java-patterns.md");
     for (const file of rules) {
@@ -169,69 +234,23 @@ describe("validate-template-substitution — edge cases", () => {
     }
   });
 
-  it("no /loom template substitutes {builtAt} or {hot} — the whitelist's standing premise", () => {
-    // The exemptions hold only while no template carries either name. A future
-    // adoption must fail here, loudly, instead of letting the gate silently
-    // allow an unsubstituted variable — the exact half-specified prompt the
-    // guard exists to catch. The corpus is the commands the /loom prompts
-    // assemble from, plus the engine's own brief template source.
-    const templateFiles = [join(__dirname, "../../../../engine/src/core/implementation-brief.ts")];
-    const visit = (dir: string): void => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) visit(path);
-        else if (entry.name.endsWith(".md")) templateFiles.push(path);
-      }
-    };
-    visit(join(__dirname, "../../../../commands"));
-    expect(templateFiles.length).toBeGreaterThan(8);
-    for (const file of templateFiles) {
-      const bytes = readFileSync(file, "utf-8");
-      expect({ file, hasBuiltAt: bytes.includes("{builtAt}"), hasHot: bytes.includes("{hot}") })
-        .toEqual({ file, hasBuiltAt: false, hasHot: false });
-    }
-  });
-
-  it("{files} → allow — the acceptance runner's own argument placeholder, not a template variable", () => {
-    // A Spec Requirement describing the runner ("each file in place of `{files}`")
-    // reaches every claimant's engine-rendered brief verbatim. The exemption is
-    // the manifest grammar's own constant, so the two cannot drift apart.
+  it("{files} → allow — the acceptance runner's own argument placeholder is no Loom template variable", () => {
     expect(ACCEPTANCE_RUNNER_FILES_PLACEHOLDER).toBe("{files}");
+    expect(LOOM_TEMPLATE_VARIABLES.has("files")).toBe(false);
     expect(validateTemplate("the argv holds each file as one argument in place of `{files}`")).toBe("allow");
     expect(validateTemplate("in place of {files} for {task_id}")).toBe("block");
   });
 
-  it("{revision} → allow — the stale-skeleton record field named in Task prose, not a template variable", () => {
-    expect(validateTemplate("each modified record left on disk and flagged stale {revision}; resolution problems")).toBe("allow");
-    expect(validateTemplate("flagged stale {revision} for {task_id}")).toBe("block");
-  });
-
-  it("{builtAt} → allow — a quoted JSX interpolation label in plan and contract prose, not a template variable", () => {
-    // Population copies such prose into Task descriptions and contract
-    // statements, which engine-rendered briefs carry.
-    expect(validateTemplate("the header reads 'Opdateret {builtAt}' (FR-044)")).toBe("allow");
-    expect(validateTemplate("Opdateret {builtAt} for {task_id}")).toBe("block");
-    // Exact token: the lowercase near-miss is not exempt and must block.
-    expect(validateTemplate("Use {builtat}")).toBe("block");
-  });
-
-  it("{hot} → allow — a quoted set literal in plan prose, not a template variable", () => {
-    // Population copies such prose into Task descriptions and contract
-    // statements, which engine-rendered briefs carry.
-    expect(validateTemplate("minScore = 20 exactly when the active band set equals {hot}")).toBe("allow");
-    expect(validateTemplate("the band set equals {hot} here, then read {plan_file}")).toBe("block");
-  });
-
   it("JSON objects in prompt → allow (a quote sits between { and the key, so no {word} match)", () => {
-    expect(validateTemplate('{"key": "value"}')).toBe("allow");
+    expect(validateTemplate('{"task_id": "value"}')).toBe("allow");
   });
 
   it("JSON with nested objects → allow", () => {
-    expect(validateTemplate('{"outer": {"inner": "value"}}')).toBe("allow");
+    expect(validateTemplate('{"outer": {"wave": "value"}}')).toBe("allow");
   });
 
-  it("multiple unsubstituted vars → block", () => {
-    expect(validateTemplate("Run {task_id} with {agent_name} on {wave}")).toBe("block");
+  it("multiple unsubstituted vars → block, each named", () => {
+    expect(findResidualPlaceholders("Run {task_id} with {agent_type} on {wave}")).toEqual(["{task_id}", "{agent_type}", "{wave}"]);
   });
 
   it("mixed shell vars and unsubstituted vars → block", () => {
@@ -239,22 +258,17 @@ describe("validate-template-substitution — edge cases", () => {
   });
 
   it("nested ${outer_{inner}} → shell var cleaned correctly", () => {
-    // The outer ${...} should be removed, leaving the inner content
-    expect(validateTemplate("${outer_{inner}}")).toBe("allow");
+    expect(validateTemplate("${outer_{task_id}}")).toBe("allow");
   });
 
   it("nested ${foo{bar}} → allow (strip matches to the first }, leaving a lone } that matches no placeholder)", () => {
     // Pins the true nesting behavior: the non-greedy ${...} strip consumes
-    // `${foo{bar}` and leaves `}` — NOT `{bar}`. Allowing a genuine nested shell
-    // expansion is correct; this guards against a "fix" that broke it.
-    expect(validateTemplate("${foo{bar}}")).toBe("allow");
+    // `${foo{wave}` and leaves `}` — NOT `{wave}`.
+    expect(validateTemplate("${foo{wave}}")).toBe("allow");
   });
 
-  it("adjacent ${done}{leftover} → block (the strip leaves {leftover}, a genuine residual)", () => {
-    // The one case the ${...} strip DOES leave a residual placeholder — and it
-    // should, because {leftover} is an unsubstituted variable, not part of the
-    // shell expansion.
-    expect(validateTemplate("${done}{leftover}")).toBe("block");
+  it("adjacent ${done}{task_id} → block (the strip leaves {task_id}, a genuine residual)", () => {
+    expect(validateTemplate("${done}{task_id}")).toBe("block");
   });
 
   it("JSX/member expression {props.title} → allow", () => {
@@ -265,28 +279,15 @@ describe("validate-template-substitution — edge cases", () => {
     expect(validateTemplate("const gap = {width-height}")).toBe("allow");
   });
 
-  it("underscore template names remain blocked", () => {
-    expect(validateTemplate("Read {plan_file}")).toBe("block");
-  });
-
   it("plain text without any braces → allow", () => {
     expect(validateTemplate("Implement the authentication feature using JWT tokens")).toBe("allow");
   });
 
-  it("single false positive among real issues → block", () => {
-    expect(validateTemplate("Use {type} for {task_id}")).toBe("block");
-  });
-
-  it("underscore-prefixed vars → block", () => {
-    expect(validateTemplate("Use {_private_var}")).toBe("block");
-  });
-
-  it("single char var (not in false positives) → block", () => {
-    expect(validateTemplate("Use {x}")).toBe("block");
+  it("names are case-sensitive: {TASK_ID} and {Wave} are not Loom variables", () => {
+    expect(validateTemplate("{TASK_ID} {Wave}")).toBe("allow");
   });
 
   it("numbers at start of var name → allow (regex requires letter/underscore start)", () => {
-    // {1foo} doesn't match [a-zA-Z_] at start
     expect(validateTemplate("{1foo}")).toBe("allow");
   });
 });
