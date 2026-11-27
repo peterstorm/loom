@@ -9,9 +9,12 @@
  *   changed, untracked-not-ignored and deleted path that
  *   `git status --porcelain=v2 -z --untracked-files=all` names is copied (or
  *   deleted) exactly, so the matrix test runs against the Wave's bytes.
- * - The repository root's and the runner cwd's `node_modules` are shared by
- *   symlink, never copied, and never written through; one the checkout
- *   carries from HEAD is replaced by the link.
+ * - `node_modules` are shared by symlink, never copied, and never written
+ *   through: the repository root's, the runner cwd's, and that of each
+ *   directory Git lists an ignored entry under (a workspace package's own,
+ *   issue #265; `sharedNodeModulesDirectories`). One inside a wholly ignored
+ *   parent directory is not shared. One the checkout carries from HEAD is
+ *   replaced by the link.
  * - `runWithOwner` rewrites only the owner file, deletes the runner's stale
  *   report and makes sure its directory exists (an ignored report directory
  *   is never overlaid), runs, and restores the owner's original bytes afterwards, even
@@ -45,6 +48,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { sharedNodeModulesDirectories } from "../core/owner-verification/node-modules-directories";
 import { statusPaths } from "../core/owner-verification/status-paths";
 import type { OwnerInfrastructureFailure } from "../core/owner-verification/types";
 import type { RepositoryRelativePath } from "../core/completion-suite";
@@ -67,7 +71,7 @@ export type MutationWorkspaceSpec = Readonly<{
   ownerPath: ReviewPath;
   /** Deleted before every run, so a stale report can never be read as this run's. */
   reportPath: ReviewPath;
-  /** The runner's cwd, or "."; its `node_modules` is shared beside the root's. */
+  /** The runner's cwd, or "."; its `node_modules` is shared beside the root's and the listed packages'. */
   runnerCwd: RepositoryRelativePath;
 }>;
 
@@ -139,26 +143,49 @@ function overlay(source: CanonicalRepositoryRoot, target: string): Step<void> {
   }
 }
 
+/** Unlink each link (never following it); the problems, empty when every link is gone. */
+function unlinkAll(links: readonly string[]): readonly string[] {
+  const problems: string[] = [];
+  for (const link of links) {
+    try {
+      unlinkSync(link);
+    } catch (cause) {
+      problems.push(`unlinking ${link} failed: ${describeCause(cause)}`);
+    }
+  }
+  return problems;
+}
+
 /**
- * Symlink each directory's `node_modules` from the real workspace; the links
- * this created, for removal. A `node_modules` the checkout itself carries
- * (committed to Git) is replaced, never kept: the matrix test must resolve the
- * real workspace's installed packages, not a stale committed subset. A
- * directory whose checkout resolves outside the isolated copy (a committed
- * symlink) is refused before anything is removed, so the replacement can never
- * delete the real workspace's dependencies.
+ * Symlink the `node_modules` of every directory `sharedNodeModulesDirectories`
+ * names from the real workspace; the links this created, for removal. A
+ * `node_modules` the checkout itself carries (committed to Git) is replaced,
+ * never kept: the matrix test must resolve the real workspace's installed
+ * packages, not a stale committed subset. A directory whose checkout resolves
+ * outside the isolated copy (a committed symlink) is refused before anything
+ * is removed, so the replacement can never delete the real workspace's
+ * dependencies. A refusal or failure unlinks the links already made before it
+ * returns, so cleanup never depends on the caller.
  */
-function shareNodeModules(source: CanonicalRepositoryRoot, target: string, runnerCwd: string): Step<readonly string[]> {
+function shareNodeModules(source: CanonicalRepositoryRoot, target: string, runnerCwd: RepositoryRelativePath): Step<readonly string[]> {
+  const listed = git(source, ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]);
+  if (!listed.ok) return listed;
+  const directories = sharedNodeModulesDirectories(listed.value.toString("utf-8"), runnerCwd);
+  if (!directories.ok) return directories;
   const links: string[] = [];
+  const withdraw = (detail: string): Step<readonly string[]> => {
+    const problems = unlinkAll(links);
+    return failure(problems.length === 0 ? detail : `${detail}; ${problems.join("; ")}`);
+  };
   try {
-    for (const directory of [...new Set([".", runnerCwd])]) {
+    for (const directory of directories.value) {
       const from = join(absolute(source, directory), "node_modules");
       const to = join(absolute(target, directory), "node_modules");
       if (!existsSync(from)) continue;
       mkdirSync(dirname(to), { recursive: true });
       const parent = realpathSync.native(dirname(to));
       if (parent !== target && !parent.startsWith(`${target}/`)) {
-        return failure(`sharing node_modules refused: ${directory} resolves to ${parent}, outside the isolated copy`);
+        return withdraw(`sharing node_modules refused: ${directory} resolves to ${parent}, outside the isolated copy`);
       }
       rmSync(to, { recursive: true, force: true });
       symlinkSync(from, to);
@@ -166,7 +193,7 @@ function shareNodeModules(source: CanonicalRepositoryRoot, target: string, runne
     }
     return success(links);
   } catch (cause) {
-    return failure(`sharing node_modules failed: ${describeCause(cause)}`);
+    return withdraw(`sharing node_modules failed: ${describeCause(cause)}`);
   }
 }
 
@@ -178,14 +205,7 @@ type Opened = Readonly<{ directory: string; links: readonly string[]; workspace:
 
 /** Remove the worktree: its node_modules links first (never followed), then Git's registration and the directory. Null when it is gone. */
 function remove(repositoryRoot: CanonicalRepositoryRoot, directory: string, links: readonly string[]): string | null {
-  const problems: string[] = [];
-  for (const link of links) {
-    try {
-      unlinkSync(link);
-    } catch (cause) {
-      problems.push(`unlinking ${link} failed: ${describeCause(cause)}`);
-    }
-  }
+  const problems = [...unlinkAll(links)];
   const removed = git(repositoryRoot, ["worktree", "remove", "--force", directory]);
   try {
     rmSync(directory, { recursive: true, force: true });
