@@ -212,8 +212,13 @@ describe("canonical verification command", () => {
     const parsed = freezeVerificationManifest(readFileSync(join(repository, ".loom/verification-manifest.json")));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) throw new Error(parsed.error.errors.join("\n"));
-    expect(parsed.value.projectChecks).toHaveLength(1);
-    expect(parsed.value.projectChecks[0]).toEqual({
+    // The root command is frozen exactly. Repair enrollments (docs/verification.md
+    // "Enrolling a critical-repair check") join the same manifest as further
+    // checks — the parser holds their shape and unique ids — so the pin freezes
+    // the one canonical verify entry rather than the manifest's length.
+    const verify = parsed.value.projectChecks.filter((check) => check.checkId === "project:verify");
+    expect(verify).toHaveLength(1);
+    expect(verify[0]).toEqual({
       kind: "project-command", checkId: "project:verify", executable: "npm", args: ["run", "verify"], cwd: ".", scope: "wave", timeoutMs: 1_800_000,
       reportPolicy: { kind: "required-file", path: ".loom/completion-reports/verify.junit.xml" },
     });

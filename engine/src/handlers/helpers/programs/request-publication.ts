@@ -21,8 +21,7 @@ import type { ContextPacket, StandaloneReviewerContextPacketV3 } from '../../../
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { parseRegisteredFacadeProgram, type FacadeRegistrationParse, type RegisteredReviewProgram } from './registration';
 import { publicationFile } from './durable-requests';
-import { renderReviewProgramSpawn, renderSpawnTask } from './spawn-task';
-import { REVIEWER_RESULT_INSTRUCTION } from '../../../core/spawn-task-text';
+import { renderIssuedRequestTask } from './spawn-task';
 import { reviewerEmissionEligible } from '../../../core/reviewer-emission-route';
 import type { FacadePublishedSpawnBatch } from './program-result';
 
@@ -106,9 +105,7 @@ async function publishInitialBatch(
     ...action.value,
     requests: Object.freeze(action.value.requests.map((request) => Object.freeze({
       ...request,
-      task: emissionAuthority === null
-        ? renderSpawnTask(handle, request.authority, REVIEWER_RESULT_INSTRUCTION, options)
-        : renderReviewProgramSpawn(handle, request.authority, REVIEWER_RESULT_INSTRUCTION, emissionAuthority, options).task,
+      task: renderIssuedRequestTask(handle, request.authority, emissionAuthority, options).task,
     }))),
   }) };
 }
