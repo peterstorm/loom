@@ -59,7 +59,7 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 624 src files / ~171.4k lines TS; `engine/tests/` holds 968 TS files / ~266.6k lines (fixtures and helpers included), of which 846 test files are executed (822 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 624 src files / ~171.5k lines TS; `engine/tests/` holds 968 TS files / ~266.7k lines (fixtures and helpers included), of which 846 test files are executed (822 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
@@ -157,7 +157,7 @@ All five are fail-closed. Active only while a State File exists.
 |---|---|---|
 | `validate-phase-order` | Phase sequencing: refuses a phase agent whose prerequisite phase is incomplete; refuses decompose until the plan design review is accepted for the **plan's current bytes** (digest via the `ArtifactProbe.sha256` port) or skipped | Order is authority: a phase completed out of order forges every later artifact's premise |
 | `validate-task-execution` | Expands the implementation brief marker, checks Wave order + dependency order + path ownership, reclaims only policy-eligible reservations, writes skeletons, captures byte baselines, registers attempt + retry authority **atomically** | One hook owns the entire "may this Task spawn, and what exactly is it" decision |
-| `validate-template-substitution` | Refuses a prompt still holding an unsubstituted `{variable}` (underscore-grammar identifiers; a small `FALSE_POSITIVES` set: `{type} {id} {name} {system} {revision} {builtAt} {hot}` + the acceptance files placeholder — owned by the exported `FALSE_POSITIVES` constant in `engine/src/core/validate-template-substitution.ts`) | An unsubstituted variable means the parent skipped protocol assembly — the child would act on a half-specified prompt |
+| `validate-template-substitution` | Refuses a parent-assembled prompt still holding an unfilled **Loom template variable**: a `{name}` whose name one of `commands/templates/*.md` declares (`LOOM_TEMPLATE_VARIABLES` in `engine/src/core/validate-template-substitution.ts`, pinned to that corpus by a test). Any other `{word}` (a key pattern `ab:outcome:{incidentId}`, a URL or path template, JSX) is the prompt's own text. A brief marker is judged as the request: the marker must render, and the engine-rendered brief is not re-judged, because the renderer proved its template filled before splicing in protected Task, plan, Spec and rule text. In `validate-task-execution`'s veto composition this gate therefore receives the request, not the expanded brief; on Pi the admission is told which tasks are briefs it just rendered. Operator notes, the parent's only text in a brief, are checked at parse | An unsubstituted variable means the parent skipped protocol assembly — the child would act on a half-specified prompt. Protected text the engine rendered is not a variable anyone forgot to fill, and refusing it made the Task undispatchable, since protected plan context has no operator edit path |
 | `validate-agent-model` | Model must match the Agent's LLM Profile | Model choice is policy, not improvisation; also blocks silently inheriting the (expensive) orchestrator model |
 | `validate-agent-skill` | Prompt must name the agent's required Skill | Skill preload is part of the agent's contract |
 
@@ -895,7 +895,7 @@ per-mechanism *why it works* and *what remains*.
 | 16 | Invariant enforced "in prose" | Executable-models policy: lint rule or honest advisory | A model in a plan either executes or does not exist | — |
 | 17 | Generated pipeline drifts | Fugue stamp + `fugue-generated-integrity` lint | Regeneration without the stamp fails the full tier | — |
 | 18 | Gated agent rewrites its own gate | Machine digest pins (ADR-0076) | Loader admits only exact bytes; tampering only tightens | OS-level rewrite of engine source (§8.4) |
-| 19 | Unsubstituted template ships | Substitution gate + FALSE_POSITIVES set | Prompt cannot reach a child half-specified | Hand-maintained set is checkout-drift-prone (§8.9) |
+| 19 | Unsubstituted template ships | Substitution gate over the Loom template vocabulary; engine-rendered briefs exempt by provenance | Prompt cannot reach a child half-specified | Vocabulary is a constant pinned to `commands/templates/` by a test, so it cannot drift silently (§8.9) |
 | 20 | Stale CLI writes state a live extension can't parse | Runtime Revision hash + pre-write re-check | Skew refuses at the write boundary | — |
 | 21 | Crash fails a gate open | FAIL_CLOSED_ROUTES exit-2 polarity from argv | Polarity decided before anything can throw | — |
 | 22 | Harness adapters drift apart | One minting rule + dual-harness matrix tests; one rules-gate core; one lint-coverage shell | Shared core, thin adapters | — |
@@ -960,7 +960,7 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **846 executed test files / ~266.6k lines** — 822 under `engine/tests/` (968 TS files there
+- **846 executed test files / ~266.7k lines** — 822 under `engine/tests/` (968 TS files there
   including fixtures and helpers; core 318 test files, handlers 189, pi 50,
   linter 47, orchestration 40, utils 35, machine 31, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
@@ -1116,9 +1116,12 @@ no-`agent_id`-under-contention stand-down itself is unchanged.
   The mechanism is retired; the ubiquitous-language file was not updated in the wave.
   (Found by this re-audit; closed since: CONTEXT.md's Judged Path entry now names the
   audited plan-edit fallback and lists Forward Fix as retired.)
-- The template gate's `FALSE_POSITIVES` set is hand-maintained and has already
-  drifted between checkouts once (the `{system}` incident; resolved in main — the set
-  now contains it — but the mechanism remains a manual list).
+- The template gate's FALSE_POSITIVES set was hand-maintained and drifted between
+  checkouts once (the `{system}` incident), and every new domain placeholder in a plan
+  (`{builtAt}`, `{hot}`, then Redis key patterns such as `ab:outcome:{incidentId}`) meant
+  another entry or an undispatchable Task. (Closed since: the set is gone. The gate flags
+  only names Loom's templates declare, a vocabulary a test pins to
+  `commands/templates/`, and never re-judges an engine-rendered brief.)
 - `parseLoomPackageRoot` admits `..`/`//` segments despite the normalized-path brand —
   harmless for its callers (package self-naming), but the brand overstates what the
   parse proves.
@@ -1452,7 +1455,7 @@ task-addition-operations, and the rest of the whitelisted-helper surface
 
 ## Appendix C — `pi/` module-by-module
 
-extension.ts (registration shell, 718 ln); spawn machinery (spawn-{claims,
+extension.ts (registration shell, 720 ln); spawn machinery (spawn-{claims,
 claim-shell, graph, lifecycle, preparation, reservation}, reserved-{slot,results},
 subagent-{process,result,result-batch,result-route,settlement,stop}); emission
 machinery (emission-{tool,readiness,readiness-gate,readiness-protocol,

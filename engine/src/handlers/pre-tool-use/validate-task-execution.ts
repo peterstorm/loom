@@ -46,7 +46,7 @@ export function createValidateTaskExecutionHandler(
     const expanded = expansion.kind === "expanded" ? expansion : null;
     const toolInput = expanded?.toolInput ?? input.tool_input;
 
-    const veto = await firstSpawnVeto(expanded?.stdin ?? stdin, vetoes);
+    const veto = await firstSpawnVeto({ "spawn-request": stdin, "expanded-brief": expanded?.stdin ?? stdin }, vetoes);
     if (veto !== null) return veto;
 
     const result = await validateTaskExecution({

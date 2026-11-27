@@ -30,7 +30,7 @@ import { DECISION_RECORD_AGENT, DISTILL_AGENT } from "../../src/core/model-profi
 import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
 import { TASK_RECORD_CHECK_BASH_TIMEOUT_MS } from "../../src/core/task-record";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
-import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
+import { findResidualPlaceholders } from "../../src/core/validate-template-substitution";
 import { IMPLEMENTATION_BRIEF_TEMPLATE, renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
 import type { Task, TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
@@ -112,7 +112,7 @@ describe("a Distill Task's implementation brief (ADR-0068 §8)", () => {
 
   it("is admitted by the spawn gate and carries no unsubstituted variable", () => {
     expect(authorizeImplementationSpawn(PASS, prompt)).toMatchObject({ ok: true, kind: "initial", taskId: "T9" });
-    expect(validateTemplateSubstitution(prompt, true)).toEqual({ kind: "allow" });
+    expect(findResidualPlaceholders(prompt)).toEqual([]);
   });
 
   it("explains the distill-pass waiver as a test requirement, not an exemption", () => {
@@ -335,7 +335,7 @@ describe("the Task mutation check in a brief (ADR-0071)", () => {
     const task = pending();
     const prompt = render(task, { verificationManifest: mutationManifest() });
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
-    expect(validateTemplateSubstitution(prompt, true)).toEqual({ kind: "allow" });
+    expect(findResidualPlaceholders(prompt)).toEqual([]);
   });
 
   it.each<[string, Task, Partial<ImplementationBriefInput>]>([
@@ -391,7 +391,7 @@ describe("the Task owner check in a brief (ADR-0092)", () => {
     });
     expect(prompt).toContain(HEADING);
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
-    expect(validateTemplateSubstitution(prompt, true)).toEqual({ kind: "allow" });
+    expect(findResidualPlaceholders(prompt)).toEqual([]);
   });
 
   it.each<[string, Task, readonly typeof PRICING[] | undefined]>([
@@ -426,7 +426,7 @@ describe("engine-run test evidence in a brief (loom#198)", () => {
     const task = pending();
     const prompt = render(task, { verificationManifest: mutationManifest(), testEvidence: ENGINE_RUN });
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
-    expect(validateTemplateSubstitution(prompt, true)).toEqual({ kind: "allow" });
+    expect(findResidualPlaceholders(prompt)).toEqual([]);
   });
 
   it("gives a Task that owes no I6 the form to fill with its test files", () => {

@@ -139,8 +139,15 @@ describe("parseAddTaskArgs", () => {
   });
 
   it.each([
-    ["--reason", "accountManager request {accountManager} breaches", "{template variable}"],
-    ["--description", "fix the {budget} path", "{template variable}"],
+    ["--reason", "accountManager request {accountManager} breaches"],
+    ["--description", "fix the ab:outcome:{incidentId} key and the {task_id} literal"],
+  ])("admits %s %j: a brace in protected text is never read as a template variable", (flag, text) => {
+    const args = ["--file", "src/serve.ts", "--description", "d", "--reason", "r"];
+    const index = args.indexOf(flag);
+    expect(parseAddTaskArgs([...args.slice(0, index + 1), text, ...args.slice(index + 2)]).ok).toBe(true);
+  });
+
+  it.each([
     ["--reason", "see LOOM_IMPLEMENTATION_BRIEF", "LOOM_ token"],
     ["--description", "Task ID: T1", "Task ID binding"],
     ["--description", "two\nlines", "one line"],

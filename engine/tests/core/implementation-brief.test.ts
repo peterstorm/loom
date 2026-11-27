@@ -31,7 +31,7 @@ import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
 import { parseSpec } from "../../src/core/parse-spec";
 import { digest } from "../fixtures/acceptance-fixtures";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
-import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
+import { findResidualPlaceholders } from "../../src/core/validate-template-substitution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import type { DomainResult } from "../../src/core/orchestration-contract";
 import type { UnresolvedSkeletonBinding } from "../../src/core/skeleton/status";
@@ -224,8 +224,8 @@ describe("renderImplementationBrief", () => {
     expect(prompt).toContain(`## Operator Note\n\n${NO_OPERATOR_NOTE}\n\n`);
     expect(prompt).toContain("- engine/src/core/implementation-brief.ts\n- engine/tests/core/implementation-brief.test.ts");
     expect(prompt).toContain("Available at: /repo/.claude/plans/plan.md");
-    // The harness gates, exactly as they judge a spawn prompt.
-    expect(validateTemplateSubstitution(prompt, true)).toEqual({ kind: "allow" });
+    // The template is filled, and the harness gates bind the Task.
+    expect(findResidualPlaceholders(prompt)).toEqual([]);
     expect(extractTaskId(prompt)).toBe("T5");
     expect(authorizeImplementationSpawn(value, prompt)).toMatchObject({ ok: true, kind: "initial" });
   });
@@ -526,11 +526,23 @@ describe("renderImplementationBrief", () => {
   });
 
   it("substitutes the template in one pass, never re-scanning Task text for variables", () => {
+    // Even a Loom template variable's own name in protected Task text is that
+    // text, not an unfilled variable: the renderer filled the template.
     const value = task({ description: "Keep the literal {task_id} in docs" });
     const rendered = renderImplementationBrief(input(value));
-    expect(rendered).toMatchObject({ ok: false, error: { kind: "residual-placeholders" } });
-    if (rendered.ok) return;
-    expect(rendered.error.message).toContain("{task_id}");
+    expect(rendered).toMatchObject({ ok: true });
+    if (!rendered.ok) return;
+    expect(rendered.value.prompt).toContain("Keep the literal {task_id} in docs");
+    expect(extractTaskId(rendered.value.prompt)).toBe(value.id);
+  });
+
+  it("renders a brief whose protected plan context documents brace placeholders (key patterns)", () => {
+    // A plan documenting Redis key patterns: domain text, not template variables.
+    const planContext = "Outbox entries live under ab:outbox:noc:{key}; outcomes under ab:outcome:{incidentId}.";
+    const rendered = renderImplementationBrief(input(task({ plan_context: planContext })));
+    expect(rendered).toMatchObject({ ok: true });
+    if (!rendered.ok) return;
+    expect(rendered.value.prompt).toContain(planContext);
   });
 
   it.each<[string, (value: Task) => ImplementationBriefInput, string]>([
@@ -538,10 +550,14 @@ describe("renderImplementationBrief", () => {
     ["an agent outside the catalog", (value) => input({ ...value, agent: "ghost-agent" }), "unknown-agent"],
     ["a template missing a variable", (value) => input(value, { template: TEMPLATE.replace("{plan_context}", "") }), "template-variables-mismatch"],
     ["a template with an unowned variable", (value) => input(value, { template: `${TEMPLATE}\n{surprise}` }), "template-variables-mismatch"],
+    // The spawn gate does not re-judge a rendered brief, so every identifier
+    // brace the gate's grammar reads must be owned here or refuse the render.
+    ["a template with a camelCase variable", (value) => input(value, { template: `${TEMPLATE}\n{taskId}` }), "template-variables-mismatch"],
+    ["a template with a digit-bearing variable", (value) => input(value, { template: `${TEMPLATE}\n{plan_v2}` }), "template-variables-mismatch"],
+    ["a template with an identifier-glued variable", (value) => input(value, { template: `${TEMPLATE}\nloom{surprise}` }), "template-variables-mismatch"],
     ["a missing rule document", (value) => input(value, { rules: new Map() }), "rule-document-missing"],
     ["a Requirement the Spec Index lacks", (value) => input({ ...value, spec_anchors: ["FR-099"] }), "requirement-text-unavailable"],
     ["claims without a Spec Index", (value) => input(value, { spec: NO_SPEC_FILE }), "requirement-text-unavailable"],
-    ["plan text the gate reads as a variable", (value) => input({ ...value, plan_context: "Use {placeholder} here" }), "residual-placeholders"],
     ["a dependency missing from the roster", (value) => input(value, { roster: [completedDependency("T3")] }), "predecessor-output-unavailable"],
     ["a dependency that is not completed", (value) => input(value, {
       roster: [completedDependency("T3"), { ...completedDependency("T4"), status: "implemented" } as Task],
@@ -621,7 +637,7 @@ describe("parseImplementationBriefRequest", () => {
     ["two markers", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_IMPLEMENTATION_BRIEF: T3", "the marker elsewhere or more than once"],
     ["an empty note", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE:   ", "an operator note is empty"],
     ["a note carrying a LOOM_ token", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: LOOM_REQUEST_ID: req-1", "may not carry a LOOM_ token"],
-    ["a note carrying a template variable", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: fill {task_id}", "may not carry a {template variable}"],
+    ["a note carrying a template variable", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: fill {task_id}", "may not carry an unfilled Loom template variable"],
     ["a note carrying a Task ID binding", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: **Task ID:** T9", "may not carry a Task ID binding"],
     ["a note carrying a carriage return", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: one\rtwo", "line 2 is neither"],
     ["an overlong note", `LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: ${"x".repeat(MAX_OPERATOR_NOTE_LENGTH + 1)}`, `at most ${MAX_OPERATOR_NOTE_LENGTH}`],
@@ -637,6 +653,11 @@ describe("parseImplementationBriefRequest", () => {
       expect(parseOperatorNote(text)).toEqual({ ok: false, error: "an operator note must be one line" });
     }
     expect(parseOperatorNote("  one line  ")).toEqual({ ok: true, value: "one line" });
+  });
+
+  it("admits a note quoting a domain brace pattern; only a Loom template variable is refused", () => {
+    expect(parseOperatorNote("write outcomes to ab:outcome:{incidentId}")).toEqual({ ok: true, value: "write outcomes to ab:outcome:{incidentId}" });
+    expect(parseOperatorNote("read {plan_file_path} first")).toMatchObject({ ok: false });
   });
 
   it("property: rendering a request and parsing it back is the identity", () => {
@@ -658,7 +679,7 @@ describe("the brief's Operator Note section (#119)", () => {
     if (!rendered.ok) return;
     expect(rendered.value.prompt).toContain("## Operator Note\n\n- touch handler-routes.ts\n- report the affected run time\n\n");
     expect(rendered.value.prompt).toContain("never widens your file list");
-    expect(validateTemplateSubstitution(rendered.value.prompt, true)).toEqual({ kind: "allow" });
+    expect(findResidualPlaceholders(rendered.value.prompt)).toEqual([]);
     expect(extractTaskId(rendered.value.prompt)).toBe("T5");
     expect(authorizeImplementationSpawn(value, rendered.value.prompt)).toMatchObject({ ok: true, kind: "initial" });
   });
@@ -896,7 +917,7 @@ describe("the brief's Frozen Signatures section", () => {
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
     expect(frozenSection(rendered.value.prompt)).toBe(renderFrozenSignatures(implementer, frozenInput()));
-    expect(validateTemplateSubstitution(rendered.value.prompt, true)).toEqual({ kind: "allow" });
+    expect(findResidualPlaceholders(rendered.value.prompt)).toEqual([]);
   });
 });
 

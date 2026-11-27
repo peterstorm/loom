@@ -11,7 +11,8 @@
  *    write the rendered briefs into the live payload, so every later gate
  *    judges exactly the bytes the child receives. A batch whose marker cannot
  *    be rendered is refused whole, with no rewrite applied.
- * 3. **Admit** the expanded payload under the observed graph authority.
+ * 3. **Admit** the expanded payload under the observed graph authority,
+ *    telling the admission which items carry an engine-rendered brief.
  *
  * Every effect is a port, so tests drive the ordering with plain fakes. The
  * pipeline names the guard that was executing for every outcome, including a
@@ -47,11 +48,15 @@ export type SpawnPreparationPorts = Readonly<{
   /** Write one rendered brief into the live spawn payload at `slot`. */
   rewriteTask: (slot: number, task: string) => void;
   /** Run the Spawn Admission core over the expanded payload. Admission ports
-   *  that perform I/O call `enterGuard` first, so a crash names its gate. */
+   *  that perform I/O call `enterGuard` first, so a crash names its gate.
+   *  `engineBriefs` holds the exact briefs step 2 wrote into the payload: an
+   *  item whose task is one of them is engine-rendered, not parent-assembled,
+   *  so the template-substitution gate does not judge it. */
   admit: (
     input: unknown,
     graph: SpawnBatchGraphAuthority,
     enterGuard: (guard: SpawnGuardName) => void,
+    engineBriefs: ReadonlySet<string>,
   ) => SpawnAdmission;
 }>;
 
@@ -84,7 +89,8 @@ export function prepareSpawnBatch(input: unknown, ports: SpawnPreparationPorts):
     if (!briefs.ok) return Object.freeze({ kind: "block", guard, reason: briefs.reason });
     for (const { slot, prompt } of briefs.rewrites) ports.rewriteTask(slot, prompt);
 
-    const admission = ports.admit(input, graph, (entered) => { guard = entered; });
+    const engineBriefs: ReadonlySet<string> = new Set(briefs.rewrites.map(({ prompt }) => prompt));
+    const admission = ports.admit(input, graph, (entered) => { guard = entered; }, engineBriefs);
     if (admission.kind === "block") {
       return Object.freeze({ kind: "block", guard: admission.guard, reason: admission.reason });
     }

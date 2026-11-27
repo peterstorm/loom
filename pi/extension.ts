@@ -66,7 +66,7 @@ import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 // Both harnesses share ONE protected-state read seam, so a Pi gate and a
 // Claude gate cannot disagree about what "no active plan" means.
 import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate-phase-order";
-import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
+import { ENGINE_RENDERED_BRIEF, parentAssembled, validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
 import { taskGraphPath, subagentDir, guardedLocations, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
@@ -471,7 +471,7 @@ export default function (
           // Pi dispatches the live argument object it handed this handler, so
           // the rendered brief is written into it in place.
           rewriteTask: (slot, task) => replacePiSpawnTask(event.input, slot, task),
-          admit: (input, graph, enterGuard) => {
+          admit: (input, graph, enterGuard, engineBriefs) => {
             // A spawn's rendered agent may carry the declared binding or a
             // routing-authorized inherit of the (local) parent model; the
             // routing context is observed once per batch for the definition
@@ -501,7 +501,9 @@ export default function (
               },
               checkTemplateSubstitution: (task) => {
                 enterGuard("validate-template-substitution");
-                return validateTemplateSubstitution(task, graph.active);
+                // A brief this batch's markers expanded to is engine-rendered:
+                // its template was filled before protected text was spliced in.
+                return validateTemplateSubstitution(engineBriefs.has(task) ? ENGINE_RENDERED_BRIEF : parentAssembled(task), graph.active);
               },
               readIssuedRequest: (requestId, contextDigest, agent) => {
                 enterGuard("expected-emission-capability");

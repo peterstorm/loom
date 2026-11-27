@@ -16,7 +16,10 @@
  * - every sibling spawn veto expands the marker itself
  *   (`withBriefMarkerExpanded`), so it judges the brief rather than the marker,
  *   and refuses a marker it cannot expand. A test drives every `SPAWN_VETOES`
- *   entry, so a new veto that forgets the wrap fails the suite.
+ *   entry, so a new veto that forgets the wrap fails the suite. The one
+ *   exception is `validate-template-substitution`: it expands the marker only
+ *   to refuse one that cannot render, and does not judge the engine-rendered
+ *   brief for template variables.
  *
  * Every refusal blocks: a marker that cannot render, or whose spawn names
  * another agent than the Task's, never reaches the child as a bare marker.

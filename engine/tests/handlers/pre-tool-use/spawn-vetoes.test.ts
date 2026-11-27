@@ -7,17 +7,21 @@ import { rmSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HookHandler, HookResult } from "../../../src/types";
-import { firstSpawnVeto, SPAWN_VETOES } from "../../../src/handlers/pre-tool-use/spawn-vetoes";
+import { firstSpawnVeto, SPAWN_VETOES, type SpawnVetoEntry } from "../../../src/handlers/pre-tool-use/spawn-vetoes";
 import validateTaskExecution, { createValidateTaskExecutionHandler } from "../../../src/handlers/pre-tool-use/validate-task-execution";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../../src/types";
 import { preI6DefaultVerificationManifest } from "../../../src/core/verification-manifest";
 
-const returning = (result: HookResult, calls: string[], name: string) => ({
+const returning = (result: HookResult, calls: string[], name: string): SpawnVetoEntry => ({
   name,
+  judges: "expanded-brief",
   handler: (async () => { calls.push(name); return result; }) as HookHandler,
 });
+
+/** A spawn with no brief marker: the request and the expanded payload are one. */
+const SAME = { "spawn-request": "{}", "expanded-brief": "{}" } as const;
 
 describe("firstSpawnVeto", () => {
   it("runs the sibling gates in order: phase order, template, model, skill", () => {
@@ -46,8 +50,22 @@ describe("firstSpawnVeto", () => {
       returning({ kind: "allow" }, calls, "a"),
       returning({ kind: "passthrough", systemMessage: "note" }, calls, "b"),
     ];
-    expect(await firstSpawnVeto("{}", vetoes)).toBeNull();
+    expect(await firstSpawnVeto(SAME, vetoes)).toBeNull();
     expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("hands each veto the payload it judges: the template gate the request, the rest the expanded brief", async () => {
+    expect(SPAWN_VETOES.map(({ name, judges }) => [name, judges])).toEqual([
+      ["validate-phase-order", "expanded-brief"],
+      ["validate-template-substitution", "spawn-request"],
+      ["validate-agent-model", "expanded-brief"],
+      ["validate-agent-skill", "expanded-brief"],
+    ]);
+    const seen: string[] = [];
+    const recording = (judges: SpawnVetoEntry["judges"]): SpawnVetoEntry =>
+      ({ name: judges, judges, handler: async (stdin) => { seen.push(stdin); return { kind: "allow" }; } });
+    await firstSpawnVeto({ "spawn-request": "marker", "expanded-brief": "brief" }, [recording("expanded-brief"), recording("spawn-request")]);
+    expect(seen).toEqual(["brief", "marker"]);
   });
 
   it("returns the first block or error and runs nothing after it", async () => {
@@ -58,7 +76,7 @@ describe("firstSpawnVeto", () => {
         returning(refusal, calls, "b"),
         returning({ kind: "block", message: "later" }, calls, "c"),
       ];
-      expect(await firstSpawnVeto("{}", vetoes)).toEqual(refusal);
+      expect(await firstSpawnVeto(SAME, vetoes)).toEqual(refusal);
       expect(calls).toEqual(["a", "b"]);
     }
   });
@@ -97,7 +115,7 @@ describe("validate-task-execution — no reservation behind a veto", () => {
     const statePath = stateFile();
     const before = readFileSync(statePath);
     const veto: HookResult = { kind: "block", message: "BLOCKED: Prompt doesn't reference required skill(s)." };
-    const handler = createValidateTaskExecutionHandler([{ name: "validate-agent-skill", handler: async () => veto }]);
+    const handler = createValidateTaskExecutionHandler([{ name: "validate-agent-skill", judges: "expanded-brief", handler: async () => veto }]);
     expect(await handler(spawn, [])).toEqual(veto);
     expect(readFileSync(statePath).equals(before)).toBe(true);
   });
@@ -115,7 +133,7 @@ describe("validate-task-execution — no reservation behind a veto", () => {
 
   it("reaches task-execution validation when every veto admits the spawn", async () => {
     stateFile();
-    const handler = createValidateTaskExecutionHandler([{ name: "admit", handler: async () => ({ kind: "allow" }) }]);
+    const handler = createValidateTaskExecutionHandler([{ name: "admit", judges: "expanded-brief", handler: async () => ({ kind: "allow" }) }]);
     const unbound = JSON.stringify({
       tool_name: "Agent",
       tool_input: { subagent_type: "loom:code-implementer-agent", prompt: "implement this without a binding", description: "" },

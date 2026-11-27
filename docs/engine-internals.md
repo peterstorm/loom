@@ -380,7 +380,7 @@ For each Wave, the orchestrator dispatches every dependency-ready implementation
 
 1. `validate-phase-order` — phase sequencing by agent identity; the decompose spawn additionally refused until the plan design review is accepted for the plan's *current* bytes. An unknown `loom:` name is refused; a foreign agent passes (what it may write is `block-direct-edits`' decision).
 2. `validate-task-execution` — the heart (§6.8.2).
-3. `validate-template-substitution` — refuses a prompt still holding an unsubstituted `{variable}`.
+3. `validate-template-substitution` — refuses a parent-assembled prompt still holding an unfilled Loom template variable: a `{name}` that one of `commands/templates/*.md` declares (`LOOM_TEMPLATE_VARIABLES`, pinned to that corpus by a test). Any other `{word}` is the prompt's own text. It judges the spawn request, not the expanded brief: a marker must render, and the brief is engine-rendered, its template proven filled before protected Task, plan, Spec and rule text was spliced in, so a key pattern such as `ab:outcome:{incidentId}` in a Task's plan context never blocks its dispatch. In `validate-task-execution`'s veto composition each veto declares the payload it judges (`SpawnVetoEntry.judges`); on Pi, spawn preparation passes the admission the briefs it rendered.
 4. `validate-agent-model` — refuses a model that does not match the Agent's LLM Profile binding.
 5. `validate-agent-skill` — refuses a prompt not naming the Agent's required Skill.
 6. `block-direct-edits` (matcher Edit/Write/MultiEdit) — the parent cannot edit; a phase agent writes only under its artifact roots; an implementation agent only once its exact attempt is bound (pending is a retriable block) and never while its Task is in attestation mode (ADR-0085).

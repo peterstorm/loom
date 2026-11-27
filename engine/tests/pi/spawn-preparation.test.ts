@@ -42,8 +42,8 @@ function fakePorts(overrides: Partial<{
     rewriteTask: (slot, task) => {
       calls.push({ port: "rewriteTask", detail: { slot, task } });
     },
-    admit: (input, graph) => {
-      calls.push({ port: "admit", detail: { input: structuredClone(input), graph } });
+    admit: (input, graph, _enterGuard, engineBriefs) => {
+      calls.push({ port: "admit", detail: { input: structuredClone(input), graph, engineBriefs: [...engineBriefs] } });
       return overrides.admission ?? { kind: "pass-through" };
     },
   };
@@ -65,6 +65,16 @@ describe("prepareSpawnBatch", () => {
     expect(calls.map(({ port }) => port)).toEqual(["observeGraph", "renderBrief", "rewriteTask", "admit"]);
     expect(calls[1]!.detail).toEqual({ graphPath: "/worktree/graph.json", taskId: "T5", operatorNotes: [] });
     expect(calls[2]!.detail).toEqual({ slot: 1, task: "rendered T5" });
+  });
+
+  it("tells the admission which tasks are engine-rendered briefs, and only those", () => {
+    const { ports, calls } = fakePorts();
+    prepareSpawnBatch(markerBatch(), ports);
+    expect(calls.find(({ port }) => port === "admit")?.detail).toMatchObject({ engineBriefs: ["rendered T5"] });
+
+    const plain = fakePorts();
+    prepareSpawnBatch({ agent: "code-reviewer", task: "Review ab:outcome:{incidentId}." }, plain.ports);
+    expect(plain.calls.find(({ port }) => port === "admit")?.detail).toMatchObject({ engineBriefs: [] });
   });
 
   it("lets a spawn-cwd graph govern the batch without resolving the runtime graph", () => {
