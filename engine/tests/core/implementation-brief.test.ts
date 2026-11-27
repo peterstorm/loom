@@ -550,6 +550,11 @@ describe("renderImplementationBrief", () => {
     ["an agent outside the catalog", (value) => input({ ...value, agent: "ghost-agent" }), "unknown-agent"],
     ["a template missing a variable", (value) => input(value, { template: TEMPLATE.replace("{plan_context}", "") }), "template-variables-mismatch"],
     ["a template with an unowned variable", (value) => input(value, { template: `${TEMPLATE}\n{surprise}` }), "template-variables-mismatch"],
+    // The spawn gate does not re-judge a rendered brief, so every identifier
+    // brace the gate's grammar reads must be owned here or refuse the render.
+    ["a template with a camelCase variable", (value) => input(value, { template: `${TEMPLATE}\n{taskId}` }), "template-variables-mismatch"],
+    ["a template with a digit-bearing variable", (value) => input(value, { template: `${TEMPLATE}\n{plan_v2}` }), "template-variables-mismatch"],
+    ["a template with an identifier-glued variable", (value) => input(value, { template: `${TEMPLATE}\nloom{surprise}` }), "template-variables-mismatch"],
     ["a missing rule document", (value) => input(value, { rules: new Map() }), "rule-document-missing"],
     ["a Requirement the Spec Index lacks", (value) => input({ ...value, spec_anchors: ["FR-099"] }), "requirement-text-unavailable"],
     ["claims without a Spec Index", (value) => input(value, { spec: NO_SPEC_FILE }), "requirement-text-unavailable"],

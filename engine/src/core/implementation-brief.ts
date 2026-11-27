@@ -227,7 +227,15 @@ export type ImplementationBriefError =
 const refused = (kind: ImplementationBriefError["kind"], message: string): DomainResult<never, ImplementationBriefError> =>
   canonicalRecord({ ok: false as const, error: canonicalRecord({ kind, message }) });
 
-const PLACEHOLDER = /\{([a-z_]+)\}/g;
+/**
+ * Every identifier brace in the template, in any position. It is at least as
+ * wide as the spawn gate's token grammar (`placeholderTokens`), because the
+ * gate no longer re-judges a rendered brief: a template brace this misses
+ * (`{taskId}`, `{plan_v2}`) would be neither owned nor filled, and nothing
+ * downstream would catch it. Any such brace makes the template declare a
+ * variable the renderer does not own, which refuses the render.
+ */
+const PLACEHOLDER = /\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g;
 
 function templateVariables(template: string): readonly string[] {
   return [...new Set([...template.matchAll(PLACEHOLDER)].map((match) => match[1] ?? ""))].sort();
