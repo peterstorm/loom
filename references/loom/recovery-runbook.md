@@ -85,7 +85,7 @@ bun {LOOM_DIR}/engine/src/cli.ts helper orchestration amend-export-binding \
   --reason "<why the design cannot implement the binding>"
 ```
 
-`--rebind <newName>` renames the export instead and keeps its frozen alias. The Task must be pending, with no live attempt and no live Wave Gate run. When the last export is dropped, the file is no longer bound, and the skeleton the engine wrote there becomes the Task's own code to replace. Then dispatch the Task from its brief: its retry appendix lists the withdrawn violation as no longer owed. Correct the plan as well if it will be re-populated. The full contract is in `docs/reference/recovery.md` (Correcting a Task's Export Binding).
+`--rebind <newName>` renames the export instead and keeps its frozen alias. The Task must be pending, with no live attempt and no live Wave Gate run. If another non-Distill Task that lists the file has already settled (`implemented` or `completed`) against the binding, the amendment is refused (`shared-with-settled-task`): reopen that Task first, or correct the plan and re-populate. A settled Distill Task does not block it. When the last export is dropped, the file is no longer bound, and the skeleton the engine wrote there becomes the Task's own code to replace. Then dispatch the Task from its brief: its retry appendix lists the withdrawn violation as no longer owed. Correct the plan as well if it will be re-populated. The full contract is in `docs/reference/recovery.md` (Correcting a Task's Export Binding).
 
 ## A Task the Wave needs that decompose did not plan
 

@@ -66,7 +66,7 @@ const PASS = distillTaskFixture({
 const ROSTER: readonly Task[] = [implementer("T5", OWNER), implementer("T6", SIBLING), PASS];
 
 const render = (task: Task, overrides: Partial<ImplementationBriefInput> = {}): string => {
-  const derivation = deriveTaskImplementationDispatch(task);
+  const derivation = deriveTaskImplementationDispatch(task, undefined);
   if (derivation.kind !== "dispatch") throw new Error(`fixture Task must be owed a dispatch, got ${derivation.kind}`);
   const rendered = renderImplementationBrief({
     template: TEMPLATE,
@@ -111,7 +111,7 @@ describe("a Distill Task's implementation brief (ADR-0068 §8)", () => {
   });
 
   it("is admitted by the spawn gate and carries no unsubstituted variable", () => {
-    expect(authorizeImplementationSpawn(PASS, prompt)).toMatchObject({ ok: true, kind: "initial", taskId: "T9" });
+    expect(authorizeImplementationSpawn(PASS, prompt, undefined)).toMatchObject({ ok: true, kind: "initial", taskId: "T9" });
     expect(findResidualPlaceholders(prompt)).toEqual([]);
   });
 
@@ -149,7 +149,7 @@ describe("a Distill Task's implementation brief (ADR-0068 §8)", () => {
     const context = section(retried, "Engine-Issued Implementation Retry Context");
     expect(context).toMatch(/^LOOM_IMPLEMENTATION_RETRY_CONTEXT: \{/);
     expect(context).toContain(`\n${distillPromptAppendix(PASS)}\n\n`);
-    expect(authorizeImplementationSpawn(retrying, retried)).toMatchObject({ ok: true, kind: "retry" });
+    expect(authorizeImplementationSpawn(retrying, retried, undefined)).toMatchObject({ ok: true, kind: "retry" });
   });
 
   it("leaves an implementer's brief as it was", () => {
@@ -157,7 +157,7 @@ describe("a Distill Task's implementation brief (ADR-0068 §8)", () => {
     const implementerPrompt = render(pending);
     expect(section(implementerPrompt, "Engine-Issued Implementation Retry Context")).toContain(NO_RETRY_CONTEXT);
     expect(section(implementerPrompt, "Verification Policy")).not.toContain("distill-pass");
-    expect(authorizeImplementationSpawn(pending, implementerPrompt)).toMatchObject({ ok: true });
+    expect(authorizeImplementationSpawn(pending, implementerPrompt, undefined)).toMatchObject({ ok: true });
   });
 });
 
@@ -334,7 +334,7 @@ describe("the Task mutation check in a brief (ADR-0071)", () => {
   it("keeps an owing implementer's brief admissible to the spawn gate", () => {
     const task = pending();
     const prompt = render(task, { verificationManifest: mutationManifest() });
-    expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
+    expect(authorizeImplementationSpawn(task, prompt, undefined)).toMatchObject({ ok: true });
     expect(findResidualPlaceholders(prompt)).toEqual([]);
   });
 
@@ -390,7 +390,7 @@ describe("the Task owner check in a brief (ADR-0092)", () => {
       ownership: briefOwnership([PRICING], [], task.file_list ?? []),
     });
     expect(prompt).toContain(HEADING);
-    expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
+    expect(authorizeImplementationSpawn(task, prompt, undefined)).toMatchObject({ ok: true });
     expect(findResidualPlaceholders(prompt)).toEqual([]);
   });
 
@@ -425,7 +425,7 @@ describe("engine-run test evidence in a brief (loom#198)", () => {
   it("keeps the brief admissible to the spawn gate", () => {
     const task = pending();
     const prompt = render(task, { verificationManifest: mutationManifest(), testEvidence: ENGINE_RUN });
-    expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
+    expect(authorizeImplementationSpawn(task, prompt, undefined)).toMatchObject({ ok: true });
     expect(findResidualPlaceholders(prompt)).toEqual([]);
   });
 

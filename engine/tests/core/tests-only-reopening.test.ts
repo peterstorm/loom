@@ -214,7 +214,7 @@ describe("reopenImplementedTasks --needs tests", () => {
   });
 
   it("tells the dispatched implementer what is owed and that implementation files are off limits", () => {
-    const derivation = deriveTaskImplementationDispatch(byId(committed(graph()), "T1"));
+    const derivation = deriveTaskImplementationDispatch(byId(committed(graph()), "T1"), undefined);
     if (derivation.kind !== "dispatch") throw new Error(`expected a dispatch, got ${derivation.kind}`);
     expect(derivation.dispatch).toMatchObject({ kind: "initial-implementation", semanticAttempt: 1 });
     const appendix = derivation.dispatch.promptAppendix ?? "";
@@ -756,7 +756,7 @@ describe("the brief for a tests-only attempt", () => {
     [name, readFileSync(join(LOOM_PACKAGE_ROOT, "rules", name), "utf8")] as const));
 
   const render = (task: Task) => {
-    const derivation = deriveTaskImplementationDispatch(task);
+    const derivation = deriveTaskImplementationDispatch(task, undefined);
     if (derivation.kind !== "dispatch") throw new Error(`expected a dispatch, got ${derivation.kind}`);
     const rendered = renderImplementationBrief({
       template: TEMPLATE, task, dispatch: derivation.dispatch, verificationManifest: i6RunnerManifest(),

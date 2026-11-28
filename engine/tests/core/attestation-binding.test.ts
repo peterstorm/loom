@@ -174,15 +174,15 @@ describe("authorizeImplementationSpawn — attestation binding", () => {
 
   it("admits an initial attestation spawn only with the exact context line", () => {
     const appendix = attestationAppendix();
-    expect(authorizeImplementationSpawn(attestationTask() as never, promptWith(appendix)))
+    expect(authorizeImplementationSpawn(attestationTask() as never, promptWith(appendix), undefined))
       .toMatchObject({ ok: true, kind: "initial", semanticAttempt: 1 });
-    expect(authorizeImplementationSpawn(attestationTask() as never, promptWith(null)))
+    expect(authorizeImplementationSpawn(attestationTask() as never, promptWith(null), undefined))
       .toMatchObject({
         ok: false,
         error: "Task T1 is in attestation mode and requires the exact attestation context from orchestration status",
       });
     const tampered = promptWith(appendix.replace(/"taskId":"T1"/, "\"taskId\":\"T9\""));
-    expect(authorizeImplementationSpawn(attestationTask() as never, tampered))
+    expect(authorizeImplementationSpawn(attestationTask() as never, tampered, undefined))
       .toMatchObject({
         ok: false,
         error: "Task T1 attestation context bytes do not match the stored attestation proof",
@@ -191,12 +191,12 @@ describe("authorizeImplementationSpawn — attestation binding", () => {
 
   it("refuses an attestation context on a task that is not in attestation mode", () => {
     const appendix = attestationAppendix();
-    expect(authorizeImplementationSpawn({ id: "T1" }, promptWith(appendix)))
+    expect(authorizeImplementationSpawn({ id: "T1" }, promptWith(appendix), undefined))
       .toMatchObject({
         ok: false,
         error: "Task T1 is not in attestation mode; refusing a caller-supplied attestation context",
       });
-    expect(authorizeImplementationSpawn({ id: "T1" }, promptWith(null)))
+    expect(authorizeImplementationSpawn({ id: "T1" }, promptWith(null), undefined))
       .toMatchObject({ ok: true, kind: "initial" });
   });
 
@@ -207,18 +207,18 @@ describe("authorizeImplementationSpawn — attestation binding", () => {
       implementation_retry_protocol: 2,
       implementation_retry_history_start: 0,
     });
-    const disposition = deriveImplementationRetryDisposition(task as never);
+    const disposition = deriveImplementationRetryDisposition(task as never, undefined);
     if (disposition.kind !== "retry") throw new Error("retry lineage fixture failed");
     const retryLine = disposition.promptAppendix;
     const appendix = attestationAppendix();
 
     // Retry line without the attestation line: refused.
-    expect(authorizeImplementationSpawn(task as never, promptWith(null, retryLine))).toMatchObject({
+    expect(authorizeImplementationSpawn(task as never, promptWith(null, retryLine), undefined)).toMatchObject({
       ok: false,
       error: "Task T1 is in attestation mode and requires the exact attestation context from orchestration status",
     });
     // Both lines: attempt 2 admitted.
-    expect(authorizeImplementationSpawn(task as never, promptWith(appendix, retryLine))).toMatchObject({
+    expect(authorizeImplementationSpawn(task as never, promptWith(appendix, retryLine), undefined)).toMatchObject({
       ok: true,
       kind: "retry",
       semanticAttempt: 2,
@@ -226,14 +226,14 @@ describe("authorizeImplementationSpawn — attestation binding", () => {
     });
     // Tampered attestation line: refused even with the exact retry line.
     const tamperedAppendix = appendix.replace(/"taskId":"T1"/, "\"taskId\":\"T9\"");
-    expect(authorizeImplementationSpawn(task as never, promptWith(tamperedAppendix, retryLine)))
+    expect(authorizeImplementationSpawn(task as never, promptWith(tamperedAppendix, retryLine), undefined))
       .toMatchObject({ ok: false });
   });
 
   it("attempt context creation still binds the admitted prompt bytes", () => {
     const appendix = attestationAppendix();
     const prompt = promptWith(appendix);
-    const admission = authorizeImplementationSpawn(attestationTask() as never, prompt);
+    const admission = authorizeImplementationSpawn(attestationTask() as never, prompt, undefined);
     expect(admission).toMatchObject({ ok: true });
     if (!admission.ok) return;
     const authority = {

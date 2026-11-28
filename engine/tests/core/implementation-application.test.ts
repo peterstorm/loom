@@ -977,7 +977,7 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       observedBytes(),
     ));
     const retried = result.state.tasks[0]!;
-    const disposition = deriveImplementationRetryDisposition(retried);
+    const disposition = deriveImplementationRetryDisposition(retried, undefined);
     expect(disposition.kind).toBe("retry");
     if (disposition.kind !== "retry") return;
     const [contextLine, ...violationLines] = disposition.promptAppendix.split("\n");
@@ -990,9 +990,9 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
       "  - OrderState: re-lists-frozen-variants — LegacyState re-lists the variants of the frozen union OrderState",
     ]);
     // The spawn gate admits the exact appendix and refuses one stripped of its violations.
-    expect(authorizeImplementationSpawn(retried, `Task ID: T1\n${disposition.promptAppendix}`))
+    expect(authorizeImplementationSpawn(retried, `Task ID: T1\n${disposition.promptAppendix}`, undefined))
       .toMatchObject({ ok: true, kind: "retry" });
-    expect(authorizeImplementationSpawn(retried, `Task ID: T1\n${contextLine}`)).toMatchObject({ ok: false });
+    expect(authorizeImplementationSpawn(retried, `Task ID: T1\n${contextLine}`, undefined)).toMatchObject({ ok: false });
   });
 
   it("bounds an over-long violation list in its failure kind, naming how many it leaves out", () => {
@@ -1017,7 +1017,7 @@ describe("contract conformance at settlement (AD-5, FR-021)", () => {
     expect(decoded.value.shown[0]).toEqual({ subject: "export0", reason: "deleted", remedy: null });
     expect(decoded.value.omitted).toBeGreaterThan(0);
     expect(decoded.value.shown.length + decoded.value.omitted).toBe(400);
-    const disposition = deriveImplementationRetryDisposition(result.state.tasks[0]!);
+    const disposition = deriveImplementationRetryDisposition(result.state.tasks[0]!, undefined);
     expect(disposition.kind === "retry" ? disposition.promptAppendix : "")
       .toContain(`  - and ${decoded.value.omitted} more violations not shown`);
     // The stored Proof still carries every violation.

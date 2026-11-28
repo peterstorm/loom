@@ -66,7 +66,7 @@ if (!createdAuthority.ok) throw new Error(createdAuthority.error.errors.join("; 
 // Protocol-2 lineage fields are part of every modern registration: the
 // rollback settlement appends a reclaimed receipt and the updated graph must
 // parse (a receipt-bearing Task without the lineage fields fails closed).
-const rosterAdmission = authorizeImplementationSpawn({ id: "T1" }, "Task ID: T1");
+const rosterAdmission = authorizeImplementationSpawn({ id: "T1" }, "Task ID: T1", undefined);
 if (!rosterAdmission.ok) throw new Error(rosterAdmission.error);
 const modernGraph: TaskGraph = {
   current_phase: "execute", verification_manifest: preI6DefaultVerificationManifest(), phase_artifacts: {}, skipped_phases: [],

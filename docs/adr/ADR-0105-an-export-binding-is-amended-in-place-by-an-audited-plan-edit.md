@@ -49,7 +49,9 @@ Task, add a dependency, add or withdraw a Task. A binding had no such edit.
   - a Task that is not `pending`, or that sits in a completed Wave;
   - a Task with its own reservation or attempt;
   - a Distill Task;
-  - a binding whose path a settled Task also lists;
+  - a binding whose path another settled (`implemented` or `completed`) Task that holds skeletons also lists.
+    A settled Distill Task listing the path does not block: it holds no skeletons and implemented nothing
+    against the binding;
   - a contract still `awaiting-red`, whose contract Task's stop still writes stubs from the stamp.
 
   A refusal writes nothing.

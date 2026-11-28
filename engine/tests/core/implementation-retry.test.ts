@@ -26,9 +26,9 @@ import {
   derivePendingTaskProof,
 } from "../../src/core/proof-obligations";
 import { compareStrings } from "../../src/core/ordering";
-import { parseIdentifier } from "../../src/core/skeleton/bindings";
-import type { ExportBinding, Identifier } from "../../src/core/skeleton/types";
+import type { ExportBinding } from "../../src/core/skeleton/types";
 import { value } from "../fixtures/parse-result";
+import { binding } from "../fixtures/skeleton-builders";
 import { observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 function authority(
@@ -113,16 +113,16 @@ function retryTask(history: readonly ImplementationAttemptSettlementReceipt[]) {
 describe("bounded implementation retry admission", () => {
   it("starts a fresh lineage at semantic attempt 1 and rejects invented retry context", () => {
     const task = retryTask([]);
-    expect(deriveImplementationRetryDisposition(task)).toEqual({ kind: "initial", semanticAttempt: 1 });
-    expect(authorizeImplementationSpawn(task, "Task ID: T1")).toMatchObject({
+    expect(deriveImplementationRetryDisposition(task, undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(authorizeImplementationSpawn(task, "Task ID: T1", undefined)).toMatchObject({
       ok: true,
       kind: "initial",
       semanticAttempt: 1,
     });
 
-    const foreign = deriveImplementationRetryDisposition(retryTask([retryReceipt()]));
+    const foreign = deriveImplementationRetryDisposition(retryTask([retryReceipt()]), undefined);
     if (foreign.kind !== "retry") throw new Error("retry fixture failed");
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${foreign.promptAppendix}`)).toEqual({
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${foreign.promptAppendix}`, undefined)).toEqual({
       ok: false,
       error: "Task T1 has no current retry authority; refusing a caller-supplied retry context",
     });
@@ -132,8 +132,8 @@ describe("bounded implementation retry admission", () => {
     // An empty history derives `initial` without reading the history start,
     // so the spawn admission is where its absence must fail closed.
     const { implementation_retry_history_start: _start, ...unstarted } = retryTask([]);
-    expect(deriveImplementationRetryDisposition(unstarted)).toEqual({ kind: "initial", semanticAttempt: 1 });
-    expect(authorizeImplementationSpawn(unstarted, "Task ID: T1")).toEqual({
+    expect(deriveImplementationRetryDisposition(unstarted, undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(authorizeImplementationSpawn(unstarted, "Task ID: T1", undefined)).toEqual({
       ok: false,
       error: "Task T1 uses retry protocol 2 but records no retry history start",
     });
@@ -151,27 +151,27 @@ describe("bounded implementation retry admission", () => {
       ...retryTask([]),
       implementation_retry_predecessor_receipt_id: retryReceipt().receiptId,
     };
-    expect(deriveImplementationRetryDisposition(seeded)).toMatchObject({
+    expect(deriveImplementationRetryDisposition(seeded, undefined)).toMatchObject({
       kind: "invalid",
       errors: ["initial compatibility prefix cannot carry a retry predecessor"],
     });
-    expect(authorizeImplementationSpawn(seeded, "Task ID: T1")).toMatchObject({ ok: false });
+    expect(authorizeImplementationSpawn(seeded, "Task ID: T1", undefined)).toMatchObject({ ok: false });
     // An unseeded empty history stays a fresh lineage.
-    expect(deriveImplementationRetryDisposition(retryTask([]))).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition(retryTask([]), undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
   });
 
   it("requires the byte-exact current retry appendix before minting semantic attempt 2", () => {
     const receipt = retryReceipt();
     const task = retryTask([receipt]);
-    const disposition = deriveImplementationRetryDisposition(task);
+    const disposition = deriveImplementationRetryDisposition(task, undefined);
     expect(disposition.kind).toBe("retry");
     if (disposition.kind !== "retry") return;
 
-    expect(authorizeImplementationSpawn(task, "Task ID: T1")).toEqual({
+    expect(authorizeImplementationSpawn(task, "Task ID: T1", undefined)).toEqual({
       ok: false,
       error: "Task T1 requires the exact attempt-2 retry context from orchestration status",
     });
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`)).toMatchObject({
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`, undefined)).toMatchObject({
       ok: true,
       kind: "retry",
       taskId: "T1",
@@ -181,15 +181,15 @@ describe("bounded implementation retry admission", () => {
       predecessorReceiptId: receipt.receiptId,
     });
     const tampered = disposition.promptAppendix.replace(receipt.receiptId, "f".repeat(64));
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${tampered}`)).toMatchObject({ ok: false });
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${tampered}`, undefined)).toMatchObject({ ok: false });
     const reformatted = disposition.promptAppendix.replace(": {", ": { ");
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${reformatted}`)).toEqual({
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${reformatted}`, undefined)).toEqual({
       ok: false,
       error: `Task T1 retry context bytes do not match current receipt ${receipt.receiptId}`,
     });
     expect(authorizeImplementationSpawn(
       task,
-      `Task ID: T1\n${disposition.promptAppendix}\n${disposition.promptAppendix}`,
+      `Task ID: T1\n${disposition.promptAppendix}\n${disposition.promptAppendix}`, undefined,
     )).toEqual({
       ok: false,
       error: "implementation prompt must contain at most one retry context",
@@ -205,10 +205,10 @@ describe("bounded implementation retry admission", () => {
 
   it("round-trips exact retry and attempt contexts and rejects digest tampering", () => {
     const receipt = retryReceipt();
-    const disposition = deriveImplementationRetryDisposition(retryTask([receipt]));
+    const disposition = deriveImplementationRetryDisposition(retryTask([receipt]), undefined);
     if (disposition.kind !== "retry") throw new Error("retry fixture failed");
     const parsedRetry = parseImplementationRetryContext(JSON.parse(
-      renderImplementationRetryContext(disposition.context).split(": ", 2)[1]!,
+      renderImplementationRetryContext(disposition.context, undefined).split(": ", 2)[1]!,
     ));
     expect(parsedRetry).toEqual({ ok: true, value: disposition.context });
     expect(parseImplementationRetryContext({ ...disposition.context, extra: true })).toMatchObject({ ok: false });
@@ -223,7 +223,7 @@ describe("bounded implementation retry admission", () => {
 
     const attempt = authority(2, "attempt-two", 2);
     const prompt = `Task ID: T1\n${disposition.promptAppendix}`;
-    const admission = authorizeImplementationSpawn(retryTask([receipt]), prompt);
+    const admission = authorizeImplementationSpawn(retryTask([receipt]), prompt, undefined);
     if (!admission.ok || admission.kind !== "retry") throw new Error("retry admission fixture failed");
     const context = createImplementationAttemptContext({
       authority: attempt,
@@ -236,7 +236,7 @@ describe("bounded implementation retry admission", () => {
     });
     expect(parseImplementationAttemptContext({ ...context, promptDigest: "b".repeat(64) })).toMatchObject({ ok: false });
 
-    const initialAdmission = authorizeImplementationSpawn(retryTask([]), "Task ID: T1");
+    const initialAdmission = authorizeImplementationSpawn(retryTask([]), "Task ID: T1", undefined);
     if (!initialAdmission.ok) throw new Error("initial admission fixture failed");
     expect(() => createImplementationAttemptContext({
       authority: attempt,
@@ -288,11 +288,11 @@ describe("bounded implementation retry admission", () => {
       observation("2026-09-01T00:02:00.000Z", false),
     );
     const task = retryTask([retry, escalation]);
-    expect(deriveImplementationRetryDisposition(task)).toMatchObject({
+    expect(deriveImplementationRetryDisposition(task, undefined)).toMatchObject({
       kind: "escalated",
       receiptId: escalation.receiptId,
     });
-    expect(authorizeImplementationSpawn(task, "Task ID: T1")).toMatchObject({
+    expect(authorizeImplementationSpawn(task, "Task ID: T1", undefined)).toMatchObject({
       ok: false,
       error: expect.stringContaining("requires escalation"),
     });
@@ -324,7 +324,7 @@ describe("bounded implementation retry admission", () => {
       implementation_attestation: true as const,
       proof: attestationProof,
     };
-    expect(deriveImplementationRetryDisposition(terminalTask)).toMatchObject({
+    expect(deriveImplementationRetryDisposition(terminalTask, undefined)).toMatchObject({
       kind: "escalated",
       receiptId: result.value.receipt.receiptId,
       failureKinds: expect.arrayContaining(["proof:attempt-scope-drifted"]),
@@ -340,7 +340,7 @@ describe("bounded implementation retry admission", () => {
     expect(deriveImplementationRetryDisposition({
       ...terminalTask,
       implementation_attempt_history: [...terminalTask.implementation_attempt_history, remediation.value],
-    })).toEqual({ kind: "initial", semanticAttempt: 1 });
+    }, undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
   });
 
   it("starts a new attempt-1 lineage after an accepted implementation is deliberately reopened", () => {
@@ -356,7 +356,7 @@ describe("bounded implementation retry admission", () => {
       implementation_attempt_history: [retry, implemented],
       implementation_retry_protocol: 2,
       implementation_retry_history_start: 0,
-    })).toEqual({ kind: "initial", semanticAttempt: 1 });
+    }, undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
   });
 
   it("rejects every contradictory settlement transition in wire order", () => {
@@ -389,13 +389,13 @@ describe("bounded implementation retry admission", () => {
       [retry, escalation, afterEscalation],
     ];
     for (const history of contradictory) {
-      expect(deriveImplementationRetryDisposition(retryTask(history))).toMatchObject({ kind: "invalid" });
+      expect(deriveImplementationRetryDisposition(retryTask(history), undefined)).toMatchObject({ kind: "invalid" });
     }
     for (const receipt of [attempt2Infrastructure, escalation]) {
       expect(deriveImplementationRetryDisposition({
         id: "T1",
         implementation_attempt_history: [receipt],
-      })).toMatchObject({
+      }, undefined)).toMatchObject({
         kind: "invalid",
         errors: [expect.stringContaining("attempt history requires protocol-2 retry lineage")],
       });
@@ -427,45 +427,45 @@ describe("bounded implementation retry admission", () => {
       [retry, infrastructure],
       [retry, repeatedRetry],
     ]) {
-      expect(deriveImplementationRetryDisposition({ id: "T1", implementation_attempt_history: history }))
+      expect(deriveImplementationRetryDisposition({ id: "T1", implementation_attempt_history: history }, undefined))
         .toMatchObject({
           kind: "invalid",
           errors: [expect.stringContaining("attempt history requires protocol-2 retry lineage")],
         });
     }
     // An empty history is a fresh lineage with or without protocol metadata.
-    expect(deriveImplementationRetryDisposition({ id: "T1" })).toEqual({ kind: "initial", semanticAttempt: 1 });
-    expect(deriveImplementationRetryDisposition(retryTask([]))).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition({ id: "T1" }, undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition(retryTask([]), undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
     // With the protocol-2 fields the SAME attempt-1 receipts project, and only
     // attempt-2 receipts may follow a retry authorization (wire order holds).
-    expect(deriveImplementationRetryDisposition(retryTask([retry])))
+    expect(deriveImplementationRetryDisposition(retryTask([retry]), undefined))
       .toMatchObject({ kind: "retry", predecessor: { receiptId: retry.receiptId } });
     const attempt2Implemented = settle(
       authority(2, "protocol-impl-2", 10),
       [retry],
       observation("2026-09-01T00:10:00.000Z", true),
     );
-    expect(deriveImplementationRetryDisposition(retryTask([retry, attempt2Implemented])))
+    expect(deriveImplementationRetryDisposition(retryTask([retry, attempt2Implemented]), undefined))
       .toEqual({ kind: "initial", semanticAttempt: 1 });
     const attempt2Infrastructure = settle(
       authority(2, "protocol-infra-2", 11),
       [retry],
       unavailable("2026-09-01T00:11:00.000Z"),
     );
-    expect(deriveImplementationRetryDisposition(retryTask([retry, attempt2Infrastructure])))
+    expect(deriveImplementationRetryDisposition(retryTask([retry, attempt2Infrastructure]), undefined))
       .toMatchObject({ kind: "retry", semanticAttempt: 2 });
     // Attempt-1 receipts after a retry authorization are contradictions.
-    expect(deriveImplementationRetryDisposition(retryTask([retry, implemented])))
+    expect(deriveImplementationRetryDisposition(retryTask([retry, implemented]), undefined))
       .toMatchObject({ kind: "invalid" });
-    expect(deriveImplementationRetryDisposition(retryTask([retry, infrastructure])))
+    expect(deriveImplementationRetryDisposition(retryTask([retry, infrastructure]), undefined))
       .toMatchObject({ kind: "invalid" });
-    expect(deriveImplementationRetryDisposition(retryTask([retry, repeatedRetry])))
+    expect(deriveImplementationRetryDisposition(retryTask([retry, repeatedRetry]), undefined))
       .toMatchObject({ kind: "invalid" });
     // History-start bounds and terminal-skip guards still apply.
     expect(deriveImplementationRetryDisposition({
       ...retryTask([retry, attempt2Infrastructure]),
       implementation_retry_history_start: 2,
-    })).toMatchObject({ kind: "invalid" });
+    }, undefined)).toMatchObject({ kind: "invalid" });
     const attempt2 = authority(2, "legacy-terminal", 9);
     const escalation = settle(
       attempt2,
@@ -475,8 +475,8 @@ describe("bounded implementation retry admission", () => {
     expect(deriveImplementationRetryDisposition({
       ...retryTask([retry, escalation]),
       implementation_retry_history_start: 2,
-    })).toMatchObject({ kind: "invalid" });
-    expect(deriveImplementationRetryDisposition(retryTask([retry, escalation])))
+    }, undefined)).toMatchObject({ kind: "invalid" });
+    expect(deriveImplementationRetryDisposition(retryTask([retry, escalation]), undefined))
       .toMatchObject({ kind: "escalated", receiptId: escalation.receiptId });
   });
 
@@ -493,7 +493,7 @@ describe("bounded implementation retry admission", () => {
           );
         });
         const retry = retryReceipt();
-        expect(deriveImplementationRetryDisposition(retryTask([...infrastructure, retry]))).toMatchObject({
+        expect(deriveImplementationRetryDisposition(retryTask([...infrastructure, retry]), undefined)).toMatchObject({
           kind: "retry",
           semanticAttempt: 2,
         });
@@ -511,7 +511,7 @@ describe("bounded implementation retry admission", () => {
           [retry],
           unavailable(`2026-09-01T00:04:${String(index).padStart(2, "0")}.000Z`),
         ));
-        expect(deriveImplementationRetryDisposition(retryTask([retry, ...infrastructure]))).toMatchObject({
+        expect(deriveImplementationRetryDisposition(retryTask([retry, ...infrastructure]), undefined)).toMatchObject({
           kind: "retry",
           semanticAttempt: 2,
           predecessor: { receiptId: retry.receiptId },
@@ -547,7 +547,7 @@ describe("the retry appendix carries the predecessor's contract violations (FR-0
   function retryOf(kinds: readonly string[]) {
     const receipt = retryReceiptWith(kinds);
     const task = retryTask([receipt]);
-    const disposition = deriveImplementationRetryDisposition(task);
+    const disposition = deriveImplementationRetryDisposition(task, undefined);
     if (disposition.kind !== "retry") throw new Error(`retry fixture failed: ${disposition.kind}`);
     return { receipt, task, disposition };
   }
@@ -564,17 +564,17 @@ describe("the retry appendix carries the predecessor's contract violations (FR-0
       error: `Task T1 retry appendix must carry the exact contract violations of receipt ${receipt.receiptId}`,
     };
     // Omitted: the authority line alone.
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${authorityLine}`)).toEqual(refusal);
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${authorityLine}`, undefined)).toEqual(refusal);
     // Edited: one violation's remedy reworded below the (untouched) authority line.
     const edited = [authorityLine, ...violationLines.map((line) => line.replace("replace the body", "rewrite the body"))].join("\n");
     expect(edited).not.toBe(disposition.promptAppendix);
     expect(edited.startsWith(`${authorityLine}\n`)).toBe(true);
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${edited}`)).toEqual(refusal);
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${edited}`, undefined)).toEqual(refusal);
     // Dropped: one violation line removed.
     const dropped = [authorityLine, ...violationLines.filter((line) => !line.includes("OrderState"))].join("\n");
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${dropped}`)).toEqual(refusal);
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${dropped}`, undefined)).toEqual(refusal);
     // Control: the exact appendix is admitted.
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`)).toMatchObject({ ok: true, kind: "retry" });
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`, undefined)).toMatchObject({ ok: true, kind: "retry" });
   });
 
   it("renders an unparseable contract-violated kind verbatim as an unreadable receipt entry, and never drops it", () => {
@@ -584,10 +584,10 @@ describe("the retry appendix carries the predecessor's contract violations (FR-0
     // The readable entry beside it still renders whole.
     expect(lines).toContain("src/order/pricing.ts:");
     expect(lines.filter((line) => line.startsWith("Declared-artifact contract violations"))).toHaveLength(1);
-    expect(renderImplementationRetryContext(disposition.context)).toBe(disposition.promptAppendix);
+    expect(renderImplementationRetryContext(disposition.context, undefined)).toBe(disposition.promptAppendix);
     // And the gate holds a prompt to it: dropping the unreadable entry is refused.
     const withoutUnreadable = lines.filter((line) => !line.startsWith("unreadable receipt entry:")).join("\n");
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${withoutUnreadable}`)).toMatchObject({
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${withoutUnreadable}`, undefined)).toMatchObject({
       ok: false,
       error: expect.stringContaining("retry appendix must carry the exact contract violations"),
     });
@@ -605,15 +605,48 @@ describe("the retry appendix carries the predecessor's contract violations (FR-0
   });
 
   describe("an amended export binding withdraws what the stamp no longer binds (ADR-0105)", () => {
-    const identifier = (raw: string): Identifier => {
-      const parsed = parseIdentifier(raw);
-      if (!parsed.ok) throw new Error(raw);
-      return parsed.value;
-    };
+    const PRICING = "src/order/pricing.ts";
     const stamp = (...names: readonly string[]): readonly ExportBinding[] => names.length === 0
       ? []
-      : [{ path: "src/order/pricing.ts", contract: "CT-1", exports: [{ name: identifier(names[0]), alias: identifier("PriceOrderFn") }] }];
+      : [binding(PRICING, "CT-1", ...names.map((name) => [name, "PriceOrderFn"] as const))];
     const WITHDRAWN = "Contract violations the previous attempt left that an amended export binding no longer owes";
+    /** Both pricing.ts exports left unimplemented by the predecessor. */
+    const BOTH_UNIMPLEMENTED = contractViolatedFailureKind({
+      kind: "declared-artifact-contract-violated",
+      artifact: PRICING,
+      violations: [
+        { subject: "priceOrder", reason: "still-unimplemented", remedy: null },
+        { subject: "parseOrder", reason: "still-unimplemented", remedy: null },
+      ],
+    }, 4_096);
+    const appendixWith = (kinds: readonly string[], bindings: readonly ExportBinding[]): readonly string[] => {
+      const amended = deriveImplementationRetryDisposition(retryOf(kinds).task, bindings);
+      if (amended.kind !== "retry") throw new Error(amended.kind);
+      return amended.promptAppendix.split("\n").slice(1);
+    };
+
+    it("withdraws by path: the export bound at another file does not keep pricing.ts's violation owed", () => {
+      const twoFiles = [binding(PRICING, "CT-1", ["parseOrder", "ParseOrderFn"]), binding("src/order/quotes.ts", "CT-1", ["priceOrder", "PriceOrderFn"])];
+      expect(appendixWith(["proof:task-completed", VIOLATED], twoFiles)).toEqual([
+        expect.stringMatching(/^Declared-artifact contract violations/),
+        `${PRICING}:`,
+        "  - OrderState: re-lists-frozen-variants",
+        expect.stringContaining(WITHDRAWN),
+        `${PRICING}:`,
+        "  - priceOrder: still-unimplemented — replace the body that throws unimplemented: priceOrder",
+      ]);
+    });
+
+    it("a stamp binding a different export at the file withdraws only the unbound subject", () => {
+      expect(appendixWith([BOTH_UNIMPLEMENTED], stamp("parseOrder"))).toEqual([
+        expect.stringMatching(/^Declared-artifact contract violations/),
+        `${PRICING}:`,
+        "  - parseOrder: still-unimplemented",
+        expect.stringContaining(WITHDRAWN),
+        `${PRICING}:`,
+        "  - priceOrder: still-unimplemented",
+      ]);
+    });
 
     it("lists a withdrawn bound-export violation apart and never demands it; a frozen-ADT violation stays owed", () => {
       const { task, disposition } = retryOf(["proof:task-completed", VIOLATED]);
@@ -654,7 +687,7 @@ describe("the retry appendix carries the predecessor's contract violations (FR-0
       const still = deriveImplementationRetryDisposition(task, stamp("priceOrder"));
       expect(still.kind === "retry" && still.promptAppendix).toBe(disposition.promptAppendix);
       expect(disposition.promptAppendix).not.toContain(WITHDRAWN);
-      expect(renderImplementationRetryContext(disposition.context)).toBe(disposition.promptAppendix);
+      expect(renderImplementationRetryContext(disposition.context, undefined)).toBe(disposition.promptAppendix);
     });
   });
 });
@@ -710,17 +743,17 @@ describe("escalation remediation closes the terminal lineage", () => {
     expect(deriveImplementationRetryDisposition({
       ...task,
       implementation_attempt_history: [...task.implementation_attempt_history, wrongAuthority],
-    })).toMatchObject({ kind: "invalid", errors: [expect.stringContaining("exact terminal authority and failure set")] });
+    }, undefined)).toMatchObject({ kind: "invalid", errors: [expect.stringContaining("exact terminal authority and failure set")] });
     const wrongFailures = remediationReceiptFor(attempt2.authorityDigest, ["different-terminal-failure"]);
     expect(deriveImplementationRetryDisposition({
       ...task,
       implementation_attempt_history: [...task.implementation_attempt_history, wrongFailures],
-    })).toMatchObject({ kind: "invalid", errors: [expect.stringContaining("exact terminal authority and failure set")] });
+    }, undefined)).toMatchObject({ kind: "invalid", errors: [expect.stringContaining("exact terminal authority and failure set")] });
   });
 
   it("resets an escalated lineage to a fresh attempt 1 and lets the cycle repeat", () => {
     const { attempt2, escalation, task } = escalatedTask();
-    expect(deriveImplementationRetryDisposition(task)).toMatchObject({
+    expect(deriveImplementationRetryDisposition(task, undefined)).toMatchObject({
       kind: "escalated",
       receiptId: escalation.receiptId,
     });
@@ -729,9 +762,9 @@ describe("escalation remediation closes the terminal lineage", () => {
       ...task,
       implementation_attempt_history: [task.implementation_attempt_history[0]!, task.implementation_attempt_history[1]!, remediation],
     };
-    expect(deriveImplementationRetryDisposition(remediated)).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition(remediated, undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
     const freshPrompt = "Task ID: T1";
-    const admission = authorizeImplementationSpawn(remediated, freshPrompt);
+    const admission = authorizeImplementationSpawn(remediated, freshPrompt, undefined);
     expect(admission).toMatchObject({ ok: true, kind: "initial", semanticAttempt: 1 });
     // The full cycle repeats: a fresh attempt-1 failure re-arms the retry budget.
     const freshAttempt = authority(1, "fresh-attempt", 11);
@@ -741,7 +774,7 @@ describe("escalation remediation closes the terminal lineage", () => {
     expect(deriveImplementationRetryDisposition({
       ...remediated,
       implementation_attempt_history: [...remediated.implementation_attempt_history, freshRetry],
-    })).toMatchObject({ kind: "retry", semanticAttempt: 2 });
+    }, undefined)).toMatchObject({ kind: "retry", semanticAttempt: 2 });
   });
 
   it("refuses remediation without a terminal escalation and attempt-2 work after one", () => {
@@ -751,7 +784,7 @@ describe("escalation remediation closes the terminal lineage", () => {
     expect(deriveImplementationRetryDisposition({
       ...task,
       implementation_attempt_history: [task.implementation_attempt_history[0]!, remediation],
-    })).toMatchObject({ kind: "invalid" });
+    }, undefined)).toMatchObject({ kind: "invalid" });
     // After the reset, the next receipt must be a fresh attempt 1: an
     // escalation-required receipt with no new retry authorization is invalid.
     expect(deriveImplementationRetryDisposition({
@@ -762,7 +795,7 @@ describe("escalation remediation closes the terminal lineage", () => {
         remediation,
         task.implementation_attempt_history[1]!,
       ],
-    })).toMatchObject({ kind: "invalid" });
+    }, undefined)).toMatchObject({ kind: "invalid" });
   });
 
   it("rejects malformed remediation receipts at the exact parser", () => {

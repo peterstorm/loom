@@ -174,23 +174,28 @@ function renderChangeProblem(path: string, problem: ExportChangeProblem): string
   }
 }
 
-/** The precondition refusals shared with Task reopening, in this operation's words. */
-function waveRefusal(graph: TaskGraph): DomainResult<never, ExportBindingAmendmentRefusal> | null {
+/** The current Wave the precondition shared with Task reopening proved, or its refusal in this operation's words. */
+function reopenableCurrentWave(graph: TaskGraph): DomainResult<number, ExportBindingAmendmentRefusal> {
   const reopenable = reopenableWave(graph);
   return reopenable.ok
-    ? null
+    ? freeze({ ok: true as const, value: reopenable.value.wave })
     : refuse(reopenable.error.kind, waveReopeningRefusalMessage(reopenable.error, "amending an export binding", "amend it"));
 }
 
 const listsPath = (task: Task, path: string): boolean => (task.file_list ?? []).some((listed) => samePlanPath(listed, path));
 
 /** Why the Task cannot take the amendment now, or null: its own lifecycle, its role, the contract, the path's other holders. */
-function taskRefusal(graph: TaskGraph, task: Task, binding: ExportBinding): DomainResult<never, ExportBindingAmendmentRefusal> | null {
+function taskRefusal(
+  graph: TaskGraph,
+  currentWave: number,
+  task: Task,
+  binding: ExportBinding,
+): DomainResult<never, ExportBindingAmendmentRefusal> | null {
   if (task.status !== "pending") {
     return refuse("not-pending", `${task.id} is ${task.status}; only a pending Task's binding is amended (reopen it first)`);
   }
   const completedWaves = new Set((graph.wave_gate_history ?? []).map(({ wave }) => wave));
-  if (completedWaves.has(task.wave) || task.wave < (graph.current_wave ?? task.wave)) {
+  if (completedWaves.has(task.wave) || task.wave < currentWave) {
     return refuse("completed-wave", `${task.id} is in completed Wave ${task.wave}; its binding was judged with that Wave`);
   }
   if (task.active_implementation_attempt !== undefined || task.reserved_at !== undefined) {
@@ -241,8 +246,8 @@ export function amendExportBinding(
   graph: TaskGraph,
   request: ExportBindingAmendmentRequest,
 ): DomainResult<ExportBindingAmendmentOutcome, ExportBindingAmendmentRefusal> {
-  const blocked = waveRefusal(graph);
-  if (blocked !== null) return blocked;
+  const currentWave = reopenableCurrentWave(graph);
+  if (!currentWave.ok) return currentWave;
   const task = graph.tasks.find(({ id }) => id === request.taskId);
   if (task === undefined) return refuse("unknown-task", `${request.taskId} is not in the TaskGraph`);
   if (!listsPath(task, request.path)) {
@@ -261,7 +266,7 @@ export function amendExportBinding(
     return refuse("not-bound", `${binding.path}'s binding to ${binding.contract} has no export '${request.change.name}' ` +
       `(it binds ${binding.exports.map(({ name }) => name).join(", ")})`);
   }
-  const blockedTask = taskRefusal(graph, task, binding);
+  const blockedTask = taskRefusal(graph, currentWave.value, task, binding);
   if (blockedTask !== null) return blockedTask;
   const applied = applyExportChange(binding.path, binding.exports, request.change);
   if (!applied.ok) return refuse("invalid-rebind", renderChangeProblem(binding.path, applied.error));

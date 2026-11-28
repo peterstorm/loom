@@ -108,7 +108,7 @@ describe("orchestration remediate consumes the escalation recovery", () => {
     expect(reparsed).toMatchObject({ ok: true });
     if (!reparsed.ok) return;
     const remediatedTask = reparsed.value.tasks[0]!;
-    expect(deriveImplementationRetryDisposition(remediatedTask)).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition(remediatedTask, undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
     // Idempotence of the AUDIT: the pre-existing receipts are unchanged.
     const beforeGraph = JSON.parse(before) as typeof raw;
     expect(task.implementation_attempt_history?.slice(0, 2)).toEqual(beforeGraph.tasks[0]?.implementation_attempt_history);

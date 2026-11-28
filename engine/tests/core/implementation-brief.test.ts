@@ -106,7 +106,7 @@ const task = (overrides: Partial<Parameters<typeof taskFixture>[0]> = {}): Task 
 });
 
 const dispatchFor = (value: Task): WaveImplementationDispatch => {
-  const derivation = deriveTaskImplementationDispatch(value);
+  const derivation = deriveTaskImplementationDispatch(value, undefined);
   if (derivation.kind !== "dispatch") throw new Error(`fixture Task must be owed a dispatch, got ${derivation.kind}`);
   return derivation.dispatch;
 };
@@ -227,7 +227,7 @@ describe("renderImplementationBrief", () => {
     // The template is filled, and the harness gates bind the Task.
     expect(findResidualPlaceholders(prompt)).toEqual([]);
     expect(extractTaskId(prompt)).toBe("T5");
-    expect(authorizeImplementationSpawn(value, prompt)).toMatchObject({ ok: true, kind: "initial" });
+    expect(authorizeImplementationSpawn(value, prompt, undefined)).toMatchObject({ ok: true, kind: "initial" });
   });
 
   it("carries the exact attempt-2 appendix the spawn gate authorizes", () => {
@@ -247,11 +247,11 @@ describe("renderImplementationBrief", () => {
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
     expect(rendered.value.prompt).toContain(`## Engine-Issued Implementation Retry Context\n\n${dispatch.promptAppendix}\n\n`);
-    expect(authorizeImplementationSpawn(value, rendered.value.prompt)).toMatchObject({ ok: true, kind: "retry" });
+    expect(authorizeImplementationSpawn(value, rendered.value.prompt, undefined)).toMatchObject({ ok: true, kind: "retry" });
     // Discriminating control: the hand-assembly mistake of keeping the
     // attempt-1 literal is refused by the same gate.
     const attemptOneLiteral = rendered.value.prompt.replace(dispatch.promptAppendix ?? "", NO_RETRY_CONTEXT);
-    expect(authorizeImplementationSpawn(value, attemptOneLiteral).ok).toBe(false);
+    expect(authorizeImplementationSpawn(value, attemptOneLiteral, undefined).ok).toBe(false);
   });
 
   it("binds an attestation Task's attempt-1 brief to its attestation context, which the gate requires", () => {
@@ -277,10 +277,10 @@ describe("renderImplementationBrief", () => {
     const rendered = renderImplementationBrief(input(value, { dispatch, spec: NO_SPEC_FILE }));
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
-    expect(authorizeImplementationSpawn(value, rendered.value.prompt)).toMatchObject({ ok: true });
+    expect(authorizeImplementationSpawn(value, rendered.value.prompt, undefined)).toMatchObject({ ok: true });
     // The old hand rule ("attempt 1 → None — semantic attempt 1.") is refused.
     const handAssembled = rendered.value.prompt.replace(dispatch.promptAppendix ?? "", NO_RETRY_CONTEXT);
-    expect(authorizeImplementationSpawn(value, handAssembled).ok).toBe(false);
+    expect(authorizeImplementationSpawn(value, handAssembled, undefined).ok).toBe(false);
   });
 
   it("inlines no rules for a documentation-only Task", () => {
@@ -681,7 +681,7 @@ describe("the brief's Operator Note section (#119)", () => {
     expect(rendered.value.prompt).toContain("never widens your file list");
     expect(findResidualPlaceholders(rendered.value.prompt)).toEqual([]);
     expect(extractTaskId(rendered.value.prompt)).toBe("T5");
-    expect(authorizeImplementationSpawn(value, rendered.value.prompt)).toMatchObject({ ok: true, kind: "initial" });
+    expect(authorizeImplementationSpawn(value, rendered.value.prompt, undefined)).toMatchObject({ ok: true, kind: "initial" });
   });
 });
 

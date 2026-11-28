@@ -40,7 +40,7 @@ export type TaskImplementationDispatchDerivation =
  */
 export function deriveTaskImplementationDispatch(
   task: Task,
-  bindings?: RetryAppendixBindings,
+  bindings: RetryAppendixBindings,
 ): TaskImplementationDispatchDerivation {
   const disposition = deriveImplementationRetryDisposition(task, bindings);
   if (disposition.kind === "invalid") return canonicalRecord({ kind: "invalid-retry" as const, errors: disposition.errors });

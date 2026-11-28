@@ -29,7 +29,7 @@ function authority(reservation: string) {
 }
 
 function initialContext(attempt: ReturnType<typeof authority>, prompt: string) {
-  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt, undefined);
   if (!admission.ok) throw new Error(admission.error);
   return createImplementationAttemptContext({ authority: attempt, prompt, admission });
 }

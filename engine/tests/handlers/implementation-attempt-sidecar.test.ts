@@ -90,7 +90,7 @@ function modernGraph(
 ): TaskGraph {
   // Protocol-2 lineage fields are part of every modern registration; the
   // settlement path appends receipts and the updated graph must parse.
-  const admission = authorizeImplementationSpawn({ id: "T1" }, "Task ID: T1");
+  const admission = authorizeImplementationSpawn({ id: "T1" }, "Task ID: T1", undefined);
   if (!admission.ok) throw new Error(admission.error);
   const task = taskFixture({
     id: "T1",

@@ -6,7 +6,9 @@
  * operator drops the binding; status and the brief keep working, the retry
  * appendix no longer demands `quote`, the retry registers, and once T4
  * replaces the stale skeleton with its own code it settles `implemented`.
- * The decision itself is pinned in tests/core/export-binding-amendment.test.ts.
+ * A partial drop leaves the Task owing only the export still bound, and a
+ * rebind refreshes the untouched skeleton to the new name at the retry's
+ * registration. The decision itself is pinned in tests/core/export-binding-amendment.test.ts.
  */
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,6 +21,7 @@ import {
   authorityOf,
   briefOf,
   canonicalSkeletonOf,
+  canonicalTsSkeleton,
   cleanupSkeletonRepos,
   contractViolations,
   orchestrationStatus,
@@ -60,6 +63,23 @@ export const parseOrder: ParseOrderFn = (raw) => ({ id: raw, lines: [] });
 const CONFORMING_LEGACY = `import type { PriceOrderFn } from "./order-contract";
 
 export const quoteOrder: PriceOrderFn = (order, quantity) => ({ cents: order.lines.length * quantity });
+`;
+
+/** pricing.ts once parseOrder is dropped from its binding: priceOrder alone. */
+const PRICE_ORDER_ONLY = `import type { PriceOrderFn } from "./order-contract";
+
+export const priceOrder: PriceOrderFn = (order, quantity) => ({ cents: order.lines.length * quantity });
+`;
+
+const CONFORMING_QUOTES = `import type { PriceOrderFn } from "./order-contract";
+
+export const quote: PriceOrderFn = (order, quantity) => ({ cents: order.lines.length * quantity });
+`;
+
+/** quotes.ts implementing the export rebound from quote. */
+const CONFORMING_QUOTE_FOR = `import type { PriceOrderFn } from "./order-contract";
+
+export const quoteFor: PriceOrderFn = (order, quantity) => ({ cents: order.lines.length * quantity });
 `;
 
 /** quotes.ts as T4's own code, once no binding owes it: a factory per request, no static export. */
@@ -134,6 +154,47 @@ describe("amend-export-binding on a live run (the binding the design cannot impl
     const attempt = authorityOf(await registered(repo, "T4"), "T4");
     expect(attempt.semanticAttempt).toBe(2);
     repo.write(PATHS.tsQuotes, OWN_QUOTES);
+    await settleAttempt(repo, attempt, [PATHS.tsQuotes]);
+    const settled = repo.rawState();
+    expect(contractViolations(settled, "T4").size).toBe(0);
+    expect(storedTask(settled, "T4").status).toBe("implemented");
+  });
+
+  it("drops one export of a binding that keeps another: the Task implements only the export still bound and settles", async () => {
+    const repo = skeletonRepo();
+    expect(await amend(["--task", "T4", "--file", PATHS.tsPricing, "--export", "parseOrder", "--drop", "--reason", REASON]))
+      .toEqual({ kind: "allow" });
+    const attempt = authorityOf(await registered(repo, "T4"), "T4");
+    // Registration wrote pricing.ts from the amended stamp: priceOrder alone.
+    expect(repo.read(PATHS.tsPricing)).toBe(canonicalTsSkeleton(PATHS.tsPricing, [{ name: "priceOrder", alias: "PriceOrderFn" }]));
+    const others = writeT4ButQuotes(repo);
+    repo.write(PATHS.tsPricing, PRICE_ORDER_ONLY);
+    repo.write(PATHS.tsQuotes, CONFORMING_QUOTES);
+    await settleAttempt(repo, attempt, [...others, PATHS.tsQuotes]);
+    const settled = repo.rawState();
+    expect(contractViolations(settled, "T4").size).toBe(0);
+    expect(storedTask(settled, "T4").status).toBe("implemented");
+  });
+
+  it("rebinds an export: the retry refreshes the skeleton to the new name, withdraws the old violation, and settles", async () => {
+    const repo = skeletonRepo();
+    await failOnStillUnimplementedQuote(repo);
+    expect(await amend(["--task", "T4", "--file", PATHS.tsQuotes, "--export", "quote", "--rebind", "quoteFor", "--reason", REASON]))
+      .toEqual({ kind: "allow" });
+    const retry = retryPrompt(repo);
+    expect(retry).not.toContain("fix every one before completing");
+    expect(retry.split("\n").slice(-3)).toEqual([
+      expect.stringContaining("an amended export binding no longer owes"),
+      `${PATHS.tsQuotes}:`,
+      "  - quote: still-unimplemented",
+    ]);
+
+    // Registration refreshes the untouched engine skeleton from the amended stamp.
+    const attempt = authorityOf(await registered(repo, "T4"), "T4");
+    expect(attempt.semanticAttempt).toBe(2);
+    expect(repo.read(PATHS.tsQuotes)).toBe(canonicalTsSkeleton(PATHS.tsQuotes, [{ name: "quoteFor", alias: "PriceOrderFn" }]));
+
+    repo.write(PATHS.tsQuotes, CONFORMING_QUOTE_FOR);
     await settleAttempt(repo, attempt, [PATHS.tsQuotes]);
     const settled = repo.rawState();
     expect(contractViolations(settled, "T4").size).toBe(0);

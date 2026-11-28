@@ -2123,11 +2123,14 @@ function parseStoredAttemptLineage(t: Readonly<Record<string, unknown>>, label: 
   const markers = parseStoredRetryMarkers(t, label, history.value?.length ?? 0);
   if (!markers.ok) return markers;
   const fields: StoredLineageFields = { ...present("implementation_attempt_history", history.value), ...markers.value };
+  // The load boundary reads the lineage alone: it checks the receipts, and a
+  // stored retry context against the receipt (`parseStoredAttemptContext`), never an
+  // appendix measured against the stamp.
   const disposition = deriveImplementationRetryDisposition({
     id,
     ...fields,
     ...(t.implementation_attestation === true ? { implementation_attestation: true } : {}),
-  });
+  }, undefined);
   return disposition.kind === "invalid"
     ? parseErr(`${label}: invalid implementation retry lineage: ${disposition.errors.join("; ")}`)
     : parseOk({ fields, disposition });
@@ -2230,7 +2233,8 @@ function parseStoredAttemptContext(
   return disposition.kind === "retry" && (
     retryContext === null ||
     predecessorReceiptId !== disposition.predecessor.receiptId ||
-    renderImplementationRetryContext(retryContext) !== disposition.promptAppendix
+    // Both sides render the receipt unmeasured (`parseStoredAttemptLineage` passes no stamp either).
+    renderImplementationRetryContext(retryContext, undefined) !== disposition.promptAppendix
   )
     ? parseErr(`${label}: active retry context must match the current retry-required receipt`)
     : context;

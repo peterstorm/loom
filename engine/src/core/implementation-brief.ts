@@ -803,7 +803,8 @@ function stampedFrozenSignatures(task: Task, { graph, observations, surfaces, un
 /** The I6 failure kinds the retry this dispatch admits inherits, in receipt order. */
 function inheritedRedThenGreenFailures(task: Task, dispatch: WaveImplementationDispatch): readonly RedThenGreenFailureKind[] {
   if (dispatch.kind !== "retry-implementation") return [];
-  const disposition = deriveImplementationRetryDisposition(task);
+  // Reads the receipt's failure kinds, never the appendix, so no stamp is measured against.
+  const disposition = deriveImplementationRetryDisposition(task, undefined);
   return disposition.kind === "retry" ? disposition.context.failureKinds.filter(isRedThenGreenFailureKind) : [];
 }
 

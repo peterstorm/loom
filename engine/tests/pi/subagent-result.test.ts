@@ -1530,7 +1530,7 @@ describe("applyImplementationPiResult", () => {
     if (!authority.ok) throw new Error(authority.error.errors.join("; "));
     // Protocol-2 lineage fields are part of every modern registration; the
     // settlement parse refuses a receipt-bearing Task without them.
-    const admission = authorizeImplementationSpawn({ id: task.id }, "Task ID: T1");
+    const admission = authorizeImplementationSpawn({ id: task.id }, "Task ID: T1", undefined);
     if (!admission.ok) throw new Error(admission.error);
     return {
       graph: {
@@ -1647,7 +1647,7 @@ describe("applyImplementationPiResult", () => {
     const authority = implementationAuthorityOf(modern.reservedSlot);
     if (authority === null || authority === undefined) throw new Error("modern cleanup authority missing");
     const prompt = "Task ID: T1";
-    const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+    const admission = authorizeImplementationSpawn({ id: "T1" }, prompt, undefined);
     if (!admission.ok) throw new Error(admission.error);
     const context = createImplementationAttemptContext({ authority, prompt, admission });
     const completed: TaskGraph = {

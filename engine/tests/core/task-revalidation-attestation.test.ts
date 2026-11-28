@@ -36,13 +36,13 @@ describe("returnToRevalidation of an attested Task", () => {
   it("ends attestation mode, so the reopened Task's dispatch no longer forbids changes", () => {
     const attested = attestedTask();
     expect(obligationKinds(attested).some((kind) => ATTESTED_KINDS.includes(kind))).toBe(true);
-    const before = deriveTaskImplementationDispatch(attested);
+    const before = deriveTaskImplementationDispatch(attested, undefined);
     expect(before.kind === "dispatch" && before.dispatch.promptAppendix).toContain("LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT");
 
     const reopened = returnToRevalidation(attested, undefined);
     expect(reopened.implementation_attestation).toBeUndefined();
     expect(obligationKinds(reopened).some((kind) => ATTESTED_KINDS.includes(kind))).toBe(false);
-    const after = deriveTaskImplementationDispatch(reopened);
+    const after = deriveTaskImplementationDispatch(reopened, undefined);
     expect(after.kind).toBe("dispatch");
     if (after.kind === "dispatch") expect(after.dispatch.promptAppendix ?? "").not.toContain("LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT");
   });

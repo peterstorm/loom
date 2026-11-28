@@ -47,10 +47,10 @@ export const NO_PLAN_TO_CHECK: PlanBindingCheck = Object.freeze({
 });
 
 /**
- * Whether the recorded plan's export bindings, with the stamp's audited
- * amendments replayed onto them (`replayExportBindingAmendments`, ADR-0105),
- * still agree with the TaskGraph stamp (`bindingStampAgreement`). A graph
- * with no stamp has nothing to drift
+ * Whether the recorded plan's export bindings, replayed with the TaskGraph's
+ * audited `export-binding-amended` edits (`wave_plan_edits`, through
+ * `replayExportBindingAmendments`, ADR-0105), still agree with the TaskGraph
+ * stamp (`bindingStampAgreement`). A graph with no stamp has nothing to drift
  * from; a stamped graph with no recorded plan cannot be checked, which the
  * brief states (`NO_PLAN_TO_CHECK`); a plan that cannot be read, or that
  * drifted, refuses.

@@ -100,7 +100,7 @@ describe("orchestration attest arms implementation re-attestation", () => {
     ]);
     expect(task.proof?.obligations[3]).toEqual({ kind: "declared-artifact-attested", artifact: "src/a.ts" });
     // The lineage is untouched and still derives a fresh attempt 1.
-    expect(deriveImplementationRetryDisposition(task)).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition(task, undefined)).toEqual({ kind: "initial", semanticAttempt: 1 });
     // The dispatch binding can derive the exact attestation context.
     expect(deriveImplementationAttestationContext(task)).toMatchObject({ ok: true });
   });

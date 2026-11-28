@@ -245,7 +245,9 @@ const WITHDRAWN_VIOLATIONS_HEADING =
  * were stamped judged no contract, and a reader of the lineage alone (the
  * State File load boundary, comparing a stored retry context with the
  * receipt) renders the receipt as it is. The brief, status and the spawn
- * gate all pass the stamp, so the bytes they compare are equal.
+ * gate all pass the stamp, so the bytes they compare are equal. Every caller
+ * names the value it passes: the parameter is required, so no reader of the
+ * appendix can forget the stamp by omission.
  */
 export type RetryAppendixBindings = readonly ExportBinding[] | undefined;
 
@@ -267,13 +269,13 @@ function contractViolationEntryLines(
   { artifact, shown, omitted }: ContractViolatedReceiptEntry,
   bindings: RetryAppendixBindings,
 ): Readonly<{ owed: readonly string[]; withdrawn: readonly string[] }> {
-  const withdrawn = new Set(shown.filter((violation) => isWithdrawn(bindings, artifact, violation)));
+  const withdrawn = shown.filter((violation) => isWithdrawn(bindings, artifact, violation));
   const owed = [
-    ...shown.filter((violation) => !withdrawn.has(violation)).map(violationLine),
+    ...shown.filter((violation) => !isWithdrawn(bindings, artifact, violation)).map(violationLine),
     ...(omitted === 0 ? [] : [`  - and ${omitted} more violation${omitted === 1 ? "" : "s"} not shown`]),
   ];
   const file = (lines: readonly string[]): readonly string[] => (lines.length === 0 ? [] : [`${oneLine(artifact)}:`, ...lines]);
-  return { owed: file(owed), withdrawn: file([...withdrawn].map(violationLine)) };
+  return { owed: file(owed), withdrawn: file(withdrawn.map(violationLine)) };
 }
 
 /**
@@ -308,7 +310,7 @@ function contractViolationLines(failureKinds: readonly string[], bindings: Retry
  * derive from the retry context and the stamp alone, so status, the spawn
  * gate and the brief render the same bytes.
  */
-export function renderImplementationRetryContext(context: ImplementationRetryContext, bindings?: RetryAppendixBindings): string {
+export function renderImplementationRetryContext(context: ImplementationRetryContext, bindings: RetryAppendixBindings): string {
   return [renderRetryContextLine(context), ...contractViolationLines(context.failureKinds, bindings)].join("\n");
 }
 
@@ -623,7 +625,7 @@ function projectLineage(
  */
 export function deriveImplementationRetryDisposition(
   task: RetryableImplementationTask,
-  bindings?: RetryAppendixBindings,
+  bindings: RetryAppendixBindings,
 ): ImplementationRetryDisposition {
   const parsedTaskId = parseTaskId(task.id, "retry task id");
   const parsedHistory = parseImplementationAttemptHistory(task.implementation_attempt_history ?? []);
@@ -705,7 +707,7 @@ export function deriveImplementationRetryDisposition(
 export function authorizeImplementationSpawn(
   task: RetryableImplementationTask,
   prompt: string,
-  bindings?: RetryAppendixBindings,
+  bindings: RetryAppendixBindings,
 ): ImplementationSpawnAdmission {
   const disposition = deriveImplementationRetryDisposition(task, bindings);
   switch (disposition.kind) {

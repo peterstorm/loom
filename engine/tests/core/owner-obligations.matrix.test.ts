@@ -270,7 +270,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
   /** The Invariants whose duty paragraph the sibling `implementation-brief.ts` renders, in order. */
   function briefDuties(files: readonly string[], stamp: readonly OwnerObligation[] | undefined): readonly string[] {
     const value = task("T1", 1, files);
-    const derivation = deriveTaskImplementationDispatch(value);
+    const derivation = deriveTaskImplementationDispatch(value, undefined);
     if (derivation.kind !== "dispatch") throw new Error(derivation.kind);
     const rendered = renderImplementationBrief({
       template: TEMPLATE, task: value, dispatch: derivation.dispatch, verificationManifest: undefined,

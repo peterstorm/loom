@@ -20,7 +20,8 @@ import {
   parseIdentifier,
   replayExportBindingAmendments,
 } from "../../src/core/skeleton/bindings";
-import type { BoundExport, ExportBinding, Identifier } from "../../src/core/skeleton/types";
+import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
+import type { BoundExport, ExportBinding } from "../../src/core/skeleton/types";
 import { exportBindingAmendedEdit } from "../../src/core/wave-plan-edit";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
@@ -33,7 +34,8 @@ import {
   skeletonRepo,
   TS_CONTRACT,
 } from "../fixtures/skeleton-repo";
-import { activeWaveGateFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
+import { identifier } from "../fixtures/skeleton-builders";
+import { activeWaveGateFixture, completedWaveGateFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 
 afterEach(cleanupSkeletonRepos);
 
@@ -246,12 +248,121 @@ describe("exportBindingAmendedEdit: the one constructor", () => {
   });
 });
 
-describe("applyExportChange (property)", () => {
-  const identifier = (raw: string): Identifier => {
-    const parsed = parseIdentifier(raw);
-    if (!parsed.ok) throw new Error(raw);
-    return parsed.value;
+describe("amendExportBinding: Java bindings", () => {
+  const DROP_JAVA_PARSE = request("--task", "T5", "--file", PATHS.javaPricing, "--export", "parseOrder", "--drop");
+  /** The Wave 2 graph with T5's Pricing.java skeleton recorded (records sorted by path, as the State File requires). */
+  const javaGraph = (): TaskGraph => {
+    const base = graph();
+    return { ...base, skeletons: [seededRecord(PATHS.javaPricing, canonicalSkeletonOf(PATHS.javaPricing)), ...(base.skeletons ?? [])] };
   };
+
+  it("drops a Java export: the amended graph reloads with its audit and skeleton record intact", () => {
+    const before = javaGraph();
+    const after = amended(before, DROP_JAVA_PARSE);
+    const reloaded = parseTaskGraph(JSON.parse(JSON.stringify(after)));
+    if (!reloaded.ok) throw new Error(reloaded.error);
+    expect(bindingAt(reloaded.value, PATHS.javaPricing)?.exports).toEqual([{ name: "priceOrder", alias: "PriceOrderFn" }]);
+    expect(reloaded.value.skeletons).toEqual(before.skeletons);
+    expect(reloaded.value.wave_plan_edits).toEqual([expect.objectContaining({
+      kind: "export-binding-amended", taskId: "T5", path: PATHS.javaPricing, contract: "CT-2",
+      change: { kind: "dropped", name: "parseOrder" }, after: [{ name: "priceOrder", alias: "PriceOrderFn" }],
+    })]);
+  });
+
+  it("accepts a Java rebind to one of the binding's aliases; the same rebind on a TypeScript file collides", () => {
+    const java = amended(javaGraph(), request("--task", "T5", "--file", PATHS.javaPricing, "--export", "priceOrder", "--rebind", "ParseOrderFn"));
+    expect(bindingAt(java, PATHS.javaPricing)?.exports).toEqual([
+      { name: "ParseOrderFn", alias: "PriceOrderFn" }, { name: "parseOrder", alias: "ParseOrderFn" },
+    ]);
+    expect(refusal(graph(), request("--task", "T4", "--file", PATHS.tsPricing, "--export", "priceOrder", "--rebind", "ParseOrderFn")))
+      .toMatchObject({ kind: "invalid-rebind", message: expect.stringContaining("(name-collides-with-alias)") });
+  });
+});
+
+describe("amendExportBinding: successive amendments replay onto the plan", () => {
+  const auditsOf = (state: TaskGraph) =>
+    (state.wave_plan_edits ?? []).flatMap((edit) => (edit.kind === "export-binding-amended" ? [edit] : []));
+
+  it.each<readonly [string, ExportBindingAmendmentRequest, ExportBindingAmendmentRequest, string]>([
+    ["a drop, then a drop of the binding's last export", DROP_PARSE,
+      request("--task", "T4", "--file", PATHS.tsPricing, "--export", "priceOrder", "--drop"), PATHS.tsPricing],
+    ["a rebind, then a drop of the new name", REBIND_QUOTE,
+      request("--task", "T4", "--file", PATHS.tsQuotes, "--export", "quoteFor", "--drop"), PATHS.tsQuotes],
+  ])("%s: the binding is gone and the replayed plan agrees with the stamp", (_name, first, second, path) => {
+    const before = graph();
+    const after = amended(amended(before, first), second);
+    expect(bindingAt(after, path)).toBeUndefined();
+    expect(auditsOf(after)).toHaveLength(2);
+    expect(bindingStampAgreement(replayExportBindingAmendments(before.export_bindings ?? [], auditsOf(after)), after.export_bindings ?? []))
+      .toEqual({ ok: true, value: null });
+  });
+
+  it("unbinding a path removes the recorded outcome of every Task that lists it, not just the amending Task's", () => {
+    const sibling = taskFixture({
+      id: "T9", description: "T9", agent: "code-implementer-agent", wave: 2, depends_on: [], file_list: [PATHS.tsQuotes],
+      spec_anchors: [], spec_contributions: [],
+    });
+    const before = { ...graph(), tasks: [...graph().tasks, {
+      ...sibling, skeleton_outcomes: [{ path: PATHS.tsQuotes, outcome: { kind: "skeleton-written" as const, origin: "spawn" as const } }],
+    }] };
+    const after = amended(before, DROP_QUOTE);
+    expect(after.tasks.find(({ id }) => id === "T9")?.skeleton_outcomes).toEqual([]);
+    expect(after.tasks.find(({ id }) => id === "T4")?.skeleton_outcomes).toEqual([]);
+  });
+});
+
+describe("amendExportBinding: the Task's own lifecycle", () => {
+  const inWave3 = (): TaskGraph => withTask(graph(), "T4", (task) => ({ ...task, wave: 3 }));
+  const liveAttempt = (task: Task): Task => {
+    const authority = createImplementationAttemptAuthority({
+      taskId: task.id, wave: task.wave, semanticAttempt: 1, reservationId: `fixture-${task.id}`,
+      headSha: "1".repeat(40), reservedAt: "2026-11-28T00:00:00.000Z", taskScopeBaseline: [], dirtySetBaseline: [],
+    });
+    if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    return { ...task, active_implementation_attempt: authority.value };
+  };
+
+  it("amends a pending Task of a later Wave than the current one", () => {
+    expect(inWave3().current_wave).toBe(2);
+    expect(bindingAt(amended(inWave3(), DROP_PARSE), PATHS.tsPricing)?.exports).toEqual([{ name: "priceOrder", alias: "PriceOrderFn" }]);
+  });
+
+  it("refuses that Task while it holds its own attempt, which the active-Wave precondition does not see", () => {
+    expect(refusal(withTask(inWave3(), "T4", liveAttempt), DROP_PARSE))
+      .toMatchObject({ kind: "live-attempt", message: expect.stringContaining("T4 holds an implementation reservation") });
+  });
+
+  it("refuses a Task whose Wave the gate history already completed", () => {
+    const gated = { ...graph(), wave_gate_history: [completedWaveGateFixture({ runId: "run.wave-2", wave: 2 })] };
+    expect(refusal(gated, DROP_PARSE)).toMatchObject({ kind: "completed-wave", message: expect.stringContaining("T4 is in completed Wave 2") });
+  });
+});
+
+describe("export-binding-amended audits are parsed, never trusted, at load", () => {
+  type RawAudit = Record<string, unknown> & { before: Record<string, unknown>[]; change: Record<string, unknown> };
+  const mutated = (req: ExportBindingAmendmentRequest, edit: (audit: RawAudit) => unknown): unknown => {
+    const raw = JSON.parse(JSON.stringify(amended(graph(), req))) as Record<string, unknown> & { wave_plan_edits: RawAudit[] };
+    return { ...raw, wave_plan_edits: [edit(raw.wave_plan_edits[0])] };
+  };
+
+  it.each<readonly [string, ExportBindingAmendmentRequest, (audit: RawAudit) => unknown]>([
+    ["an extra field on a bound export", DROP_PARSE, (audit) => ({ ...audit, before: [{ ...audit.before[0], extra: true }, ...audit.before.slice(1)] })],
+    ["a bound export whose name is no string", DROP_PARSE, (audit) => ({ ...audit, before: [{ ...audit.before[0], name: 7 }, ...audit.before.slice(1)] })],
+    ["a bound export whose alias is no string", DROP_PARSE, (audit) => ({ ...audit, before: [{ ...audit.before[0], alias: null }, ...audit.before.slice(1)] })],
+    ["an unknown change kind", DROP_PARSE, (audit) => ({ ...audit, change: { ...audit.change, kind: "renamed" } })],
+    ["a drop that carries a to", DROP_PARSE, (audit) => ({ ...audit, change: { ...audit.change, to: "quoteFor" } })],
+    ["a rebind with no to", REBIND_QUOTE, (audit) => { const { to: _to, ...change } = audit.change; return { ...audit, change }; }],
+    ["a before that is no array", DROP_PARSE, (audit) => ({ ...audit, before: { name: "priceOrder", alias: "PriceOrderFn" } })],
+  ])("refuses %s", (_name, req, edit) => {
+    expect(parseTaskGraph(mutated(req, edit))).toMatchObject({ ok: false });
+  });
+
+  it("loads the unmutated audit (the refusals above are the mutation's)", () => {
+    for (const req of [DROP_PARSE, REBIND_QUOTE]) expect(parseTaskGraph(mutated(req, (audit) => audit))).toMatchObject({ ok: true });
+  });
+});
+
+describe("applyExportChange (property)", () => {
   const names = fc.uniqueArray(fc.stringMatching(/^[a-z][a-zA-Z0-9]{0,6}$/u).filter((raw) => parseIdentifier(raw).ok), { minLength: 1, maxLength: 6 });
   const exportsOf = (raw: readonly string[]): readonly BoundExport[] => raw.map((name) => ({ name: identifier(name), alias: identifier("PriceOrderFn") }));
 

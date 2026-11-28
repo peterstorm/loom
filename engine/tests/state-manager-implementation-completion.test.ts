@@ -48,7 +48,7 @@ function authority(
 }
 
 function initialContext(active: ImplementationAttemptAuthority, prompt = "Task ID: T1") {
-  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt, undefined);
   if (!admission.ok) throw new Error(admission.error);
   return createImplementationAttemptContext({ authority: active, prompt, admission });
 }
@@ -321,7 +321,7 @@ describe("Task attempt authority StateManager lockstep", () => {
       implementation_attempt_history: [staleRetry],
       implementation_retry_protocol: 2,
       implementation_retry_history_start: 0,
-    });
+    }, undefined);
     if (retry.kind !== "retry") throw new Error("retry fixture failed");
     const prompt = `Task ID: T1\n${retry.promptAppendix}`;
     const staleAdmission = authorizeImplementationSpawn({
@@ -329,7 +329,7 @@ describe("Task attempt authority StateManager lockstep", () => {
       implementation_attempt_history: [staleRetry],
       implementation_retry_protocol: 2,
       implementation_retry_history_start: 0,
-    }, prompt);
+    }, prompt, undefined);
     if (!staleAdmission.ok) throw new Error(staleAdmission.error);
     const staleContext = createImplementationAttemptContext({ authority: active, prompt, admission: staleAdmission });
 
@@ -519,7 +519,7 @@ describe("Task attempt authority StateManager lockstep", () => {
       implementation_attempt_history: escalatedHistory,
       implementation_retry_protocol: 2,
       implementation_retry_history_start: 0,
-    });
+    }, undefined);
     if (escalatedDisposition.kind !== "escalated") throw new Error("escalation fixture failed");
     const activeOnEscalated = authority("pin-esc-active");
     expect(errorOf(activeGraph(activeOnEscalated, {
@@ -534,7 +534,7 @@ describe("Task attempt authority StateManager lockstep", () => {
       implementation_attempt_history: retryHistory,
       implementation_retry_protocol: 2,
       implementation_retry_history_start: 0,
-    });
+    }, undefined);
     if (retryDisposition.kind !== "retry") throw new Error("retry fixture failed");
     const staleSemantic = authority("pin-contradiction-active");
     expect(errorOf(activeGraph(staleSemantic, {

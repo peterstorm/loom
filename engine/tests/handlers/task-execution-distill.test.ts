@@ -106,7 +106,7 @@ const distillRefs = (repo: Repo): readonly string[] => distillSnapshotRefs(repo.
 
 /** The spawn the engine owes `T3` now: its marker and the appendices its dispatch carries. */
 function spawnOf(repo: Repo) {
-  const derivation = deriveTaskImplementationDispatch(taskOf(repo));
+  const derivation = deriveTaskImplementationDispatch(taskOf(repo), undefined);
   if (derivation.kind !== "dispatch") throw new Error(`fixture: T3 is owed no dispatch (${derivation.kind})`);
   const appendix = derivation.dispatch.promptAppendix;
   return {

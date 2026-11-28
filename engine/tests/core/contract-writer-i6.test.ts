@@ -236,7 +236,7 @@ describe("the brief states no I6 duty to a contract writer", () => {
   const brief = (id: string): string => {
     const graph = loaded();
     const target = taskOf(graph, id);
-    const derivation = deriveTaskImplementationDispatch(target);
+    const derivation = deriveTaskImplementationDispatch(target, undefined);
     if (derivation.kind !== "dispatch") throw new Error(`${id} must be owed a dispatch, got ${derivation.kind}`);
     const rendered = renderImplementationBrief({
       template: TEMPLATE,

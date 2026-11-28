@@ -163,7 +163,7 @@ function withDispatchLineage(graph: TaskGraph): TaskGraph {
       const authority = task.active_implementation_attempt;
       if (authority === undefined) return task;
       const prompt = `Task ID: ${task.id}`;
-      const admission = authorizeImplementationSpawn({ id: task.id }, prompt);
+      const admission = authorizeImplementationSpawn({ id: task.id }, prompt, undefined);
       if (!admission.ok) throw new Error(admission.error);
       return {
         ...task,
