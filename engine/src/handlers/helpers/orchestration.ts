@@ -31,6 +31,8 @@
  *   helper orchestration rescope-task --task <task-id> [--add-file <path>]... [--add-sealed-file <path>]... [--remove-file <path>]...
  *                               --reason <text>
  *   helper orchestration add-dependency --task <task-id> --on <task-id> [--on <task-id>]... --reason <text>
+ *   helper orchestration amend-export-binding --task <task-id> --file <path> --export <name>
+ *                               (--drop | --rebind <newName>) --reason <text>
  *   helper orchestration add-task --file <path>... [--sealed-file <path>]... [--depends-on <task-id>]...
  *                               [--before <task-id>]... --description <text> --reason <text>
  *                               [--agent <agent>] [--new-tests required|existing-tests-sufficient]
@@ -217,6 +219,7 @@ import { attestOperation } from "./attest-implementation";
 import { reopenTaskOperation } from "./reopen-task";
 import { rescopeTaskOperation } from "./rescope-task";
 import { addDependencyOperation } from "./add-dependency";
+import { amendExportBindingOperation } from "./amend-export-binding";
 import { adoptEngineRunTestsOperation } from "./adopt-engine-run-tests";
 import { adoptEngineRevisionOperation } from "./adopt-engine-revision";
 import { addTaskOperation, withdrawTaskOperation } from "./task-addition-operations";
@@ -252,6 +255,10 @@ const OPERATOR_OPERATIONS_USAGE: readonly string[] = [
   "  add-dependency --task <task-id> --on <task-id> [--on <task-id>]... --reason <text>",
   "          (makes a pending Task of the active Wave wait for the named Tasks of its Wave or an earlier one; a same-Wave",
   "          dependency is satisfied once it settles its implementation; a cycle is refused; audited and idempotent)",
+  "  amend-export-binding --task <task-id> --file <path> --export <name> (--drop | --rebind <newName>) --reason <text>",
+  "          (drops one export of the Export Binding of a file a pending Task lists, or renames it keeping its frozen alias,",
+  "          when the plan bound something the design cannot implement; a dropped export owes no conformance, and dropping",
+  "          the last one unbinds the file, whose engine skeleton is then the Task's own code to replace; audited and idempotent)",
   "  add-task --file <path> [--file <path>]... [--sealed-file <path>]... [--depends-on <task-id>]... [--before <task-id>]...",
   "          --description <text> --reason <text> [--agent <implementation agent>] [--new-tests required|existing-tests-sufficient]",
   "          (appends a Task to the active Wave; it waits for each --depends-on Task, and each pending --before Task of the Wave waits for it;",
@@ -1935,6 +1942,7 @@ const TASK_GRAPH_OPERATIONS = Object.freeze({
   "reopen-task": reopenTaskOperation,
   "rescope-task": rescopeTaskOperation,
   "add-dependency": addDependencyOperation,
+  "amend-export-binding": amendExportBindingOperation,
   "add-task": addTaskOperation,
   "withdraw-task": withdrawTaskOperation,
   "adopt-engine-run-tests": adoptEngineRunTestsOperation,

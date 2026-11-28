@@ -29,7 +29,7 @@ import { match } from "ts-pattern";
 
 import type { PlanContract } from "../acceptance-contract";
 import { CONTRACT_ID, contractWriter, frozenPaths } from "../acceptance-contract";
-import type { DomainResult, NonEmpty } from "../orchestration-contract";
+import { nonEmpty, type DomainResult, type NonEmpty } from "../orchestration-contract";
 import { isRepoRelativePlanPath, normalizePlanPath, samePlanPath } from "../plan-path-match";
 import { dependsOnAny } from "../task-dependencies";
 import type { RegressionWaiverReason, VerificationPolicy } from "../verification-policy";
@@ -40,6 +40,7 @@ import type {
   BoundExport,
   ContractId,
   ExportBinding,
+  ExportBindingChange,
   ExportBindingsDeclaration,
   Identifier,
   MalformedEntryReason,
@@ -436,4 +437,64 @@ export function bindingStampAgreement(plan: readonly ExportBinding[], stamp: rea
       details.length === 0 ? "the same bindings in a different order" : details.join("; ")
     } — re-populate the TaskGraph`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Amending a stamped binding (ADR-0105)
+// ---------------------------------------------------------------------------
+
+/** Why one change cannot apply to a binding's exports. */
+export type ExportChangeProblem =
+  | Readonly<{ kind: "unbound-export"; name: Identifier }>
+  | Readonly<{ kind: "duplicate-name"; name: Identifier }>
+  | Readonly<{ kind: "name-collides-with-alias"; name: Identifier }>;
+
+/**
+ * The exports a binding at `path` holds once `change` applies, in binding
+ * order; empty when a drop removes the last one. Refused when the changed
+ * name is not bound, or when a rebind's new name is already bound or, on a
+ * TypeScript target, is an alias of the binding (`aliasCollisions`, the rule
+ * the plan grammar and the State File parser apply). A rebind keeps the
+ * export's frozen alias, so the binding resolves against the same types-file
+ * surface as before; no alias changes, so no new `alias-collides-with-class`
+ * can arise.
+ */
+export function applyExportChange(
+  path: string,
+  exports: readonly BoundExport[],
+  change: ExportBindingChange,
+): DomainResult<readonly BoundExport[], ExportChangeProblem> {
+  const refuse = (kind: ExportChangeProblem["kind"], name: Identifier): DomainResult<never, ExportChangeProblem> =>
+    Object.freeze({ ok: false as const, error: Object.freeze({ kind, name }) });
+  if (!exports.some(({ name }) => name === change.name)) return refuse("unbound-export", change.name);
+  if (change.kind === "dropped") {
+    return Object.freeze({ ok: true as const, value: Object.freeze(exports.filter(({ name }) => name !== change.name)) });
+  }
+  if (exports.some(({ name }) => name === change.to)) return refuse("duplicate-name", change.to);
+  const renamed = exports.map((bound) => (bound.name === change.name ? Object.freeze({ name: change.to, alias: bound.alias }) : bound));
+  if (aliasCollisions(path, renamed).length > 0) return refuse("name-collides-with-alias", change.to);
+  return Object.freeze({ ok: true as const, value: Object.freeze(renamed) });
+}
+
+/** One audited amendment of a stamped binding, as the plan-agreement replay reads it. */
+export type ExportBindingAmendment = Readonly<{ path: string; contract: string; change: ExportBindingChange }>;
+
+/**
+ * The plan's bindings with each audited amendment applied in order: what
+ * `bindingStampAgreement` compares with the stamp. An amendment the plan no
+ * longer admits (its binding or export is gone because the operator corrected
+ * the plan as well) changes nothing, so a plan corrected by hand agrees too.
+ * A binding left with no export is dropped, as the stamp dropped it.
+ */
+export function replayExportBindingAmendments(
+  plan: readonly ExportBinding[],
+  amendments: readonly ExportBindingAmendment[],
+): readonly ExportBinding[] {
+  return amendments.reduce<readonly ExportBinding[]>((bindings, amendment) => bindings.flatMap((binding) => {
+    if (!samePlanPath(binding.path, amendment.path) || binding.contract !== amendment.contract) return [binding];
+    const applied = applyExportChange(binding.path, binding.exports, amendment.change);
+    if (!applied.ok) return [binding];
+    const exports = nonEmpty(applied.value);
+    return exports === null ? [] : [Object.freeze({ ...binding, exports })];
+  }), plan);
 }

@@ -50,6 +50,12 @@ export type ExportBinding = Readonly<{
   exports: NonEmpty<BoundExport>;
 }>;
 
+/** One audited change to one bound export of a stamped binding (ADR-0105):
+ *  dropped, or renamed to `to` keeping its frozen alias. */
+export type ExportBindingChange =
+  | Readonly<{ kind: "dropped"; name: Identifier }>
+  | Readonly<{ kind: "rebound"; name: Identifier; to: Identifier }>;
+
 export type SkeletonLanguage = "typescript" | "java";
 
 /** Why a path is no skeleton target. */

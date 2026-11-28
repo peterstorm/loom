@@ -154,6 +154,38 @@ Under the TaskGraph lock `add-dependency` requires the precondition `reopen-task
 
 A dependency in the same Wave is satisfied once that Task has settled its implementation (ADR-0081); one in an earlier Wave once it is `completed`. Status, registration and the brief withhold the waiting Task under one rule, the `dependency` Dispatch Hold. When a dependency reaches terminal escalation, status escalates the Wave and names the Tasks blocked behind it; remediate the escalated Task and they run. One `dependency-added` audit is appended to `wave_plan_edits`, and the State File refuses a same-Wave edge no such audit records. Repeating an applied request changes nothing.
 
+## Correcting a Task's Export Binding
+
+Use this when the plan bound an export that the design cannot implement, so the Task's completion fails `proof:declared-artifact-contract-violated` on that export every attempt. The usual case is `still-unimplemented`: for example, a `static final` constant bound for state that is built per instance. Do not use `populate-task-graph --force`, which resets every Task ([ADR-0105](../adr/ADR-0105-an-export-binding-is-amended-in-place-by-an-audited-plan-edit.md)).
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration amend-export-binding \
+  --task T12 --file src/main/java/com/acme/orchestrator/StatusComposer.java --export status --drop \
+  --reason "status is per-replica: each context builds its own query, so no static constant can implement it"
+```
+
+`--drop` removes the export from the binding. `--rebind <newName>` renames it instead and keeps its frozen alias, so it still resolves against the same types file. The new name must be an identifier the binding grammar admits: no reserved word, no name the binding already binds and, on a TypeScript file, none of the binding's aliases (`name-collides-with-alias`). Give exactly one of the two.
+
+Under the TaskGraph lock `amend-export-binding` requires the precondition `reopen-task` uses (execute Phase, no live Wave Gate run, no executing Task or attempt in the active Wave), no active subagent (checked before and under the lock), and:
+
+- the Task exists and lists the file;
+- the stamp binds the file, and the binding holds the export;
+- the Task is `pending`, in the active Wave or a later one, holds no reservation or attempt of its own, and is not a Distill Task. An `implemented` Task is reopened first;
+- the binding's contract is frozen. While it is still `awaiting-red`, its contract Task's stop writes stubs from the stamp: correct the plan and re-populate before the contract Wave freezes;
+- no other Task that lists the file has settled (`implemented` or `completed`) against the binding;
+- a non-blank `--reason` of at most 500 characters.
+
+A refusal changes nothing. On success, one locked write replaces the binding's exports. Dropping the last export removes the binding. The binding's skeleton record and every Task's recorded skeleton outcome at the file go with it. The file the engine wrote stays as it is: it is now the Task's own code to replace, and status shows it as `exists, not skeletonized (projected)` until the next registration records it.
+
+One `export-binding-amended` audit is appended to `wave_plan_edits`. It holds the Wave, Task, file, contract, the change, the exports before and after, and the reason.
+
+From then on the change applies everywhere:
+- A dropped export owes no conformance.
+- The brief's plan-agreement check replays the audit onto the plan's bindings, so the brief still renders. A plan corrected by hand agrees too.
+- The attempt-2 retry appendix lists a violation of the withdrawn export under its own heading as no longer owed, and no longer demands it. Status, the brief and the spawn gate render that appendix the same way.
+
+Repeating an applied request changes nothing. Re-population drops the audit and stamps the plan's bindings again, so correct the plan too if it will be re-populated. Then dispatch the Task from `helper orchestration brief --task <id>`.
+
 ## Adding a Task to the active Wave
 
 Use this when the active Wave needs a Task decompose did not plan. The common case is a judgement that fails on sealed code: a Task of the active Wave judges code a completed Wave wrote (a budget, benchmark or acceptance test), and its attempt failed because that code breaches the judgement. Neither `reopen-task` (active Wave only) nor `reopen-completed-wave` (drifted bytes only) applies, and the judge cannot change code outside its own file list. Add a Task that takes the sealed code, and make the judge wait for it ([ADR-0086](../adr/ADR-0086-a-task-joins-the-active-wave-through-a-plan-edit.md)):

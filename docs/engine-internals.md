@@ -263,10 +263,11 @@ status        brief         inspect        start <architecture|refutation|standa
                                            security-verification>
 resume        restart       recover-orphan abandon       submit       correlate
 complete      decide        disposition    remediate     attest
-reopen-task   rescope-task  add-dependency add-task      withdraw-task
+reopen-task   rescope-task  add-dependency amend-export-binding
+add-task      withdraw-task
 ```
 
-`status`, `brief`, `inspect` are read-only. `restart` is the exhausted-Wave-reviewer path; `recover-orphan` rebuilds a Wave Gate whose Run Directory vanished; `abandon` retires a run; the last five are audited protected-state edits (plan edits, reopenings) described in [Recovery operations](reference/recovery.md).
+`status`, `brief`, `inspect` are read-only. `restart` is the exhausted-Wave-reviewer path; `recover-orphan` rebuilds a Wave Gate whose Run Directory vanished; `abandon` retires a run; the last six are audited protected-state edits (plan edits, reopenings) described in [Recovery operations](reference/recovery.md).
 
 ### 5.2 The four actions
 

@@ -31,7 +31,7 @@ import {
 import { dispatchHoldMessage, dispatchHoldOf } from "../core/dispatch-holds";
 import { loomCommands, type LoomPackageRoot } from "../core/loom-cli-command";
 import type { DomainResult } from "../core/orchestration-contract";
-import { bindingStampAgreement } from "../core/skeleton/bindings";
+import { bindingStampAgreement, replayExportBindingAmendments } from "../core/skeleton/bindings";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
 import { taskOwnerDuty } from "../core/owner-verification/obligations";
 import { parsePlanExportBindings, parsePlanModels } from "../core/parse-plan-models";
@@ -47,8 +47,10 @@ export const NO_PLAN_TO_CHECK: PlanBindingCheck = Object.freeze({
 });
 
 /**
- * Whether the recorded plan's export bindings still agree with the TaskGraph
- * stamp (`bindingStampAgreement`). A graph with no stamp has nothing to drift
+ * Whether the recorded plan's export bindings, with the stamp's audited
+ * amendments replayed onto them (`replayExportBindingAmendments`, ADR-0105),
+ * still agree with the TaskGraph stamp (`bindingStampAgreement`). A graph
+ * with no stamp has nothing to drift
  * from; a stamped graph with no recorded plan cannot be checked, which the
  * brief states (`NO_PLAN_TO_CHECK`); a plan that cannot be read, or that
  * drifted, refuses.
@@ -62,7 +64,9 @@ function planBindingCheck(graph: TaskGraph, planFile: string | null): DomainResu
   } catch (error) {
     return { ok: false, error: `cannot read the plan ${planFile} for its export bindings: ${error instanceof Error ? error.message : String(error)}` };
   }
-  const agreement = bindingStampAgreement(parsePlanExportBindings(text).bindings, graph.export_bindings);
+  const amendments = (graph.wave_plan_edits ?? []).flatMap((edit) => (edit.kind === "export-binding-amended" ? [edit] : []));
+  const planned = replayExportBindingAmendments(parsePlanExportBindings(text).bindings, amendments);
+  const agreement = bindingStampAgreement(planned, graph.export_bindings);
   return agreement.ok ? { ok: true, value: PLAN_BINDINGS_AGREE } : agreement;
 }
 
@@ -125,7 +129,7 @@ export function renderTaskImplementationBrief(
     // registration refuses it, by this same rule.
     const hold = dispatchHoldOf(graph, new Set(graph.executing_tasks ?? []), task);
     if (hold !== null) return { ok: false, error: dispatchHoldMessage(taskId, hold) };
-    const derivation = deriveTaskImplementationDispatch(task);
+    const derivation = deriveTaskImplementationDispatch(task, graph.export_bindings);
     if (derivation.kind === "escalated") {
       return { ok: false, error: `Task ${taskId} reached terminal implementation escalation (${derivation.failureKinds.join(", ")}); it is owed no dispatch` };
     }

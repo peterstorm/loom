@@ -36,6 +36,10 @@ import {
   isAttestationDriftFailureKind,
 } from "./proof-obligations";
 import { taskVerificationPolicy } from "./verification-policy";
+import { samePlanPath } from "./plan-path-match";
+// The leaves only: `skeleton/types` and `skeleton/bindings` import the TaskGraph, which imports this module.
+import { isBoundExportReason } from "./skeleton/conformance-verdict";
+import type { ExportBinding } from "./skeleton/persisted";
 
 const MAX_FAILURE_KIND_LENGTH = 4_096;
 export const IMPLEMENTATION_RETRY_CONTEXT_LABEL = "LOOM_IMPLEMENTATION_RETRY_CONTEXT";
@@ -227,39 +231,85 @@ const CONTRACT_VIOLATIONS_HEADING =
 /** Receipt text is data: a line break inside it must never open a new prompt line. */
 const oneLine = (text: string): string => text.replace(/[\r\n]+/gu, " ");
 
-function contractViolationEntryLines({ artifact, shown, omitted }: ContractViolatedReceiptEntry): readonly string[] {
-  return [
-    `${oneLine(artifact)}:`,
-    ...shown.map(({ subject, reason, remedy }) =>
-      `  - ${oneLine(subject)}: ${reason}${remedy === null ? "" : ` — ${oneLine(remedy)}`}`),
+const WITHDRAWN_VIOLATIONS_HEADING =
+  "Contract violations the previous attempt left that an amended export binding no longer owes " +
+  "(helper orchestration amend-export-binding); do not fix them, follow the Frozen Signatures section instead:";
+
+/**
+ * The export bindings a retry appendix measures its predecessor's contract
+ * violations against (ADR-0105): the TaskGraph's `export_bindings` now. A
+ * violation of a bound export (deleted, renamed, retyped or still
+ * unimplemented) whose name the stamp no longer binds at its file is
+ * withdrawn: listed apart, never demanded. A frozen-ADT violation is never
+ * withdrawn. Undefined withdraws nothing: a graph populated before bindings
+ * were stamped judged no contract, and a reader of the lineage alone (the
+ * State File load boundary, comparing a stored retry context with the
+ * receipt) renders the receipt as it is. The brief, status and the spawn
+ * gate all pass the stamp, so the bytes they compare are equal.
+ */
+export type RetryAppendixBindings = readonly ExportBinding[] | undefined;
+
+type ReceiptViolation = ContractViolatedReceiptEntry["shown"][number];
+
+const violationLine = ({ subject, reason, remedy }: ReceiptViolation): string =>
+  `  - ${oneLine(subject)}: ${reason}${remedy === null ? "" : ` — ${oneLine(remedy)}`}`;
+
+/** Whether `stamp` binds an export named `name` at `path`. */
+const bindsExport = (stamp: readonly ExportBinding[], path: string, name: string): boolean =>
+  stamp.some((binding) => samePlanPath(binding.path, path) && binding.exports.some((bound) => bound.name === name));
+
+/** Whether the stamp withdrew `violation` of `artifact` (`RetryAppendixBindings`). */
+const isWithdrawn = (bindings: RetryAppendixBindings, artifact: string, violation: ReceiptViolation): boolean =>
+  bindings !== undefined && isBoundExportReason(violation.reason) && !bindsExport(bindings, artifact, violation.subject);
+
+/** One receipt entry split into what it still owes and what the stamp withdrew; a file shows only where it has lines. */
+function contractViolationEntryLines(
+  { artifact, shown, omitted }: ContractViolatedReceiptEntry,
+  bindings: RetryAppendixBindings,
+): Readonly<{ owed: readonly string[]; withdrawn: readonly string[] }> {
+  const withdrawn = new Set(shown.filter((violation) => isWithdrawn(bindings, artifact, violation)));
+  const owed = [
+    ...shown.filter((violation) => !withdrawn.has(violation)).map(violationLine),
     ...(omitted === 0 ? [] : [`  - and ${omitted} more violation${omitted === 1 ? "" : "s"} not shown`]),
+  ];
+  const file = (lines: readonly string[]): readonly string[] => (lines.length === 0 ? [] : [`${oneLine(artifact)}:`, ...lines]);
+  return { owed: file(owed), withdrawn: file([...withdrawn].map(violationLine)) };
+}
+
+/**
+ * The retry appendix's violation sections (FR-021): every
+ * `declared-artifact-contract-violated` failure kind of the predecessor
+ * receipt, rendered as its file, then each violation's subject, reason and
+ * remedy, under the heading that demands them, except those `bindings`
+ * withdrew, which follow under their own heading. A kind that does not parse
+ * is shown verbatim among the owed ones, never dropped.
+ */
+function contractViolationLines(failureKinds: readonly string[], bindings: RetryAppendixBindings): readonly string[] {
+  const entries = failureKinds
+    .filter((kind) => kind.startsWith(CONTRACT_VIOLATED_FAILURE_KIND_PREFIX))
+    .map((kind) => {
+      const parsed = parseContractViolatedFailureKind(kind);
+      return parsed.ok
+        ? contractViolationEntryLines(parsed.value, bindings)
+        : { owed: [`unreadable receipt entry: ${JSON.stringify(kind)}`], withdrawn: [] };
+    });
+  const owed = entries.flatMap((entry) => entry.owed);
+  const withdrawn = entries.flatMap((entry) => entry.withdrawn);
+  return [
+    ...(owed.length === 0 ? [] : [CONTRACT_VIOLATIONS_HEADING, ...owed]),
+    ...(withdrawn.length === 0 ? [] : [WITHDRAWN_VIOLATIONS_HEADING, ...withdrawn]),
   ];
 }
 
 /**
- * The retry appendix's violation section (FR-021): every
- * `declared-artifact-contract-violated` failure kind of the predecessor
- * receipt, rendered as its file, then each violation's subject, reason and
- * remedy. A kind that does not parse is shown verbatim, never dropped.
- */
-function contractViolationLines(failureKinds: readonly string[]): readonly string[] {
-  const entries = failureKinds
-    .filter((kind) => kind.startsWith(CONTRACT_VIOLATED_FAILURE_KIND_PREFIX))
-    .flatMap((kind) => {
-      const parsed = parseContractViolatedFailureKind(kind);
-      return parsed.ok ? contractViolationEntryLines(parsed.value) : [`unreadable receipt entry: ${JSON.stringify(kind)}`];
-    });
-  return entries.length === 0 ? [] : [CONTRACT_VIOLATIONS_HEADING, ...entries];
-}
-
-/**
  * The exact attempt-2 retry appendix: the authority line, then — when the
- * predecessor was refused for contract violations — every violation to fix.
- * Both derive from the retry context alone, so status, the spawn gate and the
- * State File load boundary render the same bytes.
+ * predecessor was refused for contract violations — every violation to fix,
+ * and those an amended binding withdrew (`RetryAppendixBindings`). Both
+ * derive from the retry context and the stamp alone, so status, the spawn
+ * gate and the brief render the same bytes.
  */
-export function renderImplementationRetryContext(context: ImplementationRetryContext): string {
-  return [renderRetryContextLine(context), ...contractViolationLines(context.failureKinds)].join("\n");
+export function renderImplementationRetryContext(context: ImplementationRetryContext, bindings?: RetryAppendixBindings): string {
+  return [renderRetryContextLine(context), ...contractViolationLines(context.failureKinds, bindings)].join("\n");
 }
 
 type PromptContextParse<T> =
@@ -472,7 +522,7 @@ function invalidLineage(
  *  diagnostics identical whichever path proves it. */
 const INITIAL_PREFIX_SEED_ERROR = "initial compatibility prefix cannot carry a retry predecessor";
 
-function projectedDisposition(lineage: ImplementationRetryLineage): ImplementationRetryDisposition {
+function projectedDisposition(lineage: ImplementationRetryLineage, bindings: RetryAppendixBindings): ImplementationRetryDisposition {
   if (lineage.kind === "escalated") {
     return freeze({
       kind: "escalated",
@@ -487,7 +537,7 @@ function projectedDisposition(lineage: ImplementationRetryLineage): Implementati
       semanticAttempt: 2,
       predecessor: lineage.predecessor,
       context,
-      promptAppendix: renderImplementationRetryContext(context),
+      promptAppendix: renderImplementationRetryContext(context, bindings),
     });
   }
   return freeze({ kind: "initial", semanticAttempt: 1 });
@@ -567,9 +617,13 @@ function projectLineage(
  * registration writes the protocol-2 fields. Attempt history WITHOUT them is
  * refused at the StateManager load boundary, before a modern dispatch can run;
  * recovery requires TaskGraph re-population or an explicit offline migration.
+ *
+ * `bindings` is what a retry's appendix measures its predecessor's contract
+ * violations against (`RetryAppendixBindings`); only the appendix reads it.
  */
 export function deriveImplementationRetryDisposition(
   task: RetryableImplementationTask,
+  bindings?: RetryAppendixBindings,
 ): ImplementationRetryDisposition {
   const parsedTaskId = parseTaskId(task.id, "retry task id");
   const parsedHistory = parseImplementationAttemptHistory(task.implementation_attempt_history ?? []);
@@ -644,15 +698,16 @@ export function deriveImplementationRetryDisposition(
   if (typeof walked === "string") {
     return freeze({ kind: "invalid", errors: nonEmptyErrors([walked]) });
   }
-  return projectedDisposition(walked);
+  return projectedDisposition(walked, bindings);
 }
 
 /** Require the exact engine-derived retry appendix before attempt-2 authority can be minted. */
 export function authorizeImplementationSpawn(
   task: RetryableImplementationTask,
   prompt: string,
+  bindings?: RetryAppendixBindings,
 ): ImplementationSpawnAdmission {
-  const disposition = deriveImplementationRetryDisposition(task);
+  const disposition = deriveImplementationRetryDisposition(task, bindings);
   switch (disposition.kind) {
     case "invalid":
       return { ok: false, error: disposition.errors.join("; ") };

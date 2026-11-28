@@ -31,6 +31,7 @@ export type {
   BoundExport,
   ContractId,
   ExportBinding,
+  ExportBindingChange,
   Identifier,
   PathSkeletonOutcome,
   SkeletonLanguage,

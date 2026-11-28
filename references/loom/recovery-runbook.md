@@ -75,6 +75,18 @@ bun {LOOM_DIR}/engine/src/cli.ts helper orchestration add-dependency \
 
 Status then withholds the Task until its dependencies settle, and names it as blocked when one of them escalates. A cycle is refused. The full contract is in `docs/reference/recovery.md` (Ordering Tasks within the active Wave).
 
+## A Task's Export Binding cannot be implemented
+
+The plan bound an export that the design cannot satisfy. A typical case is a `static final` constant for state that is built per instance. Every attempt of the Task then fails `proof:declared-artifact-contract-violated` on that export, usually as `still-unimplemented`. Do not spend the retry on it, and do not re-populate. With the user's approval, correct the binding in place:
+
+```bash
+bun {LOOM_DIR}/engine/src/cli.ts helper orchestration amend-export-binding \
+  --task <task-id> --file <bound path> --export <name> --drop \
+  --reason "<why the design cannot implement the binding>"
+```
+
+`--rebind <newName>` renames the export instead and keeps its frozen alias. The Task must be pending, with no live attempt and no live Wave Gate run. When the last export is dropped, the file is no longer bound, and the skeleton the engine wrote there becomes the Task's own code to replace. Then dispatch the Task from its brief: its retry appendix lists the withdrawn violation as no longer owed. Correct the plan as well if it will be re-populated. The full contract is in `docs/reference/recovery.md` (Correcting a Task's Export Binding).
+
 ## A Task the Wave needs that decompose did not plan
 
 The usual case: a Task of the active Wave whose tests judge code an earlier, completed Wave wrote (a budget, benchmark or acceptance test) fails its attempt on that code's breach. It cannot change code outside its own file list, `reopen-task` reaches only the active Wave, and a completed Wave is not reopened for this. Never spend the judge's retry on unchanged code, and never relax the judgement.
@@ -151,6 +163,7 @@ The guard's list also holds `store-test-evidence`, `reconcile-implementation-pro
 - `orchestration status`, `contract-status`, `retro-facts` and `stop-check-plan --task <id>`: pure reads of the State File that write only to stdout. `retro-facts [--wave <N>] [--graph <path>]` prints the friction the run recorded, for `/retro`. `contract-status` takes no arguments and prints each Acceptance Contract's freeze state, roster and due Waves. `stop-check-plan` prints what the Acceptance Stop Check would do at that Task's stop, or the one reason the check is off; it refuses an unknown Task id with a non-zero exit. See `docs/reference/helpers.md`.
 - `panel-contract` (the architecture panel): it writes only into a run directory under the runs root it is given (`.claude/specs/{date_slug}/panel-runs/`). Invoked against a guarded path it is blocked like anything else.
 - `accept-plan-design-review` (Phase 3.6): its arguments name only a runs root under `.claude/reviews/`, and its one State File write goes through the engine's locked writer.
+- The audited plan edits `orchestration rescope-task`, `add-dependency`, `amend-export-binding`, `add-task` and `withdraw-task`. Each writes the State File through the engine's locked writer, only when the section above that names it applies.
 
 Everything else is driven by hooks.
 

@@ -123,7 +123,16 @@ import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejecti
 import { parseIssuedReviewPacketRegistration, parseReviewPath, type IssuedReviewPacketRegistration } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
-import { dependencyAddedEdit, parsePlanEditReason, taskAddedEdit, taskRescopedEdit, taskWithdrawnEdit } from "./core/wave-plan-edit";
+import {
+  dependencyAddedEdit,
+  exportBindingAmendedEdit,
+  parsePlanEditReason,
+  taskAddedEdit,
+  taskRescopedEdit,
+  taskWithdrawnEdit,
+  type RawBoundExport,
+  type RawExportBindingChange,
+} from "./core/wave-plan-edit";
 import { retroRecordEntry, retroScopeKnown } from "./core/retro-record";
 import { parseAdvisoryDispositions } from "./core/advisory-disposition";
 import { dependencyCycles } from "./core/task-dependencies";
@@ -1339,6 +1348,65 @@ function parseTaskWithdrawnEdit(record: Record<string, unknown>, label: string, 
   return edit.ok ? parseOk(edit.value) : parseErr(`${label} ${edit.error}`);
 }
 
+const EXPORT_BINDING_AMENDED_EDIT_FIELDS = [
+  "schemaVersion", "kind", "wave", "taskId", "path", "contract", "change", "before", "after", "reason",
+] as const;
+
+/** A wire bound export: exactly `{ name, alias }`, two strings the constructor proves identifiers. */
+function rawBoundExports(raw: unknown, label: string): ParseResult<readonly RawBoundExport[]> {
+  if (!Array.isArray(raw)) return parseErr(`${label} must be an array of bound exports`);
+  const exports: RawBoundExport[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const entryLabel = `${label}[${index}]`;
+    if (!isRecord(entry)) return parseErr(`${entryLabel} must be an object`);
+    const fieldsError = exactFieldsError(entry, ["name", "alias"], [], entryLabel);
+    if (fieldsError !== null) return parseErr(fieldsError);
+    if (typeof entry.name !== "string" || typeof entry.alias !== "string") return parseErr(`${entryLabel}.name and .alias must be strings`);
+    exports.push({ name: entry.name, alias: entry.alias });
+  }
+  return parseOk(exports);
+}
+
+/** A wire change: exactly `{ kind: "dropped", name }` or `{ kind: "rebound", name, to }`. */
+function rawExportBindingChange(raw: unknown, label: string): ParseResult<RawExportBindingChange> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const { kind, name, to } = raw;
+  const fields = kind === "dropped" ? ["kind", "name"] : kind === "rebound" ? ["kind", "name", "to"] : null;
+  if (fields === null) return parseErr(`${label}.kind must be dropped or rebound`);
+  const fieldsError = exactFieldsError(raw, fields, [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (typeof name !== "string") return parseErr(`${label}.name must be a string`);
+  if (kind === "dropped") return parseOk({ kind, name });
+  return typeof to === "string" ? parseOk({ kind: "rebound", name, to }) : parseErr(`${label}.to must be a string`);
+}
+
+/**
+ * An `export-binding-amended` edit (ADR-0105), built by the one constructor
+ * (`core/wave-plan-edit.ts`), which derives `after` from `before` and the
+ * change: a stored `after` that differs is refused.
+ */
+function parseExportBindingAmendedEdit(record: Record<string, unknown>, label: string, roster: PlanEditRoster): ParseResult<WavePlanEdit> {
+  const header = parsePlanEditHeader(record, EXPORT_BINDING_AMENDED_EDIT_FIELDS, [], label, roster);
+  if (!header.ok) return header;
+  const { wave, taskId } = header.value;
+  if (typeof record.path !== "string" || typeof record.contract !== "string") return parseErr(`${label}.path and .contract must be strings`);
+  const change = rawExportBindingChange(record.change, `${label}.change`);
+  if (!change.ok) return change;
+  const before = rawBoundExports(record.before, `${label}.before`);
+  if (!before.ok) return before;
+  const after = rawBoundExports(record.after, `${label}.after`);
+  if (!after.ok) return after;
+  const reason = parsePlanEditReason(record.reason);
+  if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
+  const edit = exportBindingAmendedEdit({
+    wave, taskId, path: record.path, contract: record.contract, change: change.value, before: before.value, reason: reason.value,
+  });
+  if (!edit.ok) return parseErr(`${label} ${edit.error}`);
+  return canonicalStructuralEquals(edit.value.after, after.value)
+    ? parseOk(edit.value)
+    : parseErr(`${label}.after is not what its change leaves of before`);
+}
+
 type PlanEditParser = (record: Record<string, unknown>, label: string, roster: PlanEditRoster) => ParseResult<WavePlanEdit>;
 
 /** One parser per edit kind (loom#199); keyed by the union's kinds, so a new kind without a parser does not compile. */
@@ -1347,6 +1415,7 @@ const PLAN_EDIT_PARSERS: Readonly<Record<WavePlanEdit["kind"], PlanEditParser>> 
   "dependency-added": parseDependencyAddedEdit,
   "task-added": parseTaskAddedEdit,
   "task-withdrawn": parseTaskWithdrawnEdit,
+  "export-binding-amended": parseExportBindingAmendedEdit,
 });
 
 const isPlanEditKind = (kind: unknown): kind is WavePlanEdit["kind"] => typeof kind === "string" && Object.hasOwn(PLAN_EDIT_PARSERS, kind);

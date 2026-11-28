@@ -26,6 +26,8 @@ import {
   derivePendingTaskProof,
 } from "../../src/core/proof-obligations";
 import { compareStrings } from "../../src/core/ordering";
+import { parseIdentifier } from "../../src/core/skeleton/bindings";
+import type { ExportBinding, Identifier } from "../../src/core/skeleton/types";
 import { value } from "../fixtures/parse-result";
 import { observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 
@@ -600,6 +602,60 @@ describe("the retry appendix carries the predecessor's contract violations (FR-0
   it("adds no violation section to a retry whose predecessor violated no contract", () => {
     const { disposition } = retryOf(["proof:task-completed"]);
     expect(disposition.promptAppendix.split("\n")).toHaveLength(1);
+  });
+
+  describe("an amended export binding withdraws what the stamp no longer binds (ADR-0105)", () => {
+    const identifier = (raw: string): Identifier => {
+      const parsed = parseIdentifier(raw);
+      if (!parsed.ok) throw new Error(raw);
+      return parsed.value;
+    };
+    const stamp = (...names: readonly string[]): readonly ExportBinding[] => names.length === 0
+      ? []
+      : [{ path: "src/order/pricing.ts", contract: "CT-1", exports: [{ name: identifier(names[0]), alias: identifier("PriceOrderFn") }] }];
+    const WITHDRAWN = "Contract violations the previous attempt left that an amended export binding no longer owes";
+
+    it("lists a withdrawn bound-export violation apart and never demands it; a frozen-ADT violation stays owed", () => {
+      const { task, disposition } = retryOf(["proof:task-completed", VIOLATED]);
+      const amended = deriveImplementationRetryDisposition(task, stamp());
+      if (amended.kind !== "retry") throw new Error(amended.kind);
+      const [authorityLine, ...lines] = amended.promptAppendix.split("\n");
+      expect(authorityLine).toBe(disposition.promptAppendix.split("\n")[0]);
+      expect(lines).toEqual([
+        expect.stringMatching(/^Declared-artifact contract violations/),
+        "src/order/pricing.ts:",
+        "  - OrderState: re-lists-frozen-variants",
+        expect.stringContaining(WITHDRAWN),
+        "src/order/pricing.ts:",
+        "  - priceOrder: still-unimplemented — replace the body that throws unimplemented: priceOrder",
+      ]);
+      // The spawn gate measures with the same stamp: the amended appendix is admitted, the receipt's is not.
+      expect(authorizeImplementationSpawn(task, `Task ID: T1\n${amended.promptAppendix}`, stamp())).toMatchObject({ ok: true, kind: "retry" });
+      expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`, stamp())).toMatchObject({ ok: false });
+    });
+
+    it("demands nothing when the only violation was the withdrawn export", () => {
+      const onlyBound = contractViolatedFailureKind({
+        kind: "declared-artifact-contract-violated",
+        artifact: "src/order/pricing.ts",
+        violations: [{ subject: "priceOrder", reason: "still-unimplemented", remedy: null }],
+      }, 4_096);
+      const { task } = retryOf([onlyBound]);
+      const amended = deriveImplementationRetryDisposition(task, stamp());
+      if (amended.kind !== "retry") throw new Error(amended.kind);
+      expect(amended.promptAppendix).not.toContain("fix every one before completing");
+      expect(amended.promptAppendix.split("\n").slice(1)).toEqual([
+        expect.stringContaining(WITHDRAWN), "src/order/pricing.ts:", "  - priceOrder: still-unimplemented",
+      ]);
+    });
+
+    it("withdraws nothing while the stamp still binds the export, or when no stamp is given", () => {
+      const { task, disposition } = retryOf(["proof:task-completed", VIOLATED]);
+      const still = deriveImplementationRetryDisposition(task, stamp("priceOrder"));
+      expect(still.kind === "retry" && still.promptAppendix).toBe(disposition.promptAppendix);
+      expect(disposition.promptAppendix).not.toContain(WITHDRAWN);
+      expect(renderImplementationRetryContext(disposition.context)).toBe(disposition.promptAppendix);
+    });
   });
 });
 

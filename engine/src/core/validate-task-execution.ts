@@ -438,7 +438,7 @@ export function createTaskExecutionAuthorityBatch(
     if (task === undefined || input === undefined || taskBaselines === undefined || reservationId === undefined) {
       return { ok: false, error: `Cannot mint exact implementation authority for ${taskId}.` };
     }
-    const admission = authorizeImplementationSpawn(task, input.prompt);
+    const admission = authorizeImplementationSpawn(task, input.prompt, state.export_bindings);
     if (!admission.ok) return { ok: false, error: admission.error };
     const authority = createImplementationAttemptAuthority({
       taskId,
@@ -710,7 +710,7 @@ export function taskExecutionRegistrationError(
       if (plan === undefined || input === undefined || plan.authority.wave !== task.wave || plan.baselines !== baseline) {
         return `Task ${taskId} implementation authority changed before execution registration.`;
       }
-      const admission = authorizeImplementationSpawn(task, input.prompt);
+      const admission = authorizeImplementationSpawn(task, input.prompt, current.export_bindings);
       if (!admission.ok || plan.authority.semanticAttempt !== admission.semanticAttempt ||
           plan.retryHistoryStart !== admission.historyStart ||
           plan.retryLineagePredecessorReceiptId !== admission.lineagePredecessorReceiptId ||

@@ -2,7 +2,7 @@
 
 ## Status
 Accepted (2026-11-07). Shipped on branch `feat/g2-skeletons` (plan
-`.claude/plans/2026-11-02-g2-skeletons.md`, AD-4; interview Q10a and Q13a).
+`.claude/plans/2026-11-02-g2-skeletons.md`, AD-4; interview Q10a and Q13a). Amended by ADR-0105.
 
 ## Context
 G2 has the engine write signature skeletons into repository source files. A plan's **Export bindings:**

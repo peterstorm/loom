@@ -2,6 +2,7 @@ import type { Task, WaveImplementationDispatch } from "../types";
 import {
   deriveImplementationAttestationContext,
   deriveImplementationRetryDisposition,
+  type RetryAppendixBindings,
 } from "./implementation-retry";
 import { distillPromptAppendix, taskRolePolicy } from "./distill-task";
 import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
@@ -31,9 +32,17 @@ export type TaskImplementationDispatchDerivation =
  * off limits. The appendices follow the retry context in one order:
  * attestation, then distill, then tests-only. The State File never holds two
  * of them on one Task.
+ *
+ * `bindings` is the TaskGraph's export binding stamp, which a retry appendix
+ * measures its predecessor's contract violations against
+ * (`RetryAppendixBindings`); the brief and status pass it, as the spawn gate
+ * does, so all three render the same appendix.
  */
-export function deriveTaskImplementationDispatch(task: Task): TaskImplementationDispatchDerivation {
-  const disposition = deriveImplementationRetryDisposition(task);
+export function deriveTaskImplementationDispatch(
+  task: Task,
+  bindings?: RetryAppendixBindings,
+): TaskImplementationDispatchDerivation {
+  const disposition = deriveImplementationRetryDisposition(task, bindings);
   if (disposition.kind === "invalid") return canonicalRecord({ kind: "invalid-retry" as const, errors: disposition.errors });
   if (disposition.kind === "escalated") {
     return canonicalRecord({

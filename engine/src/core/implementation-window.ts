@@ -189,7 +189,7 @@ export function classifyImplementationWindow(
   const active = outstanding.filter((task) => !reclaimable.has(task.id) && holdsReservation(task));
   const activeIds = Object.freeze(active.map((task) => task.id));
   const activeTaskIds = new Set(activeIds);
-  const derivations = outstanding.map((task) => ({ task, derivation: deriveTaskImplementationDispatch(task) }));
+  const derivations = outstanding.map((task) => ({ task, derivation: deriveTaskImplementationDispatch(task, graph.export_bindings) }));
   // `flatMap` narrows the derivation in the arm that keeps it, so each kind's
   // matches arrive already typed — graph order, the first one wins.
   const invalidRetry = derivations.flatMap(({ task, derivation }) =>

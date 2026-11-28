@@ -59,13 +59,13 @@ Two persistence domains carry all authority:
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
-| `engine/` | The engine: 624 src files / ~171.5k lines TS; `engine/tests/` holds 968 TS files / ~266.7k lines (fixtures and helpers included), of which 846 test files are executed (822 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `engine/` | The engine: 626 src files / ~172.2k lines TS; `engine/tests/` holds 970 TS files / ~267.2k lines (fixtures and helpers included), of which 848 test files are executed (824 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.4k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 12 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 132 docs incl. **103 ADRs** (index test-enforced) | — |
+| `docs/` | 133 docs incl. **104 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -912,7 +912,7 @@ per-mechanism *why it works* and *what remains*.
 | 33 | Dead roster entry blocks operators forever | Roster liveness judged from transcript evidence (#211, #207) | never-started / aborted are typed observations, not guesses | — |
 | 34 | Two observers keep two engine-path lists (#192/#196) | `engine-owned-paths.ts` is the one owner (#204) | Every consumer reads one classifier; a second site is the bug | — |
 | 35 | Engine switches under a live run | TaskGraph engine-revision pin + audited adoption (#205) | Write boundary refuses a foreign pin; adoption chain is append-only and parser-checked | Self-hosted graphs exempt by design |
-| 36 | A live TaskGraph cannot be repaired, only suffered | Audited mutation operations: add-dependency, rescope-task, add-task/withdraw-task, amend-spec (#212/#203/#217/#220) | Each is a pure decision core + an audit record; cycles and illegal edits refused at write time | — |
+| 36 | A live TaskGraph cannot be repaired, only suffered | Audited mutation operations: add-dependency, rescope-task, add-task/withdraw-task, amend-spec, amend-export-binding (#212/#203/#217/#220, ADR-0105) | Each is a pure decision core + an audit record; cycles and illegal edits refused at write time | — |
 | 37 | Acceptance green on a path production never takes | Runtime seams declared, enforced at the freeze (ADR-0088, #221) | Freeze refuses acceptance files that reference no declared seam | — |
 | 38 | Retro = vibes | Friction facts + triggers + audited record (ADR-0083, #215) | Facts digested from protected state; the retro report never blocks | — |
 | 39 | Advisory decisions die with the gate run | Advisory dispositions recorded on the TaskGraph, anchored to reviewed bytes (ADR-0090, #224) | Abandon loses nothing; a decided advisory is reissued only when its bytes change | — |
@@ -960,8 +960,8 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **846 executed test files / ~266.7k lines** — 822 under `engine/tests/` (968 TS files there
-  including fixtures and helpers; core 318 test files, handlers 189, pi 50,
+- **848 executed test files / ~267.2k lines** — 824 under `engine/tests/` (970 TS files there
+  including fixtures and helpers; core 319 test files, handlers 190, pi 50,
   linter 47, orchestration 40, utils 35, machine 31, acceptance 20, security 20, …)
   and 24 under `calibration/` and `probes/`, which the Vitest include set adds
   (`*.test.ts` plus the probes' `*.test.mjs`).
@@ -970,7 +970,7 @@ roster-provability checks.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (103 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (104 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, orchestration facades, Pi resources, task-graph
   validation — real CLI processes, not mocks.
@@ -1445,7 +1445,7 @@ file-absence, runtime-baseline-restore.
 
 **handlers/helpers/** — the façades: orchestration (status/brief/inspect/start/resume/
 restart/… plus the audited mutations add-task, withdraw-task, add-dependency,
-rescope-task, adopt-engine-revision, adopt-engine-run-tests), programs/ (37
+rescope-task, amend-export-binding, adopt-engine-revision, adopt-engine-run-tests), programs/ (37
 per-program drivers), security-audit, populate-task-graph, wave-gate-observers,
 complete-orchestration, accept-plan-design-review, mutation-check,
 store-*-findings, validate-task-graph, write-verification-manifest, run-tests,

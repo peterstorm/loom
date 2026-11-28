@@ -39,7 +39,7 @@ import type { TaskId } from "./core/task-id";
 import type { AdvisoryDisposition } from "./core/advisory-disposition-shape";
 // The G2 values (AD-4) are owned by their dependency-free leaf, which imports
 // nothing from this file, so the canonical Task and TaskGraph declare them.
-import type { ExportBinding, PathSkeletonOutcome, SkeletonRecord } from "./core/skeleton/persisted";
+import type { BoundExport, ExportBinding, ExportBindingChange, PathSkeletonOutcome, SkeletonRecord } from "./core/skeleton/persisted";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
 // The sibling entry point is owned by its dependency-free leaf, which both
@@ -930,10 +930,34 @@ export type SpecTraceAmendmentChange = Readonly<{
  * One audited edit of the Wave plan (loom#198 Cause 3, loom#199 Cause 2;
  * ADR-0081, ADR-0086). A union over edit kinds: a pending Task's file list
  * re-scoped (`rescope-task`), dependency edges added to a Task
- * (`add-dependency`), a Task appended to the active Wave (`add-task`), or an
- * added Task withdrawn (`withdraw-task`).
+ * (`add-dependency`), a Task appended to the active Wave (`add-task`), an
+ * added Task withdrawn (`withdraw-task`), or one export of a Task's Export
+ * Binding dropped or renamed (`amend-export-binding`, ADR-0105).
  */
-export type WavePlanEdit = TaskRescopedEdit | DependencyAddedEdit | TaskAddedEdit | TaskWithdrawnEdit;
+export type WavePlanEdit = TaskRescopedEdit | DependencyAddedEdit | TaskAddedEdit | TaskWithdrawnEdit | ExportBindingAmendedEdit;
+
+/**
+ * One export of a pending Task's Export Binding changed in place
+ * (`helper orchestration amend-export-binding`, ADR-0105): the stamped
+ * binding of `path` to `contract` before and after, and why. `after` is
+ * `before` with `change` applied (the one constructor derives it); empty when
+ * the drop removed the binding's last export, so the stamp no longer binds
+ * the path. The operation is parent-only (ADR-0067 D6), so the operator is
+ * its actor by construction; like every plan edit it records no identity.
+ */
+export type ExportBindingAmendedEdit = Readonly<{
+  schemaVersion: 1;
+  kind: "export-binding-amended";
+  wave: number;
+  taskId: string;
+  path: string;
+  contract: string;
+  change: ExportBindingChange;
+  before: OrchestrationNonEmpty<BoundExport>;
+  after: readonly BoundExport[];
+  /** The operator's non-blank reason, at most 500 characters. */
+  reason: string;
+}>;
 
 /**
  * A Task appended to the active Wave (`helper orchestration add-task`,
