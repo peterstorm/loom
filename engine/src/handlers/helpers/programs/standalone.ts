@@ -45,8 +45,7 @@ import { decideRefutationTranscriptRead, refutationRejectionDiagnostic, standalo
 import { durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
 import { failed, type FacadeDriveResult, type ProgramParse } from './program-result';
-import { renderReviewProgramSpawn } from './spawn-task';
-import { REVIEWER_RESULT_INSTRUCTION } from '../../../core/spawn-task-text';
+import { renderIssuedRequestTask } from './spawn-task';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
 import { type RegisteredStandaloneProgram } from './registration';
 import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
@@ -784,13 +783,15 @@ async function resumeAwaitingResults(
       idempotencyKey: { runId: handle.runId, effectId: effectId.value },
       receipt: publication.receipt,
       requests: missing.map((request) => {
-        const spawn = renderReviewProgramSpawn(
+        // Rendering the extraction-only route with the CALLER's instruction was
+        // the second composer: the same sentence lived here and in the core, so
+        // the two could disagree. The authority selects it now.
+        const spawn = renderIssuedRequestTask({
           handle,
-          request.authority,
-          REVIEWER_RESULT_INSTRUCTION,
-          registration,
-          { standalone: true },
-        );
+          authority: request.authority,
+          emissionAuthority: registration,
+          options: { standalone: true },
+        });
         return {
           ...request,
           task: request.authority.attempt === 2

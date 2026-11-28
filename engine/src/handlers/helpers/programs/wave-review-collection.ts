@@ -153,7 +153,7 @@ export async function reconcileCurrentReviewEvidence(
       requests: uncapturedInitialReviews.map((authority) => ({
         authority,
         context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
-        task: renderIssuedRequestTask(handle, authority, registration).task,
+        task: renderIssuedRequestTask({ handle, authority, emissionAuthority: registration }).task,
       })),
     } });
   }

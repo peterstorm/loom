@@ -34,12 +34,11 @@ import { openRegisteredRunDirectory, type RunDirHandle } from "../engine/src/orc
 import {
   parseRegisteredFacadeProgram,
   publishedReviewerRequest,
-  renderSpawnTask,
+  renderExtractionOnlyTask,
 } from "../engine/src/handlers/helpers/programs";
 import {
   canonicalSpawnTaskText,
   parseIssuedTaskIdentity,
-  REVIEWER_RESULT_INSTRUCTION,
   type TaskIdentity,
 } from "../engine/src/core/spawn-task-text";
 import {
@@ -489,12 +488,11 @@ export async function recordPiSpawnCorrelators(
       canonicalTasks[index] = item.task;
     } else {
       const canonical = canonicalSpawnTaskText(
-        renderSpawnTask(
+        renderExtractionOnlyTask({
           handle,
-          request,
-          REVIEWER_RESULT_INSTRUCTION,
-          { standalone: hasStandaloneReviewContext(item.task) },
-        ),
+          authority: request,
+          options: { standalone: hasStandaloneReviewContext(item.task) },
+        }).task,
         item.task,
       );
       if (canonical.kind === "render-fallback") {

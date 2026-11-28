@@ -58,7 +58,7 @@ import { describeCause } from "../../../utils/describe-cause";
 import { durableCaptureRejection, durablePublishedReceipt, durableRefutationRequests, publicationResolver, refutationBatchEffectId } from "./durable-requests";
 import { recoverOrPublishRefutationRetry } from "./refutation-requests";
 import { publishLegacyInitialBatch } from "./request-publication";
-import { renderSpawnTask } from "./spawn-task";
+import { renderExtractionOnlyTask } from "./spawn-task";
 import { failed, type FacadeDriveResult, type FacadeSpawnRequest, type ProgramParse } from "./program-result";
 
 /** The durable effect label every verification batch is published under. */
@@ -68,10 +68,6 @@ const OUTPUT_CONTRACT =
   `Try to refute every candidate in the ${VERIFICATION_BRIEF_SECTION} section and return exactly one ` +
   `${VERIFICATION_RESULT_KIND} JSON object: one verdict per fingerprint in the brief, each with exactly ` +
   "fingerprint, vote (critical | advisory), reason and missingFact (null when none). No agent, profile or wave.";
-
-const VERIFIER_INSTRUCTION =
-  `Read your brief with LOOM_CONTEXT_SECTION_COMMAND --section ${VERIFICATION_BRIEF_SECTION}, try to refute ` +
-  `every candidate in it, and make your FINAL message exactly one ${VERIFICATION_RESULT_KIND} JSON object.`;
 
 
 // --- Start ---
@@ -337,7 +333,7 @@ function completedResult(
 
 /** One spawn task: the extraction-only render, plus the retry's diagnostic. */
 function verifierTask(handle: RunDirHandle, authority: AgentRequestAuthority, diagnostic: string | null): string {
-  const task = renderSpawnTask(handle, authority, VERIFIER_INSTRUCTION);
+  const task = renderExtractionOnlyTask({ handle, authority }).task;
   return authority.attempt === 1 ? task : [
     task, "", "Your previous attempt was rejected:", "", diagnostic ?? "its result could not be admitted", "",
     `Your FINAL message must be exactly one ${VERIFICATION_RESULT_KIND} JSON object and nothing else, with one verdict per fingerprint in the brief.`,

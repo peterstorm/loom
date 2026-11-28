@@ -20,14 +20,16 @@ export type { FacadeAction, FacadeDriveResult, ProgramParse } from './program-re
 // Parent-side spawn admission must prove publication, not trust prompt markers.
 export { publishedReviewerRequest } from './durable-requests';
 export { reviewerProtocolResolver } from './reviewer-protocol-resolution';
-// `renderSpawnTask` is the durable-compatibility/extraction-only render: it
-// never carries an issued emission descriptor. The program-path emission
-// seam (`renderReviewProgramSpawn`/`publishReviewInitialBatch` and their
-// required `RegisteredReviewProgram` authority) is deliberately NOT on this
-// surface — descriptor/route projection is internal to the programs volume,
-// and publication without an explicit route decision is unrepresentable for
-// callers (FR-001/FR-020; the curated surface stays parent-caller operations).
-export { renderSpawnTask } from './spawn-task';
+// `renderExtractionOnlyTask` is the durable-compatibility/extraction-only
+// render: its input type has no emission authority at all, so it never carries
+// an issued emission descriptor and a caller cannot select a route. The
+// program-path seam (`renderIssuedRequestTask`, whose `emissionAuthority` is a
+// required `RegisteredReviewProgram | null`, and `publishReviewInitialBatch`)
+// is deliberately NOT on this surface — descriptor/route projection is internal
+// to the programs volume, and publication without an explicit route decision is
+// unrepresentable for callers (FR-001/FR-020; the curated surface stays
+// parent-caller operations).
+export { renderExtractionOnlyTask } from './spawn-task';
 export {
   inspectStandaloneFacade,
   prepareStandaloneSuccessorFacadeStart,

@@ -27,7 +27,7 @@ import { observeTaskGraphProjectBoundary } from "../src/config";
 import { executingGraphFixture, graphFixture, observedEvidence, protectedGraphFixture, taskFixture } from "./fixtures/task-lifecycle";
 import type { TaskGraph } from "../src/types";
 import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/request-publication";
-import { renderSpawnTask } from "../src/handlers/helpers/programs";
+import { renderExtractionOnlyTask } from "../src/handlers/helpers/programs";
 import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
 import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
 import { waveRequests } from "../src/handlers/helpers/programs/wave-review-requests";
@@ -2846,9 +2846,11 @@ describe("Pi extension review tool_result integration", () => {
     const staged = await piCaptureRun("pi-canonical-binding-kept");
     const session = "019fca39-f989-7510-8e62-50dadbcad4b3";
     expect((await bindSession(session, staged)).ok).toBe(true);
-    const rendered = renderSpawnTask(staged.handle, staged.request, REVIEWER_RESULT_INSTRUCTION, { standalone: true });
-    const issued = `${rendered}\nReview Task T1.`;
-    const input = { agent: "code-reviewer", task: issued, agentScope: "user" };
+    // The one render already appends the packet's Task binding, so the issued
+    // task IS the render: admission must dispatch it verbatim (the keep arm).
+    const rendered = renderExtractionOnlyTask({ handle: staged.handle, authority: staged.request, options: { standalone: true } }).task;
+    expect(rendered.trimEnd().endsWith("\nReview Task T1.")).toBe(true);
+    const input = { agent: "code-reviewer", task: rendered, agentScope: "user" };
 
     try {
       expect(await pi.emit("tool_call", {
@@ -2857,7 +2859,7 @@ describe("Pi extension review tool_result integration", () => {
         input,
       }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
 
-      expect(input.task).toBe(issued);
+      expect(input.task).toBe(rendered);
     } finally {
       rmSync(join(subagentDir, `${session}.active`), { force: true });
     }

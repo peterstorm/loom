@@ -12,15 +12,16 @@ import { issueEmissionBinding } from "../../src/core/emission-tool";
 import { issuedReviewerPayloadClaim } from "../../src/core/issued-emission-capability";
 import { DESKTOP_VLLM_ROUTE } from "../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
-import { REVIEWER_RESULT_INSTRUCTION } from "../../src/core/spawn-task-text";
+import { issuedRequestInstruction } from "../../src/core/issued-request-task";
 import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import type { AdmittedSpawnItem } from "../../src/core/spawn-admission";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
 import { createRunDirectory, openRegisteredRunDirectory } from "../../src/orchestration/run-directory-handle";
-import { renderSpawnTask } from "../../src/handlers/helpers/programs";
+import { renderExtractionOnlyTask } from "../../src/handlers/helpers/programs";
 import { classifyPiIssuedReviewRequest, qualifyPiIssuedReviewRequest, recordPiSpawnCorrelators } from "../../../pi/review-run-authority";
 import { piSpawnRosterId } from "../../../pi/tool-input";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
+import { catalogAuthority } from "../fixtures/reviewer-request";
 import { withEnvOverlay, withEnvOverlaySync } from "../fixtures/env-overlay";
 import { hostileServedRouting } from "../fixtures/hostile-served-routing";
 
@@ -32,8 +33,8 @@ afterEach(() => {
 const RUN = "run.spawn-correlator";
 
 /** A minimal parsed registration, as the spawn-task render requires: the
- *  extraction-only arm re-renders through `renderSpawnTask`, whose reviewer
- *  bootstrap reads the run's program registration. */
+ *  extraction-only arm re-renders through `renderExtractionOnlyTask`, whose
+ *  reviewer bootstrap reads the run's program registration. */
 const WAVE_REGISTRATION = Object.freeze({
   schemaVersion: 1 as const,
   kind: "wave-gate" as const,
@@ -90,20 +91,22 @@ describe("recording the admission decision with a Pi spawn correlator", () => {
   });
 
   it("records a child admitted without the emission tool as not-enabled", async () => {
-    // A spec-check request carries no reviewer contract, so its canonical re-render needs no registration.
-    const request = agentRequestAuthority(RUN, {
-      requestId: "request:spec-check:1",
-      role: "spec-check-invoker",
-      modelProfile: "spec-check-review",
+    // A Refutation Panel verifier is outside the reviewer emission gate and
+    // carries no Wave subject, so its canonical re-render reads no packet.
+    const request = catalogAuthority({
+      role: "review-verifier-agent",
+      program: "refutation-panel",
+      requestId: "request:panel-verifier:1",
+      runId: RUN,
     });
     const runsRoot = await stagedRun(request);
     const admitted: AdmittedSpawnItem = {
-      item: { agent: "spec-check-invoker", task: task(request) },
+      item: { agent: "review-verifier-agent", task: task(request) },
       taskExecutionSpawn: { kind: "non-implementation" },
       emissionExpectation: { kind: "no-emission-tool" },
     };
-    const rosterId = piSpawnRosterId("call-not-enabled", 0, "spec-check-invoker");
-    const rawInput = { agent: "spec-check-invoker", task: task(request) };
+    const rosterId = piSpawnRosterId("call-not-enabled", 0, "review-verifier-agent");
+    const rawInput = { agent: "review-verifier-agent", task: task(request) };
 
     await withEnvOverlay({ [RUNS_ROOT_ENV]: runsRoot, [RUN_DIR_ENV]: join(runsRoot, RUN) }, () =>
       recordPiSpawnCorrelators([admitted], [rosterId], "session-not-enabled", rawInput));
@@ -112,11 +115,12 @@ describe("recording the admission decision with a Pi spawn correlator", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     expect(opened.value.readHarnessCorrelator("pi", rosterId))
       .toMatchObject({ ok: true, value: { requestId: request.requestId, admittedEmission: { kind: "not-enabled" } } });
-    // The extraction-only arm re-renders: the caller-authored instruction is
-    // replaced by the issued fresh render (this task is not a verbatim
+    // The extraction-only arm re-renders: the caller-authored text is replaced
+    // by the render the request authority selects (this task is not a verbatim
     // extension, so the fallback arm dispatches it, with the fallback named on
     // stderr).
-    expect(rawInput.task).toBe(renderSpawnTask(opened.value, request, REVIEWER_RESULT_INSTRUCTION, { standalone: false }));
+    expect(rawInput.task).toBe(renderExtractionOnlyTask({ handle: opened.value, authority: request, options: { standalone: false } }).task);
+    expect(rawInput.task).toContain(issuedRequestInstruction(request));
     expect(rawInput.task).not.toContain("Review the issued request");
   });
 });

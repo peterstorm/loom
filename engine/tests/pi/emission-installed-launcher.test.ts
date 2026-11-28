@@ -38,9 +38,10 @@ import { createRunDirectory, openRegisteredRunDirectory } from "../../src/orches
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
 import { parsedAuthority, type RegisteredStandaloneProgram } from "../../src/handlers/helpers/programs/registration";
 import { publishReviewInitialBatch } from "../../src/handlers/helpers/programs/request-publication";
-import { renderReviewProgramSpawn } from "../../src/handlers/helpers/programs/spawn-task";
+import { renderIssuedRequestTask } from "../../src/handlers/helpers/programs/spawn-task";
 import { standaloneRequestId } from "../../src/handlers/helpers/programs/standalone-requests";
 import { standaloneFixtureRegistration } from "../fixtures/standalone-reviewer-protocol";
+import { withEnvOverlay } from "../fixtures/env-overlay";
 import { fixtureSession, withFixturePiSession } from "../fixtures/pi-session";
 import { recordOf, repoRoot, withProcessState } from "../fixtures/emission-child-harness";
 import { JUDGE_V1_CELL } from "../fixtures/emission-registry-cells";
@@ -147,23 +148,15 @@ const publishedParentSpawnFixture = async (label: string): Promise<PublishedPare
     version: "v2",
   });
   if (!binding.ok) throw new Error(`fixture emission binding refused: ${binding.error.message}`);
-  const baseInstruction = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
-  const projected = projectEmissionTaskText(
-    canonicalRecord({
-      kind: "emission" as const,
-      binding: binding.value,
-      contextDigest: authority.contextDigest,
-    }),
-    baseInstruction,
-  );
+  // The fixture task is the PRODUCTION emission render for this request, taken
+  // under a Pi parent: the render decides the descriptor and the tool-primary
+  // instruction, so the fixture cannot drift from what publication emits.
+  const rendered = await withEnvOverlay({ PI_CODING_AGENT: "true" }, () =>
+    renderIssuedRequestTask({ handle, authority, emissionAuthority: registration, options: { standalone: true } }));
+  if (rendered.route.kind !== "emission") throw new Error("fixture requires the issued emission route");
+  const projected = projectEmissionTaskText(rendered.route, "");
   const toolPrimaryInstruction = emissionToolPrimaryInstruction(binding.value);
-  const task = projected.descriptor + renderReviewProgramSpawn(
-    handle,
-    authority,
-    projected.instruction,
-    registration,
-    { standalone: true },
-  ).task;
+  const task = rendered.task;
   return Object.freeze({
     root,
     piAgentDir,

@@ -10,7 +10,7 @@ import type { PreparedVerifierRequest } from '../../../core/refutation-verifiers
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { durableCaptureRejection, durableRefutationRequests } from './durable-requests';
 import { publishLegacyInitialBatch } from './request-publication';
-import { renderSpawnTask } from './spawn-task';
+import { renderExtractionOnlyTask } from './spawn-task';
 
 export function executableRefutationRequests(
   handle: RunDirHandle,
@@ -19,12 +19,11 @@ export function executableRefutationRequests(
   retryDiagnostic: string | null = null,
 ): readonly Readonly<SpawnRequest & { task: string }>[] {
   return requests.map((request) => {
-    const task = renderSpawnTask(
+    const task = renderExtractionOnlyTask({
       handle,
-      request.authority,
-      "Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending Refutation Panel request.",
-      { standalone },
-    );
+      authority: request.authority,
+      options: { standalone },
+    }).task;
     return Object.freeze({
       ...request,
       task: request.authority.attempt === 2 ? refutationRetryTask(task, retryDiagnostic) : task,

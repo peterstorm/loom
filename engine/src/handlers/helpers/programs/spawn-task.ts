@@ -10,6 +10,14 @@
  * child must echo is read separately, from the request's own Context Packet,
  * by `observeTaskBinding` — a second read that can still throw after the route
  * has been projected.
+ *
+ * NO CALLER SUPPLIES TEXT. The instruction is the request authority's
+ * (`issuedRequestInstruction`), the Task/Wave binding is the Context Packet's,
+ * and the emission authority is joined against the durable registration — the
+ * three facts a code path used to author for itself. The attempt-2 retry
+ * appendix is still applied by the requesting program; moving its writer here
+ * is the next step, and until then this render produces the task a child reads
+ * minus that program's own diagnostic block.
  */
 import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
 import { describeChildLaunchRouteRefusal, routedChildLaunchRoute } from "../../../utils/child-launch-route";
@@ -233,12 +241,27 @@ function observePanelView(handle: RunDirHandle, request: AgentRequestAuthority):
  * tool — FR-001), the per-version delivery, then the program-specific
  * instruction (tool-primary on the emission route, verbatim otherwise).
  *
- * Active review programs use `renderReviewProgramSpawn`, whose registered
- * emission authority is a required parameter. `renderSpawnTask` is the
- * distinct durable-compatibility/ineligible interface and therefore cannot
- * accidentally accept a program authority in an optional property.
+ * The instruction is not a parameter: `issuedRequestInstruction` selects it
+ * from the request authority, which is total over the program vocabulary. The
+ * emission authority is a separate, explicitly required parameter, so a caller
+ * decides the route and cannot leave it to a default.
  */
 type SpawnTaskRenderOptions = Readonly<{ standalone?: boolean }>;
+
+/** What one render is given: the run, the request, and the emission authority
+ *  the caller joined. No field is text, so a caller cannot author the task. */
+export type IssuedTaskRenderInput = Readonly<{
+  handle: RunDirHandle;
+  authority: AgentRequestAuthority;
+  /** The joined emission authority; null is the archived/durable-compatibility route. */
+  emissionAuthority: RegisteredReviewProgram | null;
+  options?: SpawnTaskRenderOptions;
+}>;
+
+/** The extraction-only render the curated public surface admits: the emission
+ *  authority is unrepresentable, so a parent caller cannot select a route (the
+ *  descriptor decision stays inside the programs volume — FR-001/FR-020). */
+export type ExtractionOnlyRenderInput = Omit<IssuedTaskRenderInput, "emissionAuthority">;
 
 /** One rendered review-program spawn: the task text and the issued route it
  *  was rendered from, so a retry closes on the route as data rather than
@@ -253,10 +276,10 @@ type ObservedSpawnTask = Readonly<{ facts: SpawnTaskFacts; route: IssuedSpawnEmi
 function observeSpawnTaskFacts(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,
-  instruction: string,
   emissionAuthority: RegisteredReviewProgram | undefined,
   options: SpawnTaskRenderOptions,
 ): ObservedSpawnTask {
+  const instruction = issuedRequestInstruction(authority);
   const reviewer = reviewerEmissionEligible(authority)
     ? observeReviewerDelivery(handle, authority, instruction, emissionAuthority)
     : null;
@@ -297,58 +320,36 @@ function observeTaskBinding(handle: RunDirHandle, authority: AgentRequestAuthori
 }
 
 /**
- * The durable-compatibility render: an emission-eligible request derives its
- * issued claim from the durable registration alone. Its production callers are
- * the ineligible panel/spec-check paths and Pi's extraction-only canonical
- * re-render (pi/review-run-authority.ts), which re-derives the same route from
- * the same durable registration. Active review programs use
- * `renderReviewProgramSpawn`, whose registered emission authority is a
- * required parameter, so this interface cannot accidentally accept one.
- */
-export function renderSpawnTask(
-  handle: RunDirHandle,
-  authority: AgentRequestAuthority,
-  instruction: string,
-  options: SpawnTaskRenderOptions = {},
-): string {
-  return renderSpawnTaskText(observeSpawnTaskFacts(handle, authority, instruction, undefined, options).facts);
-}
-
-/** The review-program render seam: issued emission authority is required by
- *  the compiler rather than remembered in a comment or recovered implicitly. */
-export function renderReviewProgramSpawn(
-  handle: RunDirHandle,
-  authority: AgentRequestAuthority,
-  instruction: string,
-  emissionAuthority: RegisteredReviewProgram,
-  options: SpawnTaskRenderOptions = {},
-): ReviewProgramSpawn {
-  const { facts, route } = observeSpawnTaskFacts(handle, authority, instruction, emissionAuthority, options);
-  return Object.freeze({ task: renderSpawnTaskText(facts), route });
-}
-
-/**
  * The one render of an issued request: its program's instruction, its durable
  * Wave binding, and the verified delivery — so no caller supplies either fact.
  * A caller that composed its own instruction or appended its own binding made
- * the text a property of the code path rather than of the request. The
- * attempt-1 Wave emission sites (initial publication and the collection
- * re-emission) render through this function alone; the attempt-2 retry and
- * verifier seams still compose their own text and are migrated by the next
- * slice. `emissionAuthority` is null for the archived extraction-only route,
- * matching the publication core's convention.
+ * the text a property of the code path rather than of the request, and the
+ * paths disagreed: an attempt-1 Wave request read "complete the exact Wave
+ * review request" from one site and "emit only the required reviewer result"
+ * from another, and only one appended the Task binding, so a re-emitted request
+ * lost the binding its capture matcher requires. `emissionAuthority` is null
+ * for the archived extraction-only route, matching the publication core's
+ * convention.
  */
-export function renderIssuedRequestTask(
-  handle: RunDirHandle,
-  authority: AgentRequestAuthority,
-  emissionAuthority: RegisteredReviewProgram | null,
-  options: SpawnTaskRenderOptions = {},
-): ReviewProgramSpawn {
+export function renderIssuedRequestTask(input: IssuedTaskRenderInput): ReviewProgramSpawn {
+  const { handle, authority, emissionAuthority, options } = input;
   const { facts, route } = observeSpawnTaskFacts(
-    handle, authority, issuedRequestInstruction(authority), emissionAuthority ?? undefined, options,
+    handle, authority, emissionAuthority ?? undefined, options ?? {},
   );
   return Object.freeze({
     task: withTaskBinding(renderSpawnTaskText(facts), observeTaskBinding(handle, authority)),
     route,
   });
+}
+
+/**
+ * The durable-compatibility render: an emission-eligible request derives its
+ * issued claim from the durable registration alone, and an ineligible one
+ * carries no descriptor at all. Its production caller is Pi's extraction-only
+ * canonical re-render (pi/review-run-authority.ts), which re-derives the same
+ * route from the same durable registration; the ineligible panel, spec-check
+ * and security-verifier paths call `renderIssuedRequestTask` with null.
+ */
+export function renderExtractionOnlyTask(input: ExtractionOnlyRenderInput): ReviewProgramSpawn {
+  return renderIssuedRequestTask({ ...input, emissionAuthority: null });
 }

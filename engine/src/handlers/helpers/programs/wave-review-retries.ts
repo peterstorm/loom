@@ -24,7 +24,7 @@ import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program'
 import { durableCaptureRejection, durableRefutationRequests, isCaptureRejectionOf, publicationResolver } from './durable-requests';
 import { failed, type FacadeDriveResult } from './program-result';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
-import { renderReviewProgramSpawn, renderSpawnTask } from './spawn-task';
+import { renderExtractionOnlyTask, renderIssuedRequestTask } from './spawn-task';
 import { proceed, rederive, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 import { applyWaveFacadeSubmission } from './wave-gate-submission';
 import { issuedWaveProtocol, readWaveRequestContext } from './wave-review-context';
@@ -219,7 +219,7 @@ export async function driveWaveReviewRetries(
       kind: "spawn-batch", runId: handle.runId,
       requests: requests.map((request) => {
         const retry = retries.find(({ slotId }) => slotId === request.authority.slotId);
-        const spawn = renderReviewProgramSpawn(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot.", registration);
+        const spawn = renderIssuedRequestTask({ handle, authority: request.authority, emissionAuthority: registration });
         return {
           ...request,
           task: renderCurrentWaveRetryTask(spawn.task, spawn.route, retry === undefined
@@ -358,9 +358,9 @@ export async function driveWaveSpecCheckRetry(
       requests: [{
         ...durable,
         // Extraction-only render: the spec-check slot carries no emission
-        // descriptor and keeps the caller's instruction verbatim (FR-020).
+        // descriptor, so the render takes no emission authority at all.
         task: [
-          renderSpawnTask(handle, durable.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot."),
+          renderExtractionOnlyTask({ handle, authority: durable.authority }).task,
           specCheckRetryDiagnostic(attemptOneFailure),
         ].join("\n"),
       }],

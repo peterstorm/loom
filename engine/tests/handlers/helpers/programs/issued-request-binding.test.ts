@@ -86,7 +86,7 @@ describe("renderIssuedRequestTask binds the packet's Wave subject", () => {
 
     // The re-emission (the collection path's shape) recomposes from the same
     // durable state and must not differ by a byte.
-    expect(renderIssuedRequestTask(handle, authority, registration).task).toBe(emitted.task);
+    expect(renderIssuedRequestTask({ handle, authority, emissionAuthority: registration }).task).toBe(emitted.task);
   }, 30_000);
 
   it("the spec-check slot binds the Wave, not a Task", async () => {
@@ -101,7 +101,7 @@ describe("renderIssuedRequestTask binds the packet's Wave subject", () => {
     });
     orFail(await handle.publishContext(packet), runDirectoryFailure);
 
-    const { task } = renderIssuedRequestTask(handle, authority, null);
+    const { task } = renderIssuedRequestTask({ handle, authority, emissionAuthority: null });
     expect(task.trimEnd().endsWith("\nSpec-check Wave 1.")).toBe(true);
     expect(task).not.toContain("Review Task");
   }, 30_000);
@@ -113,7 +113,7 @@ describe("renderIssuedRequestTask binds the packet's Wave subject", () => {
       contextDigest: "b".repeat(64),
       slotId: "standalone-slot:1:spec-check-invoker",
     });
-    expect(() => renderIssuedRequestTask(handle, authority, null))
+    expect(() => renderIssuedRequestTask({ handle, authority, emissionAuthority: null }))
       .toThrow(new RegExp(`request ${authority.requestId}.*unavailable Context Packet`));
   }, 30_000);
 
@@ -137,7 +137,7 @@ describe("renderIssuedRequestTask binds the packet's Wave subject", () => {
       role: "spec-check-invoker",
       slotId: "standalone-slot:1:spec-check-invoker",
     });
-    expect(() => renderIssuedRequestTask(handle, authority, null))
+    expect(() => renderIssuedRequestTask({ handle, authority, emissionAuthority: null }))
       .toThrow(new RegExp(`request ${authority.requestId}.*no usable Wave review subject`));
   }, 30_000);
 });

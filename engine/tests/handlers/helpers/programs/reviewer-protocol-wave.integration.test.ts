@@ -27,7 +27,7 @@ import {
 } from "../../../fixtures/wave-reviewer-payload";
 import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
-import { renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
+import { renderExtractionOnlyTask } from "../../../../src/handlers/helpers/programs/spawn-task";
 import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/reviewer-protocol-resolution";
 import { readWaveReviewContext, waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
 import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
@@ -1504,12 +1504,14 @@ describe("the issued emission route on the Wave program path (T6)", () => {
     // without a Pi parent yields the extraction-shaped task. The route delta
     // on the wire is EXACTLY the descriptor line plus the appended
     // tool-primary instruction.
-    const base = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
-    const undecorated = (task: string) => task.slice(0, task.lastIndexOf("\n"));
     for (const { authority, task } of emission.requests) {
-      const emissionRender = await withPiParent(true, () => renderSpawnTask(emission.handle, authority, base));
-      expect(undecorated(task)).toBe(emissionRender);
-      const extractionRender = await withPiParent(false, () => renderSpawnTask(emission.handle, authority, base));
+      // The render IS the issued task: markers, delivery, the request's own
+      // instruction and the packet's Task binding, byte for byte.
+      const emissionRender = await withPiParent(true, () =>
+        renderExtractionOnlyTask({ handle: emission.handle, authority }).task);
+      expect(task).toBe(emissionRender);
+      const extractionRender = await withPiParent(false, () =>
+        renderExtractionOnlyTask({ handle: emission.handle, authority }).task);
       if (authority.role === "spec-check-invoker") {
         expect(extractionRender).toBe(emissionRender);
         expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
@@ -1533,10 +1535,12 @@ describe("the issued emission route on the Wave program path (T6)", () => {
     for (const { authority, task } of extraction.requests) {
       expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
       expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
-      const extractionRender = await withPiParent(false, () => renderSpawnTask(extraction.handle, authority, base));
-      expect(undecorated(task)).toBe(extractionRender);
+      const extractionRender = await withPiParent(false, () =>
+        renderExtractionOnlyTask({ handle: extraction.handle, authority }).task);
+      expect(task).toBe(extractionRender);
       if (authority.role === "spec-check-invoker") continue;
-      const piRender = await withPiParent(true, () => renderSpawnTask(extraction.handle, authority, base));
+      const piRender = await withPiParent(true, () =>
+        renderExtractionOnlyTask({ handle: extraction.handle, authority }).task);
       const descriptor = parseEmissionDescriptor(piRender);
       if (descriptor.kind !== "issued") throw new Error("a Pi-parent render of a current Wave reviewer must mint an issued descriptor");
       expect(withoutEmissionRouteDelta(piRender, descriptor.binding, descriptor.contextDigest)).toBe(extractionRender);

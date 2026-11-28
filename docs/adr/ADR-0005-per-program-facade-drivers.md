@@ -24,7 +24,7 @@ record format in `orchestration/program-journal`); `core/persistent-panel` (spli
 sub-lifecycle and is consumed by BOTH standalone review and the wave gate;
 and the shared `programs/` request modules (`request-publication`, `durable-requests`,
 `spawn-task`, split from the former `programs/helpers`) own spawn-request publication, durable request
-recovery, retry task rendering (`renderSpawnTask`), and the publication
+recovery, retry task rendering (`renderIssuedRequestTask`), and the publication
 resolver. The per-program files were already reduced to one driver each by
 the A14 volume split.
 
@@ -45,7 +45,7 @@ signature.
 The drive functions remain per-program. Shared mechanics continue to be
 extracted DOWNWARD into the existing deep modules (`run-directory-handle`,
 `core/persistent-panel`, the shared `programs/` request modules) when — and only when — two programs
-need the same computation, as `renderSpawnTask` and `durableRequests` were.
+need the same computation, as `renderIssuedRequestTask` and `durableRequests` were.
 No horizontal driver/framework layer is introduced above them.
 
 ## Consequences

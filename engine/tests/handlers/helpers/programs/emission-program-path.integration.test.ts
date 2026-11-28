@@ -40,7 +40,7 @@ import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../../../src/core/standalone
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { type RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
-import { renderReviewProgramSpawn, renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
+import { renderExtractionOnlyTask, renderIssuedRequestTask } from "../../../../src/handlers/helpers/programs/spawn-task";
 import { parseRegisteredFacadeProgram, type RegisteredStandaloneProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../../../src/orchestration/harness-capture-runtime";
@@ -261,10 +261,9 @@ describe("the wave-gate program path projects the frozen issued route (T6)", () 
       taskIds: parsed.program.taskIds,
       authorityDigest: parsed.program.authorityDigest,
     });
-    const instruction = "Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.";
     const [supplied, fallback] = await withoutPiParent(() => [
-      renderReviewProgramSpawn(opened.value, waveAuthority, instruction, suppliedRegistration).task,
-      renderSpawnTask(opened.value, waveAuthority, instruction),
+      renderIssuedRequestTask({ handle: opened.value, authority: waveAuthority, emissionAuthority: suppliedRegistration }).task,
+      renderExtractionOnlyTask({ handle: opened.value, authority: waveAuthority }).task,
     ] as const);
     expect(supplied).toBe(fallback);
     expect(supplied).not.toContain(EMISSION_DESCRIPTOR_MARKER);
@@ -379,10 +378,11 @@ describe("the standalone successor v3 program path projects the issued route (T6
     );
     if (!published.ok) throw new Error(published.message);
 
-    const instruction = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
     const [supplied, fallback] = await withoutPiParent(() => [
-      renderReviewProgramSpawn(handle, authority, instruction, standaloneV3Registration, { standalone: true }).task,
-      renderSpawnTask(handle, authority, instruction, { standalone: true }),
+      renderIssuedRequestTask({
+        handle, authority, emissionAuthority: standaloneV3Registration, options: { standalone: true },
+      }).task,
+      renderExtractionOnlyTask({ handle, authority, options: { standalone: true } }).task,
     ] as const);
 
     expect(supplied).toBe(fallback);
@@ -416,9 +416,9 @@ describe("the standalone successor v3 program path projects the issued route (T6
         binding: { requestId, version: "v3", toolName: "loom_emit_reviewer_payload" },
       });
       expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
-      const rendered = renderReviewProgramSpawn(handle, authority,
-        "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.",
-        standaloneV3Registration, { standalone: true });
+      const rendered = renderIssuedRequestTask({
+        handle, authority, emissionAuthority: standaloneV3Registration, options: { standalone: true },
+      });
       expect(rendered.task).toBe(task);
       // The render hands over the route it rendered from, as data: the retry
       // closes on this value, never on a re-parse of the descriptor above.
@@ -455,10 +455,9 @@ describe("the standalone-review v2 program path projects the issued route (T6)",
     const registration = parsed.program;
     const reviewer = requests[0]!;
     const authority = mustAuthority(reviewer.authority);
-    const instruction = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
     const [supplied, fallback] = await withoutPiParent(() => [
-      renderReviewProgramSpawn(opened.value, authority, instruction, registration, { standalone: true }).task,
-      renderSpawnTask(opened.value, authority, instruction, { standalone: true }),
+      renderIssuedRequestTask({ handle: opened.value, authority, emissionAuthority: registration, options: { standalone: true } }).task,
+      renderExtractionOnlyTask({ handle: opened.value, authority, options: { standalone: true } }).task,
     ] as const);
     expect(supplied).toBe(fallback);
     expect(supplied).toBe(reviewer.task);

@@ -12,9 +12,10 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EMISSION_DESCRIPTOR_MARKER } from "../../../../src/core/issued-emission-capability";
+import { issuedRequestInstruction } from "../../../../src/core/issued-request-task";
 import { REVIEWER_PROTOCOL_V2 } from "../../../../src/core/reviewer-contract";
 import { type RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
-import { renderReviewProgramSpawn, renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
+import { renderIssuedRequestTask } from "../../../../src/handlers/helpers/programs/spawn-task";
 import { type RegisteredStandaloneProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
@@ -48,21 +49,20 @@ const unreadableRegistrationRun = (): RunDirHandle => {
   return handle;
 };
 
-describe("renderSpawnTask emission projection wiring", () => {
+describe("renderIssuedRequestTask emission projection wiring", () => {
   const panelAuthority = catalogAuthority({
     role: "arch-judge-agent", program: "refutation-panel",
     requestId: "request:probe-1", runId: "run-probe", slotId: "slot-probe-1",
   });
 
-  it("renders no descriptor and the instruction verbatim outside the reviewer emission gate (FR-001/FR-020)", () => {
+  it("renders no descriptor and the request's own instruction outside the reviewer emission gate (FR-001/FR-020)", () => {
     const handle = emptyRun();
-    const instruction = "Complete the exact pending panel request.";
-    const task = renderSpawnTask(handle, panelAuthority, instruction);
+    const task = renderIssuedRequestTask({ handle, authority: panelAuthority, emissionAuthority: null }).task;
     expect(task).toBe(
       `LOOM_REQUEST_ID: ${panelAuthority.requestId}\n` +
       `LOOM_CONTEXT_DIGEST: ${CONTEXT_DIGEST}\n` +
       `LOOM_CONTEXT_PATH: ${handle.runDirectory}/contexts/${CONTEXT_DIGEST}.json\n` +
-      instruction,
+      issuedRequestInstruction(panelAuthority),
     );
     expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
   });
@@ -110,25 +110,28 @@ const mustThrow = (render: () => string): string => {
 };
 
 describe("program-path emission authority join (T6)", () => {
-  const instruction = "Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.";
   const waveReviewer = reviewerAuthority("wave-gate", "request:wave-wiring-1");
   const standaloneReviewer = reviewerAuthority("standalone-review", "request:standalone-wiring-1");
 
   it("refuses a supplied authority naming another program before any registration read (AD-7)", () => {
     // The registration storage is unreadable, so a render that read it first
     // would refuse with the bootstrap refusal instead of the program binding.
-    const standaloneMessage = mustThrow(() =>
-      renderReviewProgramSpawn(unreadableRegistrationRun(), standaloneReviewer, instruction, waveV2Registration).task);
+    const standaloneMessage = mustThrow(() => renderIssuedRequestTask({
+      handle: unreadableRegistrationRun(), authority: standaloneReviewer, emissionAuthority: waveV2Registration,
+    }).task);
     expect(standaloneMessage).toContain("not the request's standalone-review program");
     expect(standaloneMessage).toContain("a descriptor binds only its own program's issued contract");
-    const waveMessage = mustThrow(() =>
-      renderReviewProgramSpawn(unreadableRegistrationRun(), waveReviewer, instruction, standaloneV2Registration).task);
+    const waveMessage = mustThrow(() => renderIssuedRequestTask({
+      handle: unreadableRegistrationRun(), authority: waveReviewer, emissionAuthority: standaloneV2Registration,
+    }).task);
     expect(waveMessage).toContain("not the request's wave-gate program");
   });
 
   it("refuses a supplied authority whose issued protocol diverges from the durable registration (FR-012)", async () => {
     const handle = await registeredRun(waveV1StoredRegistration);
-    const message = mustThrow(() => renderReviewProgramSpawn(handle, waveReviewer, instruction, waveV2Registration).task);
+    const message = mustThrow(() => renderIssuedRequestTask({
+      handle, authority: waveReviewer, emissionAuthority: waveV2Registration,
+    }).task);
     expect(message).toContain("schema version 2 with issued digest");
     expect(message).toContain("not the durable registration's the archived schema-1 contract");
     expect(message).toContain("a descriptor names only the joined issued contract");
@@ -138,7 +141,9 @@ describe("program-path emission authority join (T6)", () => {
     const handle = unreadableRegistrationRun();
     const storage = handle.readProgramRegistration();
     if (storage.ok) throw new Error("fixture registration storage must be unreadable");
-    const message = mustThrow(() => renderSpawnTask(handle, waveReviewer, instruction));
+    const message = mustThrow(() => renderIssuedRequestTask({
+      handle, authority: waveReviewer, emissionAuthority: null,
+    }).task);
     expect(message).toBe(`reviewer bootstrap registration is unavailable: ${storage.error.message}`);
   });
 
@@ -148,9 +153,11 @@ describe("program-path emission authority join (T6)", () => {
       requestId: "request:panel-wiring-1", slotId: "slot:panel-wiring-1",
     });
     // Ineligible renders consult no registration: unreadable storage is never read.
-    const { task, route } = renderReviewProgramSpawn(unreadableRegistrationRun(), panelJudge, instruction, waveV2Registration);
+    const { task, route } = renderIssuedRequestTask({
+      handle: unreadableRegistrationRun(), authority: panelJudge, emissionAuthority: waveV2Registration,
+    });
     expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
-    expect(task.endsWith(instruction)).toBe(true);
+    expect(task.endsWith(issuedRequestInstruction(panelJudge))).toBe(true);
     // The render hands its route over as data: an ineligible request is
     // extraction-only by construction, so its retry closes with extraction.
     expect(route).toMatchObject({ kind: "extraction-only", reason: expect.stringContaining("not emission-eligible") });
