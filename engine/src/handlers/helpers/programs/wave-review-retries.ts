@@ -10,7 +10,7 @@ import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import type { StateManager } from '../../../state-manager';
 import type { IssuedWaveReviewerProtocol } from '../../../core/review-output';
-import { renderCurrentWaveRetryTask, specCheckRetryDiagnostic, waveRetryDiagnostic } from '../../../core/reviewer-retry';
+import { waveRetryDiagnostic } from '../../../core/reviewer-retry';
 import {
   deriveWaveAttemptTwoAuthority,
   persistedWaveAttemptTwoCompatibilityProblem,
@@ -219,13 +219,18 @@ export async function driveWaveReviewRetries(
       kind: "spawn-batch", runId: handle.runId,
       requests: requests.map((request) => {
         const retry = retries.find(({ slotId }) => slotId === request.authority.slotId);
-        const spawn = renderIssuedRequestTask({ handle, authority: request.authority, emissionAuthority: registration });
-        return {
-          ...request,
-          task: renderCurrentWaveRetryTask(spawn.task, spawn.route, retry === undefined
-            ? { kind: "unattributed" }
-            : { kind: "rejected", reason: retry.retryReason, protocolVersion: retry.protocol.protocolVersion }),
-        };
+        const spawn = renderIssuedRequestTask({
+          handle,
+          authority: request.authority,
+          emissionAuthority: registration,
+          appendix: {
+            kind: 'wave-reviewer-retry',
+            diagnostic: retry === undefined
+              ? { kind: 'unattributed' }
+              : { kind: 'rejected', reason: retry.retryReason, protocolVersion: retry.protocol.protocolVersion },
+          },
+        });
+        return { ...request, task: spawn.task };
       }),
     } });
     const captureRejected: { request: SpawnRequest; rejection: string }[] = [];
@@ -358,11 +363,13 @@ export async function driveWaveSpecCheckRetry(
       requests: [{
         ...durable,
         // Extraction-only render: the spec-check slot carries no emission
-        // descriptor, so the render takes no emission authority at all.
-        task: [
-          renderExtractionOnlyTask({ handle, authority: durable.authority }).task,
-          specCheckRetryDiagnostic(attemptOneFailure),
-        ].join("\n"),
+        // descriptor, so the render takes no emission authority at all, and the
+        // retry's diagnostic is the appendix the render writes.
+        task: renderExtractionOnlyTask({
+          handle,
+          authority: durable.authority,
+          appendix: { kind: 'spec-check-retry', reason: attemptOneFailure },
+        }).task,
       }],
     } });
   }

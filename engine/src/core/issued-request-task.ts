@@ -15,12 +15,22 @@
  *
  * Here both facts are functions of the request authority and its durable
  * context, so any render through this module — issuance and re-render alike —
- * cannot disagree about them. The attempt-2 retry and verifier seams still
- * compose their own text and are migrated by the next slice.
+ * cannot disagree about them. The attempt-2 appendix is a third such fact: a
+ * closed union of what was rejected (`RetryAppendix`), whose words this module
+ * writes through `appendixText`, so a program supplies the rejection and never
+ * the sentence about it.
  * Pure module: no I/O, no clock, no randomness.
  */
 import { match } from "ts-pattern";
 import type { AgentRequestAuthority } from "./orchestration-contract";
+import type { IssuedSpawnEmissionRoute } from "./issued-emission-capability";
+import {
+  refutationRetryAppendix,
+  specCheckRetryDiagnostic,
+  standaloneRetryAppendix,
+  waveReviewerRetryAppendix,
+  type WaveReviewerRetryDiagnostic,
+} from "./reviewer-retry";
 import { REVIEWER_RESULT_INSTRUCTION } from "./spawn-task-text";
 import { VERIFICATION_BRIEF_SECTION, VERIFICATION_RESULT_KIND } from "./security-verification";
 
@@ -88,4 +98,39 @@ export function taskBindingLine(binding: IssuedTaskBinding): string {
 /** The complete task text: the render, then the subject binding it reviews. */
 export function withTaskBinding(rendered: string, binding: IssuedTaskBinding): string {
   return rendered + taskBindingLine(binding);
+}
+
+/**
+ * What a retry tells its child about attempt 1, as facts: the rejection the
+ * engine read, and nothing about how to phrase it. Every field is data the
+ * program observed — a reason, a persisted diagnostic, a protocol version — so
+ * a program cannot pass a sentence, a suffix, or a half-composed block.
+ */
+export type RetryAppendix =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "wave-reviewer-retry"; diagnostic: WaveReviewerRetryDiagnostic }>
+  | Readonly<{ kind: "spec-check-retry"; reason: string }>
+  | Readonly<{ kind: "refutation-retry"; diagnostic: string | null }>
+  | Readonly<{
+    kind: "standalone-retry";
+    diagnostic: string | null;
+    schemaVersion: 1 | 2 | 3;
+  }>;
+
+/**
+ * The words one retry appendix adds after the issued task: empty for `none`,
+ * otherwise the block a render appends after exactly one newline. The writers
+ * live in `reviewer-retry.ts`, and this is their only production caller, so a
+ * program that passes a rejection fact cannot choose the shape of the text
+ * about it.
+ */
+export function appendixText(route: IssuedSpawnEmissionRoute, appendix: RetryAppendix): string {
+  return match(appendix)
+    .with({ kind: "none" }, () => "")
+    .with({ kind: "wave-reviewer-retry" }, ({ diagnostic }) => waveReviewerRetryAppendix(route, diagnostic))
+    .with({ kind: "spec-check-retry" }, ({ reason }) => specCheckRetryDiagnostic(reason))
+    .with({ kind: "refutation-retry" }, ({ diagnostic }) => refutationRetryAppendix(diagnostic))
+    .with({ kind: "standalone-retry" }, ({ diagnostic, schemaVersion }) =>
+      standaloneRetryAppendix(route, diagnostic, schemaVersion))
+    .exhaustive();
 }

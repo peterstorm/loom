@@ -23,7 +23,8 @@ import { parseRequestId } from "../../../../src/core/orchestration-contract";
 import { renderIssuedRequestTask } from "../../../../src/handlers/helpers/programs/spawn-task";
 import { publishReviewInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
 import { REVIEWER_RESULT_INSTRUCTION } from "../../../../src/core/spawn-task-text";
-import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { specCheckRetryDiagnostic } from "../../../../src/core/reviewer-retry";
+import { issuedRequestInstruction } from "../../../../src/core/issued-request-task";import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import {
   issueWaveBatchFixture,
   packetOf,
@@ -87,6 +88,36 @@ describe("renderIssuedRequestTask binds the packet's Wave subject", () => {
     // The re-emission (the collection path's shape) recomposes from the same
     // durable state and must not differ by a byte.
     expect(renderIssuedRequestTask({ handle, authority, emissionAuthority: registration }).task).toBe(emitted.task);
+  }, 30_000);
+
+  it("puts an attempt-2 appendix after the binding, so the request's own text stays its head", async () => {
+    const batch = waveProject();
+    const handle = await bindingRun();
+    const packet = packetOf(batch, "spec-check-invoker", null);
+    orFail(await handle.publishContext(packet), runDirectoryFailure);
+    const authority = agentRequestAuthority(RUN_ID, {
+      requestId: packet.requestId,
+      contextDigest: packet.digest,
+      role: "spec-check-invoker",
+      slotId: "standalone-slot:1:spec-check-invoker",
+    });
+    const attemptOne = renderIssuedRequestTask({ handle, authority, emissionAuthority: null });
+    const attemptTwo = renderIssuedRequestTask({
+      handle,
+      authority: { ...authority, attempt: 2 },
+      emissionAuthority: null,
+      appendix: { kind: "spec-check-retry", reason: "SPEC_CHECK_VERDICT missing" },
+    });
+    const appendix = specCheckRetryDiagnostic("SPEC_CHECK_VERDICT missing");
+    // The retry's own tail is appended last: markers, the retry instruction and
+    // the binding are untouched, so the issued head a re-render reproduces is
+    // everything before the appendix.
+    expect(attemptTwo.task.endsWith(`\n${appendix}`)).toBe(true);
+    const head = attemptTwo.task.slice(0, attemptTwo.task.length - appendix.length - 1);
+    expect(head.trimEnd().endsWith("\nSpec-check Wave 1.")).toBe(true);
+    expect(head.endsWith(issuedRequestInstruction({ ...authority, attempt: 2 }))).toBe(false);
+    expect(head).toContain(issuedRequestInstruction({ ...authority, attempt: 2 }));
+    expect(attemptOne.task).toContain(issuedRequestInstruction(authority));
   }, 30_000);
 
   it("the spec-check slot binds the Wave, not a Task", async () => {

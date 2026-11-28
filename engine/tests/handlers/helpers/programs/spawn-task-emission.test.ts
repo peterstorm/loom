@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EMISSION_DESCRIPTOR_MARKER } from "../../../../src/core/issued-emission-capability";
 import { issuedRequestInstruction } from "../../../../src/core/issued-request-task";
+import { refutationRetryAppendix } from "../../../../src/core/reviewer-retry";
 import { REVIEWER_PROTOCOL_V2 } from "../../../../src/core/reviewer-contract";
 import { type RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
 import { renderIssuedRequestTask } from "../../../../src/handlers/helpers/programs/spawn-task";
@@ -65,6 +66,22 @@ describe("renderIssuedRequestTask emission projection wiring", () => {
       issuedRequestInstruction(panelAuthority),
     );
     expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+    // `none` is the absence of a retry tail, not an empty block to be appended.
+    expect(renderIssuedRequestTask({ handle, authority: panelAuthority, emissionAuthority: null, appendix: { kind: "none" } }).task)
+      .toBe(task);
+  });
+
+  it("appends a retry appendix's own words after the task, from facts alone", () => {
+    const handle = emptyRun();
+    const base = renderIssuedRequestTask({ handle, authority: panelAuthority, emissionAuthority: null }).task;
+    const { task } = renderIssuedRequestTask({
+      handle,
+      authority: panelAuthority,
+      emissionAuthority: null,
+      appendix: { kind: "refutation-retry", diagnostic: "no verdict object" },
+    });
+    expect(task).toBe(`${base}\n${refutationRetryAppendix("no verdict object")}`);
+    expect(task).toContain("no verdict object");
   });
 });
 

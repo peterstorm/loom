@@ -3,19 +3,20 @@ import fc from "fast-check";
 import {
   decideRefutationTranscriptRead,
   parseWaveRetryDiagnosticSection,
-  renderCurrentWaveRetryTask,
   REVIEWER_EXTRACTION_RETRY_INSTRUCTION,
   reviewerRetryInstruction,
   SPEC_CHECK_RETRY_TAIL,
   specCheckRetryDiagnostic,
-  standaloneRetryTask,
+  standaloneRetryAppendix,
+  waveReviewerRetryAppendix,
+  refutationRetryAppendix,
   WAVE_RETRY_FIXED_TAIL,
   WAVE_RETRY_PREAMBLE,
   waveRetryDiagnostic,
 } from "../../src/core/reviewer-retry";
 import { emissionToolPrimaryInstruction, type IssuedSpawnEmissionRoute } from "../../src/core/issued-emission-capability";
 import { STANDALONE_SUCCESSOR_ROSTER_RULE } from "../../src/core/standalone-lineage-contract";
-import { emissionRouteFor, emissionTask, issuedTask, REVIEWER_V2 } from "../fixtures/issued-emission";
+import { emissionRouteFor, REVIEWER_V2 } from "../fixtures/issued-emission";
 
 const bytes = (text: string): readonly number[] => [...new TextEncoder().encode(text)];
 const nonBlankReason = fc.string({ minLength: 1, maxLength: 400 })
@@ -95,47 +96,35 @@ describe("reviewerRetryInstruction", () => {
     expect(reviewerRetryInstruction(EMISSION_ROUTE)).toBe(FRESH_SPAWN_TOOL_RULE);
     expect(reviewerRetryInstruction(EXTRACTION_ROUTE)).toBe(REVIEWER_EXTRACTION_RETRY_INSTRUCTION);
   });
-
-  it("is a function of the route alone: the task text it closes plays no part", () => {
-    // The descriptor a task carries can no longer disagree with the route,
-    // because the route is never recovered from it.
-    const descriptorTask = emissionTask("code-reviewer", REVIEWER_V2);
-    expect(standaloneRetryTask(descriptorTask, EXTRACTION_ROUTE, null, { schemaVersion: 2 })
-      .endsWith(REVIEWER_EXTRACTION_RETRY_INSTRUCTION)).toBe(true);
-    expect(standaloneRetryTask(issuedTask("code-reviewer", REVIEWER_V2), EMISSION_ROUTE, null, { schemaVersion: 2 })
-      .endsWith(FRESH_SPAWN_TOOL_RULE)).toBe(true);
-  });
 });
 
-describe("standaloneRetryTask", () => {
-  it("renders route-aware final actions for current standalone requests", () => {
-    const emission = emissionTask("code-reviewer", REVIEWER_V2);
-    const standaloneEmission = standaloneRetryTask(emission, EMISSION_ROUTE, "bad payload", { schemaVersion: 2 });
-    expect(standaloneEmission).toContain(`calling the exact tool ${REVIEWER_V2.toolName} exactly once`);
-    expect(standaloneEmission).toContain("fresh one-call budget");
-    expect(standaloneEmission.endsWith(REVIEWER_EXTRACTION_RETRY_INSTRUCTION)).toBe(false);
+describe("standaloneRetryAppendix", () => {
+  it("writes the route-aware final action for a current standalone request", () => {
+    const emission = standaloneRetryAppendix(EMISSION_ROUTE, "bad payload", 2);
+    expect(emission).toContain(`calling the exact tool ${REVIEWER_V2.toolName} exactly once`);
+    expect(emission).toContain("fresh one-call budget");
+    expect(emission.endsWith(REVIEWER_EXTRACTION_RETRY_INSTRUCTION)).toBe(false);
     // Scope discipline is stated, not implied: the retry names the rule the
     // admission enforces AND the escape hatch that avoids re-emitting the same
     // defect (a real path outside the frozen slice).
-    expect(standaloneEmission).toContain("Every finding's file is either null or a path inside the frozen scope.");
-    expect(standaloneEmission).toContain("or emit an honest null location — never an unfrozen path.");
-    expect(standaloneEmission).toBe([emission, "", "Your previous attempt was rejected by the engine's admission check.",
+    expect(emission).toContain("Every finding's file is either null or a path inside the frozen scope.");
+    expect(emission).toContain("or emit an honest null location — never an unfrozen path.");
+    // The appendix begins with the blank line a render separates it by, so the
+    // task and its retry notice cannot be joined two different ways.
+    expect(emission).toBe(["", "Your previous attempt was rejected by the engine's admission check.",
       JSON.stringify("bad payload"), "",
       "Satisfy BOTH admission rules:\n1. Every finding's file is either null or a path inside the frozen scope.\n" +
         "2. The payload conforms exactly to the issued reviewer-payload-schema and reviewer-impact-rubric.\n" +
         "When the evidence lies outside the frozen scope, name the frozen file that should have carried\n" +
         "the assertion, or emit an honest null location — never an unfrozen path.",
       "", `This is your final attempt. ${FRESH_SPAWN_TOOL_RULE}`].join("\n"));
-
-    const extractionTask = issuedTask("code-reviewer", REVIEWER_V2);
-    expect(standaloneRetryTask(extractionTask, EXTRACTION_ROUTE, null, { schemaVersion: 2 }))
+    expect(standaloneRetryAppendix(EXTRACTION_ROUTE, null, 2))
       .toContain(`This is your final attempt. ${REVIEWER_EXTRACTION_RETRY_INSTRUCTION}`);
   });
 
   it("tells a successor retry the v3 envelope and the roster rule, and no other version (issue #185)", () => {
-    const task = issuedTask("code-reviewer", REVIEWER_V2);
-    const successor = standaloneRetryTask(task, EXTRACTION_ROUTE, "bad assessment", { schemaVersion: 3 });
-    const current = standaloneRetryTask(task, EXTRACTION_ROUTE, "bad assessment", { schemaVersion: 2 });
+    const successor = standaloneRetryAppendix(EXTRACTION_ROUTE, "bad assessment", 3);
+    const current = standaloneRetryAppendix(EXTRACTION_ROUTE, "bad assessment", 2);
     // The roster rule is the one wording every successor prompt surface shares, verbatim.
     for (const phrase of ['"schemaVersion": 3', '"kind": "standalone-successor-review"', STANDALONE_SUCCESSOR_ROSTER_RULE,
       "in roster order", "repairablePaths"]) {
@@ -148,21 +137,18 @@ describe("standaloneRetryTask", () => {
   });
 
   it("keeps the archived schema-1 retry wording whatever the route", () => {
-    const task = issuedTask("code-reviewer", REVIEWER_V2);
-    const archived = standaloneRetryTask(task, EMISSION_ROUTE, "missing summary", { schemaVersion: 1 });
-    expect(archived).toBe(standaloneRetryTask(task, EXTRACTION_ROUTE, "missing summary", { schemaVersion: 1 }));
+    const archived = standaloneRetryAppendix(EMISSION_ROUTE, "missing summary", 1);
+    expect(archived).toBe(standaloneRetryAppendix(EXTRACTION_ROUTE, "missing summary", 1));
     expect(archived).toContain("### Machine Summary");
     expect(archived).not.toContain(REVIEWER_V2.toolName);
   });
 });
 
-describe("renderCurrentWaveRetryTask", () => {
-  const task = emissionTask("code-reviewer", REVIEWER_V2);
-
+describe("waveReviewerRetryAppendix", () => {
   it("carries the canonical extraction diagnostic unchanged on an extraction route", () => {
     fc.assert(fc.property(fc.string({ maxLength: 300 }), fc.constantFrom(1 as const, 2 as const), (reason, protocolVersion) => {
-      expect(renderCurrentWaveRetryTask(task, EXTRACTION_ROUTE, { kind: "rejected", reason, protocolVersion }))
-        .toBe(`${task}\n${waveRetryDiagnostic(reason, protocolVersion)}`);
+      expect(waveReviewerRetryAppendix(EXTRACTION_ROUTE, { kind: "rejected", reason, protocolVersion }))
+        .toBe(waveRetryDiagnostic(reason, protocolVersion));
     }));
   });
 
@@ -170,20 +156,33 @@ describe("renderCurrentWaveRetryTask", () => {
     fc.assert(fc.property(fc.string({ maxLength: 3000 }), (reason) => {
       const persisted = waveRetryDiagnostic(reason, 2);
       const lead = persisted.slice(0, -REVIEWER_EXTRACTION_RETRY_INSTRUCTION.length);
-      const rendered = renderCurrentWaveRetryTask(task, EMISSION_ROUTE, { kind: "rejected", reason, protocolVersion: 2 });
-      expect(rendered).toBe(`${task}\n${lead}${FRESH_SPAWN_TOOL_RULE}`);
-      expect(rendered.endsWith(REVIEWER_EXTRACTION_RETRY_INSTRUCTION)).toBe(false);
-      expect(rendered).toContain(`calling the exact tool ${REVIEWER_V2.toolName} exactly once`);
+      const appendix = waveReviewerRetryAppendix(EMISSION_ROUTE, { kind: "rejected", reason, protocolVersion: 2 });
+      expect(appendix).toBe(`${lead}${FRESH_SPAWN_TOOL_RULE}`);
+      expect(appendix.endsWith(REVIEWER_EXTRACTION_RETRY_INSTRUCTION)).toBe(false);
+      expect(appendix).toContain(`calling the exact tool ${REVIEWER_V2.toolName} exactly once`);
     }));
   });
 
   it("appends the tool rule after an archived v1 diagnostic and after the unattributed notice", () => {
-    expect(renderCurrentWaveRetryTask(task, EMISSION_ROUTE, { kind: "rejected", reason: "bad finding_id", protocolVersion: 1 }))
-      .toBe(`${task}\n${waveRetryDiagnostic("bad finding_id", 1)}\n\n${FRESH_SPAWN_TOOL_RULE}`);
+    expect(waveReviewerRetryAppendix(EMISSION_ROUTE, { kind: "rejected", reason: "bad finding_id", protocolVersion: 1 }))
+      .toBe(`${waveRetryDiagnostic("bad finding_id", 1)}\n\n${FRESH_SPAWN_TOOL_RULE}`);
     const unattributed = "Attempt 1 was rejected; correct the packet evidence contract.";
-    expect(renderCurrentWaveRetryTask(task, EMISSION_ROUTE, { kind: "unattributed" }))
-      .toBe(`${task}\n${unattributed}\n\n${FRESH_SPAWN_TOOL_RULE}`);
-    expect(renderCurrentWaveRetryTask(task, EXTRACTION_ROUTE, { kind: "unattributed" }))
-      .toBe(`${task}\n${unattributed}`);
+    expect(waveReviewerRetryAppendix(EMISSION_ROUTE, { kind: "unattributed" }))
+      .toBe(`${unattributed}\n\n${FRESH_SPAWN_TOOL_RULE}`);
+    expect(waveReviewerRetryAppendix(EXTRACTION_ROUTE, { kind: "unattributed" })).toBe(unattributed);
+  });
+});
+
+describe("refutationRetryAppendix", () => {
+  it("names the rejection it was given and closes with the one-object final-action contract", () => {
+    const named = refutationRetryAppendix("verdict payload had no criterion");
+    expect(named).toContain("Your previous attempt was rejected:");
+    expect(named).toContain("verdict payload had no criterion");
+    expect(named).toContain("Your FINAL message must be exactly one JSON object and nothing else");
+    expect(named.startsWith("\n")).toBe(true);
+  });
+
+  it("degrades to the unparseable-verdict notice when no diagnostic survived", () => {
+    expect(refutationRetryAppendix(null)).toContain("its verdict payload could not be parsed.");
   });
 });

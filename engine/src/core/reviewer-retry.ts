@@ -1,17 +1,18 @@
 /**
- * What a rejected review attempt becomes: the attempt-2 task text every review
- * program renders (standalone reviewers, Wave reviewers, Wave spec-check,
- * Refutation Panel verifiers), the byte-exact parse of a persisted Wave retry
- * diagnostic, and the classification of a refutation transcript read. Pure —
- * the program volume reads the bytes and renders the spawn; this module only
- * decides the words. The reviewer retry route is DATA: the render that
- * produced the attempt-2 task hands over its own issued route, so nothing here
- * re-derives the route from rendered prose.
+ * What a rejected review attempt says, as data and as words: the attempt-2
+ * appendix every review program appends (standalone reviewers, Wave reviewers,
+ * Wave spec-check, Refutation Panel verifiers), the byte-exact parse of a
+ * persisted Wave retry diagnostic, and the classification of a refutation
+ * transcript read. Pure — the program volume reads the bytes; `appendixText`
+ * (`issued-request-task.ts`) is the one caller that turns these into text, so
+ * this module decides the words and nothing here joins them onto a task. The
+ * reviewer retry route is DATA: the render that produced the attempt-2 task
+ * hands over its own issued route, so nothing here re-derives the route from
+ * rendered prose.
  */
 import { canonicalRecord, type DomainResult } from "./orchestration-contract";
 import type { PersistentRefutationPanelEvent } from "./persistent-panel";
 import { emissionToolPrimaryInstruction, type IssuedSpawnEmissionRoute } from "./issued-emission-capability";
-import type { FrozenStandaloneReviewAuthority } from "./standalone-review-model";
 import { STANDALONE_SUCCESSOR_ROSTER_RULE } from "./standalone-lineage-contract";
 
 /**
@@ -67,25 +68,26 @@ const SUCCESSOR_STANDALONE_RETRY_RULE = [
  * failure classes are now stated, with the engine's own diagnostic first
  * whenever one survived to here. `route` is the issued route the render of
  * `task` decided; it selects the closing final action.
+ *
+ * Returns the appendix only — the bytes a render appends after one newline — so
+ * the task text and this diagnostic cannot be joined in two different shapes.
  */
-export function standaloneRetryTask(
-  task: string,
+export function standaloneRetryAppendix(
   route: IssuedSpawnEmissionRoute,
   diagnostic: string | null,
-  authority: Pick<FrozenStandaloneReviewAuthority, "schemaVersion">,
+  schemaVersion: 1 | 2 | 3,
 ): string {
-  if (authority.schemaVersion !== 1) {
-    return [task, "", "Your previous attempt was rejected by the engine's admission check.",
+  if (schemaVersion !== 1) {
+    return ["", "Your previous attempt was rejected by the engine's admission check.",
       ...(diagnostic === null ? [] : [JSON.stringify(diagnostic)]), "",
       CURRENT_STANDALONE_RETRY_RULES, "",
-      ...(authority.schemaVersion === 3 ? [SUCCESSOR_STANDALONE_RETRY_RULE, ""] : []),
+      ...(schemaVersion === 3 ? [SUCCESSOR_STANDALONE_RETRY_RULE, ""] : []),
       `This is your final attempt. ${reviewerRetryInstruction(route)}`].join("\n");
   }
   const marker = diagnostic === null
     ? ["Your previous attempt was rejected by the engine's admission check."]
     : ["Your previous attempt was rejected by the engine's admission check:", "", diagnostic];
   return [
-    task,
     "",
     ...marker,
     "",
@@ -103,11 +105,10 @@ export function standaloneRetryTask(
  * notice that anything was refused, no reason. The engine re-asked the identical
  * question and got the identical malformed shape back, exhausting the slot and
  * terminal-blocking whole runs. Naming the defect is what makes the retry worth
- * spending.
+ * spending. Appendix bytes only, like every other retry writer here.
  */
-export function refutationRetryTask(task: string, diagnostic: string | null): string {
+export function refutationRetryAppendix(diagnostic: string | null): string {
   return [
-    task,
     "",
     ...(diagnostic === null
       ? ["Your previous attempt was rejected: its verdict payload could not be parsed."]
@@ -251,23 +252,22 @@ const extractionWaveRetryDiagnostic = (diagnostic: WaveReviewerRetryDiagnostic):
     : UNATTRIBUTED_WAVE_RETRY_DIAGNOSTIC;
 
 /**
- * Compose attempt-2 task text for the request's issued route. An extraction
+ * Compose the attempt-2 appendix for the request's issued route. An extraction
  * route carries the canonical extraction diagnostic unchanged. An emission
  * route closes with the fresh-spawn tool rule instead of the extraction
  * instruction: a current (v2) rejection keeps its preamble and bounded reason
  * and swaps only the closing action; any other diagnostic gains the tool rule
  * after it.
  */
-export function renderCurrentWaveRetryTask(
-  task: string,
+export function waveReviewerRetryAppendix(
   route: IssuedSpawnEmissionRoute,
   diagnostic: WaveReviewerRetryDiagnostic,
 ): string {
-  if (route.kind !== "emission") return [task, extractionWaveRetryDiagnostic(diagnostic)].join("\n");
+  if (route.kind !== "emission") return extractionWaveRetryDiagnostic(diagnostic);
   const lead = diagnostic.kind === "rejected" && diagnostic.protocolVersion === 2
     ? currentWaveRetryLead(diagnostic.reason)
     : extractionWaveRetryDiagnostic(diagnostic);
-  return [task, `${lead}\n\n${reviewerRetryInstruction(route)}`].join("\n");
+  return `${lead}\n\n${reviewerRetryInstruction(route)}`;
 }
 
 /**

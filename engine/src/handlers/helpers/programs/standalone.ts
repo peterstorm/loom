@@ -41,7 +41,7 @@ import { standaloneReviewerProtocolResolver, readRegisteredStandaloneAuthority }
 import { readPublishedStandaloneResult, durableRequests, recoverOrPublishStandaloneRetry, safeScope, standalonePackets, standalonePublicationEffectId, standaloneReadCoverageStart } from './standalone-requests';
 import { deriveChangedPaths, gitText, metadata, reviewBaseline } from './changed-paths';
 import { STANDALONE_READ_COVERAGE_V1, readCoverageBudgetProblem } from '../../../core/standalone-read-coverage';
-import { decideRefutationTranscriptRead, refutationRejectionDiagnostic, standaloneRetryTask } from '../../../core/reviewer-retry';
+import { decideRefutationTranscriptRead, refutationRejectionDiagnostic } from '../../../core/reviewer-retry';
 import { durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
 import { failed, type FacadeDriveResult, type ProgramParse } from './program-result';
@@ -785,19 +785,22 @@ async function resumeAwaitingResults(
       requests: missing.map((request) => {
         // Rendering the extraction-only route with the CALLER's instruction was
         // the second composer: the same sentence lived here and in the core, so
-        // the two could disagree. The authority selects it now.
+        // the two could disagree. The authority selects it now, and an attempt 2
+        // passes the rejection it heard as an appendix FACT rather than a block.
         const spawn = renderIssuedRequestTask({
           handle,
           authority: request.authority,
           emissionAuthority: registration,
+          appendix: request.authority.attempt === 2
+            ? {
+              kind: 'standalone-retry',
+              diagnostic: rejectedDiagnostics.get(request.authority.slotId) ?? null,
+              schemaVersion: activeAuthority.schemaVersion,
+            }
+            : { kind: 'none' },
           options: { standalone: true },
         });
-        return {
-          ...request,
-          task: request.authority.attempt === 2
-            ? standaloneRetryTask(spawn.task, spawn.route, rejectedDiagnostics.get(request.authority.slotId) ?? null, activeAuthority)
-            : spawn.task,
-        };
+        return { ...request, task: spawn.task };
       }),
     } };
   }

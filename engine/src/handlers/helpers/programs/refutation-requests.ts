@@ -5,7 +5,6 @@
  * terminal capture rejection back to the panel as data.
  */
 import { sameAgentRequestAuthority, type AgentRequestAuthority, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
-import { refutationRetryTask } from '../../../core/reviewer-retry';
 import type { PreparedVerifierRequest } from '../../../core/refutation-verifiers';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { durableCaptureRejection, durableRefutationRequests } from './durable-requests';
@@ -18,17 +17,19 @@ export function executableRefutationRequests(
   standalone: boolean,
   retryDiagnostic: string | null = null,
 ): readonly Readonly<SpawnRequest & { task: string }>[] {
-  return requests.map((request) => {
-    const task = renderExtractionOnlyTask({
+  return requests.map((request) => Object.freeze({
+    ...request,
+    // Attempt 2 names its rejection as an appendix FACT: `appendixText` writes
+    // the words, so the panel request and its retry cannot disagree about them.
+    task: renderExtractionOnlyTask({
       handle,
       authority: request.authority,
+      appendix: request.authority.attempt === 2
+        ? { kind: 'refutation-retry', diagnostic: retryDiagnostic }
+        : { kind: 'none' },
       options: { standalone },
-    }).task;
-    return Object.freeze({
-      ...request,
-      task: request.authority.attempt === 2 ? refutationRetryTask(task, retryDiagnostic) : task,
-    });
-  });
+    }).task,
+  }));
 }
 
 /**

@@ -13,11 +13,9 @@
  *
  * NO CALLER SUPPLIES TEXT. The instruction is the request authority's
  * (`issuedRequestInstruction`), the Task/Wave binding is the Context Packet's,
- * and the emission authority is joined against the durable registration — the
- * three facts a code path used to author for itself. The attempt-2 retry
- * appendix is still applied by the requesting program; moving its writer here
- * is the next step, and until then this render produces the task a child reads
- * minus that program's own diagnostic block.
+ * the retry appendix is a union of rejection facts (`appendixText`), and the
+ * emission authority is joined against the durable registration — the four
+ * facts a code path used to author for itself.
  */
 import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
 import { describeChildLaunchRouteRefusal, routedChildLaunchRoute } from "../../../utils/child-launch-route";
@@ -36,7 +34,7 @@ import {
   type ReviewerDelivery,
   type SpawnTaskFacts,
 } from '../../../core/spawn-task-text';
-import { issuedRequestInstruction, withTaskBinding, type IssuedTaskBinding } from '../../../core/issued-request-task';
+import { appendixText, issuedRequestInstruction, withTaskBinding, type IssuedTaskBinding, type RetryAppendix } from '../../../core/issued-request-task';
 import { readWaveReviewContext } from '../../../core/wave-review-authority';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { parseRegisteredFacadeProgram, readObligated, type RegisteredReviewProgram } from './registration';
@@ -244,17 +242,22 @@ function observePanelView(handle: RunDirHandle, request: AgentRequestAuthority):
  * The instruction is not a parameter: `issuedRequestInstruction` selects it
  * from the request authority, which is total over the program vocabulary. The
  * emission authority is a separate, explicitly required parameter, so a caller
- * decides the route and cannot leave it to a default.
+ * decides the route and cannot leave it to a default. The attempt-2 appendix is
+ * a closed union of rejection facts (`RetryAppendix`), whose words
+ * `appendixText` writes.
  */
 type SpawnTaskRenderOptions = Readonly<{ standalone?: boolean }>;
 
-/** What one render is given: the run, the request, and the emission authority
- *  the caller joined. No field is text, so a caller cannot author the task. */
+/** What one render is given: the run, the request, the emission authority the
+ *  caller joined, and the rejection facts of an attempt-2 retry. No field is
+ *  text, so a caller cannot author the task. */
 export type IssuedTaskRenderInput = Readonly<{
   handle: RunDirHandle;
   authority: AgentRequestAuthority;
   /** The joined emission authority; null is the archived/durable-compatibility route. */
   emissionAuthority: RegisteredReviewProgram | null;
+  /** What attempt 1 was rejected for; absent is `none` (an attempt-1 spawn). */
+  appendix?: RetryAppendix;
   options?: SpawnTaskRenderOptions;
 }>;
 
@@ -330,14 +333,21 @@ function observeTaskBinding(handle: RunDirHandle, authority: AgentRequestAuthori
  * lost the binding its capture matcher requires. `emissionAuthority` is null
  * for the archived extraction-only route, matching the publication core's
  * convention.
+ *
+ * Composition order: the render's facts, then the binding line, then the
+ * attempt-2 appendix. The appendix is last because it is the retry's own tail,
+ * not part of the request's text — so the head of an issued task stays
+ * prefix-comparable against a re-render (`canonicalSpawnTaskText`).
  */
 export function renderIssuedRequestTask(input: IssuedTaskRenderInput): ReviewProgramSpawn {
-  const { handle, authority, emissionAuthority, options } = input;
+  const { handle, authority, emissionAuthority, appendix, options } = input;
   const { facts, route } = observeSpawnTaskFacts(
     handle, authority, emissionAuthority ?? undefined, options ?? {},
   );
+  const bound = withTaskBinding(renderSpawnTaskText(facts), observeTaskBinding(handle, authority));
+  const retry = appendixText(route, appendix ?? { kind: 'none' });
   return Object.freeze({
-    task: withTaskBinding(renderSpawnTaskText(facts), observeTaskBinding(handle, authority)),
+    task: retry === '' ? bound : `${bound}\n${retry}`,
     route,
   });
 }
