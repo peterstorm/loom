@@ -207,7 +207,7 @@ describe("quality-program helper boundaries", () => {
       "readPlanDesignEvidence",
       "readStandaloneReviewedSource",
       "recoverOrphanedWaveGateFacade",
-      "renderSpawnTask",
+      "renderExtractionOnlyTask",
       "replayStandaloneCapturedEvidence",
       "replayStandaloneResultFromEvidence",
       "replayVerificationOutcome",
