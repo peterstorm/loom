@@ -280,7 +280,7 @@ describe("a Task waits for the added Task it depends on (one dispatch-hold rule)
     const settled = withTask(after, "T5", implemented);
     expect(dispatchHoldOf(settled, new Set(), byId(settled, "T3"))).toBeNull();
     expect(offered(classifyImplementationWindow(settled, observed(), []))).toContain("T3");
-    const retry = deriveTaskImplementationDispatch(byId(settled, "T3"));
+    const retry = deriveTaskImplementationDispatch(byId(settled, "T3"), undefined);
     expect(retry.kind === "dispatch" && retry.dispatch.kind).toBe("retry-implementation");
   });
 

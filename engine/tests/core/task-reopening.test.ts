@@ -176,7 +176,7 @@ describe("reopenImplementedTasks", () => {
     expect(t1.advisory_findings).toEqual([ADVISORY.claim]);
     expect(byId(outcome.graph, "T2").status).toBe("implemented");
     expect(byId(outcome.graph, "T3")).toEqual(byId(paused(), "T3"));
-    expect(deriveTaskImplementationDispatch(t1)).toMatchObject({
+    expect(deriveTaskImplementationDispatch(t1, undefined)).toMatchObject({
       kind: "dispatch",
       dispatch: { kind: "initial-implementation", taskId: "T1", semanticAttempt: 1 },
     });

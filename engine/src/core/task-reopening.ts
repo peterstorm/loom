@@ -246,7 +246,7 @@ function targetRefusal(graph: TaskGraph, request: TaskReopeningRequest): DomainR
       return refuse("not-implemented", `${id} is ${task.status}; only an implemented Task is reopened ` +
         "(a pending Task is already owed a dispatch)");
     }
-    const derivation = deriveTaskImplementationDispatch(task);
+    const derivation = deriveTaskImplementationDispatch(task, graph.export_bindings);
     if (derivation.kind !== "dispatch") {
       const why = derivation.kind === "escalated"
         ? `its lineage reached terminal escalation ${derivation.receiptId}; remediate it first (helper orchestration remediate)`

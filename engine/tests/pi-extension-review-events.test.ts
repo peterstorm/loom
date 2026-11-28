@@ -216,7 +216,7 @@ function replacementAttemptContext(
     dirtySetBaseline: task.attempt_repository_baseline,
   });
   if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
-  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt, undefined);
   if (!admission.ok) throw new Error(admission.error);
   return {
     authority: replacement.value,
@@ -4160,7 +4160,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(afterAttempt1.tasks[0].implementation_attempt_history).toEqual([
       expect.objectContaining({ semanticAttempt: 1, transition: "retry-required" }),
     ]);
-    const retry = deriveImplementationRetryDisposition(afterAttempt1.tasks[0]);
+    const retry = deriveImplementationRetryDisposition(afterAttempt1.tasks[0], undefined);
     if (retry.kind !== "retry") throw new Error(`expected retry, got ${retry.kind}`);
 
     const missingContext = await pi.emit("tool_call", {

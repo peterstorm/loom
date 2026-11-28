@@ -827,7 +827,7 @@ export function spawnFor(raw: RawStateFile, taskId: string): TaskExecutionSpawn 
   const parsed = protectedGraphFixture(raw);
   const owed = parsed.tasks.find(({ id }) => id === taskId);
   if (owed === undefined) throw new Error(`fixture: no Task ${taskId}`);
-  const derivation = deriveTaskImplementationDispatch(owed);
+  const derivation = deriveTaskImplementationDispatch(owed, parsed.export_bindings);
   if (derivation.kind !== "dispatch") throw new Error(`fixture: ${taskId} is owed no dispatch (${derivation.kind})`);
   const appendix = derivation.dispatch.promptAppendix;
   return {

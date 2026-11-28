@@ -66,7 +66,7 @@ type Graph = Readonly<{ roster: readonly Task[]; contracts: readonly AcceptanceC
 
 function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[] | undefined, graph: Graph = { roster: [], contracts: [] }): string {
   const value = task(fileList);
-  const derivation = deriveTaskImplementationDispatch(value);
+  const derivation = deriveTaskImplementationDispatch(value, undefined);
   if (derivation.kind !== "dispatch") throw new Error(`fixture must be owed a dispatch, got ${derivation.kind}`);
   const input: ImplementationBriefInput = {
     template: TEMPLATE,

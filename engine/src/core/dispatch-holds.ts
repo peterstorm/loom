@@ -71,7 +71,8 @@ function dependencyBlockers(graph: DispatchHoldGraph, reserved: ReadonlySet<stri
     const dependency = graph.tasks.find((candidate) => candidate.id === id);
     return dependency === undefined || dependency.wave !== task.wave || implementationSettled(dependency, reserved)
       ? []
-      : [Object.freeze({ id, escalated: deriveTaskImplementationDispatch(dependency).kind === "escalated" })];
+      // Reads the derivation's kind only; the stamp shapes nothing but a retry appendix.
+      : [Object.freeze({ id, escalated: deriveTaskImplementationDispatch(dependency, undefined).kind === "escalated" })];
   });
 }
 

@@ -1,8 +1,9 @@
 /**
  * The audited plan edits a TaskGraph carries in `wave_plan_edits` (loom#198
- * Cause 3; ADR-0081, ADR-0086). This leaf module is the one home of an edit's
+ * Cause 3; ADR-0081, ADR-0086, ADR-0105). This leaf module is the one home of an edit's
  * invariants: the commands that write one (`core/task-rescope.ts`,
- * `core/task-dependency-edit.ts`, `core/task-addition.ts`) and the State File
+ * `core/task-dependency-edit.ts`, `core/task-addition.ts`,
+ * `core/export-binding-amendment.ts`) and the State File
  * parser that reads one back both build it through the constructor of its
  * kind, so neither can hold a value the other would refuse.
  *
@@ -12,8 +13,10 @@
 import { isExactGitSha } from "./git-sha";
 import { nonEmpty, type DomainResult, type OrchestrationRunId } from "./orchestration-contract";
 import { parseReviewPath } from "./review-packet";
+import { applyExportChange, parseContractId, parseIdentifier } from "./skeleton/bindings";
+import type { BoundExport, ExportBindingChange, Identifier } from "./skeleton/types";
 import { parseTaskId } from "./task-id";
-import type { DependencyAddedEdit, TaskAddedEdit, TaskRescopedEdit, TaskWithdrawnEdit } from "../types";
+import type { DependencyAddedEdit, ExportBindingAmendedEdit, TaskAddedEdit, TaskRescopedEdit, TaskWithdrawnEdit } from "../types";
 
 /** The longest reason an operator may give for a plan edit. */
 export const MAX_PLAN_EDIT_REASON_LENGTH = 500;
@@ -226,6 +229,98 @@ export function taskWithdrawnEdit(input: TaskWithdrawnEditInput): DomainResult<T
       taskId: taskId.value,
       reason: reason.value,
       abandonedRunId: input.abandonedRunId,
+    }),
+  });
+}
+
+/** A bound export as a plan edit's input carries it: two strings, not yet proven identifiers. */
+export type RawBoundExport = Readonly<{ name: string; alias: string }>;
+
+/** A change as a plan edit's input carries it: its kind and names, not yet proven identifiers. */
+export type RawExportBindingChange =
+  | Readonly<{ kind: "dropped"; name: string }>
+  | Readonly<{ kind: "rebound"; name: string; to: string }>;
+
+export type ExportBindingAmendedEditInput = Readonly<{
+  wave: number;
+  taskId: string;
+  path: string;
+  contract: string;
+  change: RawExportBindingChange;
+  /** The binding's exports before the change, in binding order. */
+  before: readonly RawBoundExport[];
+  reason: string;
+}>;
+
+function identifierOf(raw: string, label: string): DomainResult<Identifier, string> {
+  const parsed = parseIdentifier(raw);
+  return parsed.ok ? parsed : fail(`${label} '${raw}' is no identifier (${parsed.error})`);
+}
+
+/** `raw` as distinct bound exports with identifier names and aliases, at least one, or why not. */
+function boundExports(raw: readonly RawBoundExport[]): DomainResult<readonly [BoundExport, ...BoundExport[]], string> {
+  const exports: BoundExport[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const name = identifierOf(entry.name, `before[${index}].name`);
+    if (!name.ok) return name;
+    const alias = identifierOf(entry.alias, `before[${index}].alias`);
+    if (!alias.ok) return alias;
+    if (exports.some((bound) => bound.name === name.value)) return fail(`before binds '${name.value}' twice`);
+    exports.push(freeze({ name: name.value, alias: alias.value }));
+  }
+  const listed = nonEmpty(exports);
+  return listed === null ? fail("before binds no export") : freeze({ ok: true as const, value: listed });
+}
+
+function exportChange(raw: RawExportBindingChange): DomainResult<ExportBindingChange, string> {
+  const name = identifierOf(raw.name, "change.name");
+  if (!name.ok) return name;
+  if (raw.kind === "dropped") return freeze({ ok: true as const, value: freeze({ kind: "dropped" as const, name: name.value }) });
+  const to = identifierOf(raw.to, "change.to");
+  if (!to.ok) return to;
+  if (to.value === name.value) return fail(`change rebinds '${name.value}' to itself`);
+  return freeze({ ok: true as const, value: freeze({ kind: "rebound" as const, name: name.value, to: to.value }) });
+}
+
+/**
+ * An `export-binding-amended` edit (ADR-0105), or why it is not one: a Wave
+ * of at least 1, a Task id, a review path, a contract id, distinct
+ * identifier exports before the change, a change of a name `before` binds
+ * (a rebind to a new, distinct identifier that the binding grammar admits),
+ * and an admitted reason. `after` is derived here (`applyExportChange`), never
+ * taken as input, so the stored after can only be what the change leaves.
+ * Whether the Task holds the path and the stamp held `before` are the
+ * caller's to check.
+ */
+export function exportBindingAmendedEdit(input: ExportBindingAmendedEditInput): DomainResult<ExportBindingAmendedEdit, string> {
+  if (!Number.isSafeInteger(input.wave) || input.wave < 1) return fail("wave must be an integer >= 1");
+  const taskId = parseTaskId(input.taskId, "taskId");
+  if (!taskId.ok) return fail(taskId.error.errors.join("; "));
+  const path = parseReviewPath(input.path, "path");
+  if (!path.ok) return fail(path.errors.join("; "));
+  const contract = parseContractId(input.contract);
+  if (!contract.ok) return fail(`contract '${input.contract}' is no contract id CT-<n>`);
+  const before = boundExports(input.before);
+  if (!before.ok) return before;
+  const change = exportChange(input.change);
+  if (!change.ok) return change;
+  const after = applyExportChange(path.value, before.value, change.value);
+  if (!after.ok) return fail(`change cannot apply to before: ${after.error.kind} '${after.error.name}'`);
+  const reason = parsePlanEditReason(input.reason);
+  if (!reason.ok) return fail(`reason ${reason.error}`);
+  return freeze({
+    ok: true as const,
+    value: freeze({
+      schemaVersion: 1 as const,
+      kind: "export-binding-amended" as const,
+      wave: input.wave,
+      taskId: taskId.value,
+      path: path.value,
+      contract: contract.value,
+      change: change.value,
+      before: before.value,
+      after: after.value,
+      reason: reason.value,
     }),
   });
 }

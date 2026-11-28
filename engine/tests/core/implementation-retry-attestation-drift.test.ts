@@ -76,11 +76,11 @@ describe("an attestation drift is terminal by its receipt", () => {
   });
 
   it("replays a remediated drift as a fresh attempt 1 while the Task is attested", () => {
-    expect(deriveImplementationRetryDisposition(task(true)).kind).toBe("initial");
+    expect(deriveImplementationRetryDisposition(task(true), undefined).kind).toBe("initial");
   });
 
   it("still replays it as valid once reopening has cleared the attestation flag", () => {
-    expect(deriveImplementationRetryDisposition(task(false)).kind).toBe("initial");
+    expect(deriveImplementationRetryDisposition(task(false), undefined).kind).toBe("initial");
   });
 
   it("escalates an unremediated drift even without the attestation flag", () => {
@@ -88,7 +88,7 @@ describe("an attestation drift is terminal by its receipt", () => {
     const disposition = deriveImplementationRetryDisposition({
       id: TASK, implementation_attempt_history: [drift],
       implementation_retry_protocol: 2, implementation_retry_history_start: 0,
-    });
+    }, undefined);
     expect(disposition).toMatchObject({ kind: "escalated", receiptId: drift.receiptId, failureKinds: drift.failureKinds });
   });
 
@@ -98,7 +98,7 @@ describe("an attestation drift is terminal by its receipt", () => {
     const disposition = deriveImplementationRetryDisposition({
       id: TASK, implementation_attempt_history: [failure],
       implementation_retry_protocol: 2, implementation_retry_history_start: 0,
-    });
+    }, undefined);
     expect(disposition.kind).toBe("retry");
     if (disposition.kind === "retry") expect(disposition.context.predecessorReceiptId).toBe(failure.receiptId);
   });

@@ -104,7 +104,8 @@ export function armImplementationAttestation(
   if (task.active_implementation_attempt !== undefined || task.reserved_at !== undefined || input.executing) {
     return lifecycleFailure({ kind: "live-attempt", taskId: task.id, operation: "attestation" });
   }
-  const disposition = deriveImplementationRetryDisposition(task);
+  // Reads the lineage's kind only; the stamp shapes nothing but a retry appendix.
+  const disposition = deriveImplementationRetryDisposition(task, undefined);
   if (disposition.kind === "invalid") {
     return lifecycleFailure({ kind: "invalid-lineage", taskId: task.id, errors: Object.freeze([...disposition.errors]) });
   }
@@ -155,7 +156,8 @@ function escalationRemediationPlan(
   if (task.active_implementation_attempt !== undefined || task.reserved_at !== undefined || input.executing) {
     return lifecycleFailure({ kind: "live-attempt", taskId: task.id, operation: "remediation" });
   }
-  const disposition = deriveImplementationRetryDisposition(task);
+  // Reads the lineage's kind and terminal receipt only; the stamp shapes nothing but a retry appendix.
+  const disposition = deriveImplementationRetryDisposition(task, undefined);
   if (disposition.kind === "invalid") {
     return lifecycleFailure({ kind: "invalid-lineage", taskId: task.id, errors: Object.freeze([...disposition.errors]) });
   }

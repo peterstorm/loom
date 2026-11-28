@@ -139,7 +139,7 @@ function writeGraph(
     };
     const attempt = attempts[id];
     if (attempt === undefined) return taskFixture(base);
-    const admission = authorizeImplementationSpawn({ id }, `Task ID: ${id}`);
+    const admission = authorizeImplementationSpawn({ id }, `Task ID: ${id}`, undefined);
     if (!admission.ok) throw new Error(admission.error);
     return taskFixture({
       ...base,

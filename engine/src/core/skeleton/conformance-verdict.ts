@@ -30,6 +30,20 @@ export type ViolationReason = (typeof VIOLATION_REASONS)[number];
 export const isViolationReason = (raw: unknown): raw is ViolationReason =>
   typeof raw === "string" && (VIOLATION_REASONS as readonly string[]).includes(raw);
 
+/** The reasons judged per bound export, whose subject is the export's name;
+ *  the others are judged per frozen ADT, whose subject is the ADT's name. */
+const BOUND_EXPORT_REASONS = {
+  deleted: true,
+  renamed: true,
+  retyped: true,
+  "still-unimplemented": true,
+  "shadows-frozen-adt": false,
+  "re-lists-frozen-variants": false,
+} as const satisfies Record<ViolationReason, boolean>;
+
+/** Whether a violation of `reason` concerns a bound export (its subject is the export's name). */
+export const isBoundExportReason = (reason: ViolationReason): boolean => BOUND_EXPORT_REASONS[reason];
+
 /** `subject` is the bound export or frozen ADT the violation concerns;
  *  `remedy` names the fix where one is fixed (re-listing), else null. */
 export type ConformanceViolation = Readonly<{ subject: string; reason: ViolationReason; remedy: string | null }>;

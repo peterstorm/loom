@@ -77,7 +77,7 @@ const spawn = (taskId: string) => ({
 function nextSpawn(state: TaskGraph, taskId: string) {
   const task = state.tasks.find((candidate) => candidate.id === taskId);
   if (task === undefined) throw new Error(`missing task ${taskId}`);
-  const disposition = deriveImplementationRetryDisposition(task);
+  const disposition = deriveImplementationRetryDisposition(task, undefined);
   if (disposition.kind === "invalid" || disposition.kind === "escalated") {
     throw new Error(`task ${taskId} is not spawnable: ${disposition.kind}`);
   }

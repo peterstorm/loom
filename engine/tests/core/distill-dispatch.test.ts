@@ -279,7 +279,7 @@ const retrying = (task: Task): Task => ({
 });
 
 const appendixOf = (task: Task): string => {
-  const derivation = deriveTaskImplementationDispatch(task);
+  const derivation = deriveTaskImplementationDispatch(task, undefined);
   if (derivation.kind !== "dispatch" || derivation.dispatch.promptAppendix === null) {
     throw new Error(`fixture Task must be owed a dispatch with an appendix, got ${derivation.kind}`);
   }
@@ -290,14 +290,14 @@ describe("a Distill Task's dispatch carries the distill appendix (ADR-0068 §8)"
   const pass = distill(SCOPE);
 
   it("is the whole appendix of its initial dispatch", () => {
-    expect(deriveTaskImplementationDispatch(pass)).toEqual({
+    expect(deriveTaskImplementationDispatch(pass, undefined)).toEqual({
       kind: "dispatch",
       dispatch: { kind: "initial-implementation", taskId: "T9", semanticAttempt: 1, promptAppendix: distillPromptAppendix(pass) },
     });
   });
 
   it("follows the retry context on a retry dispatch", () => {
-    const derivation = deriveTaskImplementationDispatch(retrying(pass));
+    const derivation = deriveTaskImplementationDispatch(retrying(pass), undefined);
     expect(derivation).toMatchObject({ kind: "dispatch", dispatch: { kind: "retry-implementation", semanticAttempt: 2 } });
     const [retryLine, ...rest] = appendixOf(retrying(pass)).split("\n");
     expect(retryLine).toMatch(/^LOOM_IMPLEMENTATION_RETRY_CONTEXT: \{/);
@@ -305,7 +305,7 @@ describe("a Distill Task's dispatch carries the distill appendix (ADR-0068 §8)"
   });
 
   it("is absent from every other Task's dispatch", () => {
-    expect(deriveTaskImplementationDispatch(sibling("T1"))).toMatchObject({ dispatch: { promptAppendix: null } });
+    expect(deriveTaskImplementationDispatch(sibling("T1"), undefined)).toMatchObject({ dispatch: { promptAppendix: null } });
     expect(appendixOf(retrying(sibling("T1")))).not.toContain(DISTILL_APPENDIX_HEADER);
   });
 });
@@ -315,14 +315,14 @@ describe("the spawn gate binds the distill appendix (ADR-0068 §8)", () => {
   const appendix = distillPromptAppendix(pass);
   const prompt = (body: string): string => `**Task ID:** T9\n\n${body}\n\nFiles follow.`;
   const refusal = (task: Task, text: string): string => {
-    const admission = authorizeImplementationSpawn(task, text);
+    const admission = authorizeImplementationSpawn(task, text, undefined);
     if (admission.ok) throw new Error("expected the spawn to be refused");
     return admission.error;
   };
   const MISMATCH = "Task T9 distill appendix bytes do not match its protected file list";
 
   it("admits the exact status-issued appendix at semantic attempt 1", () => {
-    expect(authorizeImplementationSpawn(pass, prompt(appendix))).toMatchObject({ ok: true, kind: "initial", semanticAttempt: 1 });
+    expect(authorizeImplementationSpawn(pass, prompt(appendix), undefined)).toMatchObject({ ok: true, kind: "initial", semanticAttempt: 1 });
   });
 
   it("refuses a Distill Task prompt that carries no appendix", () => {
@@ -356,13 +356,13 @@ describe("the spawn gate binds the distill appendix (ADR-0068 §8)", () => {
     expect(refusal(foreign, `**Task ID:** T1\n${distillPromptAppendix(foreign)}`))
       .toBe("Task T1 is not a Distill Task; refusing a caller-supplied distill appendix");
     expect(refusal(foreign, "**Task ID:** T1\nLOOM_DISTILL_PASS:")).toContain("is not a Distill Task");
-    expect(authorizeImplementationSpawn(foreign, "**Task ID:** T1\nMention of LOOM_DISTILL_PASS: 1 in prose.")).toMatchObject({ ok: true });
+    expect(authorizeImplementationSpawn(foreign, "**Task ID:** T1\nMention of LOOM_DISTILL_PASS: 1 in prose.", undefined)).toMatchObject({ ok: true });
   });
 
   it("binds it beside the retry context on semantic attempt 2", () => {
     const task = retrying(pass);
     const whole = appendixOf(task);
-    expect(authorizeImplementationSpawn(task, prompt(whole))).toMatchObject({ ok: true, kind: "retry", semanticAttempt: 2 });
+    expect(authorizeImplementationSpawn(task, prompt(whole), undefined)).toMatchObject({ ok: true, kind: "retry", semanticAttempt: 2 });
     const retryOnly = whole.split("\n")[0] ?? "";
     expect(refusal(task, prompt(retryOnly))).toContain("requires the exact distill appendix");
     expect(refusal(task, prompt(appendix))).toBe("Task T9 requires the exact attempt-2 retry context from orchestration status");
@@ -377,9 +377,9 @@ describe("the spawn gate binds the distill appendix (ADR-0068 §8)", () => {
     fc.assert(fc.property(cases, ({ scope, dropped }) => {
       const task = distill(scope);
       const lines = distillPromptAppendix(task).split("\n");
-      expect(authorizeImplementationSpawn(task, prompt(lines.join("\n")))).toMatchObject({ ok: true });
-      expect(authorizeImplementationSpawn(task, prompt(lines.filter((_line, index) => index !== dropped).join("\n")))).toMatchObject({ ok: false });
-      expect(authorizeImplementationSpawn(task, prompt(lines.map((line, index) => (index === dropped ? `${line} ` : line)).join("\n"))))
+      expect(authorizeImplementationSpawn(task, prompt(lines.join("\n")), undefined)).toMatchObject({ ok: true });
+      expect(authorizeImplementationSpawn(task, prompt(lines.filter((_line, index) => index !== dropped).join("\n")), undefined)).toMatchObject({ ok: false });
+      expect(authorizeImplementationSpawn(task, prompt(lines.map((line, index) => (index === dropped ? `${line} ` : line)).join("\n")), undefined))
         .toMatchObject({ ok: false });
     }));
   });

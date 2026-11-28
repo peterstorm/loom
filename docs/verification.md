@@ -530,3 +530,9 @@ or when a production file in the types file's language `shadows frozen ADT` (dec
 **Stray prepared files.** Each skeleton write first writes a dot-file `.<file>.loom-skeleton-…` beside the target and removes it afterwards. When that removal fails, nothing is blocked: registration prints `[loom] skeleton note: …` on stderr and the contract stop adds a `note:` line to its stop note, both naming the dot-file. Delete it.
 
 **Recovering.** A stage-two refusal means the plan and the frozen types disagree: add the missing signature to the types file through a Contract Revision (above), or correct the plan's bindings and re-populate. Never write or delete a skeleton by hand to get past it — a deleted skeleton is simply rewritten at the next spawn.
+
+A binding the design cannot implement is a different case: the types resolve, but completion fails `declared-artifact-contract-violated` on the same export every attempt. An example is a `static final` constant bound for state built per instance. Re-population would reset every Task. Instead, correct that one binding of a pending Task in place with [`helper orchestration amend-export-binding`](reference/recovery.md#correcting-a-tasks-export-binding) (ADR-0105). `--drop` removes the export and `--rebind <newName>` renames it, keeping its frozen alias. The change is audited in `wave_plan_edits`.
+- A dropped export owes no conformance.
+- Dropping a binding's last export unbinds the file: its skeleton record and recorded outcomes go, and the engine's bytes stay as the Task's own code to replace (`exists, not skeletonized`).
+- The brief's plan-agreement check replays the audit, so the brief still renders.
+- The retry appendix lists the withdrawn violation as no longer owed instead of demanding it.

@@ -38,7 +38,7 @@ describe("implementation prompt required-skill contract", () => {
       const source = read("agents", `${agent}.md`);
       expect(parseDeclaredSkills(source).kind).not.toBe("unreadable");
       const task = taskFixture({ id: "T1", description: "contract", agent, wave: 1, depends_on: [], file_list: ["src/a.ts"] });
-      const derivation = deriveTaskImplementationDispatch(task);
+      const derivation = deriveTaskImplementationDispatch(task, undefined);
       if (derivation.kind !== "dispatch") throw new Error(`fixture must be owed a dispatch, got ${derivation.kind}`);
       const rendered = renderImplementationBrief({
         template, task, dispatch: derivation.dispatch, planFile: "plan.md",

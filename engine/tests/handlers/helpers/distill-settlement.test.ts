@@ -87,7 +87,7 @@ const sibling = (id: string, file: string): Task => siblingTaskFixture({ id, sta
 
 /** A Wave whose siblings are implemented and whose Task `T3` holds `attempt`. */
 function graphWith(attempt: ImplementationAttemptAuthority, agent: string): TaskGraph {
-  const admission = authorizeImplementationSpawn({ id: "T3" }, "Task ID: T3");
+  const admission = authorizeImplementationSpawn({ id: "T3" }, "Task ID: T3", undefined);
   if (!admission.ok) throw new Error(admission.error);
   const reserved = taskFixture({
     id: "T3",

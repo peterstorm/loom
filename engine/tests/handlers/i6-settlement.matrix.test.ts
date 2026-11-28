@@ -659,7 +659,7 @@ const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((nam
   [name, readFileSync(join(LOOM_PACKAGE_ROOT, "rules", name), "utf8")] as const));
 
 function briefInput(graph: TaskGraph, task: Task, overrides: Partial<ImplementationBriefInput> = {}): ImplementationBriefInput {
-  const derivation = deriveTaskImplementationDispatch(task);
+  const derivation = deriveTaskImplementationDispatch(task, undefined);
   if (derivation.kind !== "dispatch") throw new Error(`fixture Task must be owed a dispatch, got ${derivation.kind}`);
   return {
     template: TEMPLATE,
@@ -711,7 +711,7 @@ describe("the implementation brief states I6 up front and names the repair on re
     expect(section).toMatch(/1\. \*\*Red\.\*\*[\s\S]*2\. \*\*First implementation write\.\*\*[\s\S]*3\. \*\*Green\.\*\*/);
     expect(section).toMatch(/exit code and a parsed structured report/);
     expect(section).not.toContain("I6 repair for this retry");
-    expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true, kind: "initial" });
+    expect(authorizeImplementationSpawn(task, prompt, undefined)).toMatchObject({ ok: true, kind: "initial" });
   });
 
   it("AS-018: the brief classifies the file_list by the frozen operator pattern, not the engine default", () => {
@@ -766,7 +766,7 @@ describe("the implementation brief states I6 up front and names the repair on re
     expect(prompt).toMatch(/observe red[\s\S]*then implement/i);
     // The restore is the named exception to the template's never-`git restore` constraint.
     expect(prompt).toMatch(/one exception to the Constraints' never-`git restore` rule/);
-    expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true, kind: "retry" });
+    expect(authorizeImplementationSpawn(task, prompt, undefined)).toMatchObject({ ok: true, kind: "retry" });
     // #118: the command the brief renders must pass the agent's own state-file guard.
     expect(guardDecision(command)).toBe("allow");
   });

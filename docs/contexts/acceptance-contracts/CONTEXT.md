@@ -25,7 +25,7 @@ An **Acceptance Contract**'s types file as the declarations its dependents imple
 _Avoid_: Frozen surface (that is the parsed types file a **Skeleton** is generated from), contract framing, types review
 
 **Export Binding**:
-One line of a plan's `**Export bindings:**` list that ties each named export of one new implementation file to a function-type alias declared by one contract's frozen types file. One contract per file. Only consumer-facing signatures are bound; helpers and module structure stay the implementer's choice. An alias that is missing, not a function type or generic blocks the spawn of the Task holding the file.
+One line of a plan's `**Export bindings:**` list that ties each named export of one new implementation file to a function-type alias declared by one contract's frozen types file. One contract per file. Only consumer-facing signatures are bound; helpers and module structure stay the implementer's choice. An alias that is missing, not a function type or generic blocks the spawn of the Task holding the file. Population stamps the bindings into the TaskGraph. Only re-population, or an audited amendment that drops or renames one export for a pending Task (`helper orchestration amend-export-binding`, ADR-0105), changes them.
 _Avoid_: Interface block (the plan's `**Interface:**` prose is never read for signatures), export list, stub list
 
 **Frozen ADT**:
